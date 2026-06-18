@@ -6,3 +6,12 @@
 backups/
 *.key
 credentials.json
+.env*
+*.db*
+*.enc
+backups/
+*.key
+credentials.json
+*.log
+__pycache__/
+bot_instances/
