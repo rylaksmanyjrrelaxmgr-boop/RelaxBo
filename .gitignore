@@ -1,0 +1,8 @@
+.env
+*.db
+.env*
+*.db*
+*.enc
+backups/
+*.key
+credentials.json
