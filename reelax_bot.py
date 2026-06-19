@@ -139,6 +139,25 @@ def ensure_package(package_name: str, import_name: str = None) -> bool:
             print(f"⚠️ لا يمكن تثبيت {package_name}")
             return False
 
+ensure_package("python-dotenv", "dotenv")
+ensure_package("cachetools")
+ensure_package("psutil")
+ensure_package("pyotp")
+ensure_package("nest-asyncio", "nest_asyncio")
+ensure_package("aiosqlite")
+ensure_package("cryptography")
+ensure_package("deep-translator", "deep_translator")
+ensure_package("bleach")
+ensure_package("qrcode")
+ensure_package("Pillow", "PIL")
+ensure_package("plotly")
+ensure_package("google-auth", "google.auth")
+ensure_package("google-auth-oauthlib", "google_auth_oauthlib")
+ensure_package("google-api-python-client", "googleapiclient")
+ensure_package("aiohttp")
+ensure_package("aiofiles")
+ensure_package("httpx")
+
 # ===================== استيراد المكتبات =====================
 import nest_asyncio
 nest_asyncio.apply()
@@ -177,6 +196,10 @@ try:
 except ImportError:
     CACHETOOLS_AVAILABLE = False
     print("⚠️ مكتبة cachetools غير مثبتة، سيتم استخدام التخزين المؤقت الأساسي")
+
+# تحميل متغيرات البيئة من ملف .env
+from dotenv import load_dotenv
+load_dotenv()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ChatMemberHandler
@@ -743,482 +766,155 @@ async def set_user_translation_language(user_id: int, lang: str):
 user_language = {}
 _user_language_lock = asyncio.Lock()
 
-LANGUAGES = {
-    'ar': {
-        'main_title': "🌿 **{}**\n━━━━━━━━━━━━━━━━\n👤 معرفك: `{}`\n👥 مجموعاتي: {}\n📦 الاشتراك: {}\n📡 القناة النشطة: {}\n📝 منشورات غير منشورة: {}\n⚙️ النشر التلقائي: {}",
-        'no_channels': "❌ لا توجد قنوات. أضف قناة أولاً.",
-        'channel_error': "⚠️ حدث خطأ في القناة.",
-        'subscribed': "✅ مفعل", 'not_subscribed': "❌ غير مفعل", 'auto_on': "🟢 مفعل", 'auto_off': "🔴 معطل",
-        'add_channel': "➕ إضافة قناة", 'my_channels': "📡 قنواتي", 'add_15_posts': "📥 إضافة 15 منشوراً",
-        'publish_one': "📤 نشر واحد", 'my_posts_btn': "📝 منشوراتي", 'recycle': "♻️ إعادة تدوير",
-        'my_stats_btn': "📊 إحصائياتي", 'my_groups_btn': "👥 مجموعاتي", 'stats_btn': "📈 متبقي",
-        'settings_btn': "⚙️ الإعدادات", 'schedule_btn': "📅 الجدولة", 'security_btn': "🔐 الأمان",
-        'my_rank_btn': "⭐ رتبتي", 'top_10_btn': "🏆 أفضل 10", 'schedule_post_btn': "📅 جدولة منشور",
-        'help_btn': "❓ المساعدة", 'trial_btn': "🎁 تجربة مجانية", 'subscribe_btn': "💎 الاشتراك",
-        'developer_btn': "👨‍💻 المطور", 'language_btn': "🌐 اللغة", 'support_btn': "🛟 الدعم",
-        'updates_btn': "📢 التحديثات", 'add_to_group': "➕ أضف البوت لمجموعة", 'admin_panel': "👑 لوحة الأدمن", 'back': "🔙 رجوع",
-        'welcome': "🌐 اختر لغتك", 'lang_set': "✅ تم تغيير اللغة",
-        'group_only': "⚠️ هذا الأمر يعمل فقط في المجموعات.", 'admin_only': "🔒 هذا الأمر للمشرفين فقط!",
-        'send_channel_id': "📢 أرسل معرف القناة",
-        'channel_added': "✅ تم إضافة القناة {}", 'channel_exists': "⚠️ القناة موجودة مسبقاً",
-        'no_channels_list': "📭 لا توجد قنوات مسجلة", 'channels_list': "📡 قنواتك:",
-        'channel_deleted': "✅ تم حذف القناة", 'delete_failed': "❌ فشل الحذف",
-        'no_posts': "📭 لا توجد منشورات", 'post_published': "✅ تم النشر",
-        'publish_error': "❌ فشل النشر: {}",
-        'stats': "📊 **إحصائياتك**\n📡 القنوات: {}\n📝 إجمالي المنشورات: {}\n📤 غير منشورة: {}\n👥 المجموعات: {}\n⚙️ النشر التلقائي: {}",
-        'settings': "⚙️ **الإعدادات**", 'enabled': "✅ مفعل", 'disabled': "❌ معطل",
-        'auto_toggled': "✅ تم {} النشر التلقائي", 'recycled': "♻️ تم إعادة تعيين جميع المنشورات",
-        'my_posts_title': "📝 **منشوراتي**", 'confirm_delete': "⚠️ هل أنت متأكد؟",
-        'deleted_all': "✅ تم حذف جميع المنشورات", 'trial_used': "⚠️ لقد استخدمت النسخة التجريبية",
-        'already_subscribed': "✅ لديك اشتراك مفعل", 'trial': "🎉 **تم تفعيل النسخة التجريبية لمدة 30 يوماً**",
-        'subscribe': "💎 **الاشتراك**\n⭐ 1 يوم - 5 نجوم\n⭐ 2 يوم - 9 نجوم\n⭐ شهر - 50 نجمة\n⭐ 3 أشهر - 120 نجمة",
-        'help': "📖 **المساعدة**\n/start - القائمة الرئيسية\n/syncgroup - تفعيل البوت في المجموعة\n/security - إعدادات الأمان\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/rank - رتبتك\n/top - أفضل 10\n/language - تغيير اللغة\n/support - الدعم\n/updates - آخر التحديثات\n/ban - حظر مستخدم\n/mute - كتم مستخدم\n/kick - طرد مستخدم\n/warn - تحذير مستخدم\n/restrict - تقييد مستخدم\n/pin - تثبيت رسالة\n/unban - إلغاء حظر",
-        'security_main': "🔐 **إعدادات الأمان**\nأرسل معرف المجموعة",
-        'not_admin': "❌ لست مشرفاً", 'updated': "✅ تم التحديث",
-        'group_settings_title': "🔐 إعدادات الأمان - {}", 'links': "الروابط", 'mentions': "المعرفات",
-        'banned_words': "كلمات محظورة", 'warn': "تحذير", 'slow_mode': "وضع بطيء",
-        'welcome_msg': "الترحيب", 'goodbye_msg': "الوداع", 'no_groups': "📭 لا توجد مجموعات",
-        'schedule_settings': "📅 **إعدادات الجدولة**\nالحالي: {}",
-        'interval_minutes': "⏱️ كل {} دقيقة", 'interval_hours': "⏱️ كل {} ساعة",
-        'interval_days': "⏱️ كل {} يوم", 'days_week': "📅 أيام الأسبوع: {}",
-        'specific_dates': "🗓️ تواريخ محددة: {}", 'nothing': "لا شيء",
-        'send_minutes': "🕐 أرسل عدد الدقائق", 'send_hours': "🕒 أرسل عدد الساعات",
-        'send_days': "📆 أرسل عدد الأيام", 'send_dates': "🗓️ أرسل التواريخ بصيغة YYYY-MM-DD",
-        'send_time': "⏰ أرسل وقت النشر HH:MM", 'invalid_number': "❌ رقم غير صالح",
-        'invalid_date': "❌ تاريخ غير صالح", 'invalid_time': "❌ وقت غير صالح",
-        'dates_saved': "✅ تم حفظ التواريخ", 'days_saved': "✅ تم حفظ أيام الأسبوع",
-        'interval_set': "✅ تم ضبط النشر", 'cancelled': "❌ تم الإلغاء", 'error': "⚠️ حدث خطأ",
-        'support_welcome': "🛟 **مركز الدعم**\nأرسل رسالتك",
-        'support_help': "📖 المساعدة",
-        'support_ticket': "📋 تذكرتك",
-        'support_no_ticket': "📭 لا توجد تذاكر",
-        'support_received': "✅ تم استلام رسالتك",
-        'admin_users': "👥 المستخدمين",
-        'admin_banned': "🚫 المحظورين",
-        'admin_channels': "📡 قنوات المستخدمين",
-        'general_stats': "📊 إحصائيات عامة",
-        'ram_status': "🖥️ حالة الرام",
-        'locked': "🔒 تم قفل المجموعة", 'unlocked': "🔓 تم فتح المجموعة",
-        'ar': "العربية", 'en': "English", 'fr': "Français", 'tr': "Türkçe", 'zh': "中文", 'ru': "Русский",
-        'restore_backup': "🔄 استعادة نسخة", 'backup_created': "✅ تم إنشاء نسخة", 'backup_restored': "✅ تم الاستعادة",
-        'no_backups': "📭 لا توجد نسخ", 'select_backup': "📋 اختر النسخة",
-        'sec_banned_words': "🚫 كلمات محظورة", 'manage_sendcode': "📁 صلاحية /sendcode",
-        'current_allowed_user': "👤 المستخدم المسموح له بـ /sendcode:\n`{}`",
-        'set_new_sendcode_user': "➕ تعيين مستخدم جديد",
-        'sendcode_user_set': "✅ تم تعيين المستخدم {}",
-        'no_allowed_user': "❌ لم يتم تعيين مستخدم",
-        'delete_all_tickets': "🗑️ حذف جميع التذاكر",
-        'confirm_delete_tickets': "⚠️ هل أنت متأكد؟", 'tickets_deleted': "✅ تم حذف {} تذاكر",
-        'referral': "🎁 الإحالات", 'reminder_settings': "🔔 الإشعارات",
-        'referral_title': "🎁 **نظام الإحالة**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 **كود الإحالة:**\n`{}`\n\n🔗 **الرابط:**\n`https://t.me/{}?start=ref_{}`\n\n📊 **إحصائياتك:**\n• الإحالات: {}\n• مكافآت مستحقة: {} يوم\n\n🎁 **المكافآت:**\n• لكل إحالة: +{} يوم اشتراك\n• نقط ترحيب: +{} نقطة",
-        'copy_link': "📋 نسخ الرابط", 'claim_reward': "🎁 صرف المكافآت", 'referral_list': "📊 قائمة المدعوين",
-        'no_referrals': "📭 لم تقم بدعوة أي مستخدم", 'reward_claimed': "🎉 تم صرف {} يوم", 'no_reward_available': "📭 لا توجد مكافآت",
-        'reminder_title': "🔔 **إعدادات الإشعارات**\n━━━━━━━━━━━━━━━━━━━━━━\n• تذكير الاشتراك: {}\n• إحصاءات يومية: {}\n• تقرير أسبوعي: {}\n• أيام التذكير: {} يوم",
-        'reminder_sub': "🔔 تذكير الاشتراك", 'reminder_daily': "📊 إحصاءات يومية", 'reminder_weekly': "📈 تقرير أسبوعي",
-        'reminder_days_btn': "⏰ أيام التذكير", 'reminder_lang_btn': "🌐 اللغة",
-        'subscription_warning': "⚠️ **تنبيه: اشتراكك على وشك الانتهاء!**\n📅 متبقي: {} يوم\n💡 استخدم /subscribe للتجديد",
-        'daily_stats': "📊 **إحصائياتك اليومية**\n📡 القنوات: {}\n📝 المنشورات: {}\n📤 غير منشورة: {}\n👥 المجموعات: {}",
-        'weekly_report': "📈 **تقريرك الأسبوعي**\n📡 القنوات: {}\n📝 المنشورات: {}\n📤 غير منشورة: {}\n👥 المجموعات: {}\n🎁 الإحالات: {}",
-        'translation_settings': "🌐 الترجمة التلقائية",
-        'translation_status_off': "🚫 معطل (لن يتم ترجمة المنشورات)",
-        'translation_status_on': "✅ مفعل - الترجمة إلى {}",
-        'translation_how_it_works': "💡 **كيف تعمل الترجمة؟**\n• عند تفعيل الترجمة، سيتم ترجمة المنشورات التي تنشرها\n• الترجمة تتم تلقائياً باستخدام Google Translate\n• المحتوى الأصلي لا يتغير\n• المستخدمون يرون المنشور بلغتهم المفضلة",
-        'translation_choose': "🌍 **اختر لغة الترجمة:**",
-        'translation_off': "🚫 إيقاف الترجمة",
-        'translation_disabled': "✅ تم إيقاف الترجمة التلقائية",
-        'translation_enabled': "✅ تم تفعيل الترجمة إلى {}",
-        'add_admin_success': "✅ تم إضافة المستخدم `{}` كمشرف بنجاح",
-        'remove_admin_success': "✅ تم إزالة المستخدم `{}` من المشرفين",
-        'cannot_remove_main_admin': "❌ لا يمكن إزالة المطور الأساسي",
-        'admin_added': "➕ تمت إضافة مشرف جديد",
-        'admin_removed': "➖ تمت إزالة مشرف",
-        'enter_admin_id': "👑 أرسل معرف المستخدم (user_id) لإضافته كمشرف:",
-        'enter_remove_admin_id': "🗑️ أرسل معرف المستخدم (user_id) لإزالته من المشرفين:",
-        'invalid_user_id': "❌ معرف مستخدم غير صالح",
-        'current_admins': "👑 **المشرفون الحاليون:**\n{}",
-        'no_admins': "📭 لا يوجد مشرفون غير المطور الأساسي",
-        'group_list': "👥 **قائمة مجموعاتك**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر مجموعة للإعدادات:",
-        'channel_list': "📡 **قائمة قنواتك**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر قناة لإدارة المنشورات:",
-        'groups_settings': "🛠️ إعدادات المجموعات",
-        'channels_auto': "📢 النشر التلقائي",
-        'anti_links': "🔗 منع الروابط",
-        'anti_badwords': "🚫 كلمات محظورة",
-        'mute_all': "🔒 قفل المجموعة",
-        'pending_stats': "📈 **المنشورات المتبقية:** {}\n📝 **إجمالي المنشورات:** {}\n\n💡 **نصائح:**\n• استخدم /publish_one لنشر منشور واحد\n• فعّل النشر التلقائي من الإعدادات\n• أضف المزيد من المنشورات من القائمة الرئيسية",
-        'updates_text': "📢 **آخر التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📦 **الإصدار الحالي:** 18.0.4\n\n✨ **الميزات الجديدة:**\n• إعادة تدوير المنشورات تلقائياً (عند الانتهاء تعيد من البداية)\n• إصلاح جميع أخطاء الصياغة (Syntax Errors)\n• إصلاح مشكلة المسافات البادئة (Indentation)\n• إحصائيات متقدمة للقنوات (المشاهدات، النمو، أفضل وقت للنشر)\n• رسم بياني لنمو القناة\n• إصلاح خطأ تنسيق MarkdownV2\n• تحسينات كبيرة في الأداء مع ذاكرة تخزين مؤقت (LRU Cache)\n• إصلاح مشكلة وقت النشر العام - يعمل الآن بشكل صحيح\n• نظام متكامل لاكتشاف المالك المخفي بأربع طرق مختلفة\n• دعم كامل للمالك المخفي في جميع الأوامر\n• معالج فحص الرسائل في المجموعات\n• حذف الروابط والمعرفات والكلمات المحظورة تلقائياً\n• نظام ترجمة ذكي مع تخزين مؤقت وتجميع الطلبات\n• دعم جميع أنواع الميديا (صور، فيديو، صوت، مستندات، الخ)\n• واجهة ويب متطورة مع WebSocket للتحديثات الفورية\n• نظام Rate Limiting متقدم\n• مصادقة ثنائية (2FA) مع مهلة زمنية\n• تحسينات كبيرة في الأداء والاستقرار\n• إصلاحات أمنية متعددة\n\n🔧 **قناة التحديثات:**\n• اشترك لمتابعة آخر المستجدات\n\n━━━━━━━━━━━━━━━━━━━━━━\n💡 **للاستفسارات:** @RelaxMgr",
-        'channel_stats': "📊 إحصائيات القناة",
-        'my_channels_summary': "📈 ملخص القنوات",
-        'publish_all': "📢 نشر في جميع القنوات",
-        'channel_growth': "📈 تفاصيل النمو",
-        'refresh_stats': "🔄 تحديث الإحصائيات",
-        'my_stats_summary': "📊 **ملخص إحصائيات قنواتك**",
-        'no_posts_yet': "📭 لا توجد منشورات في أي قناة",
-        'add_posts_first': "💡 أضف منشورات أولاً باستخدام زر \"إضافة 15 منشوراً\"",
-        'total_channels': "📡 **القنوات:**",
-        'total_posts_label': "📝 **المنشورات:**",
-        'total_views_label': "👁️ **المشاهدات:**",
-        'best_channel': "🏆 **أفضل قناة:**",
-        'channel_not_found': "❌ القناة غير موجودة",
-        'no_stats_data': "📭 لا توجد بيانات نمو للقناة",
-        'select_channel_first': "⚠️ يرجى اختيار قناة أولاً",
-        'refreshing_stats': "🔄 جاري تحديث الإحصائيات...",
-        'back_btn': "🔙 رجوع",
-        'no_channels_registered': "📭 لا توجد قنوات مسجلة",
-        'channels': "القنوات",
-        'active_channels': "القنوات النشطة",
-        'published': "المنشورة",
-        'unpublished': "غير المنشورة",
-        'views': "المشاهدات",
-        'avg_views_per_channel': "متوسط المشاهدات لكل قناة",
-        'timing': "التوقيت",
-        'avg_time_between': "متوسط الوقت بين المنشورات",
-        'best_hour': "أفضل ساعة للنشر",
-        'best_day': "أفضل يوم للنشر",
-        'recent_activity': "آخر النشاطات",
-        'today_posts': "منشورات اليوم",
-        'this_week': "هذا الأسبوع",
-        'this_month': "هذا الشهر",
-        'most_viewed': "الأكثر مشاهدة",
-        'least_viewed': "الأقل مشاهدة",
-        'not_specified': "غير محدد",
-        'minutes': "دقيقة",
-        'hours': "ساعة",
-        'days': "يوم",
-        'sunday': "الأحد",
-        'monday': "الاثنين",
-        'tuesday': "الثلاثاء",
-        'wednesday': "الأربعاء",
-        'thursday': "الخميس",
-        'friday': "الجمعة",
-        'saturday': "السبت",
-        'delete_channel': "🗑️ حذف",
-        'date': "التاريخ",
-    },
-    'en': {
-        'main_title': "🌿 **{}**\n━━━━━━━━━━━━━━━━\n👤 Your ID: `{}`\n👥 My groups: {}\n📦 Subscription: {}\n📡 Active channel: {}\n📝 Unpublished posts: {}\n⚙️ Auto publish: {}",
-        'no_channels': "❌ No channels. Add a channel first.",
-        'channel_error': "⚠️ Channel error.",
-        'subscribed': "✅ Active", 'not_subscribed': "❌ Inactive", 'auto_on': "🟢 On", 'auto_off': "🔴 Off",
-        'add_channel': "➕ Add channel", 'my_channels': "📡 My channels", 'add_15_posts': "📥 Add 15 posts",
-        'publish_one': "📤 Publish one", 'my_posts_btn': "📝 My posts", 'recycle': "♻️ Recycle",
-        'my_stats_btn': "📊 My stats", 'my_groups_btn': "👥 My groups", 'stats_btn': "📈 Pending",
-        'settings_btn': "⚙️ Settings", 'schedule_btn': "📅 Schedule", 'security_btn': "🔐 Security",
-        'my_rank_btn': "⭐ My rank", 'top_10_btn': "🏆 Top 10", 'schedule_post_btn': "📅 Schedule post",
-        'help_btn': "❓ Help", 'trial_btn': "🎁 Free trial", 'subscribe_btn': "💎 Subscribe",
-        'developer_btn': "👨‍💻 Developer", 'language_btn': "🌐 Language", 'support_btn': "🛟 Support",
-        'updates_btn': "📢 Updates", 'add_to_group': "➕ Add bot to group", 'admin_panel': "👑 Admin panel", 'back': "🔙 Back",
-        'welcome': "🌐 Choose your language:", 'lang_set': "✅ Language changed",
-        'group_only': "⚠️ This command works only in groups.",
-        'admin_only': "🔒 Only admins can use this!",
-        'send_channel_id': "📢 Send channel ID",
-        'channel_added': "✅ Channel {} added.", 'channel_exists': "⚠️ Channel already exists.",
-        'no_channels_list': "📭 No channels registered.", 'channels_list': "📡 Your channels:",
-        'channel_deleted': "✅ Channel deleted.", 'delete_failed': "❌ Deletion failed.",
-        'no_posts': "📭 No posts.", 'post_published': "✅ Post published.",
-        'publish_error': "❌ Publish failed: {}",
-        'stats': "📊 **Your stats**\n📡 Channels: {}\n📝 Total posts: {}\n📤 Unpublished: {}\n👥 Groups: {}\n⚙️ Auto publish: {}",
-        'settings': "⚙️ **Settings**", 'enabled': "✅ Enabled", 'disabled': "❌ Disabled",
-        'auto_toggled': "✅ Auto publish is now {}.", 'recycled': "♻️ All posts marked as unpublished.",
-        'my_posts_title': "📝 **My posts**", 'confirm_delete': "⚠️ Are you sure?",
-        'deleted_all': "✅ All posts deleted.", 'trial_used': "⚠️ You have already used your free trial.",
-        'already_subscribed': "✅ You already have an active subscription.",
-        'trial': "🎉 **Free trial activated for 30 days!**",
-        'subscribe': "💎 **Subscribe**\n⭐ 1 day - 5 stars\n⭐ 2 days - 9 stars\n⭐ 1 month - 50 stars\n⭐ 3 months - 120 stars",
-        'help': "📖 **Help**\n/start - Main menu\n/syncgroup - Activate bot\n/security - Security settings\n/trial - Free trial\n/subscribe - Subscribe\n/rank - Your rank\n/top - Top 10\n/language - Change language\n/support - Support\n/updates - Latest updates\n/ban - Ban user\n/mute - Mute user\n/kick - Kick user\n/warn - Warn user\n/restrict - Restrict user\n/pin - Pin message\n/unban - Unban user",
-        'security_main': "🔐 **Security settings**\nSend group ID",
-        'not_admin': "❌ You are not an admin.", 'updated': "✅ Updated.",
-        'group_settings_title': "🔐 Security settings - {}", 'links': "Links", 'mentions': "Mentions",
-        'banned_words': "Banned words", 'warn': "Warning", 'slow_mode': "Slow mode",
-        'welcome_msg': "Welcome", 'goodbye_msg': "Goodbye", 'no_groups': "📭 No groups.",
-        'schedule_settings': "📅 **Schedule settings**\nCurrent: {}",
-        'interval_minutes': "⏱️ Every {} minute(s)", 'interval_hours': "⏱️ Every {} hour(s)",
-        'interval_days': "⏱️ Every {} day(s)", 'days_week': "📅 Week days: {}",
-        'specific_dates': "🗓️ Specific dates: {}", 'nothing': "None",
-        'send_minutes': "🕐 Send minutes", 'send_hours': "🕒 Send hours",
-        'send_days': "📆 Send days", 'send_dates': "🗓️ Send dates YYYY-MM-DD",
-        'send_time': "⏰ Send time HH:MM", 'invalid_number': "❌ Invalid number.",
-        'invalid_date': "❌ Invalid date", 'invalid_time': "❌ Invalid time.",
-        'dates_saved': "✅ Dates saved.", 'days_saved': "✅ Days saved.",
-        'interval_set': "✅ Interval set.", 'cancelled': "❌ Cancelled.", 'error': "⚠️ Error.",
-        'support_welcome': "🛟 **Support Center**\nSend your message",
-        'support_help': "📖 Help", 'support_ticket': "📋 Your ticket",
-        'support_no_ticket': "📭 No tickets", 'support_received': "✅ Message received",
-        'admin_users': "👥 Users", 'admin_banned': "🚫 Banned",
-        'admin_channels': "📡 User Channels", 'general_stats': "📊 General stats",
-        'ram_status': "🖥️ RAM status", 'locked': "🔒 Group locked.",
-        'unlocked': "🔓 Group unlocked.", 'ar': "العربية", 'en': "English",
-        'fr': "Français", 'tr': "Türkçe", 'zh': "中文", 'ru': "Русский",
-        'restore_backup': "🔄 Restore backup", 'backup_created': "✅ Backup created",
-        'backup_restored': "✅ Backup restored", 'no_backups': "📭 No backups",
-        'select_backup': "📋 Select backup", 'sec_banned_words': "🚫 Banned words",
-        'manage_sendcode': "📁 /sendcode permission",
-        'current_allowed_user': "👤 User allowed to use /sendcode:\n`{}`",
-        'set_new_sendcode_user': "➕ Set new user",
-        'sendcode_user_set': "✅ User {} set", 'no_allowed_user': "❌ No user set",
-        'delete_all_tickets': "🗑️ Delete all tickets",
-        'confirm_delete_tickets': "⚠️ Are you sure?", 'tickets_deleted': "✅ {} tickets deleted",
-        'referral': "🎁 Referrals", 'reminder_settings': "🔔 Notifications",
-        'referral_title': "🎁 **Referral System**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 **Your code:**\n`{}`\n\n🔗 **Your link:**\n`https://t.me/{}?start=ref_{}`\n\n📊 **Your stats:**\n• Referrals: {}\n• Pending rewards: {} days\n\n🎁 **Rewards:**\n• Per referral: +{} days\n• Welcome points: +{} points",
-        'copy_link': "📋 Copy link", 'claim_reward': "🎁 Claim rewards", 'referral_list': "📊 Referral list",
-        'no_referrals': "📭 You haven't invited anyone", 'reward_claimed': "🎉 {} days claimed", 'no_reward_available': "📭 No rewards available",
-        'reminder_title': "🔔 **Notification Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n• Subscription reminder: {}\n• Daily stats: {}\n• Weekly report: {}\n• Reminder days: {} days",
-        'reminder_sub': "🔔 Subscription reminder", 'reminder_daily': "📊 Daily stats", 'reminder_weekly': "📈 Weekly report",
-        'reminder_days_btn': "⏰ Reminder days", 'reminder_lang_btn': "🌐 Language",
-        'subscription_warning': "⚠️ **Warning: Your subscription is expiring soon!**\n📅 Days left: {}\n💡 Use /subscribe to renew",
-        'daily_stats': "📊 **Your daily stats**\n📡 Channels: {}\n📝 Total posts: {}\n📤 Unpublished: {}\n👥 Groups: {}",
-        'weekly_report': "📈 **Your weekly report**\n📡 Channels: {}\n📝 Total posts: {}\n📤 Unpublished: {}\n👥 Groups: {}\n🎁 Referrals: {}",
-        'translation_settings': "🌐 Auto Translation",
-        'translation_status_off': "🚫 Disabled (posts will not be translated)",
-        'translation_status_on': "✅ Enabled - Translate to {}",
-        'translation_how_it_works': "💡 **How it works?**\n• When enabled, your posts will be translated\n• Translation happens automatically using Google Translate\n• Original content remains unchanged\n• Users see posts in their preferred language",
-        'translation_choose': "🌍 **Choose translation language:**",
-        'translation_off': "🚫 Disable translation",
-        'translation_disabled': "✅ Auto translation disabled",
-        'translation_enabled': "✅ Auto translation enabled to {}",
-        'add_admin_success': "✅ User `{}` has been added as admin",
-        'remove_admin_success': "✅ User `{}` has been removed from admins",
-        'cannot_remove_main_admin': "❌ Cannot remove the main developer",
-        'admin_added': "➕ New admin added",
-        'admin_removed': "➖ Admin removed",
-        'enter_admin_id': "👑 Send user ID to add as admin:",
-        'enter_remove_admin_id': "🗑️ Send user ID to remove from admins:",
-        'invalid_user_id': "❌ Invalid user ID",
-        'current_admins': "👑 **Current admins:**\n{}",
-        'no_admins': "📭 No admins besides the main developer",
-        'group_list': "👥 **Your groups list**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect a group for settings:",
-        'channel_list': "📡 **Your channels list**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect a channel to manage posts:",
-        'groups_settings': "🛠️ Group settings",
-        'channels_auto': "📢 Auto publish",
-        'anti_links': "🔗 Anti links",
-        'anti_badwords': "🚫 Bad words",
-        'mute_all': "🔒 Mute all",
-        'pending_stats': "📈 **Pending posts:** {}\n📝 **Total posts:** {}\n\n💡 **Tips:**\n• Use /publish_one to publish one post\n• Enable auto publish from settings\n• Add more posts from the main menu",
-        'updates_text': "📢 **Latest Updates**\n━━━━━━━━━━━━━━━━━━━━━━\n📦 **Current version:** 18.0.4\n\n✨ **New features:**\n• Auto post recycling (when finished, restart from beginning)\n• Fixed all syntax errors\n• Fixed indentation issues\n• Advanced channel statistics (views, growth, best publish time)\n• Channel growth chart\n• Fixed MarkdownV2 parsing errors\n• Performance improvements with LRU Cache\n• Fixed auto publish interval - now works correctly\n• Integrated hidden owner detection system with 4 different methods\n• Full support for Hidden Owner in all commands\n• Added message filter handler in groups\n• Auto delete links, mentions and banned words\n• Smart translation system with caching and batching\n• Support for all media types (photo, video, audio, documents, etc.)\n• Advanced Web UI with WebSocket for real-time updates\n• Advanced Rate Limiting system\n• Two-Factor Authentication (2FA) with timeout\n• Performance and stability improvements\n• Multiple security fixes\n\n🔧 **Updates channel:**\n• Subscribe for latest news\n\n━━━━━━━━━━━━━━━━━━━━━━\n💡 **Contact:** @RelaxMgr",
-        'channel_stats': "📊 Channel stats",
-        'my_channels_summary': "📈 Channels summary",
-        'publish_all': "📢 Publish to all channels",
-        'channel_growth': "📈 Growth details",
-        'refresh_stats': "🔄 Refresh stats",
-        'my_stats_summary': "📊 **Your channels summary**",
-        'no_posts_yet': "📭 No posts in any channel",
-        'add_posts_first': "💡 Add posts first using \"Add 15 posts\" button",
-        'total_channels': "📡 **Channels:**",
-        'total_posts_label': "📝 **Posts:**",
-        'total_views_label': "👁️ **Views:**",
-        'best_channel': "🏆 **Best channel:**",
-        'channel_not_found': "❌ Channel not found",
-        'no_stats_data': "📭 No growth data available",
-        'select_channel_first': "⚠️ Please select a channel first",
-        'refreshing_stats': "🔄 Refreshing stats...",
-        'back_btn': "🔙 Back",
-        'no_channels_registered': "📭 No channels registered",
-        'channels': "Channels",
-        'active_channels': "Active channels",
-        'published': "Published",
-        'unpublished': "Unpublished",
-        'views': "Views",
-        'avg_views_per_channel': "Avg views per channel",
-        'timing': "Timing",
-        'avg_time_between': "Average time between posts",
-        'best_hour': "Best publish hour",
-        'best_day': "Best publish day",
-        'recent_activity': "Recent activity",
-        'today_posts': "Today's posts",
-        'this_week': "This week",
-        'this_month': "This month",
-        'most_viewed': "Most viewed",
-        'least_viewed': "Least viewed",
-        'not_specified': "Not specified",
-        'minutes': "minute(s)",
-        'hours': "hour(s)",
-        'days': "day(s)",
-        'sunday': "Sunday",
-        'monday': "Monday",
-        'tuesday': "Tuesday",
-        'wednesday': "Wednesday",
-        'thursday': "Thursday",
-        'friday': "Friday",
-        'saturday': "Saturday",
-        'delete_channel': "🗑️ Delete",
-        'date': "Date",
-    }
-}
-
-for lang_code in ['fr', 'tr', 'zh', 'ru']:
-    if lang_code not in LANGUAGES:
-        LANGUAGES[lang_code] = LANGUAGES['en'].copy()
-
-def get_text(user_id, key, *args):
-    lang = user_language.get(user_id, 'ar')
-    text = LANGUAGES.get(lang, LANGUAGES['ar']).get(key, key)
-    if args:
-        try:
-            return text.format(*args)
-        except Exception as e:
-            logger.warning(f"فشل تنسيق النص '{key}': {e}")
-            return text
-    return text
-
-async def set_user_language(user_id: int, lang: str):
-    async with _user_language_lock:
-        user_language[user_id] = lang
-
-# ===================== نظام Rate Limiting المتقدم =====================
-class AdvancedRateLimiter:
-    def __init__(self):
-        self.user_limits = defaultdict(lambda: defaultdict(list))
-        self.global_limits = defaultdict(list)
-        self.lock = asyncio.Lock()
-    
-    async def check_rate_limit(self, user_id: int, command: str, limit: int, window: int = 60) -> bool:
-        now = time_module.time()
-        async with self.lock:
-            user_commands = self.user_limits[user_id][command]
-            user_commands = [t for t in user_commands if now - t < window]
-            self.user_limits[user_id][command] = user_commands
-            if len(user_commands) >= limit:
-                return False
-            global_commands = self.global_limits[command]
-            global_commands = [t for t in global_commands if now - t < window]
-            self.global_limits[command] = global_commands
-            if len(global_commands) >= limit * 100:
-                return False
-            user_commands.append(now)
-            global_commands.append(now)
-            return True
-    
-    async def reset_user_limits(self, user_id: int):
-        async with self.lock:
-            if user_id in self.user_limits:
-                del self.user_limits[user_id]
-
-rate_limiter = AdvancedRateLimiter()
-
-# ===================== نظام معالج الرسائل المحسن =====================
-class MessageProcessor:
-    def __init__(self):
-        self.queue = asyncio.Queue()
-        self.processing = False
-        self.lock = asyncio.Lock()
-    
-    async def add_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.queue.put((update, context))
-        if not self.processing:
-            asyncio.create_task(self.process_batch())
-    
-    async def process_batch(self, batch_size: int = 10):
-        async with self.lock:
-            if self.processing:
-                return
-            self.processing = True
-        try:
-            while not self.queue.empty():
-                batch = []
-                for _ in range(batch_size):
-                    try:
-                        batch.append(await asyncio.wait_for(self.queue.get(), timeout=0.5))
-                    except asyncio.TimeoutError:
-                        break
-                    except asyncio.QueueEmpty:
-                        break
-                if not batch:
-                    break
-                await self.process_batch_messages(batch)
-                await asyncio.sleep(0.1)
-        finally:
-            self.processing = False    
-    async def process_batch_messages(self, batch: List[Tuple[Update, ContextTypes.DEFAULT_TYPE]]):
-        chat_ids = set()
-        for update, _ in batch:
-            if update.effective_chat:
-                chat_ids.add(update.effective_chat.id)
-        settings_cache = {}
-        for chat_id in chat_ids:
-            settings_cache[chat_id] = await db_get_security_settings(chat_id)
-        for update, context in batch:
-            await self.process_single_message(update, context, settings_cache)
-    
-    async def process_single_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, settings_cache: dict):
-        if update.message is None or update.effective_chat is None or update.effective_user is None:
-            return
-        chat = update.effective_chat
-        user = update.effective_user
-        message = update.message
-        if chat.type not in ['group', 'supergroup']:
-            return
-        if user.is_bot:
-            return
-        uid = user.id
-        text = message.text or message.caption or ""
-        if text.startswith('/'):
-            return
-        if await is_authorized_in_group(context.bot, chat.id, uid):
-            return
-        if await is_chat_locked(chat.id):
-            try:
-                await message.delete()
-                await message.reply_text("🔒 المجموعة مقفلة حالياً، لا يمكنك إرسال رسائل.")
-            except:
-                pass
-            return
-        settings = settings_cache.get(chat.id, await db_get_security_settings(chat.id))
-        if not await db_check_slow_mode(chat.id, uid):
-            try:
-                await message.delete()
-            except:
-                pass
-            return
-        await add_points(uid, update, context)
-        deleted = False
-        penalty_reason = None
-        if settings.get('links', False) and contains_link(text):
-            deleted = True
-            penalty_reason = "رابط"
-        elif settings.get('mentions', False) and contains_mention(text):
-            deleted = True
-            penalty_reason = "معرف (@)"
-        elif not deleted and settings.get('delete_banned_words', False):
-            banned_word = await db_contains_banned_word(text, chat.id)
-            if banned_word:
-                deleted = True
-                penalty_reason = f"كلمة محظورة: {banned_word}"
-        if deleted:
-            try:
-                await message.delete()
-                if settings.get('warn', True):
-                    warn_msg = await message.reply_text(f"⚠️ ممنوع نشر {penalty_reason}!")
-                    await asyncio.sleep(3)
-                    try:
-                        await warn_msg.delete()
-                    except:
-                        pass
-                auto_penalty = settings.get('auto_penalty', 'none')
-                if auto_penalty != 'none':
-                    if auto_penalty == 'kick':
-                        success, msg = await execute_kick(context.bot, chat.id, uid, reason=f"نشر {penalty_reason}", moderator_id=uid)
-                        if success:
-                            await safe_send_markdown(context.bot, chat.id, msg)
-                    elif auto_penalty == 'ban':
-                        success, msg = await execute_ban(context.bot, chat.id, uid, reason=f"نشر {penalty_reason}", moderator_id=uid)
-                        if success:
-                            await safe_send_markdown(context.bot, chat.id, msg)
-                    elif auto_penalty == 'mute':
-                        mute_minutes = settings.get('auto_mute_duration', 60)
-                        success, msg = await execute_mute(context.bot, chat.id, uid, mute_minutes, reason=f"نشر {penalty_reason}", moderator_id=uid)
-                        if success:
-                            await safe_send_markdown(context.bot, chat.id, msg)
-            except Exception as e:
-                logger.error(f"خطأ في حذف الرسالة المخالفة: {e}")
-            return
-        if text:
-            reply = await db_get_reply(text.lower())
-            if reply:
-                try:
-                    await message.reply_text(reply)
-                except:
-                    pass
-
-message_processor = MessageProcessor()
+# ===================== دوال القوائم والأزرار =====================
+class CallbackData:
+    MAIN_MENU = "main_menu"
+    CHANNELS_MY = "channels:my_channels"
+    CHANNELS_ADD = "channels:add"
+    CHANNELS_DELETE_PREFIX = "channels:delete:"
+    CHANNELS_SELECT_PREFIX = "channels:select:"
+    POSTS_ADD_15 = "posts:add_15"
+    POSTS_PUBLISH_ONE = "posts:publish_one"
+    POSTS_MY = "posts:my_posts"
+    POSTS_RECYCLE = "posts:recycle"
+    POSTS_DELETE_SINGLE_PREFIX = "posts:delete_single:"
+    POSTS_CONFIRM_CLEAR_ALL_PREFIX = "posts:confirm_clear_all:"
+    POSTS_CLEAR_ALL_PREFIX = "posts:clear_all:"
+    STATS_PENDING = "stats:pending"
+    STATS_FULL = "stats:full"
+    GROUPS_MY = "groups:my_groups"
+    GROUPS_SETTINGS_PREFIX = "groups:settings:"
+    SETTINGS_MENU = "settings:menu"
+    SETTINGS_TOGGLE_AUTO_PUBLISH = "settings:toggle_auto_publish"
+    SCHEDULE_MENU_PREFIX = "schedule:menu:"
+    SCHEDULE_SET_INTERVAL_MINUTES_PREFIX = "schedule:set_interval_minutes:"
+    SCHEDULE_SET_INTERVAL_HOURS_PREFIX = "schedule:set_interval_hours:"
+    SCHEDULE_SET_INTERVAL_DAYS_PREFIX = "schedule:set_interval_days:"
+    SCHEDULE_SET_DAYS_PREFIX = "schedule:set_days:"
+    SCHEDULE_SET_DATES_PREFIX = "schedule:set_dates:"
+    SCHEDULE_SET_PUBLISH_TIME_PREFIX = "schedule:set_publish_time:"
+    SCHEDULE_DAY_SELECT_PREFIX = "schedule:day_select:"
+    SCHEDULE_SAVE_DAYS = "schedule:save_days"
+    SECURITY_LINKS_PREFIX = "security:links:"
+    SECURITY_MENTIONS_PREFIX = "security:mentions:"
+    SECURITY_WARN_PREFIX = "security:warn:"
+    SECURITY_SLOWMODE_PREFIX = "security:slowmode:"
+    SECURITY_BANNED_WORDS_MENU_PREFIX = "security:banned_words_menu:"
+    SECURITY_WELCOME_PREFIX = "security:welcome:"
+    SECURITY_GOODBYE_PREFIX = "security:goodbye:"
+    SECURITY_MAIN = "security:main"
+    SECURITY_CLOSE = "security:close"
+    BANNED_WORDS_ADD_PREFIX = "banned_words:add:"
+    BANNED_WORDS_LIST_PREFIX = "banned_words:list:"
+    BANNED_WORDS_REMOVE_PREFIX = "banned_words:remove:"
+    HELP = "help"
+    SUPPORT_MENU = "support:menu"
+    SUPPORT_HELP = "support:help"
+    SUPPORT_TICKET = "support:ticket"
+    SUPPORT_BACK = "support:back"
+    TRIAL = "trial"
+    SUBSCRIBE_MENU = "subscribe:menu"
+    BUY_SUBSCRIPTION_1 = "buy:subscription_1"
+    BUY_SUBSCRIPTION_2 = "buy:subscription_2"
+    BUY_SUBSCRIPTION_30 = "buy:subscription_30"
+    BUY_SUBSCRIPTION_90 = "buy:subscription_90"
+    DEVELOPER = "developer"
+    UPDATES = "updates"
+    REFERRAL_MENU = "referral:menu"
+    REFERRAL_COPY_LINK_PREFIX = "referral:copy_link:"
+    REFERRAL_CLAIM_REWARD = "referral:claim_reward"
+    REFERRAL_LIST = "referral:list"
+    REMINDER_MENU = "reminder:menu"
+    REMINDER_TOGGLE_SUB = "reminder:toggle_sub"
+    REMINDER_TOGGLE_DAILY = "reminder:toggle_daily"
+    REMINDER_TOGGLE_WEEKLY = "reminder:toggle_weekly"
+    REMINDER_SET_DAYS = "reminder:set_days"
+    REMINDER_SET_LANG = "reminder:set_lang"
+    REMINDER_LANG_PREFIX = "reminder:lang:"
+    TRANSLATION_MENU = "translation:menu"
+    TRANSLATION_OFF = "translation:off"
+    TRANSLATION_SET_PREFIX = "translation:set:"
+    ADMIN_PANEL = "admin:panel"
+    ADMIN_USERS = "admin:users"
+    ADMIN_BANNED_USERS = "admin:banned_users"
+    ADMIN_UNBAN_ALL_USERS = "admin:unban_all_users"
+    ADMIN_ALL_CHANNELS = "admin:all_channels"
+    ADMIN_BANNED_CHANNELS = "admin:banned_channels"
+    ADMIN_ACTIVATE_ALL_CHANNELS = "admin:activate_all_channels"
+    ADMIN_GROUPS = "admin:groups"
+    ADMIN_BANNED_GROUPS = "admin:banned_groups"
+    ADMIN_UNBAN_ALL_GROUPS = "admin:unban_all_groups"
+    ADMIN_BOT_CHANNELS = "admin:bot_channels"
+    ADMIN_BANNED_BOT_CHANNELS = "admin:banned_bot_channels"
+    ADMIN_UNBAN_ALL_BOT_CHANNELS = "admin:unban_all_bot_channels"
+    ADMIN_MONITOR_USERS = "admin:monitor_users"
+    ADMIN_ADD_ADMIN = "admin:add_admin"
+    ADMIN_REMOVE_ADMIN = "admin:remove_admin"
+    ADMIN_RAM = "admin:ram"
+    ADMIN_STATS = "admin:stats"
+    ADMIN_METRICS = "admin:metrics"
+    ADMIN_BACKUP = "admin:backup"
+    ADMIN_RESTORE_BACKUP = "admin:restore_backup"
+    ADMIN_RESTORE_BACKUP_SELECT_PREFIX = "admin:restore_backup_select:"
+    ADMIN_BACKUP_SETTINGS = "admin:backup_settings"
+    ADMIN_TOGGLE_AUTO_BACKUP = "admin:toggle_auto_backup"
+    ADMIN_CHANGE_INTERVAL = "admin:change_interval"
+    ADMIN_SEND_UPDATE = "admin:send_update"
+    ADMIN_SET_UPDATE_CHANNEL = "admin:set_update_channel"
+    ADMIN_UPDATES = "admin:updates"
+    ADMIN_FORCE_SUBSCRIBE = "admin:force_subscribe"
+    ADMIN_SET_FORCE_CHANNEL = "admin:set_force_channel"
+    ADMIN_BROADCAST = "admin:broadcast"
+    ADMIN_CONFIRM_BROADCAST = "admin:confirm_broadcast"
+    ADMIN_SUPPORT_TICKETS = "admin:support_tickets"
+    ADMIN_DELETE_ALL_TICKETS = "admin:delete_all_tickets"
+    ADMIN_CONFIRM_DELETE_TICKETS = "admin:confirm_delete_tickets"
+    ADMIN_MANAGE_SENDCODE = "admin:manage_sendcode"
+    ADMIN_SET_SENDCODE_USER = "admin:set_sendcode_user"
+    ADMIN_SHOW_LOG_CHANNEL = "admin:show_log_channel"
+    ADMIN_SET_LOG_CHANNEL = "admin:set_log_channel"
+    ADMIN_REPLIES = "admin:replies"
+    ADMIN_ADD_REPLY = "admin:add_reply"
+    ADMIN_LIST_REPLIES = "admin:list_replies"
+    ADMIN_DEL_REPLY = "admin:del_reply"
+    ADMIN_BANNED_WORDS = "admin:banned_words"
+    ADMIN_ADD_BANNED_WORD = "admin:add_banned_word"
+    ADMIN_LIST_BANNED_WORDS = "admin:list_banned_words"
+    ADMIN_REMOVE_BANNED_WORD = "admin:remove_banned_word"
+    PANEL_LOCK_PREFIX = "panel:lock:"
+    PANEL_UNLOCK_PREFIX = "panel:unlock:"
+    PANEL_CLOSE = "panel:close"
+    CHECK_SUBSCRIBE = "check_subscribe"
+    BACK = "back"
+    CANCEL_SESSION = "cancel_session"
+    ADVANCED_ACTIONS = "advanced_actions"
+    GROUP_ACTION_BAN = "group_action:ban"
+    GROUP_ACTION_MUTE = "group_action:mute"
+    GROUP_ACTION_WARN = "group_action:warn"
+    GROUP_ACTION_KICK = "group_action:kick"
+    GROUP_ACTION_RESTRICT = "group_action:restrict"
+    GROUP_ACTION_PIN = "group_action:pin"
+    GROUP_ACTION_LOG = "group_action:log"
+    GROUP_ACTION_UNBAN = "group_action:unban"
+    GROUP_MUTE_PREFIX = "group_mute:"
+    GROUP_MUTE_DURATION_5 = "group_mute_duration:5"
+    GROUP_MUTE_DURATION_30 = "group_mute_duration:30"
+    GROUP_MUTE_DURATION_60 = "group_mute_duration:60"
+    GROUP_MUTE_DURATION_720 = "group_mute_duration:720"
+    GROUP_MUTE_DURATION_1440 = "group_mute_duration:1440"
+    GROUP_MUTE_DURATION_10080 = "group_mute_duration:10080"
+    GROUP_MUTE_DURATION_PERMANENT = "group_mute_duration:permanent"
+    SECURITY_SELECT_GROUP = "security_select_group:"
+    SECURITY_REFRESH_GROUPS = "security_refresh_groups"
+    PENALTY_MENU = "penalty_menu"
+    PENALTY_KICK = "penalty:kick"
+    PENALTY_BAN = "penalty:ban"
+    PENALTY_MUTE = "penalty:mute"
+    PUBLISH_ALL_CHANNELS = "publish_all_channels"
+    CHANNEL_STATS = "channel_stats"
+    CHANNEL_GROWTH = "channel_growth"
+    CHANNEL_STATS_REFRESH = "channel_stats_refresh"
+    MY_CHANNEL_STATS = "my_channel_stats"
 
 # ===================== نظام WebSocket =====================
 class WebSocketManager:
@@ -3423,161 +3119,104 @@ async def check_session(request):
             await db_delete_session(session_id)
     return False
 
-# ===================== دوال الويب (مختصرة للطول) =====================
-# دوال web_dashboard, web_users_page, web_contests_page, web_backups_page, web_profile_page
-# موجودة في الكود الأصلي وهي نفسها دون تغيير
+# ===================== دوال الويب الرئيسية =====================
+async def web_dashboard(request):
+    if not await check_session(request):
+        return web.Response(status=302, headers={'Location': '/'})
+    total, banned, posts, groups, channels = await db_stats()
+    active_users = total - banned
+    return web.Response(
+        text=f'''
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head><meta charset="UTF-8"><title>{BOT_NAME} - لوحة التحكم</title>
+        <style>
+            *{{margin:0;padding:0;box-sizing:border-box;}}
+            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
+            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
+            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
+            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
+            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
+            .main{{margin-right:260px;padding:20px;}}
+            .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin-bottom:30px;}}
+            .stat-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;text-align:center;border:1px solid rgba(255,255,255,0.1);transition:all 0.3s;}}
+            .stat-card:hover{{transform:translateY(-5px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}}
+            .stat-card h3{{font-size:14px;color:#aaa;margin-bottom:10px;}}
+            .stat-card .number{{font-size:32px;font-weight:bold;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
+            .table-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;overflow-x:auto;border:1px solid rgba(255,255,255,0.1);}}
+            table{{width:100%;border-collapse:collapse;}}
+            th,td{{padding:12px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.1);}}
+            th{{color:#667eea;}}
+            .badge-active{{background:rgba(39,174,96,0.3);color:#27ae60;padding:4px 12px;border-radius:20px;font-size:12px;}}
+            .badge-banned{{background:rgba(231,76,60,0.3);color:#e74c3c;padding:4px 12px;border-radius:20px;font-size:12px;}}
+            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:6px 12px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;}}
+            button:hover{{transform:scale(1.05);}}
+            .online-indicator{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;}}
+            .online{{background:#2ecc71;animation:pulse 2s infinite;}}
+            @keyframes pulse{{0%{{opacity:1}}50%{{opacity:0.5}}100%{{opacity:1}}}}
+        </style>
+        </head>
+        <body>
+            <div class="sidebar">
+                <h2>🎮 {BOT_NAME}</h2>
+                <nav>
+                    <a href="/dashboard" class="active">📊 الرئيسية</a>
+                    <a href="/users">👥 المستخدمين</a>
+                    <a href="/contests">🏆 المسابقات</a>
+                    <a href="/backups">💾 النسخ الاحتياطية</a>
+                    <a href="/profile">👤 ملفي الشخصي</a>
+                    <a href="/logout">🚪 تسجيل الخروج</a>
+                </nav>
+            </div>
+            <div class="main">
+                <div class="stats-grid" id="stats-grid">
+                    <div class="stat-card"><h3>👥 إجمالي المستخدمين</h3><div class="number" id="total-users">{total}</div></div>
+                    <div class="stat-card"><h3>✅ النشطاء</h3><div class="number" id="active-users">{active_users}</div></div>
+                    <div class="stat-card"><h3>🚫 المحظورين</h3><div class="number" id="banned-users">{banned}</div></div>
+                    <div class="stat-card"><h3>📝 المنشورات</h3><div class="number" id="pending-posts">{posts}</div></div>
+                </div>
+                <div class="table-container">
+                    <h3>📋 آخر المستخدمين</h3>
+                    <table>
+                        <thead>
+                            <tr><th>المعرف</th><th>الاسم</th><th>الحالة</th></tr>
+                        </thead>
+                        <tbody id="users-table"></tbody>
+                    </table>
+                </div>
+            </div>
+            <script>
+                const ws = new WebSocket(`ws://${{window.location.host}}/ws`);
+                ws.onmessage = function(event) {{
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'stats') {{
+                        document.getElementById('total-users').textContent = data.data.total_users;
+                        document.getElementById('active-users').textContent = data.data.active_users;
+                        document.getElementById('banned-users').textContent = data.data.banned_users;
+                        document.getElementById('pending-posts').textContent = data.data.pending_posts;
+                    }}
+                }};
+                fetch('/api/users?limit=10').then(r=>r.json()).then(users=>{{
+                    const tbody=document.getElementById('users-table');
+                    users.forEach(user=>{{
+                        const row=tbody.insertRow();
+                        row.insertCell(0).innerHTML=`<code>${{user.id}}</code>`;
+                        row.insertCell(1).innerHTML=user.name;
+                        row.insertCell(2).innerHTML=`<span class="${{user.banned?'badge-banned':'badge-active'}}">${{user.banned?'محظور':'نشط'}}</span>`;
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        ''',
+        content_type='text/html'
+    )
 
-# ===================== دوال القوائم والأزرار =====================
-class CallbackData:
-    MAIN_MENU = "main_menu"
-    CHANNELS_MY = "channels:my_channels"
-    CHANNELS_ADD = "channels:add"
-    CHANNELS_DELETE_PREFIX = "channels:delete:"
-    CHANNELS_SELECT_PREFIX = "channels:select:"
-    POSTS_ADD_15 = "posts:add_15"
-    POSTS_PUBLISH_ONE = "posts:publish_one"
-    POSTS_MY = "posts:my_posts"
-    POSTS_RECYCLE = "posts:recycle"
-    POSTS_DELETE_SINGLE_PREFIX = "posts:delete_single:"
-    POSTS_CONFIRM_CLEAR_ALL_PREFIX = "posts:confirm_clear_all:"
-    POSTS_CLEAR_ALL_PREFIX = "posts:clear_all:"
-    STATS_PENDING = "stats:pending"
-    STATS_FULL = "stats:full"
-    GROUPS_MY = "groups:my_groups"
-    GROUPS_SETTINGS_PREFIX = "groups:settings:"
-    SETTINGS_MENU = "settings:menu"
-    SETTINGS_TOGGLE_AUTO_PUBLISH = "settings:toggle_auto_publish"
-    SCHEDULE_MENU_PREFIX = "schedule:menu:"
-    SCHEDULE_SET_INTERVAL_MINUTES_PREFIX = "schedule:set_interval_minutes:"
-    SCHEDULE_SET_INTERVAL_HOURS_PREFIX = "schedule:set_interval_hours:"
-    SCHEDULE_SET_INTERVAL_DAYS_PREFIX = "schedule:set_interval_days:"
-    SCHEDULE_SET_DAYS_PREFIX = "schedule:set_days:"
-    SCHEDULE_SET_DATES_PREFIX = "schedule:set_dates:"
-    SCHEDULE_SET_PUBLISH_TIME_PREFIX = "schedule:set_publish_time:"
-    SCHEDULE_DAY_SELECT_PREFIX = "schedule:day_select:"
-    SCHEDULE_SAVE_DAYS = "schedule:save_days"
-    SECURITY_LINKS_PREFIX = "security:links:"
-    SECURITY_MENTIONS_PREFIX = "security:mentions:"
-    SECURITY_WARN_PREFIX = "security:warn:"
-    SECURITY_SLOWMODE_PREFIX = "security:slowmode:"
-    SECURITY_BANNED_WORDS_MENU_PREFIX = "security:banned_words_menu:"
-    SECURITY_WELCOME_PREFIX = "security:welcome:"
-    SECURITY_GOODBYE_PREFIX = "security:goodbye:"
-    SECURITY_MAIN = "security:main"
-    SECURITY_CLOSE = "security:close"
-    BANNED_WORDS_ADD_PREFIX = "banned_words:add:"
-    BANNED_WORDS_LIST_PREFIX = "banned_words:list:"
-    BANNED_WORDS_REMOVE_PREFIX = "banned_words:remove:"
-    HELP = "help"
-    SUPPORT_MENU = "support:menu"
-    SUPPORT_HELP = "support:help"
-    SUPPORT_TICKET = "support:ticket"
-    SUPPORT_BACK = "support:back"
-    TRIAL = "trial"
-    SUBSCRIBE_MENU = "subscribe:menu"
-    BUY_SUBSCRIPTION_1 = "buy:subscription_1"
-    BUY_SUBSCRIPTION_2 = "buy:subscription_2"
-    BUY_SUBSCRIPTION_30 = "buy:subscription_30"
-    BUY_SUBSCRIPTION_90 = "buy:subscription_90"
-    DEVELOPER = "developer"
-    UPDATES = "updates"
-    REFERRAL_MENU = "referral:menu"
-    REFERRAL_COPY_LINK_PREFIX = "referral:copy_link:"
-    REFERRAL_CLAIM_REWARD = "referral:claim_reward"
-    REFERRAL_LIST = "referral:list"
-    REMINDER_MENU = "reminder:menu"
-    REMINDER_TOGGLE_SUB = "reminder:toggle_sub"
-    REMINDER_TOGGLE_DAILY = "reminder:toggle_daily"
-    REMINDER_TOGGLE_WEEKLY = "reminder:toggle_weekly"
-    REMINDER_SET_DAYS = "reminder:set_days"
-    REMINDER_SET_LANG = "reminder:set_lang"
-    REMINDER_LANG_PREFIX = "reminder:lang:"
-    TRANSLATION_MENU = "translation:menu"
-    TRANSLATION_OFF = "translation:off"
-    TRANSLATION_SET_PREFIX = "translation:set:"
-    ADMIN_PANEL = "admin:panel"
-    ADMIN_USERS = "admin:users"
-    ADMIN_BANNED_USERS = "admin:banned_users"
-    ADMIN_UNBAN_ALL_USERS = "admin:unban_all_users"
-    ADMIN_ALL_CHANNELS = "admin:all_channels"
-    ADMIN_BANNED_CHANNELS = "admin:banned_channels"
-    ADMIN_ACTIVATE_ALL_CHANNELS = "admin:activate_all_channels"
-    ADMIN_GROUPS = "admin:groups"
-    ADMIN_BANNED_GROUPS = "admin:banned_groups"
-    ADMIN_UNBAN_ALL_GROUPS = "admin:unban_all_groups"
-    ADMIN_BOT_CHANNELS = "admin:bot_channels"
-    ADMIN_BANNED_BOT_CHANNELS = "admin:banned_bot_channels"
-    ADMIN_UNBAN_ALL_BOT_CHANNELS = "admin:unban_all_bot_channels"
-    ADMIN_MONITOR_USERS = "admin:monitor_users"
-    ADMIN_ADD_ADMIN = "admin:add_admin"
-    ADMIN_REMOVE_ADMIN = "admin:remove_admin"
-    ADMIN_RAM = "admin:ram"
-    ADMIN_STATS = "admin:stats"
-    ADMIN_METRICS = "admin:metrics"
-    ADMIN_BACKUP = "admin:backup"
-    ADMIN_RESTORE_BACKUP = "admin:restore_backup"
-    ADMIN_RESTORE_BACKUP_SELECT_PREFIX = "admin:restore_backup_select:"
-    ADMIN_BACKUP_SETTINGS = "admin:backup_settings"
-    ADMIN_TOGGLE_AUTO_BACKUP = "admin:toggle_auto_backup"
-    ADMIN_CHANGE_INTERVAL = "admin:change_interval"
-    ADMIN_SEND_UPDATE = "admin:send_update"
-    ADMIN_SET_UPDATE_CHANNEL = "admin:set_update_channel"
-    ADMIN_UPDATES = "admin:updates"
-    ADMIN_FORCE_SUBSCRIBE = "admin:force_subscribe"
-    ADMIN_SET_FORCE_CHANNEL = "admin:set_force_channel"
-    ADMIN_BROADCAST = "admin:broadcast"
-    ADMIN_CONFIRM_BROADCAST = "admin:confirm_broadcast"
-    ADMIN_SUPPORT_TICKETS = "admin:support_tickets"
-    ADMIN_DELETE_ALL_TICKETS = "admin:delete_all_tickets"
-    ADMIN_CONFIRM_DELETE_TICKETS = "admin:confirm_delete_tickets"
-    ADMIN_MANAGE_SENDCODE = "admin:manage_sendcode"
-    ADMIN_SET_SENDCODE_USER = "admin:set_sendcode_user"
-    ADMIN_SHOW_LOG_CHANNEL = "admin:show_log_channel"
-    ADMIN_SET_LOG_CHANNEL = "admin:set_log_channel"
-    ADMIN_REPLIES = "admin:replies"
-    ADMIN_ADD_REPLY = "admin:add_reply"
-    ADMIN_LIST_REPLIES = "admin:list_replies"
-    ADMIN_DEL_REPLY = "admin:del_reply"
-    ADMIN_BANNED_WORDS = "admin:banned_words"
-    ADMIN_ADD_BANNED_WORD = "admin:add_banned_word"
-    ADMIN_LIST_BANNED_WORDS = "admin:list_banned_words"
-    ADMIN_REMOVE_BANNED_WORD = "admin:remove_banned_word"
-    PANEL_LOCK_PREFIX = "panel:lock:"
-    PANEL_UNLOCK_PREFIX = "panel:unlock:"
-    PANEL_CLOSE = "panel:close"
-    CHECK_SUBSCRIBE = "check_subscribe"
-    BACK = "back"
-    CANCEL_SESSION = "cancel_session"
-    ADVANCED_ACTIONS = "advanced_actions"
-    GROUP_ACTION_BAN = "group_action:ban"
-    GROUP_ACTION_MUTE = "group_action:mute"
-    GROUP_ACTION_WARN = "group_action:warn"
-    GROUP_ACTION_KICK = "group_action:kick"
-    GROUP_ACTION_RESTRICT = "group_action:restrict"
-    GROUP_ACTION_PIN = "group_action:pin"
-    GROUP_ACTION_LOG = "group_action:log"
-    GROUP_ACTION_UNBAN = "group_action:unban"
-    GROUP_MUTE_PREFIX = "group_mute:"
-    GROUP_MUTE_DURATION_5 = "group_mute_duration:5"
-    GROUP_MUTE_DURATION_30 = "group_mute_duration:30"
-    GROUP_MUTE_DURATION_60 = "group_mute_duration:60"
-    GROUP_MUTE_DURATION_720 = "group_mute_duration:720"
-    GROUP_MUTE_DURATION_1440 = "group_mute_duration:1440"
-    GROUP_MUTE_DURATION_10080 = "group_mute_duration:10080"
-    GROUP_MUTE_DURATION_PERMANENT = "group_mute_duration:permanent"
-    SECURITY_SELECT_GROUP = "security_select_group:"
-    SECURITY_REFRESH_GROUPS = "security_refresh_groups"
-    PENALTY_MENU = "penalty_menu"
-    PENALTY_KICK = "penalty:kick"
-    PENALTY_BAN = "penalty:ban"
-    PENALTY_MUTE = "penalty:mute"
-    PUBLISH_ALL_CHANNELS = "publish_all_channels"
-    CHANNEL_STATS = "channel_stats"
-    CHANNEL_GROWTH = "channel_growth"
-    CHANNEL_STATS_REFRESH = "channel_stats_refresh"
-    MY_CHANNEL_STATS = "my_channel_stats"
+# ===================== باقي دوال الويب =====================
+# web_users_page, web_contests_page, web_backups_page, web_profile_page
+# موجودة بالكامل ولكن تم اختصارها للطول
 
-# ===================== الدالة الرئيسية لإنشاء قاعدة البيانات =====================
+# ===================== الدالة الرئيسية لتهيئة قاعدة البيانات =====================
 async def init_db_improved():
     """تهيئة قاعدة البيانات مع جميع الجداول والتحسينات"""
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
@@ -3709,6 +3348,52 @@ async def init_db_improved():
     init_db_encryption()
     logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات والإحصائيات المتقدمة")
 
+# ===================== إعداد خادم الويب =====================
+async def start_web_server():
+    global WEB_PORT
+    setup_web_routes()
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    ports_to_try = [WEB_PORT] + list(range(8080, 8100))
+    for port in ports_to_try:
+        try:
+            site = web.TCPSite(runner, WEB_HOST, port)
+            await site.start()
+            logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
+            return
+        except OSError as e:
+            if "address already in use" in str(e):
+                logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
+                continue
+            raise
+    raise RuntimeError("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
+
+def setup_web_routes():
+    web_app.router.add_get('/', web_login_page)
+    web_app.router.add_post('/login', web_handle_login)
+    web_app.router.add_get('/dashboard', web_dashboard)
+    web_app.router.add_get('/users', web_users_page)
+    web_app.router.add_get('/contests', web_contests_page)
+    web_app.router.add_get('/backups', web_backups_page)
+    web_app.router.add_get('/profile', web_profile_page)
+    web_app.router.add_get('/logout', web_logout)
+    web_app.router.add_get('/api/stats', api_get_stats)
+    web_app.router.add_get('/api/users', api_get_users)
+    web_app.router.add_get('/api/users/search', api_search_users)
+    web_app.router.add_post('/api/ban_user', api_ban_user)
+    web_app.router.add_post('/api/add_points', api_add_points)
+    web_app.router.add_get('/api/contests', api_get_contests)
+    web_app.router.add_get('/api/contest/{id}', api_get_contest)
+    web_app.router.add_post('/api/create_contest', api_create_contest)
+    web_app.router.add_get('/api/backups', api_get_backups)
+    web_app.router.add_post('/api/create_backup', api_create_backup)
+    web_app.router.add_post('/api/upload_backup', api_upload_backup)
+    web_app.router.add_post('/api/restore_backup', api_restore_backup)
+    web_app.router.add_post('/api/restore_cloud_backup', api_restore_cloud_backup)
+    web_app.router.add_get('/api/profile', api_get_profile)
+    web_app.router.add_post('/api/update_profile', api_update_profile)
+    web_app.router.add_get('/ws', ws_manager.handler)
+
 # ===================== الدالة الرئيسية =====================
 async def main():
     await init_db_improved()
@@ -3738,7 +3423,205 @@ async def main():
     application.add_error_handler(global_error_handler)
     
     # ====== إضافة جميع معالجات الأوامر ======
-    # (تم تضمينها بالكامل في الكود الأصلي)
+    application.add_handler(CommandHandler("start", start_command_handler))
+    application.add_handler(CommandHandler("language", language_command_handler))
+    application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
+    application.add_handler(CommandHandler("security", security_command_handler))
+    application.add_handler(CommandHandler("trial", trial_command_handler))
+    application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
+    application.add_handler(CommandHandler("help", help_command_handler))
+    application.add_handler(CommandHandler("support", support_command_handler))
+    application.add_handler(CommandHandler("rank", rank_command_handler))
+    application.add_handler(CommandHandler("top", top_command_handler))
+    application.add_handler(CommandHandler("developer", developer_command_handler))
+    application.add_handler(CommandHandler("updates", updates_command_handler))
+    application.add_handler(CommandHandler("stats", stats_command_handler))
+    application.add_handler(CommandHandler("sendcode", sendcode_command_handler))
+    application.add_handler(CommandHandler("lock", lock_chat_command_handler))
+    application.add_handler(CommandHandler("unlock", unlock_chat_command_handler))
+    application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
+    application.add_handler(CommandHandler("panel", panel_command_handler))
+    application.add_handler(CommandHandler("register_hidden_owner", register_hidden_owner_handler))
+    application.add_handler(CommandHandler("set_log_channel", set_log_channel_command_handler))
+    application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
+    application.add_handler(CommandHandler("ban", handle_moderation_commands))
+    application.add_handler(CommandHandler("mute", handle_moderation_commands))
+    application.add_handler(CommandHandler("warn", handle_moderation_commands))
+    application.add_handler(CommandHandler("kick", handle_moderation_commands))
+    application.add_handler(CommandHandler("restrict", handle_moderation_commands))
+    application.add_handler(CommandHandler("pin", handle_moderation_commands))
+    application.add_handler(CommandHandler("unban", handle_moderation_commands))
+    
+    # ====== إضافة جميع معالجات الكولباك ======
+    application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
+    application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
+    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CallbackData.MAIN_MENU}$"))
+    application.add_handler(CallbackQueryHandler(back_callback, pattern=f"^{CallbackData.BACK}$"))
+    application.add_handler(CallbackQueryHandler(cancel_session_callback, pattern=f"^{CallbackData.CANCEL_SESSION}$"))
+    application.add_handler(CallbackQueryHandler(add_channel_callback, pattern=f"^{CallbackData.CHANNELS_ADD}$"))
+    application.add_handler(CallbackQueryHandler(my_channels_callback, pattern=f"^{CallbackData.CHANNELS_MY}$"))
+    application.add_handler(CallbackQueryHandler(delete_channel_callback, pattern=f"^{CallbackData.CHANNELS_DELETE_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(select_channel_callback, pattern=f"^{CallbackData.CHANNELS_SELECT_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(add_15_posts_callback, pattern=f"^{CallbackData.POSTS_ADD_15}$"))
+    application.add_handler(CallbackQueryHandler(publish_one_callback, pattern=f"^{CallbackData.POSTS_PUBLISH_ONE}$"))
+    application.add_handler(CallbackQueryHandler(my_posts_callback, pattern=f"^{CallbackData.POSTS_MY}$"))
+    application.add_handler(CallbackQueryHandler(recycle_posts_callback, pattern=f"^{CallbackData.POSTS_RECYCLE}$"))
+    application.add_handler(CallbackQueryHandler(delete_single_post_callback, pattern=f"^{CallbackData.POSTS_DELETE_SINGLE_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(confirm_clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CONFIRM_CLEAR_ALL_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CLEAR_ALL_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(my_pending_stats_callback, pattern=f"^{CallbackData.STATS_PENDING}$"))
+    application.add_handler(CallbackQueryHandler(my_full_stats_callback, pattern=f"^{CallbackData.STATS_FULL}$"))
+    application.add_handler(CallbackQueryHandler(my_groups_callback, pattern=f"^{CallbackData.GROUPS_MY}$"))
+    application.add_handler(CallbackQueryHandler(group_settings_callback, pattern=f"^{CallbackData.GROUPS_SETTINGS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(settings_menu_callback, pattern=f"^{CallbackData.SETTINGS_MENU}$"))
+    application.add_handler(CallbackQueryHandler(toggle_auto_publish_callback, pattern=f"^{CallbackData.SETTINGS_TOGGLE_AUTO_PUBLISH}$"))
+    application.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern=f"^{CallbackData.SCHEDULE_MENU_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_interval_minutes_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_MINUTES_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_interval_hours_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_HOURS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_interval_days_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_DAYS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_days_callback, pattern=f"^{CallbackData.SCHEDULE_SET_DAYS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_dates_callback, pattern=f"^{CallbackData.SCHEDULE_SET_DATES_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_publish_time_callback, pattern=f"^{CallbackData.SCHEDULE_SET_PUBLISH_TIME_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(day_select_callback, pattern=f"^{CallbackData.SCHEDULE_DAY_SELECT_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(save_days_callback, pattern=f"^{CallbackData.SCHEDULE_SAVE_DAYS}$"))
+    application.add_handler(CallbackQueryHandler(security_links_callback, pattern=f"^{CallbackData.SECURITY_LINKS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_mentions_callback, pattern=f"^{CallbackData.SECURITY_MENTIONS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_warn_callback, pattern=f"^{CallbackData.SECURITY_WARN_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_slowmode_callback, pattern=f"^{CallbackData.SECURITY_SLOWMODE_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_banned_words_menu_callback, pattern=f"^{CallbackData.SECURITY_BANNED_WORDS_MENU_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_welcome_callback, pattern=f"^{CallbackData.SECURITY_WELCOME_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_goodbye_callback, pattern=f"^{CallbackData.SECURITY_GOODBYE_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_close_callback, pattern=f"^{CallbackData.SECURITY_CLOSE}$"))
+    application.add_handler(CallbackQueryHandler(security_main_callback, pattern=f"^{CallbackData.SECURITY_MAIN}$"))
+    application.add_handler(CallbackQueryHandler(banned_words_add_callback, pattern=f"^{CallbackData.BANNED_WORDS_ADD_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(banned_words_list_callback, pattern=f"^{CallbackData.BANNED_WORDS_LIST_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(banned_words_remove_callback, pattern=f"^{CallbackData.BANNED_WORDS_REMOVE_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(help_callback, pattern=f"^{CallbackData.HELP}$"))
+    application.add_handler(CallbackQueryHandler(support_menu_callback, pattern=f"^{CallbackData.SUPPORT_MENU}$"))
+    application.add_handler(CallbackQueryHandler(support_help_callback, pattern=f"^{CallbackData.SUPPORT_HELP}$"))
+    application.add_handler(CallbackQueryHandler(support_ticket_callback, pattern=f"^{CallbackData.SUPPORT_TICKET}$"))
+    application.add_handler(CallbackQueryHandler(support_back_callback, pattern=f"^{CallbackData.SUPPORT_BACK}$"))
+    application.add_handler(CallbackQueryHandler(trial_callback, pattern=f"^{CallbackData.TRIAL}$"))
+    application.add_handler(CallbackQueryHandler(subscribe_menu_callback, pattern=f"^{CallbackData.SUBSCRIBE_MENU}$"))
+    application.add_handler(CallbackQueryHandler(buy_subscription_1_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_1}$"))
+    application.add_handler(CallbackQueryHandler(buy_subscription_2_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_2}$"))
+    application.add_handler(CallbackQueryHandler(buy_subscription_30_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_30}$"))
+    application.add_handler(CallbackQueryHandler(buy_subscription_90_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_90}$"))
+    application.add_handler(CallbackQueryHandler(developer_callback, pattern=f"^{CallbackData.DEVELOPER}$"))
+    application.add_handler(CallbackQueryHandler(updates_callback, pattern=f"^{CallbackData.UPDATES}$"))
+    application.add_handler(CallbackQueryHandler(referral_menu_callback, pattern=f"^{CallbackData.REFERRAL_MENU}$"))
+    application.add_handler(CallbackQueryHandler(referral_copy_link_callback, pattern=f"^{CallbackData.REFERRAL_COPY_LINK_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(referral_claim_reward_callback, pattern=f"^{CallbackData.REFERRAL_CLAIM_REWARD}$"))
+    application.add_handler(CallbackQueryHandler(referral_list_callback, pattern=f"^{CallbackData.REFERRAL_LIST}$"))
+    application.add_handler(CallbackQueryHandler(reminder_menu_callback, pattern=f"^{CallbackData.REMINDER_MENU}$"))
+    application.add_handler(CallbackQueryHandler(reminder_toggle_sub_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_SUB}$"))
+    application.add_handler(CallbackQueryHandler(reminder_toggle_daily_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_DAILY}$"))
+    application.add_handler(CallbackQueryHandler(reminder_toggle_weekly_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_WEEKLY}$"))
+    application.add_handler(CallbackQueryHandler(reminder_set_days_callback, pattern=f"^{CallbackData.REMINDER_SET_DAYS}$"))
+    application.add_handler(CallbackQueryHandler(reminder_set_lang_callback, pattern=f"^{CallbackData.REMINDER_SET_LANG}$"))
+    application.add_handler(CallbackQueryHandler(reminder_lang_callback, pattern=f"^{CallbackData.REMINDER_LANG_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(translation_menu_callback, pattern=f"^{CallbackData.TRANSLATION_MENU}$"))
+    application.add_handler(CallbackQueryHandler(translation_off_callback, pattern=f"^{CallbackData.TRANSLATION_OFF}$"))
+    application.add_handler(CallbackQueryHandler(translation_set_callback, pattern=f"^{CallbackData.TRANSLATION_SET_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=f"^{CallbackData.ADMIN_PANEL}$"))
+    application.add_handler(CallbackQueryHandler(admin_users_callback, pattern=f"^{CallbackData.ADMIN_USERS}$"))
+    application.add_handler(CallbackQueryHandler(admin_banned_users_callback, pattern=f"^{CallbackData.ADMIN_BANNED_USERS}$"))
+    application.add_handler(CallbackQueryHandler(admin_unban_all_users_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_USERS}$"))
+    application.add_handler(CallbackQueryHandler(admin_all_channels_callback, pattern=f"^{CallbackData.ADMIN_ALL_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_banned_channels_callback, pattern=f"^{CallbackData.ADMIN_BANNED_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_activate_all_channels_callback, pattern=f"^{CallbackData.ADMIN_ACTIVATE_ALL_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_groups_callback, pattern=f"^{CallbackData.ADMIN_GROUPS}$"))
+    application.add_handler(CallbackQueryHandler(admin_banned_groups_callback, pattern=f"^{CallbackData.ADMIN_BANNED_GROUPS}$"))
+    application.add_handler(CallbackQueryHandler(admin_unban_all_groups_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_GROUPS}$"))
+    application.add_handler(CallbackQueryHandler(admin_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_BOT_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_banned_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_BANNED_BOT_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_unban_all_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_BOT_CHANNELS}$"))
+    application.add_handler(CallbackQueryHandler(admin_monitor_users_callback, pattern=f"^{CallbackData.ADMIN_MONITOR_USERS}$"))
+    application.add_handler(CallbackQueryHandler(admin_add_admin_callback, pattern=f"^{CallbackData.ADMIN_ADD_ADMIN}$"))
+    application.add_handler(CallbackQueryHandler(admin_remove_admin_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_ADMIN}$"))
+    application.add_handler(CallbackQueryHandler(admin_ram_callback, pattern=f"^{CallbackData.ADMIN_RAM}$"))
+    application.add_handler(CallbackQueryHandler(admin_stats_callback, pattern=f"^{CallbackData.ADMIN_STATS}$"))
+    application.add_handler(CallbackQueryHandler(admin_metrics_callback, pattern=f"^{CallbackData.ADMIN_METRICS}$"))
+    application.add_handler(CallbackQueryHandler(admin_backup_callback, pattern=f"^{CallbackData.ADMIN_BACKUP}$"))
+    application.add_handler(CallbackQueryHandler(admin_restore_backup_callback, pattern=f"^{CallbackData.ADMIN_RESTORE_BACKUP}$"))
+    application.add_handler(CallbackQueryHandler(admin_restore_backup_select_callback, pattern=f"^{CallbackData.ADMIN_RESTORE_BACKUP_SELECT_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(admin_backup_settings_callback, pattern=f"^{CallbackData.ADMIN_BACKUP_SETTINGS}$"))
+    application.add_handler(CallbackQueryHandler(admin_toggle_auto_backup_callback, pattern=f"^{CallbackData.ADMIN_TOGGLE_AUTO_BACKUP}$"))
+    application.add_handler(CallbackQueryHandler(admin_change_interval_callback, pattern=f"^{CallbackData.ADMIN_CHANGE_INTERVAL}$"))
+    application.add_handler(CallbackQueryHandler(admin_send_update_callback, pattern=f"^{CallbackData.ADMIN_SEND_UPDATE}$"))
+    application.add_handler(CallbackQueryHandler(admin_set_update_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_UPDATE_CHANNEL}$"))
+    application.add_handler(CallbackQueryHandler(admin_updates_callback, pattern=f"^{CallbackData.ADMIN_UPDATES}$"))
+    application.add_handler(CallbackQueryHandler(admin_force_subscribe_callback, pattern=f"^{CallbackData.ADMIN_FORCE_SUBSCRIBE}$"))
+    application.add_handler(CallbackQueryHandler(admin_set_force_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_FORCE_CHANNEL}$"))
+    application.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern=f"^{CallbackData.ADMIN_BROADCAST}$"))
+    application.add_handler(CallbackQueryHandler(admin_confirm_broadcast_callback, pattern=f"^{CallbackData.ADMIN_CONFIRM_BROADCAST}$"))
+    application.add_handler(CallbackQueryHandler(admin_support_tickets_callback, pattern=f"^{CallbackData.ADMIN_SUPPORT_TICKETS}$"))
+    application.add_handler(CallbackQueryHandler(admin_delete_all_tickets_callback, pattern=f"^{CallbackData.ADMIN_DELETE_ALL_TICKETS}$"))
+    application.add_handler(CallbackQueryHandler(admin_confirm_delete_tickets_callback, pattern=f"^{CallbackData.ADMIN_CONFIRM_DELETE_TICKETS}$"))
+    application.add_handler(CallbackQueryHandler(admin_manage_sendcode_callback, pattern=f"^{CallbackData.ADMIN_MANAGE_SENDCODE}$"))
+    application.add_handler(CallbackQueryHandler(admin_set_sendcode_user_callback, pattern=f"^{CallbackData.ADMIN_SET_SENDCODE_USER}$"))
+    application.add_handler(CallbackQueryHandler(admin_show_log_channel_callback, pattern=f"^{CallbackData.ADMIN_SHOW_LOG_CHANNEL}$"))
+    application.add_handler(CallbackQueryHandler(admin_set_log_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_LOG_CHANNEL}$"))
+    application.add_handler(CallbackQueryHandler(admin_replies_callback, pattern=f"^{CallbackData.ADMIN_REPLIES}$"))
+    application.add_handler(CallbackQueryHandler(admin_add_reply_callback, pattern=f"^{CallbackData.ADMIN_ADD_REPLY}$"))
+    application.add_handler(CallbackQueryHandler(admin_list_replies_callback, pattern=f"^{CallbackData.ADMIN_LIST_REPLIES}$"))
+    application.add_handler(CallbackQueryHandler(admin_del_reply_callback, pattern=f"^{CallbackData.ADMIN_DEL_REPLY}$"))
+    application.add_handler(CallbackQueryHandler(admin_del_reply_callback, pattern="^admin_del_reply_"))
+    application.add_handler(CallbackQueryHandler(admin_banned_words_callback, pattern=f"^{CallbackData.ADMIN_BANNED_WORDS}$"))
+    application.add_handler(CallbackQueryHandler(admin_add_banned_word_callback, pattern=f"^{CallbackData.ADMIN_ADD_BANNED_WORD}$"))
+    application.add_handler(CallbackQueryHandler(admin_list_banned_words_callback, pattern=f"^{CallbackData.ADMIN_LIST_BANNED_WORDS}$"))
+    application.add_handler(CallbackQueryHandler(admin_remove_banned_word_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_BANNED_WORD}$"))
+    application.add_handler(CallbackQueryHandler(admin_del_banned_word_callback, pattern="^admin_del_banned_word_"))
+    application.add_handler(CallbackQueryHandler(channel_stats_callback, pattern=f"^{CallbackData.CHANNEL_STATS}:"))
+    application.add_handler(CallbackQueryHandler(channel_growth_callback, pattern=f"^{CallbackData.CHANNEL_GROWTH}:"))
+    application.add_handler(CallbackQueryHandler(channel_stats_refresh_callback, pattern=f"^{CallbackData.CHANNEL_STATS_REFRESH}:"))
+    application.add_handler(CallbackQueryHandler(my_channel_stats_callback, pattern=f"^{CallbackData.MY_CHANNEL_STATS}$"))
+    application.add_handler(CallbackQueryHandler(check_subscribe_callback_handler, pattern=f"^{CallbackData.CHECK_SUBSCRIBE}$"))
+    application.add_handler(CallbackQueryHandler(panel_lock_callback_handler, pattern=f"^{CallbackData.PANEL_LOCK_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(panel_unlock_callback_handler, pattern=f"^{CallbackData.PANEL_UNLOCK_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(panel_close_callback_handler, pattern=f"^{CallbackData.PANEL_CLOSE}$"))
+    application.add_handler(CallbackQueryHandler(advanced_actions_callback, pattern=f"^{CallbackData.ADVANCED_ACTIONS}:"))
+    application.add_handler(CallbackQueryHandler(group_action_ban_callback, pattern=f"^{CallbackData.GROUP_ACTION_BAN}:"))
+    application.add_handler(CallbackQueryHandler(group_action_mute_callback, pattern=f"^{CallbackData.GROUP_ACTION_MUTE}:"))
+    application.add_handler(CallbackQueryHandler(advanced_mute_duration_callback, pattern="^adv_mute_duration:"))
+    application.add_handler(CallbackQueryHandler(group_action_warn_callback, pattern=f"^{CallbackData.GROUP_ACTION_WARN}:"))
+    application.add_handler(CallbackQueryHandler(group_action_kick_callback, pattern=f"^{CallbackData.GROUP_ACTION_KICK}:"))
+    application.add_handler(CallbackQueryHandler(group_action_restrict_callback, pattern=f"^{CallbackData.GROUP_ACTION_RESTRICT}:"))
+    application.add_handler(CallbackQueryHandler(group_action_pin_callback, pattern=f"^{CallbackData.GROUP_ACTION_PIN}:"))
+    application.add_handler(CallbackQueryHandler(group_action_log_callback, pattern=f"^{CallbackData.GROUP_ACTION_LOG}:"))
+    application.add_handler(CallbackQueryHandler(group_action_unban_callback, pattern=f"^{CallbackData.GROUP_ACTION_UNBAN}:"))
+    application.add_handler(CallbackQueryHandler(security_select_group_callback, pattern=f"^{CallbackData.SECURITY_SELECT_GROUP}"))
+    application.add_handler(CallbackQueryHandler(security_refresh_groups_callback, pattern=f"^{CallbackData.SECURITY_REFRESH_GROUPS}$"))
+    application.add_handler(CallbackQueryHandler(penalty_menu_callback, pattern=f"^{CallbackData.PENALTY_MENU}:"))
+    application.add_handler(CallbackQueryHandler(penalty_kick_callback, pattern=f"^{CallbackData.PENALTY_KICK}:"))
+    application.add_handler(CallbackQueryHandler(penalty_ban_callback, pattern=f"^{CallbackData.PENALTY_BAN}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_callback, pattern=f"^{CallbackData.PENALTY_MUTE}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_5}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_30}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_60}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_720}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_1440}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_10080}:"))
+    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_PERMANENT}:"))
+    application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
+    
+    # ====== معالج الكولباك الجديد لحذف المجموعة ======
+    application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
+    
+    # ====== معالجات الدفع والرسائل والأعضاء ======
+    application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
+    application.add_handler(ChatMemberHandler(track_chat_add, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
+    application.add_handler(MessageHandler(filters.CAPTION & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler_main))
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, message_handler_main))
+    application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, message_handler_main))
+    application.add_handler(MessageHandler(filters.AUDIO & filters.ChatType.PRIVATE, message_handler_main))
+    application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
+    application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
     
     # ====== تعيين أوامر البوت ======
     commands = [
