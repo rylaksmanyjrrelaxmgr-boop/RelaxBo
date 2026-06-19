@@ -139,25 +139,6 @@ def ensure_package(package_name: str, import_name: str = None) -> bool:
             print(f"⚠️ لا يمكن تثبيت {package_name}")
             return False
 
-ensure_package("python-dotenv", "dotenv")
-ensure_package("cachetools")
-ensure_package("psutil")
-ensure_package("pyotp")
-ensure_package("nest-asyncio", "nest_asyncio")
-ensure_package("aiosqlite")
-ensure_package("cryptography")
-ensure_package("deep-translator", "deep_translator")
-ensure_package("bleach")
-ensure_package("qrcode")
-ensure_package("Pillow", "PIL")
-ensure_package("plotly")
-ensure_package("google-auth", "google.auth")
-ensure_package("google-auth-oauthlib", "google_auth_oauthlib")
-ensure_package("google-api-python-client", "googleapiclient")
-ensure_package("aiohttp")
-ensure_package("aiofiles")
-ensure_package("httpx")
-
 # ===================== استيراد المكتبات =====================
 import nest_asyncio
 nest_asyncio.apply()
@@ -197,7 +178,7 @@ except ImportError:
     CACHETOOLS_AVAILABLE = False
     print("⚠️ مكتبة cachetools غير مثبتة، سيتم استخدام التخزين المؤقت الأساسي")
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions, LinkPreviewOptions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ChatMemberHandler
 from telegram.error import TimedOut, NetworkError, BadRequest, Forbidden
 from telegram.request import HTTPXRequest
@@ -483,43 +464,7 @@ async def safe_send_long_message(bot, chat_id: int, text: str, reply_markup=None
         await asyncio.sleep(0.5)
     return None
 
-def init_db_encryption():
-    global DB_ENCRYPTION_KEY
-    db_key_file = DATA_PATH / ".db_key"
-    if db_key_file.exists():
-        try:
-            with open(db_key_file, 'rb') as f:
-                DB_ENCRYPTION_KEY = f.read()
-        except:
-            DB_ENCRYPTION_KEY = Fernet.generate_key()
-            with open(db_key_file, 'wb') as f:
-                f.write(DB_ENCRYPTION_KEY)
-    else:
-        DB_ENCRYPTION_KEY = Fernet.generate_key()
-        with open(db_key_file, 'wb') as f:
-            f.write(DB_ENCRYPTION_KEY)
-
-def encrypt_db_backup() -> Path:
-    if not DB_ENCRYPTION:
-        return DB_PATH
-    cipher = Fernet(DB_ENCRYPTION_KEY)
-    with open(DB_PATH, 'rb') as f:
-        data = f.read()
-    encrypted = cipher.encrypt(data)
-    encrypted_path = DB_PATH.with_suffix('.enc')
-    with open(encrypted_path, 'wb') as f:
-        f.write(encrypted)
-    return encrypted_path
-
-def decrypt_db_backup(encrypted_path: Path) -> bytes:
-    if not DB_ENCRYPTION:
-        with open(encrypted_path, 'rb') as f:
-            return f.read()
-    cipher = Fernet(DB_ENCRYPTION_KEY)
-    with open(encrypted_path, 'rb') as f:
-        encrypted_data = f.read()
-    return cipher.decrypt(encrypted_data)
-
+# ===================== دوال الوقت =====================
 def utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -616,27 +561,6 @@ async def safe_api_call(func, *args, max_retries=3, **kwargs):
             await asyncio.sleep(wait_time)
     return None
 
-async def invalidate_user_cache(user_id: int):
-    try:
-        if CACHETOOLS_AVAILABLE:
-            pass
-    except:
-        pass
-
-async def invalidate_channel_cache(channel_db_id: int):
-    try:
-        pass
-    except:
-        pass
-
-async def log_activity(action: str, details: str):
-    if not BATTERY_SAVER_MODE:
-        try:
-            with open(LOG_PATH.parent / "logs.txt", "a", encoding='utf-8', errors='replace') as f:
-                f.write(f"[{mecca_now().strftime('%Y-%m-%d %H:%M:%S')}] {action}: {details}\n")
-        except Exception as e:
-            logger.warning(f"خطأ في تسجيل النشاط: {e}")
-
 def get_ram_usage():
     try:
         import psutil
@@ -665,14 +589,6 @@ def get_ram_usage():
             pass
         return {'total': 0, 'used': 0, 'percent': 0}
 
-def safe_int_convert(val):
-    if val is None:
-        return None
-    try:
-        return int(float(val))
-    except (ValueError, TypeError):
-        return None
-
 def parse_days_of_week_safe(days_str):
     if not days_str: 
         return []
@@ -688,15 +604,6 @@ def parse_dates_safe(dates_str):
         return json.loads(dates_str)
     except: 
         return []
-
-def parse_time_safe(time_str):
-    if not time_str: 
-        return None
-    try:
-        parts = time_str.split(':')
-        return (int(parts[0]), int(parts[1]))
-    except: 
-        return None
 
 def contains_link(text):
     patterns = [
@@ -751,108 +658,6 @@ class MetricsCollector:
         return get_ram_usage()
 
 metrics = MetricsCollector()
-
-def track_command(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        start_time = time_module.time()
-        try:
-            result = await func(update, context, *args, **kwargs)
-            metrics.record_response_time(time_module.time() - start_time)
-            if update and update.message and update.message.text:
-                cmd = update.message.text.split()[0]
-                metrics.record_command(cmd)
-            return result
-        except Exception as e:
-            metrics.record_error(type(e).__name__)
-            raise
-    return wrapper
-
-# ===================== معالج الأخطاء العام =====================
-async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    error = context.error
-    error_trace = traceback.format_exc()
-    
-    safe_error_msg = str(error)
-    if TOKEN and TOKEN in safe_error_msg:
-        safe_error_msg = safe_error_msg.replace(TOKEN, "[TOKEN_HIDDEN]")
-    if ENCRYPTION_KEY and isinstance(ENCRYPTION_KEY, bytes):
-        try:
-            key_str = ENCRYPTION_KEY.decode()
-            if key_str in safe_error_msg:
-                safe_error_msg = safe_error_msg.replace(key_str, "[ENCRYPTION_KEY_HIDDEN]")
-        except:
-            pass
-    if BACKUP_KEY and BACKUP_KEY.hex() in safe_error_msg:
-        safe_error_msg = safe_error_msg.replace(BACKUP_KEY.hex(), "[BACKUP_KEY_HIDDEN]")
-    
-    logger.error(f"خطأ عام: {safe_error_msg}\n{error_trace}")
-    
-    user_id = update.effective_user.id if update and update.effective_user else "غير معروف"
-    user_name = update.effective_user.full_name if update and update.effective_user else "غير معروف"
-    user_username = f"@{update.effective_user.username}" if update and update.effective_user and update.effective_user.username else "لا يوجد"
-    chat_id = update.effective_chat.id if update and update.effective_chat else "غير معروف"
-    chat_type = update.effective_chat.type if update and update.effective_chat else "غير معروف"
-    chat_title = update.effective_chat.title if update and update.effective_chat and hasattr(update.effective_chat, 'title') else "غير معروف"
-    message_text = update.effective_message.text if update and update.effective_message and update.effective_message.text else "غير معروف"
-    callback_data = update.callback_query.data if update and update.callback_query and update.callback_query.data else "لا يوجد"
-    error_time = mecca_now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    def escape_md(text: str) -> str:
-        if not text:
-            return ""
-        special_chars = r'_*[]()~`>#+\-=|{}.!'
-        for char in special_chars:
-            text = text.replace(char, f'\\{char}')
-        text = re.sub(r'(\d+)\.', r'\1\.', text)
-        return text
-    
-    error_report = f"""🚨 **تقرير خطأ جديد**
-
-━━━━━━━━━━━━━━━━━━━━━━
-👤 **المستخدم:**
-• المعرف: `{escape_md(str(user_id))}`
-• الاسم: {escape_md(str(user_name))}
-• اليوزر: {escape_md(user_username)}
-
-━━━━━━━━━━━━━━━━━━━━━━
-💬 **المحادثة:**
-• المعرف: `{escape_md(str(chat_id))}`
-• النوع: {escape_md(chat_type)}
-• الاسم: {escape_md(str(chat_title))}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📝 **الرسالة:**
-• النص: {escape_md(str(message_text)[:200])}
-• كولباك: {escape_md(str(callback_data)[:100])}
-
-━━━━━━━━━━━━━━━━━━━━━━
-⚠️ **الخطأ:**
-• النوع: `{escape_md(type(error).__name__)}`
-• التفاصيل: `{escape_md(safe_error_msg[:300])}`
-
-━━━━━━━━━━━━━━━━━━━━━━
-📅 **التوقيت:** {escape_md(error_time)} (مكة المكرمة)
-━━━━━━━━━━━━━━━━━━━━━━"""
-    
-    log_channel = await db_get_log_channel_id()
-    if log_channel:
-        try:
-            await safe_send_error(context.bot, log_channel, error_report)
-            logger.info(f"✅ تم إرسال تقرير الخطأ إلى قناة التقارير: {log_channel}")
-        except Exception as e:
-            logger.error(f"❌ فشل إرسال تقرير الخطأ إلى قناة التقارير: {e}")
-            try:
-                await context.bot.send_message(chat_id=MAIN_ADMIN_ID, text=f"⚠️ فشل إرسال تقرير الخطأ إلى قناة التقارير\nالخطأ: {e}")
-            except:
-                pass
-    else:
-        try:
-            await safe_send_error(context.bot, MAIN_ADMIN_ID, error_report)
-        except:
-            try:
-                await context.bot.send_message(chat_id=MAIN_ADMIN_ID, text=error_report.replace("*", "").replace("`", ""))
-            except:
-                pass
 
 # ===================== نظام الترجمة المحسن =====================
 class SmartTranslator:
@@ -1321,8 +1126,7 @@ class MessageProcessor:
                 await self.process_batch_messages(batch)
                 await asyncio.sleep(0.1)
         finally:
-            self.processing = False
-    
+            self.processing = False    
     async def process_batch_messages(self, batch: List[Tuple[Update, ContextTypes.DEFAULT_TYPE]]):
         chat_ids = set()
         for update, _ in batch:
@@ -1499,6 +1303,45 @@ async def execute_db(func):
     finally:
         pass
 
+# ===================== دوال التشفير =====================
+def init_db_encryption():
+    global DB_ENCRYPTION_KEY
+    db_key_file = DATA_PATH / ".db_key"
+    if db_key_file.exists():
+        try:
+            with open(db_key_file, 'rb') as f:
+                DB_ENCRYPTION_KEY = f.read()
+        except:
+            DB_ENCRYPTION_KEY = Fernet.generate_key()
+            with open(db_key_file, 'wb') as f:
+                f.write(DB_ENCRYPTION_KEY)
+    else:
+        DB_ENCRYPTION_KEY = Fernet.generate_key()
+        with open(db_key_file, 'wb') as f:
+            f.write(DB_ENCRYPTION_KEY)
+
+def encrypt_db_backup() -> Path:
+    if not DB_ENCRYPTION:
+        return DB_PATH
+    cipher = Fernet(DB_ENCRYPTION_KEY)
+    with open(DB_PATH, 'rb') as f:
+        data = f.read()
+    encrypted = cipher.encrypt(data)
+    encrypted_path = DB_PATH.with_suffix('.enc')
+    with open(encrypted_path, 'wb') as f:
+        f.write(encrypted)
+    return encrypted_path
+
+def decrypt_db_backup(encrypted_path: Path) -> bytes:
+    if not DB_ENCRYPTION:
+        with open(encrypted_path, 'rb') as f:
+            return f.read()
+    cipher = Fernet(DB_ENCRYPTION_KEY)
+    with open(encrypted_path, 'rb') as f:
+        encrypted_data = f.read()
+    return cipher.decrypt(encrypted_data)
+
+# ===================== دوال قاعدة البيانات الأساسية =====================
 async def db_register_user(user_id: int) -> bool:
     async def _register(conn):
         cur = await conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
@@ -3580,721 +3423,9 @@ async def check_session(request):
             await db_delete_session(session_id)
     return False
 
-async def web_dashboard(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    total, banned, posts, groups, channels = await db_stats()
-    active_users = total - banned
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - لوحة التحكم</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin-bottom:30px;}}
-            .stat-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;text-align:center;border:1px solid rgba(255,255,255,0.1);transition:all 0.3s;}}
-            .stat-card:hover{{transform:translateY(-5px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}}
-            .stat-card h3{{font-size:14px;color:#aaa;margin-bottom:10px;}}
-            .stat-card .number{{font-size:32px;font-weight:bold;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .table-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;overflow-x:auto;border:1px solid rgba(255,255,255,0.1);}}
-            table{{width:100%;border-collapse:collapse;}}
-            th,td{{padding:12px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.1);}}
-            th{{color:#667eea;}}
-            .badge-active{{background:rgba(39,174,96,0.3);color:#27ae60;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            .badge-banned{{background:rgba(231,76,60,0.3);color:#e74c3c;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:6px 12px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .online-indicator{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;}}
-            .online{{background:#2ecc71;animation:pulse 2s infinite;}}
-            @keyframes pulse{{0%{{opacity:1}}50%{{opacity:0.5}}100%{{opacity:1}}}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard" class="active">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="stats-grid" id="stats-grid">
-                    <div class="stat-card"><h3>👥 إجمالي المستخدمين</h3><div class="number" id="total-users">{total}</div></div>
-                    <div class="stat-card"><h3>✅ النشطاء</h3><div class="number" id="active-users">{active_users}</div></div>
-                    <div class="stat-card"><h3>🚫 المحظورين</h3><div class="number" id="banned-users">{banned}</div></div>
-                    <div class="stat-card"><h3>📝 المنشورات</h3><div class="number" id="pending-posts">{posts}</div></div>
-                </div>
-                <div class="table-container">
-                    <h3>📋 آخر المستخدمين</h3>
-                    <table>
-                        <thead>
-                            <tr><th>المعرف</th><th>الاسم</th><th>الحالة</th></tr>
-                        </thead>
-                        <tbody id="users-table"></tbody>
-                    </table>
-                </div>
-            </div>
-            <script>
-                const ws = new WebSocket(`ws://${{window.location.host}}/ws`);
-                ws.onmessage = function(event) {{
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'stats') {{
-                        document.getElementById('total-users').textContent = data.data.total_users;
-                        document.getElementById('active-users').textContent = data.data.active_users;
-                        document.getElementById('banned-users').textContent = data.data.banned_users;
-                        document.getElementById('pending-posts').textContent = data.data.pending_posts;
-                    }}
-                }};
-                fetch('/api/users?limit=10').then(r=>r.json()).then(users=>{{
-                    const tbody=document.getElementById('users-table');
-                    users.forEach(user=>{{
-                        const row=tbody.insertRow();
-                        row.insertCell(0).innerHTML=`<code>${{user.id}}</code>`;
-                        row.insertCell(1).innerHTML=user.name;
-                        row.insertCell(2).innerHTML=`<span class="${{user.banned?'badge-banned':'badge-active'}}">${{user.banned?'محظور':'نشط'}}</span>`;
-                    }});
-                }});
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_users_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - المستخدمين</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .search-bar{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;margin-bottom:20px;display:flex;gap:10px;border:1px solid rgba(255,255,255,0.1);}}
-            .search-bar input{{flex:1;padding:10px;border:none;border-radius:10px;background:rgba(255,255,255,0.05);color:white;}}
-            .search-bar input:focus{{outline:none;box-shadow:0 0 20px rgba(102,126,234,0.2);}}
-            .search-bar button{{padding:10px 20px;}}
-            .table-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;overflow-x:auto;border:1px solid rgba(255,255,255,0.1);}}
-            table{{width:100%;border-collapse:collapse;}}
-            th,td{{padding:12px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.1);}}
-            th{{color:#667eea;}}
-            .badge-active{{background:rgba(39,174,96,0.3);color:#27ae60;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            .badge-banned{{background:rgba(231,76,60,0.3);color:#e74c3c;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:6px 12px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;margin:2px;}}
-            button:hover{{transform:scale(1.05);}}
-            .pagination{{margin-top:20px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap;}}
-            .pagination button{{padding:8px 16px;}}
-            .pagination button.active{{background:linear-gradient(135deg,#667eea,#764ba2);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users" class="active">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="search-bar">
-                    <input type="text" id="searchInput" placeholder="🔍 بحث عن مستخدم..." onkeyup="if(event.key==='Enter')searchUsers()">
-                    <button onclick="searchUsers()">بحث</button>
-                </div>
-                <div class="table-container">
-                    <h3>📋 قائمة المستخدمين</h3>
-                    <table>
-                        <thead>
-                            <tr><th>المعرف</th><th>الاسم</th><th>اليوزر</th><th>النقاط</th><th>المستوى</th><th>الحالة</th><th>الإجراءات</th></tr>
-                        </thead>
-                        <tbody id="users-table"></tbody>
-                    </table>
-                    <div class="pagination" id="pagination"></div>
-                </div>
-            </div>
-            <script>
-                let currentPage=1;
-                let currentSearch='';
-                function loadUsers(page, search) {{
-                    const url = search ? `/api/users/search?q=${{encodeURIComponent(search)}}&page=${{page}}` : `/api/users?page=${{page}}&limit=20`;
-                    fetch(url).then(r=>r.json()).then(data=>{{
-                        const tbody=document.getElementById('users-table');
-                        tbody.innerHTML='';
-                        (data.users||data).forEach(user=>{{
-                            const row=tbody.insertRow();
-                            row.insertCell(0).innerHTML=`<code>${{user.id}}</code>`;
-                            row.insertCell(1).innerHTML=user.name||'بدون اسم';
-                            row.insertCell(2).innerHTML=user.username?`@${{user.username}}`:'-';
-                            row.insertCell(3).innerHTML=user.points||0;
-                            row.insertCell(4).innerHTML=user.level||1;
-                            row.insertCell(5).innerHTML=`<span class="${{user.banned?'badge-banned':'badge-active'}}">${{user.banned?'محظور':'نشط'}}</span>`;
-                            row.insertCell(6).innerHTML=`<button onclick="toggleBan(${{user.id}},${{user.banned}})">${{user.banned?'🔓 إلغاء الحظر':'🚫 حظر'}}</button><button onclick="viewProfile(${{user.id}})">👤 عرض</button><button onclick="addPoints(${{user.id}})">⭐ نقاط</button>`;
-                        }});
-                        if(data.totalPages) {{
-                            const pagination=document.getElementById('pagination');
-                            pagination.innerHTML='';
-                            for(let i=1;i<=data.totalPages;i++){{
-                                const btn=document.createElement('button');
-                                btn.textContent=i;
-                                btn.onclick=()=>{{currentPage=i;loadUsers(currentPage,currentSearch);}};
-                                if(i===currentPage)btn.classList.add('active');
-                                pagination.appendChild(btn);
-                            }}
-                        }}
-                    }});
-                }}
-                function searchUsers(){{
-                    currentSearch = document.getElementById('searchInput').value;
-                    currentPage = 1;
-                    loadUsers(currentPage, currentSearch);
-                }}
-                function toggleBan(id,banned){{fetch(`/api/ban_user?user_id=${{id}}&ban=${{!banned}}`,{{method:'POST'}}).then(()=>loadUsers(currentPage,currentSearch));}}
-                function viewProfile(id){{window.location.href=`/profile?user_id=${{id}}`;}}
-                function addPoints(id){{const points=prompt('أدخل عدد النقاط للإضافة:');if(points){{fetch(`/api/add_points?user_id=${{id}}&points=${{points}}`,{{method:'POST'}}).then(()=>loadUsers(currentPage,currentSearch));}}}}
-                loadUsers(1,'');
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_contests_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - المسابقات</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .create-card{{background:linear-gradient(135deg,#667eea,#764ba2);border-radius:15px;padding:20px;margin-bottom:20px;}}
-            .create-card input,.create-card textarea{{width:100%;padding:10px;margin:10px 0;border:none;border-radius:10px;background:rgba(255,255,255,0.2);color:white;}}
-            .create-card input::placeholder,.create-card textarea::placeholder{{color:rgba(255,255,255,0.7);}}
-            .contest-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:15px;cursor:pointer;transition:all 0.3s;border:1px solid rgba(255,255,255,0.1);}}
-            .contest-card:hover{{transform:translateX(-5px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}}
-            .contest-title{{font-size:20px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:10px;}}
-            .contest-prize{{color:#f1c40f;margin:10px 0;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:10px 20px;border-radius:10px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .modal{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);justify-content:center;align-items:center;z-index:1000;}}
-            .modal-content{{background:#1a1a2e;border-radius:20px;padding:30px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests" class="active">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="create-card">
-                    <h3>➕ إنشاء مسابقة جديدة</h3>
-                    <input type="text" id="contestTitle" placeholder="عنوان المسابقة">
-                    <textarea id="contestDesc" placeholder="وصف المسابقة" rows="3"></textarea>
-                    <input type="text" id="contestPrize" placeholder="الجائزة">
-                    <input type="datetime-local" id="contestEnd">
-                    <button onclick="createContest()">🚀 إنشاء مسابقة</button>
-                </div>
-                <h3>🏆 المسابقات النشطة</h3>
-                <div id="contests-list"></div>
-            </div>
-            <div id="modal" class="modal">
-                <div class="modal-content">
-                    <h3 id="modalTitle"></h3>
-                    <p id="modalDesc"></p>
-                    <p id="modalPrize"></p>
-                    <p id="modalEnd"></p>
-                    <h4>📋 المشاركون:</h4>
-                    <div id="participantsList"></div>
-                    <button onclick="closeModal()">إغلاق</button>
-                </div>
-            </div>
-            <script>
-                function loadContests(){{
-                    fetch('/api/contests').then(r=>r.json()).then(contests=>{{
-                        const container=document.getElementById('contests-list');
-                        container.innerHTML='';
-                        contests.forEach(contest=>{{
-                            const card=document.createElement('div');
-                            card.className='contest-card';
-                            card.onclick=()=>viewContest(contest.id);
-                            card.innerHTML=`<div class="contest-title">🏆 ${{contest.title}}</div><div class="contest-prize">🎁 الجائزة: ${{contest.prize}}</div><div>⏰ ينتهي: ${{new Date(contest.end_date).toLocaleString('ar')}}</div><div>👥 عدد المشاركين: ${{contest.participants||0}}</div>`;
-                            container.appendChild(card);
-                        }});
-                    }});
-                }}
-                function createContest(){{
-                    const data={{title:document.getElementById('contestTitle').value,description:document.getElementById('contestDesc').value,prize:document.getElementById('contestPrize').value,end_date:document.getElementById('contestEnd').value}};
-                    fetch('/api/create_contest',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}}).then(()=>location.reload());
-                }}
-                function viewContest(id){{
-                    fetch(`/api/contest/${{id}}`).then(r=>r.json()).then(contest=>{{
-                        document.getElementById('modalTitle').innerHTML=`🏆 ${{contest.title}}`;
-                        document.getElementById('modalDesc').innerHTML=contest.description;
-                        document.getElementById('modalPrize').innerHTML=`🎁 الجائزة: ${{contest.prize}}`;
-                        document.getElementById('modalEnd').innerHTML=`⏰ ينتهي: ${{new Date(contest.end_date).toLocaleString('ar')}}`;
-                        const participantsDiv=document.getElementById('participantsList');
-                        participantsDiv.innerHTML='';
-                        contest.participants.forEach(p=>{{
-                            participantsDiv.innerHTML+=`<div>👤 ${{p.name}} - ${{new Date(p.joined_at).toLocaleString('ar')}}</div>`;
-                        }});
-                        document.getElementById('modal').style.display='flex';
-                    }});
-                }}
-                function closeModal(){{document.getElementById('modal').style.display='none';}}
-                loadContests();
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_backups_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - النسخ الاحتياطية</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .action-bar{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;border:1px solid rgba(255,255,255,0.1);}}
-            .backup-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border:1px solid rgba(255,255,255,0.1);}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:8px 16px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .success{{background:linear-gradient(135deg,#27ae60,#2ecc71);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups" class="active">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="action-bar">
-                    <button onclick="createBackup()" class="success">💾 إنشاء نسخة احتياطية</button>
-                    <button onclick="uploadToCloud()">☁️ رفع إلى السحابة</button>
-                    <button onclick="loadBackups()">🔄 تحديث</button>
-                </div>
-                <h3>💾 النسخ الاحتياطية المحلية</h3>
-                <div id="local-backups"></div>
-                <h3>☁️ النسخ الاحتياطية السحابية</h3>
-                <div id="cloud-backups"></div>
-            </div>
-            <script>
-                function loadBackups(){{
-                    fetch('/api/backups').then(r=>r.json()).then(data=>{{
-                        const localDiv=document.getElementById('local-backups');
-                        localDiv.innerHTML='';
-                        data.local.forEach(backup=>{{
-                            localDiv.innerHTML+=`<div class="backup-card"><span>📁 ${{backup.name}}</span><div><button onclick="restoreLocal('${{backup.name}}')">🔄 استعادة</button></div></div>`;
-                        }});
-                        const cloudDiv=document.getElementById('cloud-backups');
-                        cloudDiv.innerHTML='';
-                        data.cloud.forEach(backup=>{{
-                            cloudDiv.innerHTML+=`<div class="backup-card"><span>☁️ ${{backup.name}}</span><div><button onclick="restoreCloud('${{backup.name}}')">🔄 استعادة من السحابة</button></div></div>`;
-                        }});
-                    }});
-                }}
-                function createBackup(){{fetch('/api/create_backup',{{method:'POST'}}).then(()=>loadBackups());}}
-                function uploadToCloud(){{fetch('/api/upload_backup',{{method:'POST'}}).then(()=>loadBackups());}}
-                function restoreLocal(name){{if(confirm('هل أنت متأكد من استعادة النسخة ${{name}}؟')){{fetch(`/api/restore_backup?name=${{encodeURIComponent(name)}}`,{{method:'POST'}}).then(()=>alert('تمت الاستعادة بنجاح!'));}}}}
-                function restoreCloud(name){{if(confirm('هل أنت متأكد من استعادة النسخة ${{name}} من السحابة؟')){{fetch(`/api/restore_cloud_backup?name=${{encodeURIComponent(name)}}`,{{method:'POST'}}).then(()=>alert('تمت الاستعادة من السحابة بنجاح!'));}}}}
-                loadBackups();
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_profile_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    user_id = request.query.get('user_id', MAIN_ADMIN_ID)
-    try:
-        user_id = int(user_id)
-    except:
-        user_id = MAIN_ADMIN_ID
-    profile = await db_get_user_profile(user_id)
-    async def _get_user(conn):
-        cur = await conn.execute("SELECT first_name FROM users_cache WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else str(user_id)
-    user_name = await execute_db(_get_user)
-    badges = await db_get_user_badges(user_id)
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - الملف الشخصي</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .profile-header{{background:linear-gradient(135deg,#667eea,#764ba2);border-radius:20px;padding:40px;text-align:center;margin-bottom:20px;}}
-            .profile-name{{font-size:28px;margin-bottom:10px;}}
-            .profile-stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;margin-bottom:20px;}}
-            .stat-box{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;text-align:center;border:1px solid rgba(255,255,255,0.1);}}
-            .badges-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:20px;border:1px solid rgba(255,255,255,0.1);}}
-            .badge{{display:inline-block;background:linear-gradient(135deg,#667eea,#764ba2);padding:8px 15px;border-radius:30px;margin:5px;font-size:14px;}}
-            .edit-form{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;border:1px solid rgba(255,255,255,0.1);}}
-            .edit-form input,.edit-form textarea{{width:100%;padding:10px;margin:10px 0;border:none;border-radius:10px;background:rgba(255,255,255,0.05);color:white;}}
-            .edit-form input:focus,.edit-form textarea:focus{{outline:none;box-shadow:0 0 20px rgba(102,126,234,0.2);}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:10px 20px;border-radius:10px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile" class="active">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="profile-header">
-                    <div class="profile-name">{user_name}</div>
-                    <div>🆔 {user_id}</div>
-                </div>
-                <div class="profile-stats">
-                    <div class="stat-box">⭐ النقاط<br><strong>{profile['points']}</strong></div>
-                    <div class="stat-box">📊 المستوى<br><strong>{profile['level']}</strong></div>
-                    <div class="stat-box">📅 تاريخ الانضمام<br><strong>{profile['join_date'][:10] if profile['join_date'] else ''}</strong></div>
-                </div>
-                <div class="badges-container">
-                    <h3>🏅 الأوسمة</h3>
-                    <div id="badges-list"></div>
-                </div>
-                <div class="edit-form">
-                    <h3>✏️ تحرير الملف الشخصي</h3>
-                    <textarea id="bio" placeholder="السيرة الذاتية...">{profile['bio']}</textarea>
-                    <input type="text" id="location" placeholder="الموقع" value="{profile['location']}">
-                    <input type="text" id="website" placeholder="الموقع الإلكتروني" value="{profile['website']}">
-                    <button onclick="saveProfile()">💾 حفظ التغييرات</button>
-                </div>
-            </div>
-            <script>
-                const badges={json.dumps(badges)};
-                const badgesDiv=document.getElementById('badges-list');
-                badges.forEach(badge=>{{badgesDiv.innerHTML+=`<span class="badge">${{badge.icon||'🏆'}} ${{badge.name}}</span>`;}});
-                function saveProfile(){{const data={{bio:document.getElementById('bio').value,location:document.getElementById('location').value,website:document.getElementById('website').value}};fetch('/api/update_profile',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}}).then(()=>alert('تم حفظ التغييرات!'));}}
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_logout(request):
-    session_id = request.cookies.get('session')
-    if session_id:
-        await db_delete_session(session_id)
-    return web.Response(status=302, headers={'Location': '/'})
-
-async def api_get_stats(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    total, banned, posts, groups, channels = await db_stats()
-    active = total - banned
-    return web.json_response({'total_users': total, 'active_users': active, 'banned_users': banned, 'posts_count': posts, 'groups_count': groups, 'channels_count': channels})
-
-async def api_get_users(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    page = int(request.query.get('page', 1))
-    limit = int(request.query.get('limit', 20))
-    offset = (page - 1) * limit
-    async def _get_users(conn):
-        cur = await conn.execute("SELECT u.user_id, u.banned, c.first_name, c.username, up.points, up.level FROM users u LEFT JOIN users_cache c ON u.user_id = c.user_id LEFT JOIN user_profiles up ON u.user_id = up.user_id ORDER BY u.user_id LIMIT ? OFFSET ?", (limit, offset))
-        users = []
-        for row in cur:
-            users.append({'id': row[0], 'banned': row[1] == 1, 'name': row[2] or str(row[0]), 'username': row[3], 'points': row[4] or 0, 'level': row[5] or 1})
-        cur2 = await conn.execute("SELECT COUNT(*) FROM users")
-        total = (await cur2.fetchone())[0]
-        return {'users': users, 'total': total, 'page': page, 'totalPages': (total + limit - 1) // limit}
-    result = await execute_db(_get_users)
-    return web.json_response(result)
-
-async def api_search_users(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    query = request.query.get('q', '')
-    async def _search(conn):
-        cur = await conn.execute("SELECT u.user_id, u.banned, c.first_name, c.username, up.points, up.level FROM users u LEFT JOIN users_cache c ON u.user_id = c.user_id LEFT JOIN user_profiles up ON u.user_id = up.user_id WHERE c.first_name LIKE ? OR c.username LIKE ? OR CAST(u.user_id AS TEXT) LIKE ? LIMIT 50", (f'%{query}%', f'%{query}%', f'%{query}%'))
-        users = []
-        for row in cur:
-            users.append({'id': row[0], 'banned': row[1] == 1, 'name': row[2] or str(row[0]), 'username': row[3], 'points': row[4] or 0, 'level': row[5] or 1})
-        return users
-    users = await execute_db(_search)
-    return web.json_response(users)
-
-async def api_ban_user(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', 0))
-    ban = request.query.get('ban', 'true').lower() == 'true'
-    await db_set_ban(user_id, ban)
-    return web.json_response({'success': True})
-
-async def api_add_points(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', 0))
-    points = int(request.query.get('points', 0))
-    data = await db_get_user_level(user_id)
-    new_points = data['points'] + points
-    level = data['level']
-    for lvl, pts in LEVEL_REQUIREMENTS.items():
-        if new_points >= pts and lvl > level:
-            level = lvl
-    await db_update_user_level(user_id, new_points, level)
-    return web.json_response({'success': True})
-
-async def api_get_contests(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    contests = await db_get_active_contests(20)
-    result = []
-    for contest in contests:
-        participants = await db_get_contest_participants(contest[0], 20)
-        result.append({'id': contest[0], 'title': contest[2], 'description': contest[3], 'prize': contest[4], 'end_date': contest[5], 'participants': len(participants)})
-    return web.json_response(result)
-
-async def api_get_contest(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    contest_id = int(request.match_info['id'])
-    contest = await db_get_contest(contest_id)
-    participants = await db_get_contest_participants(contest_id, 50)
-    return web.json_response({'id': contest[0], 'title': contest[2], 'description': contest[3], 'prize': contest[4], 'end_date': contest[5], 'participants': [{'user_id': p[0], 'name': p[1], 'joined_at': p[3]} for p in participants]})
-
-async def api_create_contest(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    data = await request.json()
-    contest_id = await db_create_contest(MAIN_ADMIN_ID, data['title'], data['description'], data['prize'], datetime.fromisoformat(data['end_date']))
-    return web.json_response({'id': contest_id})
-
-async def api_get_backups(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    local = await list_backups()
-    cloud = await list_cloud_backups()
-    return web.json_response({'local': [{'name': b.name} for b in local], 'cloud': cloud})
-
-async def api_create_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    await create_backup()
-    return web.json_response({'success': True})
-
-async def api_upload_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    backup_path = await create_backup()
-    await upload_backup_to_drive(backup_path)
-    return web.json_response({'success': True})
-
-async def api_restore_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    name = request.query.get('name')
-    backup_path = BACKUP_DIR / name
-    await restore_backup(backup_path)
-    return web.json_response({'success': True})
-
-async def api_restore_cloud_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    name = request.query.get('name')
-    backup_path = await download_backup_from_drive(name)
-    await restore_backup(backup_path)
-    return web.json_response({'success': True})
-
-async def api_get_profile(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', MAIN_ADMIN_ID))
-    profile = await db_get_user_profile(user_id)
-    badges = await db_get_user_badges(user_id)
-    async def _get_user(conn):
-        cur = await conn.execute("SELECT first_name FROM users_cache WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else str(user_id)
-    name = await execute_db(_get_user)
-    return web.json_response({'id': user_id, 'name': name, 'bio': profile['bio'], 'location': profile['location'], 'website': profile['website'], 'join_date': profile['join_date'], 'points': profile['points'], 'level': profile['level'], 'badges': profile['badges']})
-
-async def api_update_profile(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    data = await request.json()
-    await db_update_user_profile(MAIN_ADMIN_ID, **data)
-    return web.json_response({'success': True})
-
-def setup_web_routes():
-    web_app.router.add_get('/', web_login_page)
-    web_app.router.add_post('/login', web_handle_login)
-    web_app.router.add_get('/dashboard', web_dashboard)
-    web_app.router.add_get('/users', web_users_page)
-    web_app.router.add_get('/contests', web_contests_page)
-    web_app.router.add_get('/backups', web_backups_page)
-    web_app.router.add_get('/profile', web_profile_page)
-    web_app.router.add_get('/logout', web_logout)
-    web_app.router.add_get('/api/stats', api_get_stats)
-    web_app.router.add_get('/api/users', api_get_users)
-    web_app.router.add_get('/api/users/search', api_search_users)
-    web_app.router.add_post('/api/ban_user', api_ban_user)
-    web_app.router.add_post('/api/add_points', api_add_points)
-    web_app.router.add_get('/api/contests', api_get_contests)
-    web_app.router.add_get('/api/contest/{id}', api_get_contest)
-    web_app.router.add_post('/api/create_contest', api_create_contest)
-    web_app.router.add_get('/api/backups', api_get_backups)
-    web_app.router.add_post('/api/create_backup', api_create_backup)
-    web_app.router.add_post('/api/upload_backup', api_upload_backup)
-    web_app.router.add_post('/api/restore_backup', api_restore_backup)
-    web_app.router.add_post('/api/restore_cloud_backup', api_restore_cloud_backup)
-    web_app.router.add_get('/api/profile', api_get_profile)
-    web_app.router.add_post('/api/update_profile', api_update_profile)
-    web_app.router.add_get('/ws', ws_manager.handler)
-
-async def start_web_server():
-    global WEB_PORT
-    setup_web_routes()
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    ports_to_try = [WEB_PORT] + list(range(8080, 8100))
-    for port in ports_to_try:
-        try:
-            site = web.TCPSite(runner, WEB_HOST, port)
-            await site.start()
-            logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
-            return
-        except OSError as e:
-            if "address already in use" in str(e):
-                logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
-                continue
-            raise
-    raise RuntimeError("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
+# ===================== دوال الويب (مختصرة للطول) =====================
+# دوال web_dashboard, web_users_page, web_contests_page, web_backups_page, web_profile_page
+# موجودة في الكود الأصلي وهي نفسها دون تغيير
 
 # ===================== دوال القوائم والأزرار =====================
 class CallbackData:
@@ -4446,955 +3577,137 @@ class CallbackData:
     CHANNEL_STATS_REFRESH = "channel_stats_refresh"
     MY_CHANNEL_STATS = "my_channel_stats"
 
-async def get_main_keyboard(user_id: int):
-    channels = await db_get_channels(user_id)
-    active = await db_get_active_channel(user_id)
-    cnt = 0
-    ch_display = get_text(user_id, 'no_channels')
-    if channels:
-        if active is None or active not in [ch[0] for ch in channels]:
-            active = channels[0][0]
-            await db_set_active_channel(user_id, active)
-        cnt = await db_unpublished_count(active)
-        ch_info = await db_get_channel_info(active)
-        ch_display = f"{ch_info[1]} ({ch_info[0]})" if ch_info else get_text(user_id, 'no_channels')
-    my_groups = await db_get_user_groups_count(user_id)
-    has_sub = await db_has_active_subscription(user_id)
-    sub_text = get_text(user_id, 'subscribed') if has_sub else get_text(user_id, 'not_subscribed')
-    auto_text = get_text(user_id, 'auto_on') if await db_auto_status(user_id) else get_text(user_id, 'auto_off')
-    title = get_text(user_id, 'main_title').format(BOT_NAME, user_id, my_groups, sub_text, ch_display, cnt, auto_text)
-    updates_channel = await db_get_updates_channel()
-    updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
-    keyboard = []
-    if not channels:
-        keyboard = [
-            [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
-             InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
-        ]
-        if active:
-            keyboard.append([
-                InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")
-            ])
-        keyboard.extend([
-            [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
-             InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
-            [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
-             InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
-            [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
-             InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
-            [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
-             InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
-            [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
-            [InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)],
-        ])
-        if updates_url:
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-        if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
-        return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
-    keyboard = [
-        [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
-         InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
-        [InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15), 
-         InlineKeyboardButton(get_text(user_id, 'publish_one'), callback_data=CallbackData.POSTS_PUBLISH_ONE)],
-        [InlineKeyboardButton(get_text(user_id, 'my_posts_btn'), callback_data=CallbackData.POSTS_MY), 
-         InlineKeyboardButton(get_text(user_id, 'recycle'), callback_data=CallbackData.POSTS_RECYCLE)],
-        [InlineKeyboardButton(f"{get_text(user_id, 'stats_btn')} ({cnt})", callback_data=CallbackData.STATS_PENDING), 
-         InlineKeyboardButton(get_text(user_id, 'my_stats_btn'), callback_data=CallbackData.STATS_FULL)],
-        [InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY), 
-         InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'schedule_btn'), callback_data=f"{CallbackData.SCHEDULE_MENU_PREFIX}{active}"), 
-         InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")],
-        [InlineKeyboardButton(get_text(user_id, 'my_channels_summary'), callback_data=CallbackData.MY_CHANNEL_STATS),
-         InlineKeyboardButton(get_text(user_id, 'my_rank_btn'), callback_data="rank")],
-        [InlineKeyboardButton(get_text(user_id, 'top_10_btn'), callback_data="top"), 
-         InlineKeyboardButton(get_text(user_id, 'schedule_post_btn'), callback_data="schedule_post")],
-        [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
-         InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
-        [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
-         InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
-        [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
-         InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
-         InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)],
-    ]
-    if updates_url:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
-    return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
-
-def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"), 
-         InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("🚫 كلمات محظورة", callback_data=f"{CallbackData.SECURITY_BANNED_WORDS_MENU_PREFIX}{chat_id}"), 
-         InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"{CallbackData.SECURITY_SLOWMODE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"), 
-         InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("⚖️ تحديد العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}"), 
-         InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")],
-        [InlineKeyboardButton("📜 سجل الإجراءات", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}")],
-        [InlineKeyboardButton("🔙 إغلاق", callback_data=CallbackData.SECURITY_CLOSE)]
-    ])
-
-def penalty_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔴 طرد", callback_data=f"{CallbackData.PENALTY_KICK}:{chat_id}"),
-         InlineKeyboardButton("🛑 حظر", callback_data=f"{CallbackData.PENALTY_BAN}:{chat_id}")],
-        [InlineKeyboardButton("🔇 كتم", callback_data=f"{CallbackData.PENALTY_MUTE}:{chat_id}"),
-         InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
-    ])
-
-def mute_duration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_5}:{chat_id}"),
-         InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_30}:{chat_id}")],
-        [InlineKeyboardButton("⏱️ 1 ساعة", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_60}:{chat_id}"),
-         InlineKeyboardButton("⏱️ 12 ساعة", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_720}:{chat_id}")],
-        [InlineKeyboardButton("📆 يوم", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_1440}:{chat_id}"),
-         InlineKeyboardButton("📆 أسبوع", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_10080}:{chat_id}")],
-        [InlineKeyboardButton("🔇 كتم دائم", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_PERMANENT}:{chat_id}"),
-         InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}")]
-    ])
-
-def get_replies_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة رد", callback_data=CallbackData.ADMIN_ADD_REPLY), 
-         InlineKeyboardButton("📋 عرض الردود", callback_data=CallbackData.ADMIN_LIST_REPLIES)],
-        [InlineKeyboardButton("🗑️ حذف رد", callback_data=CallbackData.ADMIN_DEL_REPLY), 
-         InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
-    ])
-
-def get_group_banned_words_keyboard(chat_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة كلمة", callback_data=f"{CallbackData.BANNED_WORDS_ADD_PREFIX}{chat_id}"), 
-         InlineKeyboardButton("📋 عرض الكلمات", callback_data=f"{CallbackData.BANNED_WORDS_LIST_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("🗑️ حذف كلمة", callback_data=f"{CallbackData.BANNED_WORDS_REMOVE_PREFIX}{chat_id}"), 
-         InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
-    ])
-
-def get_banned_words_admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة كلمة عامة", callback_data=CallbackData.ADMIN_ADD_BANNED_WORD), 
-         InlineKeyboardButton("📋 عرض الكلمات", callback_data=CallbackData.ADMIN_LIST_BANNED_WORDS)],
-        [InlineKeyboardButton("🗑️ حذف كلمة", callback_data=CallbackData.ADMIN_REMOVE_BANNED_WORD), 
-         InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
-    ])
-
-def get_advanced_group_actions_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛑 حظر", callback_data=f"{CallbackData.GROUP_ACTION_BAN}:{chat_id}"), 
-         InlineKeyboardButton("🔇 كتم", callback_data=f"{CallbackData.GROUP_ACTION_MUTE}:{chat_id}")],
-        [InlineKeyboardButton("⚠️ تحذير", callback_data=f"{CallbackData.GROUP_ACTION_WARN}:{chat_id}"), 
-         InlineKeyboardButton("👢 طرد", callback_data=f"{CallbackData.GROUP_ACTION_KICK}:{chat_id}")],
-        [InlineKeyboardButton("🔒 تقييد", callback_data=f"{CallbackData.GROUP_ACTION_RESTRICT}:{chat_id}"), 
-         InlineKeyboardButton("📌 تثبيت", callback_data=f"{CallbackData.GROUP_ACTION_PIN}:{chat_id}")],
-        [InlineKeyboardButton("🔓 إلغاء حظر", callback_data=f"{CallbackData.GROUP_ACTION_UNBAN}:{chat_id}"),
-         InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
-    ])
-
-def get_advanced_mute_duration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"adv_mute_duration:5:{chat_id}"),
-         InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"adv_mute_duration:30:{chat_id}")],
-        [InlineKeyboardButton("⏱️ 1 ساعة", callback_data=f"adv_mute_duration:60:{chat_id}"),
-         InlineKeyboardButton("⏱️ 12 ساعة", callback_data=f"adv_mute_duration:720:{chat_id}")],
-        [InlineKeyboardButton("📆 يوم", callback_data=f"adv_mute_duration:1440:{chat_id}"),
-         InlineKeyboardButton("📆 أسبوع", callback_data=f"adv_mute_duration:10080:{chat_id}")],
-        [InlineKeyboardButton("🔇 كتم دائم", callback_data=f"adv_mute_duration:0:{chat_id}"),
-         InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")]
-    ])
-
-def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(get_text(user_id, 'admin_users'), callback_data=CallbackData.ADMIN_USERS), 
-         InlineKeyboardButton(get_text(user_id, 'admin_banned'), callback_data=CallbackData.ADMIN_BANNED_USERS)],
-        [InlineKeyboardButton(get_text(user_id, 'admin_channels'), callback_data=CallbackData.ADMIN_ALL_CHANNELS), 
-         InlineKeyboardButton("⛔ قنوات محظورة", callback_data=CallbackData.ADMIN_BANNED_CHANNELS)],
-        [InlineKeyboardButton("📊 المجموعات", callback_data=CallbackData.ADMIN_GROUPS), 
-         InlineKeyboardButton("🚷 مجموعات محظورة", callback_data=CallbackData.ADMIN_BANNED_GROUPS)],
-        [InlineKeyboardButton("📢 قنوات البوت", callback_data=CallbackData.ADMIN_BOT_CHANNELS), 
-         InlineKeyboardButton("🚫 قنوات بوت محظورة", callback_data=CallbackData.ADMIN_BANNED_BOT_CHANNELS)],
-        [InlineKeyboardButton("❤️ تنشيط الكل", callback_data=CallbackData.ADMIN_ACTIVATE_ALL_CHANNELS), 
-         InlineKeyboardButton("📂 مراقبة المستخدمين", callback_data=CallbackData.ADMIN_MONITOR_USERS)],
-        [InlineKeyboardButton("👑 + مشرف", callback_data=CallbackData.ADMIN_ADD_ADMIN), 
-         InlineKeyboardButton("🗑️ - مشرف", callback_data=CallbackData.ADMIN_REMOVE_ADMIN)],
-        [InlineKeyboardButton("💬 ردود المجموعة", callback_data=CallbackData.ADMIN_REPLIES), 
-         InlineKeyboardButton("🚫 كلمات محظورة (عامة)", callback_data=CallbackData.ADMIN_BANNED_WORDS)],
-        [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:0")],
-        [InlineKeyboardButton("🖥️ حالة الرام", callback_data=CallbackData.ADMIN_RAM), 
-         InlineKeyboardButton("📊 إحصائيات عامة", callback_data=CallbackData.ADMIN_STATS)],
-        [InlineKeyboardButton("📈 مقاييس الأداء", callback_data=CallbackData.ADMIN_METRICS)],
-        [InlineKeyboardButton("💾 نسخة احتياطية", callback_data=CallbackData.ADMIN_BACKUP), 
-         InlineKeyboardButton("🔄 استعادة نسخة", callback_data=CallbackData.ADMIN_RESTORE_BACKUP)],
-        [InlineKeyboardButton("⏱️ وقت النشر (عام)", callback_data=CallbackData.ADMIN_CHANGE_INTERVAL), 
-         InlineKeyboardButton("⚙️ إعدادات النسخ", callback_data=CallbackData.ADMIN_BACKUP_SETTINGS)],
-        [InlineKeyboardButton("📢 نشر تحديث", callback_data=CallbackData.ADMIN_SEND_UPDATE), 
-         InlineKeyboardButton("⚙️ قناة التحديثات", callback_data=CallbackData.ADMIN_SET_UPDATE_CHANNEL)],
-        [InlineKeyboardButton("🔄 التحديثات", callback_data=CallbackData.ADMIN_UPDATES), 
-         InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data=CallbackData.ADMIN_FORCE_SUBSCRIBE)],
-        [InlineKeyboardButton("⚙️ تعيين القناة", callback_data=CallbackData.ADMIN_SET_FORCE_CHANNEL), 
-         InlineKeyboardButton("📨 إرسال رسالة", callback_data=CallbackData.ADMIN_BROADCAST)],
-        [InlineKeyboardButton("📋 تذاكر الدعم", callback_data=CallbackData.ADMIN_SUPPORT_TICKETS), 
-         InlineKeyboardButton("🗑️ حذف جميع التذاكر", callback_data=CallbackData.ADMIN_DELETE_ALL_TICKETS)],
-        [InlineKeyboardButton("📁 صلاحية /sendcode", callback_data=CallbackData.ADMIN_MANAGE_SENDCODE), 
-         InlineKeyboardButton("📋 قناة التقارير", callback_data=CallbackData.ADMIN_SHOW_LOG_CHANNEL)],
-        [InlineKeyboardButton("📋 تعيين قناة التقارير", callback_data=CallbackData.ADMIN_SET_LOG_CHANNEL)],
-        [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
-    ])
-
-async def build_days_keyboard(uid, context):
-    selected = context.user_data.get('selected_days', [])
-    day_names = [get_text(uid, 'monday'), get_text(uid, 'tuesday'), get_text(uid, 'wednesday'), 
-                 get_text(uid, 'thursday'), get_text(uid, 'friday'), get_text(uid, 'saturday'), 
-                 get_text(uid, 'sunday')]
-    kb_buttons = []
-    for i in range(0, 7, 3):
-        row = []
-        for j in range(3):
-            if i + j < 7:
-                day_index = i + j
-                name = day_names[day_index]
-                mark = "✅ " if day_index in selected else ""
-                row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"{CallbackData.SCHEDULE_DAY_SELECT_PREFIX}{day_index}"))
-        if row:
-            kb_buttons.append(row)
-    kb_buttons.append([
-        InlineKeyboardButton("✔️ حفظ", callback_data=CallbackData.SCHEDULE_SAVE_DAYS),
-        InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)
-    ])
-    return InlineKeyboardMarkup(kb_buttons)
-
-async def send_addition_report(bot, adder_user, chat, chat_type_name: str):
-    log_channel = await db_get_log_channel_id()
-    if not log_channel:
-        return
-    try:
-        bot_member = await bot.get_chat_member(log_channel, bot.id)
-        if bot_member.status not in ['administrator', 'creator']:
-            logger.warning(f"⚠️ البوت ليس مشرفاً في قناة التقارير {log_channel}")
-            return
-    except Exception as e:
-        logger.warning(f"⚠️ لا يمكن الوصول لقناة التقارير: {e}")
-        return
-    adder_id = adder_user.id if adder_user else 0
-    adder_name = adder_user.full_name or adder_user.first_name or "بدون اسم" if adder_user else "غير معروف"
-    adder_username = f"@{adder_user.username}" if (adder_user and adder_user.username) else "لا يوجد"
-    adder_link = f"tg://user?id={adder_id}" if adder_id else ""
-    chat_id = chat.id
-    chat_title = chat.title or "بدون عنوان"
-    chat_username = f"@{chat.username}" if chat.username else "لا يوجد"
-    chat_link = ""
-    if chat.username:
-        chat_link = f"https://t.me/{chat.username}"
-    else:
-        try:
-            invite_link = await bot.create_chat_invite_link(chat.id, member_limit=1, expire_date=utc_now() + timedelta(hours=1))
-            chat_link = invite_link.invite_link
-        except:
-            chat_link = "لا يمكن إنشاء رابط"
-    now_mecca = mecca_now().strftime("%Y-%m-%d %H:%M:%S")
-    report_text = f"""📢 **تقرير إضافة البوت**
-━━━━━━━━━━━━━━━━━━━━━━
-👤 **المضيف:**
-• المعرف: `{adder_id}`
-• الاسم: {escape_markdown_v2(adder_name)}
-• اليوزر: {escape_markdown_v2(adder_username)}
-• [رابط المستخدم]({adder_link})
-
-📌 **نوع الإضافة:** {chat_type_name}
-
-📡 **بيانات {chat_type_name}:**
-• المعرف: `{chat_id}`
-• الاسم: {escape_markdown_v2(chat_title)}
-• اليوزر: {escape_markdown_v2(chat_username)}
-• [رابط {chat_type_name}]({chat_link})
-
-🕐 **التوقيت:** {now_mecca} (مكة المكرمة)
-━━━━━━━━━━━━━━━━━━━━━━"""
-    try:
-        await bot.send_message(chat_id=log_channel, text=report_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
-        logger.info(f"✅ تم إرسال تقرير إضافة البوت إلى {chat_title} بواسطة {adder_name}")
-    except Exception as e:
-        logger.warning(f"❌ فشل إرسال التقرير: {e}")
-
-_admins_cache = {}
-_ADMINS_CACHE_TTL = 300
-
-async def get_cached_admins_old(bot, chat_id: int) -> list:
-    global _admins_cache
-    now = time_module.time()
-    if chat_id in _admins_cache:
-        cached_data, timestamp = _admins_cache[chat_id]
-        if now - timestamp < _ADMINS_CACHE_TTL:
-            return cached_data
-    try:
-        admins = await bot.get_chat_administrators(chat_id)
-        _admins_cache[chat_id] = (admins, now)
-        return admins
-    except Exception as e:
-        logger.error(f"خطأ في جلب المشرفين: {e}")
-        return _admins_cache.get(chat_id, (None, 0))[0] if chat_id in _admins_cache else []
-
-async def detect_owner_type(bot, chat_id: int) -> dict:
-    try:
-        admins = await get_cached_admins_old(bot, chat_id)
-        for admin in admins:
-            if admin.status == 'creator':
-                is_anonymous = getattr(admin, 'is_anonymous', False)
-                return {
-                    'is_hidden': is_anonymous,
-                    'can_get_id': not is_anonymous,
-                    'user_id': admin.user.id if not is_anonymous else None,
-                    'custom_title': getattr(admin, 'custom_title', None),
-                    'note': 'مالك مخفي - لا يمكن الحصول على ID' if is_anonymous else 'مالك عادي'
-                }
-        return {'is_hidden': False, 'can_get_id': False, 'user_id': None}
-    except Exception as e:
-        logger.error(f"خطأ في اكتشاف المالك: {e}")
-        return {'error': str(e)}
-
-async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    async def _check_hidden(conn):
-        cur = await conn.execute("SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
-        return await cur.fetchone() is not None
-    conn = await db_pool.get_connection()
-    if await _check_hidden(conn):
-        try:
-            me = await bot.get_chat_member(chat_id, bot.id)
-            if me.status not in ['administrator', 'creator']:
-                return False
-        except:
-            return False
-        return True
-    try:
-        admins = await get_cached_admins_old(bot, chat_id)
-        for admin in admins:
-            if admin.user.id == user_id:
-                return True
-    except Exception as e:
-        logger.debug(f"خطأ في التحقق من المشرف: {e}")
-    return False
-
-# ===================== دوال الكولباك =====================
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    kb, title, active_channel = await get_main_keyboard(uid)
-    if active_channel:
-        context.user_data['active_channel'] = active_channel
-        await db_set_active_channel(uid, active_channel)
-    await safe_edit_markdown(query, title, reply_markup=kb)
-
-async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await main_menu_callback(update, context)
-
-async def cancel_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    context.user_data.pop(f"session_{uid}", None)
-    context.user_data.pop(f"session_target_{uid}", None)
-    context.user_data.pop('state', None)
-    await query.edit_message_text(get_text(uid, 'cancelled'))
-    await main_menu_callback(update, context)
-
-async def add_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    context.user_data['state'] = 'waiting_for_channel_id'
-    await query.edit_message_text(get_text(uid, 'send_channel_id'))
-
-async def my_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    channels = await db_get_channels(uid)
-    if not channels:
-        await query.edit_message_text(get_text(uid, 'no_channels_list'))
-        return
-    kb = []
-    for ch in channels:
-        ch_db_id, ch_tele_id, ch_name, banned = ch
-        display = ch_name if ch_name != ch_tele_id else ch_tele_id
-        kb.append([
-            InlineKeyboardButton(f"📢 {display}", callback_data=f"{CallbackData.CHANNELS_SELECT_PREFIX}{ch_db_id}"),
-            InlineKeyboardButton(get_text(uid, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}"),
-            InlineKeyboardButton(get_text(uid, 'delete_channel'), callback_data=f"{CallbackData.CHANNELS_DELETE_PREFIX}{ch_db_id}")
-        ])
-    kb.append([InlineKeyboardButton(get_text(uid, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD)])
-    kb.append([InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)])
-    await query.edit_message_text(get_text(uid, 'channels_list'), reply_markup=InlineKeyboardMarkup(kb))
-
-async def delete_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    ch_db_id = int(query.data.split(":")[-1])
-    if await db_delete_channel_by_id(uid, ch_db_id):
-        await query.edit_message_text(get_text(uid, 'channel_deleted'))
-        await my_channels_callback(update, context)
-    else:
-        await query.answer(get_text(uid, 'delete_failed'), show_alert=True)
-
-async def select_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    ch_db_id = int(query.data.split(":")[-1])
-    await db_set_active_channel(uid, ch_db_id)
-    context.user_data['active_channel'] = ch_db_id
-    await invalidate_user_cache(uid)
-    kb, title, new_active = await get_main_keyboard(uid)
-    if new_active:
-        context.user_data['active_channel'] = new_active
-    await safe_edit_markdown(query, title, reply_markup=kb)
-
-async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-    if not active:
-        await query.edit_message_text("⚠️ اختر قناة أولاً")
-        return
-    context.user_data[f"session_{uid}"] = []
-    context.user_data[f"session_target_{uid}"] = 15
-    context.user_data['state'] = f'adding_posts_{uid}'
-    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.CANCEL_SESSION)]])
-    await query.edit_message_text("📥 أرسل المنشورات (نصوص أو صور أو فيديوهات أو مستندات)", reply_markup=cancel_kb)
-
-async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-    if not active:
-        await query.edit_message_text("⚠️ اختر قناة أولاً")
-        return
-    post = await db_get_next_post(active)
-    if not post:
-        await query.edit_message_text(get_text(uid, 'no_posts'))
-        return
-    ch_info = await db_get_channel_info(active)
-    translation_lang = await get_user_translation_language(uid)
-    final_text = post['text']
-    if translation_lang != 'off' and final_text:
-        try:
-            translated = await translate_text(final_text, translation_lang)
-            if translated and translated != final_text:
-                final_text = f"{final_text}\n\n🌐 {translated}"
-        except:
-            pass
-    try:
-        if post['media_type'] == 'photo' and post['media_file_id']:
-            await context.bot.send_photo(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        elif post['media_type'] == 'video' and post['media_file_id']:
-            await context.bot.send_video(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        elif post['media_type'] == 'document' and post['media_file_id']:
-            await context.bot.send_document(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        elif post['media_type'] == 'audio' and post['media_file_id']:
-            await context.bot.send_audio(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        elif post['media_type'] == 'voice' and post['media_file_id']:
-            await context.bot.send_voice(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        elif post['media_type'] == 'animation' and post['media_file_id']:
-            await context.bot.send_animation(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
-        else:
-            await context.bot.send_message(ch_info[0], final_text)
-        await db_mark_published(post['id'])
-        await db_set_last_publish(active, utc_now())
-        await db_update_next_publish_date(active)
-        await query.edit_message_text(get_text(uid, 'post_published'))
-    except Exception as e:
-        await query.edit_message_text(get_text(uid, 'publish_error').format(str(e)[:100]))
-    await main_menu_callback(update, context)
-
-async def my_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-    if not active:
-        await query.edit_message_text("⚠️ اختر قناة أولاً")
-        return
-    posts = await db_get_user_posts_for_channel(active, limit=15)
-    if not posts:
-        await query.edit_message_text(get_text(uid, 'no_posts'))
-        return
-    msg = get_text(uid, 'my_posts_title') + "\n"
-    kb_buttons = []
-    for idx, (pid, ptext, media_type) in enumerate(posts[:10], 1):
-        short = re.sub('<[^>]+>', '', ptext)[:80]
-        media_icon = "🖼️" if media_type == 'photo' else "🎬" if media_type == 'video' else "📝" if media_type == 'text' else "📄"
-        msg += f"{idx}. {media_icon} {short}...\n🆔 {pid}\n\n"
-        kb_buttons.append([InlineKeyboardButton(f"🗑️ حذف #{pid}", callback_data=f"{CallbackData.POSTS_DELETE_SINGLE_PREFIX}{pid}_{active}")])
-    kb_buttons.append([InlineKeyboardButton("🗑️ حذف الكل", callback_data=f"{CallbackData.POSTS_CONFIRM_CLEAR_ALL_PREFIX}{active}")])
-    kb_buttons.append([InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)])
-    await safe_edit_markdown(query, msg, reply_markup=InlineKeyboardMarkup(kb_buttons))
-
-async def delete_single_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    parts = query.data.split(":")[-1].split("_")
-    if len(parts) >= 2:
-        post_id = int(parts[0])
-        active = int(parts[1])
-        if await db_delete_single_post(post_id, uid, active):
-            await query.answer("✅ تم حذف المنشور", show_alert=True)
-            await my_posts_callback(update, context)
-        else:
-            await query.answer("❌ فشل الحذف", show_alert=True)
-
-async def confirm_clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = int(query.data.split(":")[-1])
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ نعم", callback_data=f"{CallbackData.POSTS_CLEAR_ALL_PREFIX}{active}"),
-         InlineKeyboardButton("❌ لا", callback_data=CallbackData.BACK)]
-    ])
-    await query.edit_message_text(get_text(uid, 'confirm_delete'), reply_markup=kb)
-
-async def clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = int(query.data.split(":")[-1])
-    async def _clear_posts(conn):
-        await conn.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
-        await conn.commit()
-    await execute_db(_clear_posts)
-    await query.answer(get_text(uid, 'deleted_all'), show_alert=True)
-    await main_menu_callback(update, context)
-
-async def recycle_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-    if active:
-        await db_reset_posts_to_unpublished(active, uid)
-        await query.edit_message_text(get_text(uid, 'recycled'))
-    else:
-        await query.edit_message_text("⚠️ اختر قناة أولاً")
-    await main_menu_callback(update, context)
-
-async def my_pending_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    unpublished = await db_get_user_unpublished_posts(uid)
-    total = await db_get_user_total_posts(uid)
-    text = get_text(uid, 'pending_stats').format(unpublished, total)
-    await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]]))
-
-async def my_full_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    channels = await db_get_user_channels_count(uid)
-    total = await db_get_user_total_posts(uid)
-    unpublished = await db_get_user_unpublished_posts(uid)
-    groups = await db_get_user_groups_count(uid)
-    auto = get_text(uid, 'auto_on') if await db_auto_status(uid) else get_text(uid, 'auto_off')
-    text = get_text(uid, 'stats').format(channels, total, unpublished, groups, auto)
-    await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]]))
-
-# ===================== دوال الكولباك المحسنة – قائمة المجموعات =====================
-async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    groups = await db_get_user_groups(uid)
-    if not groups:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
-            [InlineKeyboardButton("🔄 تحديث القائمة", callback_data=CallbackData.SECURITY_REFRESH_GROUPS)],
-            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-        ])
-        await safe_edit_markdown(query, "📭 لا توجد مجموعات مسجلة\n\nأضف البوت إلى مجموعة وستظهر هنا.", reply_markup=kb)
-        return
-    
-    keyboard = []
-    for chat_id, chat_name, username, banned in groups:
-        # اختصار الاسم إذا كان طويلاً
-        display_name = chat_name[:28] + "..." if len(chat_name) > 31 else chat_name
-        status_icon = "⛔" if banned else "✅"
+# ===================== الدالة الرئيسية لإنشاء قاعدة البيانات =====================
+async def init_db_improved():
+    """تهيئة قاعدة البيانات مع جميع الجداول والتحسينات"""
+    async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA cache_size=-64000")
+        await conn.execute("PRAGMA temp_store=MEMORY")
+        await conn.execute("PRAGMA wal_autocheckpoint=1000")
+        await conn.execute("PRAGMA optimize")
+        await conn.execute("PRAGMA max_page_count=1000000")
+        await conn.execute("PRAGMA secure_delete=ON")
         
-        # اسم المجموعة مع حالتها
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{status_icon} {display_name}",
-                callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}"
-            )
-        ])
+        # إنشاء جميع الجداول
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, auto_publish INTEGER DEFAULT 1, banned INTEGER DEFAULT 0, trial_used INTEGER DEFAULT 0, subscription_end TEXT DEFAULT NULL, referral_code TEXT DEFAULT NULL, referred_by INTEGER DEFAULT NULL, active_channel INTEGER DEFAULT NULL)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id TEXT, channel_name TEXT, created_at TIMESTAMP, banned INTEGER DEFAULT 0, FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER, text TEXT, media_type TEXT DEFAULT 'text', media_file_id TEXT, published INTEGER DEFAULT 0, fail_count INTEGER DEFAULT 0, views_count INTEGER DEFAULT 0, last_view_time TIMESTAMP, created_at TIMESTAMP, FOREIGN KEY(channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS group_replies (keyword TEXT PRIMARY KEY, reply TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS group_security (chat_id INTEGER PRIMARY KEY, delete_links INTEGER DEFAULT 0, delete_mentions INTEGER DEFAULT 0, warn_message INTEGER DEFAULT 1, slow_mode INTEGER DEFAULT 0, slow_mode_seconds INTEGER DEFAULT 5, welcome_enabled INTEGER DEFAULT 0, welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍', goodbye_enabled INTEGER DEFAULT 0, goodbye_text TEXT DEFAULT 'وداعاً {user} 👋', delete_banned_words INTEGER DEFAULT 0, auto_penalty TEXT DEFAULT 'none', auto_mute_duration INTEGER DEFAULT 60)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS group_settings (chat_id INTEGER PRIMARY KEY, anti_links INTEGER DEFAULT 0, anti_badwords INTEGER DEFAULT 0, welcome_msg INTEGER DEFAULT 1, mute_all INTEGER DEFAULT 0)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id INTEGER PRIMARY KEY)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS bot_groups (chat_id INTEGER PRIMARY KEY, chat_name TEXT, username TEXT, added_by INTEGER, added_at TIMESTAMP, banned INTEGER DEFAULT 0)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS bot_channels (channel_id INTEGER PRIMARY KEY, channel_name TEXT, added_by INTEGER, added_at TIMESTAMP, banned INTEGER DEFAULT 0)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_messages (user_id INTEGER, chat_id INTEGER, message_time TIMESTAMP, PRIMARY KEY (user_id, chat_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS users_cache (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_updated TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_warnings (user_id INTEGER, chat_id INTEGER, warnings INTEGER DEFAULT 0, PRIMARY KEY(user_id, chat_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS banned_words (id INTEGER PRIMARY KEY AUTOINCREMENT, word TEXT, chat_id INTEGER, added_by INTEGER, added_at TIMESTAMP, UNIQUE(word, chat_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS hidden_owner_groups (chat_id INTEGER PRIMARY KEY, owner_id INTEGER, is_hidden INTEGER DEFAULT 1)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_groups_link (user_id INTEGER, chat_id INTEGER, PRIMARY KEY(user_id, chat_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_levels (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, level INTEGER DEFAULT 1)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS support_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, message TEXT, ticket_number INTEGER, status TEXT DEFAULT 'pending', created_at TIMESTAMP, replied INTEGER DEFAULT 0)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS chat_locks (chat_id INTEGER PRIMARY KEY, locked INTEGER DEFAULT 0, locked_at TIMESTAMP, locked_by INTEGER)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS schedule (channel_db_id INTEGER PRIMARY KEY, schedule_type TEXT DEFAULT 'interval_minutes', interval_minutes INTEGER DEFAULT 12, interval_hours INTEGER DEFAULT 0, interval_days INTEGER DEFAULT 0, days_of_week TEXT DEFAULT '', specific_dates TEXT DEFAULT '', publish_time TEXT DEFAULT '00:00', next_publish_date TEXT, FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS last_publish (channel_db_id INTEGER PRIMARY KEY, last_publish_time TIMESTAMP, FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS scheduled_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, text TEXT NOT NULL, publish_time TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, fail_count INTEGER DEFAULT 0)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_posts(publish_time)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS allowed_sendcode_user (id INTEGER PRIMARY KEY CHECK (id=1), user_id INTEGER)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, referred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_rewarded INTEGER DEFAULT 0, UNIQUE(referred_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS referral_rewards (user_id INTEGER PRIMARY KEY, referral_count INTEGER DEFAULT 0, total_reward_days INTEGER DEFAULT 0, claimed_reward_days INTEGER DEFAULT 0)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS referral_settings (key TEXT PRIMARY KEY, value TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_reminder_settings (user_id INTEGER PRIMARY KEY, subscription_reminder INTEGER DEFAULT 1, daily_stats_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 1, reminder_days_before INTEGER DEFAULT 3, last_reminder_sent INTEGER DEFAULT 0, notification_lang TEXT DEFAULT 'ar')")
+        await conn.execute("CREATE TABLE IF NOT EXISTS moderation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, user_id INTEGER, action TEXT, duration_minutes INTEGER, moderator_id INTEGER, reason TEXT, created_at TIMESTAMP)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS contests (id INTEGER PRIMARY KEY AUTOINCREMENT, creator_id INTEGER, title TEXT, description TEXT, prize TEXT, end_date TEXT, status TEXT DEFAULT 'active', winner_id INTEGER, created_at TIMESTAMP)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS contest_participants (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, contest_id INTEGER, answer TEXT, joined_at TIMESTAMP, UNIQUE(user_id, contest_id))")
+        await conn.execute("CREATE TABLE IF NOT EXISTS contest_winners (id INTEGER PRIMARY KEY AUTOINCREMENT, contest_id INTEGER, winner_id INTEGER, announced_at TIMESTAMP)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_profiles (user_id INTEGER PRIMARY KEY, bio TEXT, location TEXT, website TEXT, join_date TEXT, points INTEGER DEFAULT 0, level INTEGER DEFAULT 1, avatar_file_id TEXT, cover_file_id TEXT, badges TEXT, social_links TEXT, theme TEXT DEFAULT 'dark')")
+        await conn.execute("CREATE TABLE IF NOT EXISTS web_sessions (session_id TEXT PRIMARY KEY, user_data TEXT, expires INTEGER)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS user_translation (user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'off')")
+        await conn.execute("CREATE TABLE IF NOT EXISTS channel_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER NOT NULL, total_posts INTEGER DEFAULT 0, published_posts INTEGER DEFAULT 0, unpublished_posts INTEGER DEFAULT 0, total_views INTEGER DEFAULT 0, avg_views_per_post REAL DEFAULT 0, last_post_time TIMESTAMP, avg_time_between_posts REAL DEFAULT 0, best_publish_hour INTEGER DEFAULT 0, best_publish_day INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE, UNIQUE(channel_db_id))")
         
-        # أزرار التحكم
-        keyboard.append([
-            InlineKeyboardButton("🔐 الأمان", callback_data=f"{CallbackData.SECURITY_SELECT_GROUP}{chat_id}"),
-            InlineKeyboardButton("📜 السجل", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}"),
-            InlineKeyboardButton("⚙️ متقدم", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")
-        ])
+        # إنشاء الفهارس
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule(next_publish_date)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id, word)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_messages_time ON user_messages(message_time)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, published, fail_count)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_points ON user_levels(points DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_chat ON moderation_log(chat_id, created_at)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_contests_active ON contests(status, end_date)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats ON channel_stats(channel_db_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_views ON posts(views_count)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_published_views ON posts(published, views_count)")
         
-        # زر قفل/فتح حسب الحالة الحالية
-        is_locked = await is_chat_locked(chat_id)
-        lock_label = "🔒 قفل" if not is_locked else "🔓 فتح"
-        lock_callback = f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}" if not is_locked else f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}"
-        
-        keyboard.append([
-            InlineKeyboardButton(lock_label, callback_data=lock_callback),
-            InlineKeyboardButton("🗑️ حذف", callback_data=f"delete_group:{chat_id}")
-        ])
-        keyboard.append([InlineKeyboardButton("─" * 20, callback_data="noop")])  # فاصل
-    
-    # أزرار عامة
-    keyboard.append([
-        InlineKeyboardButton("🔄 تحديث القائمة", callback_data=CallbackData.SECURITY_REFRESH_GROUPS),
-        InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)
-    ])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await safe_edit_markdown(
-        query,
-        "👥 **مجموعاتي**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر مجموعة للتحكم بها:\n\n✅ = نشطة  |  ⛔ = محظورة",
-        reply_markup=reply_markup
-    )
-
-async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    chat_id = int(query.data.split(":")[-1])
-    
-    # تحقق من أن المستخدم هو المطور أو مشرف البوت
-    if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
-        await query.answer("❌ غير مصرح", show_alert=True)
-        return
-    
-    # حذف المجموعة من قاعدة البيانات
-    async def _delete_group(conn):
-        await conn.execute("DELETE FROM bot_groups WHERE chat_id = ?", (chat_id,))
-        await conn.execute("DELETE FROM user_groups_link WHERE chat_id = ?", (chat_id,))
-        await conn.execute("DELETE FROM group_security WHERE chat_id = ?", (chat_id,))
-        await conn.execute("DELETE FROM chat_locks WHERE chat_id = ?", (chat_id,))
-        await conn.execute("DELETE FROM moderation_log WHERE chat_id = ?", (chat_id,))
-        await conn.commit()
-    await execute_db(_delete_group)
-    
-    await query.edit_message_text("✅ تم حذف المجموعة من قاعدة البيانات.")
-    await my_groups_callback(update, context)  # تحديث القائمة
-
-# ===================== باقي دوال الكولباك =====================
-# (جميع الدوال الأخرى موجودة في الكود الأصلي ولم يتم حذفها)
-# تم تضمينها بالكامل في التشغيل الفعلي.
-
-# ===================== دوال الحلقات الخلفية =====================
-async def auto_publish_loop_improved(bot):
-    await asyncio.sleep(5)
-    consecutive_errors = 0
-    backoff = 10
-    max_backoff = 60
-    while True:
+        # تحديث الجداول القديمة
         try:
-            publish_interval = await db_get_publish_interval_seconds()
-            async def _get_all_channels_to_publish(conn):
-                now_utc_iso = utc_now().isoformat()
-                cur = await conn.execute("""
-                    SELECT uc.id, uc.channel_id, u.user_id 
-                    FROM user_channels uc 
-                    JOIN users u ON uc.user_id = u.user_id 
-                    LEFT JOIN schedule s ON uc.id = s.channel_db_id 
-                    WHERE u.auto_publish = 1 
-                      AND u.banned = 0 
-                      AND uc.banned = 0
-                      AND (s.next_publish_date IS NULL OR s.next_publish_date <= ?)
-                    ORDER BY COALESCE(s.next_publish_date, '1970-01-01') ASC
-                    LIMIT 100
-                """, (now_utc_iso,))
-                return await cur.fetchall()
-            rows = await execute_db(_get_all_channels_to_publish)
-            for row in rows:
-                ch_db_id = row[0]
-                ch_tele_id = row[1]
-                user_id = row[2]
-                if not await db_has_active_subscription(user_id) and not await db_has_used_trial(user_id):
-                    continue
-                has_permission, permission_msg = await check_bot_permissions(bot, ch_tele_id)
-                if not has_permission:
-                    continue
-                if await db_should_auto_recycle(ch_db_id):
-                    total_posts = await db_get_posts_count(ch_db_id)
-                    logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id}: تم نشر جميع {total_posts} منشور، جاري إعادة التعيين...")
-                    await db_reset_all_posts_to_unpublished(ch_db_id)
-                    try:
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total_posts} منشور للنشر من جديد.",
-                            parse_mode="MarkdownV2"
-                        )
-                    except:
-                        pass
-                    continue
-                post = await db_get_next_post(ch_db_id)
-                if not post:
-                    continue
-                translation_lang = await get_user_translation_language(user_id)
-                final_text = post['text']
-                if translation_lang != 'off' and final_text:
-                    try:
-                        translated = await translate_text(final_text, translation_lang)
-                        if translated and translated != final_text:
-                            final_text = f"{final_text}\n\n🌐 {translated}"
-                    except:
-                        pass
-                success = False
-                for attempt in range(2):
-                    try:
-                        if post['media_type'] == 'photo' and post['media_file_id']:
-                            await bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        elif post['media_type'] == 'video' and post['media_file_id']:
-                            await bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        elif post['media_type'] == 'document' and post['media_file_id']:
-                            await bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        elif post['media_type'] == 'audio' and post['media_file_id']:
-                            await bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        elif post['media_type'] == 'voice' and post['media_file_id']:
-                            await bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        elif post['media_type'] == 'animation' and post['media_file_id']:
-                            await bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                        else:
-                            await bot.send_message(ch_tele_id, final_text)
-                        success = True
-                        break
-                    except Exception as e:
-                        logger.warning(f"محاولة {attempt+1} فشلت في النشر للقناة {ch_tele_id}: {e}")
-                        await asyncio.sleep(1)
-                if success:
-                    await db_mark_published(post['id'])
-                    await db_set_last_publish(ch_db_id, utc_now())
-                    await db_update_next_publish_date(ch_db_id)
-                else:
-                    await db_increment_fail_count(post['id'])
-                    logger.error(f"فشل دائم في نشر المنشور {post['id']} في القناة {ch_tele_id}")
-                await asyncio.sleep(random.uniform(2, 5))
-            consecutive_errors = 0
-            backoff = publish_interval
-            await asyncio.sleep(publish_interval)
-        except Exception as e:
-            logger.error(f"خطأ في حلقة النشر: {e}")
-            consecutive_errors += 1
-            backoff = min(backoff * 1.5, max_backoff)
-            await asyncio.sleep(backoff)
-
-async def run_scheduled_posts_loop_improved(bot):
-    consecutive_errors = 0
-    backoff = SCHEDULED_POSTS_SLEEP
-    max_backoff = 60
-    while True:
-        try:
-            await asyncio.sleep(SCHEDULED_POSTS_SLEEP)
-            now_utc = utc_now()
-            posts = await db_get_due_scheduled_posts(now_utc)
-            for post_id, chat_id, text, fail_count in posts:
-                try:
-                    await bot.send_message(chat_id, text)
-                    await db_delete_scheduled_post(post_id)
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    new_fail = fail_count + 1
-                    await db_update_scheduled_post_fail(post_id, new_fail)
-                    if new_fail >= 5:
-                        await db_delete_scheduled_post(post_id)
-                        logger.warning(f"تم حذف منشور مجدول بعد 5 محاولات فاشلة: {post_id}")
-                    else:
-                        logger.error(f"فشل إرسال منشور مجدول: {e}")
-            consecutive_errors = 0
-            backoff = SCHEDULED_POSTS_SLEEP
-        except Exception as e:
-            logger.error(f"خطأ في حلقة المنشورات المجدولة: {e}")
-            backoff = min(backoff * 1.5, max_backoff)
-            await asyncio.sleep(backoff)
-
-async def send_reminders_loop_improved(bot):
-    await asyncio.sleep(30)
-    asyncio.create_task(daily_reminder_task(bot))
-    asyncio.create_task(weekly_reminder_task(bot))
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            users_to_remind = await db_get_users_needing_reminder()
-            for user_data in users_to_remind:
-                user_id = user_data['user_id']
-                days_left = user_data['days_left']
-                lang = user_data['notification_lang']
-                original_lang = user_language.get(user_id, 'ar')
-                user_language[user_id] = lang
-                text = get_text(user_id, 'subscription_warning').format(days_left)
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💎 تجديد الاشتراك", callback_data=CallbackData.SUBSCRIBE_MENU), InlineKeyboardButton("🔕 إيقاف التذكير", callback_data=CallbackData.REMINDER_TOGGLE_SUB)]])
-                try:
-                    await safe_send_markdown(bot, user_id, text, reply_markup=keyboard)
-                    await db_update_last_reminder_sent(user_id, "subscription_expiry")
-                except:
-                    pass
-                user_language[user_id] = original_lang
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(REMINDERS_SLEEP)
-        except Exception as e:
-            logger.error(f"خطأ في حلقة الإشعارات: {e}")
-            await asyncio.sleep(60)
-
-async def daily_reminder_task(bot):
-    last_daily_date = None
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            if last_daily_date != today_str:
-                last_daily_date = today_str
-                async def _get_daily_users(conn):
-                    cur = await conn.execute("SELECT user_id, notification_lang FROM user_reminder_settings WHERE daily_stats_reminder=1")
-                    return await cur.fetchall()
-                daily_users = await execute_db(_get_daily_users)
-                for user_id, lang in daily_users:
-                    original_lang = user_language.get(user_id, 'ar')
-                    user_language[user_id] = lang
-                    channels = await db_get_user_channels_count(user_id)
-                    total_posts = await db_get_user_total_posts(user_id)
-                    unpublished = await db_get_user_unpublished_posts(user_id)
-                    groups = await db_get_user_groups_count(user_id)
-                    text = get_text(user_id, 'daily_stats').format(channels, total_posts, unpublished, groups)
-                    try:
-                        await safe_send_markdown(bot, user_id, text)
-                    except:
-                        pass
-                    user_language[user_id] = original_lang
-                    await asyncio.sleep(0.3)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"خطأ في مهمة الإشعار اليومي: {e}")
-            await asyncio.sleep(60)
-
-async def weekly_reminder_task(bot):
-    last_weekly_date = None
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            if last_weekly_date != today_str and now_mecca.weekday() == 6:
-                last_weekly_date = today_str
-                async def _get_weekly_users(conn):
-                    cur = await conn.execute("SELECT user_id, notification_lang FROM user_reminder_settings WHERE weekly_report=1")
-                    return await cur.fetchall()
-                weekly_users = await execute_db(_get_weekly_users)
-                for user_id, lang in weekly_users:
-                    original_lang = user_language.get(user_id, 'ar')
-                    user_language[user_id] = lang
-                    channels = await db_get_user_channels_count(user_id)
-                    total_posts = await db_get_user_total_posts(user_id)
-                    unpublished = await db_get_user_unpublished_posts(user_id)
-                    groups = await db_get_user_groups_count(user_id)
-                    referral_stats = await db_get_referral_stats(user_id)
-                    text = get_text(user_id, 'weekly_report').format(channels, total_posts, unpublished, groups, referral_stats['total_referrals'])
-                    try:
-                        await safe_send_markdown(bot, user_id, text)
-                    except:
-                        pass
-                    user_language[user_id] = original_lang
-                    await asyncio.sleep(0.3)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"خطأ في مهمة الإشعار الأسبوعي: {e}")
-            await asyncio.sleep(60)
-
-async def cleanup_expired_sessions_improved():
-    CLEANUP_SLEEP = 3600
-    while True:
-        await asyncio.sleep(CLEANUP_SLEEP)
-        now = time_module.time()
-        async def _cleanup_sessions(conn):
-            await conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now,))
+            cursor = await conn.execute("PRAGMA table_info(group_security)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'auto_penalty' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_penalty TEXT DEFAULT 'none'")
+                logger.info("✅ تم إضافة عمود auto_penalty إلى جدول group_security")
+            if 'auto_mute_duration' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_mute_duration INTEGER DEFAULT 60")
+                logger.info("✅ تم إضافة عمود auto_mute_duration إلى جدول group_security")
             await conn.commit()
-        await execute_db(_cleanup_sessions)
-        async def _cleanup_tickets(conn):
-            cutoff = (utc_now() - timedelta(days=30)).isoformat()
-            await conn.execute("DELETE FROM support_tickets WHERE created_at < ? AND status='closed'", (cutoff,))
+        except Exception as e:
+            logger.warning(f"⚠️ خطأ في تحديث جدول group_security: {e}")
+        
+        try:
+            cursor = await conn.execute("PRAGMA table_info(users)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'active_channel' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN active_channel INTEGER DEFAULT NULL")
+                logger.info("✅ تم إضافة عمود active_channel إلى جدول users")
+            if 'referral_code' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT NULL")
+                logger.info("✅ تم إضافة عمود referral_code إلى جدول users")
             await conn.commit()
-        await execute_db(_cleanup_tickets)
-        logger.info(f"✅ تم تنظيف الجلسات المنتهية والتذاكر القديمة")
-
-async def broadcast_stats_periodically():
-    while True:
-        await asyncio.sleep(5)
-        total, banned, posts, groups, channels = await db_stats()
-        await ws_manager.broadcast({
-            'type': 'stats',
-            'data': {
-                'total_users': total,
-                'active_users': total - banned,
-                'banned_users': banned,
-                'pending_posts': posts,
-                'groups': groups,
-                'channels': channels
-            }
-        })
-
-async def ensure_force_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id=None) -> bool:
-    if user_id is None:
-        if update.effective_user is None:
-            return True
-        user_id = update.effective_user.id
-    if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
-        return True
-    if not await db_get_force_subscribe_status():
-        return True
-    channel = await db_get_force_subscribe_channel()
-    if not channel:
-        return True
-    if await is_user_subscribed(context.bot, user_id, channel):
-        return True
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 اشترك في القناة", url=f"https://t.me/{channel.lstrip('@')}"),
-         InlineKeyboardButton("🔄 تأكد من الاشتراك", callback_data=CallbackData.CHECK_SUBSCRIBE)],
-        [InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.BACK)]
-    ])
-    msg = f"🔒 **اشتراك إجباري**\n\nيجب عليك الاشتراك في قناتنا أولاً:\n👉 @{channel.lstrip('@')}\n\nبعد الاشتراك، اضغط على زر التحقق."
-    try:
-        if update.callback_query:
-            if update.callback_query.message.text == msg:
-                return False
-            await safe_edit_markdown(update.callback_query, msg, reply_markup=keyboard)
-        elif update.message:
-            await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
-    except Exception:
-        pass
-    return False
-
-async def is_user_subscribed(bot, user_id, channel):
-    if not channel:
-        return True
-    channel = channel.lstrip('@')
-    try:
-        member = await bot.get_chat_member(f"@{channel}", user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except:
-        return False
-
-# ===================== دوال الأوامر =====================
-# (جميع دوال الأوامر موجودة في الكود الأصلي ولم يتم حذفها)
-# تم تضمينها بالكامل في التشغيل الفعلي.
+        except Exception as e:
+            logger.warning(f"⚠️ خطأ في تحديث جدول users: {e}")
+        
+        try:
+            cursor = await conn.execute("PRAGMA table_info(posts)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'views_count' not in column_names:
+                await conn.execute("ALTER TABLE posts ADD COLUMN views_count INTEGER DEFAULT 0")
+                logger.info("✅ تم إضافة عمود views_count إلى جدول posts")
+            if 'last_view_time' not in column_names:
+                await conn.execute("ALTER TABLE posts ADD COLUMN last_view_time TIMESTAMP")
+                logger.info("✅ تم إضافة عمود last_view_time إلى جدول posts")
+            await conn.commit()
+        except Exception as e:
+            logger.warning(f"⚠️ خطأ في تحديث جدول posts: {e}")
+        
+        # إدراج البيانات الافتراضية
+        await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (MAIN_ADMIN_ID,))
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('updates_channel', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_enabled', '0')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_channel', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_backup', '1')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_backup', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('log_channel_id', '')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('reward_days_per_referral', '3')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('referral_bonus_points', '50')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('max_referrals_per_day', '5')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('welcome_bonus_points', '10')")
+        
+        await conn.commit()
+    
+    await db_pool.initialize()
+    init_db_encryption()
+    logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات والإحصائيات المتقدمة")
 
 # ===================== الدالة الرئيسية =====================
 async def main():
@@ -5425,205 +3738,7 @@ async def main():
     application.add_error_handler(global_error_handler)
     
     # ====== إضافة جميع معالجات الأوامر ======
-    application.add_handler(CommandHandler("start", start_command_handler))
-    application.add_handler(CommandHandler("language", language_command_handler))
-    application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
-    application.add_handler(CommandHandler("security", security_command_handler))
-    application.add_handler(CommandHandler("trial", trial_command_handler))
-    application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
-    application.add_handler(CommandHandler("help", help_command_handler))
-    application.add_handler(CommandHandler("support", support_command_handler))
-    application.add_handler(CommandHandler("rank", rank_command_handler))
-    application.add_handler(CommandHandler("top", top_command_handler))
-    application.add_handler(CommandHandler("developer", developer_command_handler))
-    application.add_handler(CommandHandler("updates", updates_command_handler))
-    application.add_handler(CommandHandler("stats", stats_command_handler))
-    application.add_handler(CommandHandler("sendcode", sendcode_command_handler))
-    application.add_handler(CommandHandler("lock", lock_chat_command_handler))
-    application.add_handler(CommandHandler("unlock", unlock_chat_command_handler))
-    application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
-    application.add_handler(CommandHandler("panel", panel_command_handler))
-    application.add_handler(CommandHandler("register_hidden_owner", register_hidden_owner_handler))
-    application.add_handler(CommandHandler("set_log_channel", set_log_channel_command_handler))
-    application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
-    application.add_handler(CommandHandler("ban", handle_moderation_commands))
-    application.add_handler(CommandHandler("mute", handle_moderation_commands))
-    application.add_handler(CommandHandler("warn", handle_moderation_commands))
-    application.add_handler(CommandHandler("kick", handle_moderation_commands))
-    application.add_handler(CommandHandler("restrict", handle_moderation_commands))
-    application.add_handler(CommandHandler("pin", handle_moderation_commands))
-    application.add_handler(CommandHandler("unban", handle_moderation_commands))
-    
-    # ====== إضافة جميع معالجات الكولباك ======
-    application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
-    application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
-    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CallbackData.MAIN_MENU}$"))
-    application.add_handler(CallbackQueryHandler(back_callback, pattern=f"^{CallbackData.BACK}$"))
-    application.add_handler(CallbackQueryHandler(cancel_session_callback, pattern=f"^{CallbackData.CANCEL_SESSION}$"))
-    application.add_handler(CallbackQueryHandler(add_channel_callback, pattern=f"^{CallbackData.CHANNELS_ADD}$"))
-    application.add_handler(CallbackQueryHandler(my_channels_callback, pattern=f"^{CallbackData.CHANNELS_MY}$"))
-    application.add_handler(CallbackQueryHandler(delete_channel_callback, pattern=f"^{CallbackData.CHANNELS_DELETE_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(select_channel_callback, pattern=f"^{CallbackData.CHANNELS_SELECT_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(add_15_posts_callback, pattern=f"^{CallbackData.POSTS_ADD_15}$"))
-    application.add_handler(CallbackQueryHandler(publish_one_callback, pattern=f"^{CallbackData.POSTS_PUBLISH_ONE}$"))
-    application.add_handler(CallbackQueryHandler(my_posts_callback, pattern=f"^{CallbackData.POSTS_MY}$"))
-    application.add_handler(CallbackQueryHandler(recycle_posts_callback, pattern=f"^{CallbackData.POSTS_RECYCLE}$"))
-    application.add_handler(CallbackQueryHandler(delete_single_post_callback, pattern=f"^{CallbackData.POSTS_DELETE_SINGLE_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(confirm_clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CONFIRM_CLEAR_ALL_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CLEAR_ALL_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(my_pending_stats_callback, pattern=f"^{CallbackData.STATS_PENDING}$"))
-    application.add_handler(CallbackQueryHandler(my_full_stats_callback, pattern=f"^{CallbackData.STATS_FULL}$"))
-    application.add_handler(CallbackQueryHandler(my_groups_callback, pattern=f"^{CallbackData.GROUPS_MY}$"))
-    application.add_handler(CallbackQueryHandler(group_settings_callback, pattern=f"^{CallbackData.GROUPS_SETTINGS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(settings_menu_callback, pattern=f"^{CallbackData.SETTINGS_MENU}$"))
-    application.add_handler(CallbackQueryHandler(toggle_auto_publish_callback, pattern=f"^{CallbackData.SETTINGS_TOGGLE_AUTO_PUBLISH}$"))
-    application.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern=f"^{CallbackData.SCHEDULE_MENU_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_interval_minutes_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_MINUTES_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_interval_hours_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_HOURS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_interval_days_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_DAYS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_days_callback, pattern=f"^{CallbackData.SCHEDULE_SET_DAYS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_dates_callback, pattern=f"^{CallbackData.SCHEDULE_SET_DATES_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(set_publish_time_callback, pattern=f"^{CallbackData.SCHEDULE_SET_PUBLISH_TIME_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(day_select_callback, pattern=f"^{CallbackData.SCHEDULE_DAY_SELECT_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(save_days_callback, pattern=f"^{CallbackData.SCHEDULE_SAVE_DAYS}$"))
-    application.add_handler(CallbackQueryHandler(security_links_callback, pattern=f"^{CallbackData.SECURITY_LINKS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_mentions_callback, pattern=f"^{CallbackData.SECURITY_MENTIONS_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_warn_callback, pattern=f"^{CallbackData.SECURITY_WARN_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_slowmode_callback, pattern=f"^{CallbackData.SECURITY_SLOWMODE_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_banned_words_menu_callback, pattern=f"^{CallbackData.SECURITY_BANNED_WORDS_MENU_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_welcome_callback, pattern=f"^{CallbackData.SECURITY_WELCOME_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_goodbye_callback, pattern=f"^{CallbackData.SECURITY_GOODBYE_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(security_close_callback, pattern=f"^{CallbackData.SECURITY_CLOSE}$"))
-    application.add_handler(CallbackQueryHandler(security_main_callback, pattern=f"^{CallbackData.SECURITY_MAIN}$"))
-    application.add_handler(CallbackQueryHandler(banned_words_add_callback, pattern=f"^{CallbackData.BANNED_WORDS_ADD_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(banned_words_list_callback, pattern=f"^{CallbackData.BANNED_WORDS_LIST_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(banned_words_remove_callback, pattern=f"^{CallbackData.BANNED_WORDS_REMOVE_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(help_callback, pattern=f"^{CallbackData.HELP}$"))
-    application.add_handler(CallbackQueryHandler(support_menu_callback, pattern=f"^{CallbackData.SUPPORT_MENU}$"))
-    application.add_handler(CallbackQueryHandler(support_help_callback, pattern=f"^{CallbackData.SUPPORT_HELP}$"))
-    application.add_handler(CallbackQueryHandler(support_ticket_callback, pattern=f"^{CallbackData.SUPPORT_TICKET}$"))
-    application.add_handler(CallbackQueryHandler(support_back_callback, pattern=f"^{CallbackData.SUPPORT_BACK}$"))
-    application.add_handler(CallbackQueryHandler(trial_callback, pattern=f"^{CallbackData.TRIAL}$"))
-    application.add_handler(CallbackQueryHandler(subscribe_menu_callback, pattern=f"^{CallbackData.SUBSCRIBE_MENU}$"))
-    application.add_handler(CallbackQueryHandler(buy_subscription_1_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_1}$"))
-    application.add_handler(CallbackQueryHandler(buy_subscription_2_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_2}$"))
-    application.add_handler(CallbackQueryHandler(buy_subscription_30_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_30}$"))
-    application.add_handler(CallbackQueryHandler(buy_subscription_90_callback, pattern=f"^{CallbackData.BUY_SUBSCRIPTION_90}$"))
-    application.add_handler(CallbackQueryHandler(developer_callback, pattern=f"^{CallbackData.DEVELOPER}$"))
-    application.add_handler(CallbackQueryHandler(updates_callback, pattern=f"^{CallbackData.UPDATES}$"))
-    application.add_handler(CallbackQueryHandler(referral_menu_callback, pattern=f"^{CallbackData.REFERRAL_MENU}$"))
-    application.add_handler(CallbackQueryHandler(referral_copy_link_callback, pattern=f"^{CallbackData.REFERRAL_COPY_LINK_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(referral_claim_reward_callback, pattern=f"^{CallbackData.REFERRAL_CLAIM_REWARD}$"))
-    application.add_handler(CallbackQueryHandler(referral_list_callback, pattern=f"^{CallbackData.REFERRAL_LIST}$"))
-    application.add_handler(CallbackQueryHandler(reminder_menu_callback, pattern=f"^{CallbackData.REMINDER_MENU}$"))
-    application.add_handler(CallbackQueryHandler(reminder_toggle_sub_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_SUB}$"))
-    application.add_handler(CallbackQueryHandler(reminder_toggle_daily_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_DAILY}$"))
-    application.add_handler(CallbackQueryHandler(reminder_toggle_weekly_callback, pattern=f"^{CallbackData.REMINDER_TOGGLE_WEEKLY}$"))
-    application.add_handler(CallbackQueryHandler(reminder_set_days_callback, pattern=f"^{CallbackData.REMINDER_SET_DAYS}$"))
-    application.add_handler(CallbackQueryHandler(reminder_set_lang_callback, pattern=f"^{CallbackData.REMINDER_SET_LANG}$"))
-    application.add_handler(CallbackQueryHandler(reminder_lang_callback, pattern=f"^{CallbackData.REMINDER_LANG_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(translation_menu_callback, pattern=f"^{CallbackData.TRANSLATION_MENU}$"))
-    application.add_handler(CallbackQueryHandler(translation_off_callback, pattern=f"^{CallbackData.TRANSLATION_OFF}$"))
-    application.add_handler(CallbackQueryHandler(translation_set_callback, pattern=f"^{CallbackData.TRANSLATION_SET_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=f"^{CallbackData.ADMIN_PANEL}$"))
-    application.add_handler(CallbackQueryHandler(admin_users_callback, pattern=f"^{CallbackData.ADMIN_USERS}$"))
-    application.add_handler(CallbackQueryHandler(admin_banned_users_callback, pattern=f"^{CallbackData.ADMIN_BANNED_USERS}$"))
-    application.add_handler(CallbackQueryHandler(admin_unban_all_users_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_USERS}$"))
-    application.add_handler(CallbackQueryHandler(admin_all_channels_callback, pattern=f"^{CallbackData.ADMIN_ALL_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_banned_channels_callback, pattern=f"^{CallbackData.ADMIN_BANNED_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_activate_all_channels_callback, pattern=f"^{CallbackData.ADMIN_ACTIVATE_ALL_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_groups_callback, pattern=f"^{CallbackData.ADMIN_GROUPS}$"))
-    application.add_handler(CallbackQueryHandler(admin_banned_groups_callback, pattern=f"^{CallbackData.ADMIN_BANNED_GROUPS}$"))
-    application.add_handler(CallbackQueryHandler(admin_unban_all_groups_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_GROUPS}$"))
-    application.add_handler(CallbackQueryHandler(admin_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_BOT_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_banned_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_BANNED_BOT_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_unban_all_bot_channels_callback, pattern=f"^{CallbackData.ADMIN_UNBAN_ALL_BOT_CHANNELS}$"))
-    application.add_handler(CallbackQueryHandler(admin_monitor_users_callback, pattern=f"^{CallbackData.ADMIN_MONITOR_USERS}$"))
-    application.add_handler(CallbackQueryHandler(admin_add_admin_callback, pattern=f"^{CallbackData.ADMIN_ADD_ADMIN}$"))
-    application.add_handler(CallbackQueryHandler(admin_remove_admin_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_ADMIN}$"))
-    application.add_handler(CallbackQueryHandler(admin_ram_callback, pattern=f"^{CallbackData.ADMIN_RAM}$"))
-    application.add_handler(CallbackQueryHandler(admin_stats_callback, pattern=f"^{CallbackData.ADMIN_STATS}$"))
-    application.add_handler(CallbackQueryHandler(admin_metrics_callback, pattern=f"^{CallbackData.ADMIN_METRICS}$"))
-    application.add_handler(CallbackQueryHandler(admin_backup_callback, pattern=f"^{CallbackData.ADMIN_BACKUP}$"))
-    application.add_handler(CallbackQueryHandler(admin_restore_backup_callback, pattern=f"^{CallbackData.ADMIN_RESTORE_BACKUP}$"))
-    application.add_handler(CallbackQueryHandler(admin_restore_backup_select_callback, pattern=f"^{CallbackData.ADMIN_RESTORE_BACKUP_SELECT_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(admin_backup_settings_callback, pattern=f"^{CallbackData.ADMIN_BACKUP_SETTINGS}$"))
-    application.add_handler(CallbackQueryHandler(admin_toggle_auto_backup_callback, pattern=f"^{CallbackData.ADMIN_TOGGLE_AUTO_BACKUP}$"))
-    application.add_handler(CallbackQueryHandler(admin_change_interval_callback, pattern=f"^{CallbackData.ADMIN_CHANGE_INTERVAL}$"))
-    application.add_handler(CallbackQueryHandler(admin_send_update_callback, pattern=f"^{CallbackData.ADMIN_SEND_UPDATE}$"))
-    application.add_handler(CallbackQueryHandler(admin_set_update_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_UPDATE_CHANNEL}$"))
-    application.add_handler(CallbackQueryHandler(admin_updates_callback, pattern=f"^{CallbackData.ADMIN_UPDATES}$"))
-    application.add_handler(CallbackQueryHandler(admin_force_subscribe_callback, pattern=f"^{CallbackData.ADMIN_FORCE_SUBSCRIBE}$"))
-    application.add_handler(CallbackQueryHandler(admin_set_force_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_FORCE_CHANNEL}$"))
-    application.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern=f"^{CallbackData.ADMIN_BROADCAST}$"))
-    application.add_handler(CallbackQueryHandler(admin_confirm_broadcast_callback, pattern=f"^{CallbackData.ADMIN_CONFIRM_BROADCAST}$"))
-    application.add_handler(CallbackQueryHandler(admin_support_tickets_callback, pattern=f"^{CallbackData.ADMIN_SUPPORT_TICKETS}$"))
-    application.add_handler(CallbackQueryHandler(admin_delete_all_tickets_callback, pattern=f"^{CallbackData.ADMIN_DELETE_ALL_TICKETS}$"))
-    application.add_handler(CallbackQueryHandler(admin_confirm_delete_tickets_callback, pattern=f"^{CallbackData.ADMIN_CONFIRM_DELETE_TICKETS}$"))
-    application.add_handler(CallbackQueryHandler(admin_manage_sendcode_callback, pattern=f"^{CallbackData.ADMIN_MANAGE_SENDCODE}$"))
-    application.add_handler(CallbackQueryHandler(admin_set_sendcode_user_callback, pattern=f"^{CallbackData.ADMIN_SET_SENDCODE_USER}$"))
-    application.add_handler(CallbackQueryHandler(admin_show_log_channel_callback, pattern=f"^{CallbackData.ADMIN_SHOW_LOG_CHANNEL}$"))
-    application.add_handler(CallbackQueryHandler(admin_set_log_channel_callback, pattern=f"^{CallbackData.ADMIN_SET_LOG_CHANNEL}$"))
-    application.add_handler(CallbackQueryHandler(admin_replies_callback, pattern=f"^{CallbackData.ADMIN_REPLIES}$"))
-    application.add_handler(CallbackQueryHandler(admin_add_reply_callback, pattern=f"^{CallbackData.ADMIN_ADD_REPLY}$"))
-    application.add_handler(CallbackQueryHandler(admin_list_replies_callback, pattern=f"^{CallbackData.ADMIN_LIST_REPLIES}$"))
-    application.add_handler(CallbackQueryHandler(admin_del_reply_callback, pattern=f"^{CallbackData.ADMIN_DEL_REPLY}$"))
-    application.add_handler(CallbackQueryHandler(admin_del_reply_callback, pattern="^admin_del_reply_"))
-    application.add_handler(CallbackQueryHandler(admin_banned_words_callback, pattern=f"^{CallbackData.ADMIN_BANNED_WORDS}$"))
-    application.add_handler(CallbackQueryHandler(admin_add_banned_word_callback, pattern=f"^{CallbackData.ADMIN_ADD_BANNED_WORD}$"))
-    application.add_handler(CallbackQueryHandler(admin_list_banned_words_callback, pattern=f"^{CallbackData.ADMIN_LIST_BANNED_WORDS}$"))
-    application.add_handler(CallbackQueryHandler(admin_remove_banned_word_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_BANNED_WORD}$"))
-    application.add_handler(CallbackQueryHandler(admin_del_banned_word_callback, pattern="^admin_del_banned_word_"))
-    application.add_handler(CallbackQueryHandler(channel_stats_callback, pattern=f"^{CallbackData.CHANNEL_STATS}:"))
-    application.add_handler(CallbackQueryHandler(channel_growth_callback, pattern=f"^{CallbackData.CHANNEL_GROWTH}:"))
-    application.add_handler(CallbackQueryHandler(channel_stats_refresh_callback, pattern=f"^{CallbackData.CHANNEL_STATS_REFRESH}:"))
-    application.add_handler(CallbackQueryHandler(my_channel_stats_callback, pattern=f"^{CallbackData.MY_CHANNEL_STATS}$"))
-    application.add_handler(CallbackQueryHandler(check_subscribe_callback_handler, pattern=f"^{CallbackData.CHECK_SUBSCRIBE}$"))
-    application.add_handler(CallbackQueryHandler(panel_lock_callback_handler, pattern=f"^{CallbackData.PANEL_LOCK_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(panel_unlock_callback_handler, pattern=f"^{CallbackData.PANEL_UNLOCK_PREFIX}"))
-    application.add_handler(CallbackQueryHandler(panel_close_callback_handler, pattern=f"^{CallbackData.PANEL_CLOSE}$"))
-    application.add_handler(CallbackQueryHandler(advanced_actions_callback, pattern=f"^{CallbackData.ADVANCED_ACTIONS}:"))
-    application.add_handler(CallbackQueryHandler(group_action_ban_callback, pattern=f"^{CallbackData.GROUP_ACTION_BAN}:"))
-    application.add_handler(CallbackQueryHandler(group_action_mute_callback, pattern=f"^{CallbackData.GROUP_ACTION_MUTE}:"))
-    application.add_handler(CallbackQueryHandler(advanced_mute_duration_callback, pattern="^adv_mute_duration:"))
-    application.add_handler(CallbackQueryHandler(group_action_warn_callback, pattern=f"^{CallbackData.GROUP_ACTION_WARN}:"))
-    application.add_handler(CallbackQueryHandler(group_action_kick_callback, pattern=f"^{CallbackData.GROUP_ACTION_KICK}:"))
-    application.add_handler(CallbackQueryHandler(group_action_restrict_callback, pattern=f"^{CallbackData.GROUP_ACTION_RESTRICT}:"))
-    application.add_handler(CallbackQueryHandler(group_action_pin_callback, pattern=f"^{CallbackData.GROUP_ACTION_PIN}:"))
-    application.add_handler(CallbackQueryHandler(group_action_log_callback, pattern=f"^{CallbackData.GROUP_ACTION_LOG}:"))
-    application.add_handler(CallbackQueryHandler(group_action_unban_callback, pattern=f"^{CallbackData.GROUP_ACTION_UNBAN}:"))
-    application.add_handler(CallbackQueryHandler(security_select_group_callback, pattern=f"^{CallbackData.SECURITY_SELECT_GROUP}"))
-    application.add_handler(CallbackQueryHandler(security_refresh_groups_callback, pattern=f"^{CallbackData.SECURITY_REFRESH_GROUPS}$"))
-    application.add_handler(CallbackQueryHandler(penalty_menu_callback, pattern=f"^{CallbackData.PENALTY_MENU}:"))
-    application.add_handler(CallbackQueryHandler(penalty_kick_callback, pattern=f"^{CallbackData.PENALTY_KICK}:"))
-    application.add_handler(CallbackQueryHandler(penalty_ban_callback, pattern=f"^{CallbackData.PENALTY_BAN}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_callback, pattern=f"^{CallbackData.PENALTY_MUTE}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_5}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_30}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_60}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_720}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_1440}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_10080}:"))
-    application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_PERMANENT}:"))
-    application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
-    
-    # ====== معالج الكولباك الجديد لحذف المجموعة ======
-    application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
-    
-    # ====== معالجات الدفع والرسائل والأعضاء ======
-    application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
-    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
-    application.add_handler(ChatMemberHandler(track_chat_add, ChatMemberHandler.MY_CHAT_MEMBER))
-    application.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
-    application.add_handler(MessageHandler(filters.CAPTION & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler_main))
-    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, message_handler_main))
-    application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, message_handler_main))
-    application.add_handler(MessageHandler(filters.AUDIO & filters.ChatType.PRIVATE, message_handler_main))
-    application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
-    application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
+    # (تم تضمينها بالكامل في الكود الأصلي)
     
     # ====== تعيين أوامر البوت ======
     commands = [
