@@ -7836,7 +7836,7 @@ async def main():
         }
         request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
-    application.add_error_handler(global_error_handler)
+    # application.add_error_handler(global_error_handler)
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
