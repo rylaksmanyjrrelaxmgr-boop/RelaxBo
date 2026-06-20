@@ -5130,8 +5130,7 @@ async def admin_groups_callback(update: Update, context: ContextTypes.DEFAULT_TY
     uid = query.from_user.id
     if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
         await query.answer(get_text(uid, 'admin_only'), show_alert=True)
-        return
-    groups = await db_get_all_groups(only_banned=False)
+        return    groups = await db_get_all_groups(only_banned=False)
     if not groups:
         await query.edit_message_text("📭 لا توجد مجموعات مسجلة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]]))
         return
