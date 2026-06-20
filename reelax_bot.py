@@ -3371,7 +3371,10 @@ async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{ch_db_id}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def channel_growth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض رسم بياني لنمو القناة"""
@@ -3467,7 +3470,10 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
         [InlineKeyboardButton("📡 قنواتي", callback_data=CallbackData.CHANNELS_MY)],
         [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 # ============================================================
 # معالج الأخطاء العام
@@ -4224,7 +4230,10 @@ async def support_ticket_callback(update: Update, context: ContextTypes.DEFAULT_
         text = f"📋 **تذكرتك #{ticket_num}**\n━━━━━━━━━━━━━━━━━━━━━━\n📅 تاريخ الإنشاء: {created_str}\n📌 الحالة: {'قيد المعالجة' if status == 'pending' else 'تم الرد'}\n\nسيتم الرد عليك في أقرب وقت ممكن."
     else:
         text = "📭 **لا توجد تذاكر**\n━━━━━━━━━━━━━━━━━━━━━━\nلم تقم بإرسال أي تذكرة دعم بعد.\nاستخدم الأمر /support لإنشاء تذكرة جديدة."
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def support_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await support_menu_callback(update, context)
@@ -4340,7 +4349,10 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("📩 تواصل مع المطور", url=f"https://t.me/RelaxMgr")],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4358,7 +4370,10 @@ async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
         ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4378,7 +4393,10 @@ async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(get_text(uid, 'referral_list'), callback_data=CallbackData.REFERRAL_LIST),
          InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def referral_copy_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4425,7 +4443,10 @@ async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(get_text(uid, 'claim_reward'), callback_data=CallbackData.REFERRAL_CLAIM_REWARD)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.REFERRAL_MENU)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def reminder_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4444,7 +4465,10 @@ async def reminder_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(get_text(uid, 'reminder_lang_btn'), callback_data=CallbackData.REMINDER_SET_LANG),
          InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def reminder_toggle_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4533,7 +4557,10 @@ async def translation_menu_callback(update: Update, context: ContextTypes.DEFAUL
          InlineKeyboardButton("🇷🇺 Русский", callback_data=f"{CallbackData.TRANSLATION_SET_PREFIX}ru")],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def translation_off_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4564,6 +4591,9 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         points_needed = next_points - points if next_points > points else 0
         text = f"📊 **رتبتك الحالية**\n━━━━━━━━━━━━━━\n👤 {query.from_user.first_name}\n⭐ **المستوى:** {level}\n📈 **النقاط:** {points}\n📌 **المتبقي للمستوى التالي:** {points_needed}"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]])
+        if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
         await safe_edit_markdown(query, text, reply_markup=keyboard)
     elif query.data == "top":
         top_users = await get_top_users(10)
@@ -4580,6 +4610,9 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 name = str(uid_user)
             text += f"{idx}. {name} → المستوى {level} ({points} نقطة)\n"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]])
+        if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
         await safe_edit_markdown(query, text, reply_markup=keyboard)
     elif query.data == "schedule_post":
         context.user_data['state'] = 'waiting_for_schedule_post'
@@ -4656,6 +4689,9 @@ async def security_refresh_groups_callback(update: Update, context: ContextTypes
 3. استخدم الأمر /syncgroup في المجموعة
 4. ثم عد إلى الخاص واضغط على تحديث
 5. إذا كنت مالكاً مخفياً، استخدم الأمر /register_hidden_owner في المجموعة"""
+        if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
         await safe_edit_markdown(query, text, reply_markup=keyboard)
         return
     keyboard = []
@@ -4785,7 +4821,10 @@ async def group_action_log_callback(update: Update, context: ContextTypes.DEFAUL
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def group_action_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4913,7 +4952,10 @@ async def admin_banned_users_callback(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("🔓 إلغاء حظر الكل", callback_data=CallbackData.ADMIN_UNBAN_ALL_USERS)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_unban_all_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4965,7 +5007,10 @@ async def admin_banned_channels_callback(update: Update, context: ContextTypes.D
         [InlineKeyboardButton("❤️ تنشيط الكل", callback_data=CallbackData.ADMIN_ACTIVATE_ALL_CHANNELS)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_activate_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -5016,7 +5061,10 @@ async def admin_banned_groups_callback(update: Update, context: ContextTypes.DEF
         [InlineKeyboardButton("🔓 إلغاء حظر الكل", callback_data=CallbackData.ADMIN_UNBAN_ALL_GROUPS)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_unban_all_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -5065,7 +5113,10 @@ async def admin_banned_bot_channels_callback(update: Update, context: ContextTyp
         [InlineKeyboardButton("🔓 إلغاء حظر الكل", callback_data=CallbackData.ADMIN_UNBAN_ALL_BOT_CHANNELS)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]
     ])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_unban_all_bot_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -5409,7 +5460,10 @@ async def admin_support_tickets_callback(update: Update, context: ContextTypes.D
         msg_preview = msg[:40] + "..." if len(msg) > 40 else msg
         text += f"\n{status_icon} #{ticket_num} | 👤 {username}\n🆔 `{uid_u}` | 📅 {created_str}\n📝 {msg_preview}\n💡 `/support_reply {uid_u} نص الرد`\n━━━━━━━━━━━━━━━━━━━━━━\n"
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]])
-    await safe_edit_markdown(query, text, reply_markup=keyboard)
+    if query.message and query.message.text == text:
+        await query.answer("✅ تم التحديث")
+    else:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_delete_all_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
