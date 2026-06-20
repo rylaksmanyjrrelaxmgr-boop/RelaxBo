@@ -210,6 +210,9 @@ from deep_translator import GoogleTranslator
 from cryptography.fernet import Fernet
 from aiohttp import web, WSMsgType
 import aiohttp
+# ===================== واجهة الويب =====================
+web_app = web.Application()
+CSRF_TOKEN = secrets.token_urlsafe(32)
 import aiofiles
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
@@ -765,6 +768,299 @@ async def set_user_translation_language(user_id: int, lang: str):
 user_language = {}
 _user_language_lock = asyncio.Lock()
 
+def get_text(user_id: int, key: str) -> str:
+    lang = user_language.get(user_id, 'ar')
+    texts = {
+        'ar': {
+            'welcome': "🌿 **مرحباً بك في ريلاكس مانيجر**\nاختر اللغة المناسبة",
+            'main_title': "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المعرف: `{1}`\n👥 مجموعاتي: {2}\n💎 الاشتراك: {3}\n📡 القناة النشطة: {4}\n📝 المنشورات غير المنشورة: {5}\n⚙️ النشر التلقائي: {6}",
+            'no_channels': "لا توجد قنوات",
+            'add_channel': "➕ إضافة قناة",
+            'my_channels': "📡 قنواتي",
+            'add_15_posts': "📥 إضافة 15 منشور",
+            'publish_one': "📤 نشر واحد",
+            'my_posts_btn': "📋 منشوراتي",
+            'recycle': "♻️ إعادة تدوير",
+            'stats_btn': "📊 إحصائياتي",
+            'my_stats_btn': "📈 إحصائيات كاملة",
+            'my_groups_btn': "👥 مجموعاتي",
+            'settings_btn': "⚙️ الإعدادات",
+            'schedule_btn': "⏰ الجدولة",
+            'help_btn': "❓ المساعدة",
+            'trial_btn': "🎁 تجربة مجانية",
+            'subscribe_btn': "💎 اشتراك",
+            'developer_btn': "👨‍💻 المطور",
+            'language_btn': "🌐 اللغة",
+            'support_btn': "📞 الدعم",
+            'referral': "🔗 الإحالات",
+            'reminder_settings': "⏰ التذكيرات",
+            'translation_settings': "🌐 الترجمة",
+            'publish_all': "📤 نشر الكل",
+            'updates_btn': "📢 التحديثات",
+            'add_to_group': "➕ إضافة إلى مجموعة",
+            'admin_panel': "👑 لوحة الأدمن",
+            'my_rank_btn': "📊 رتبتي",
+            'top_10_btn': "🏆 أفضل 10",
+            'schedule_post_btn': "📝 جدولة منشور",
+            'channel_stats': "📊 إحصائيات القناة",
+            'my_channels_summary': "📊 ملخص قنواتي",
+            'auto_on': "مفعل",
+            'auto_off': "معطل",
+            'subscribed': "✅ مفعل",
+            'not_subscribed': "❌ غير مفعل",
+            'send_channel_id': "📡 أرسل معرف القناة (مثال: @channel أو -100123456)",
+            'channel_added': "✅ تم إضافة القناة {0}",
+            'channel_exists': "⚠️ القناة موجودة مسبقاً",
+            'no_channels_list': "📭 لا توجد قنوات مسجلة",
+            'channels_list': "📡 **قنواتي**\nاختر قناة للتحكم بها:",
+            'delete_channel': "🗑️ حذف",
+            'channel_deleted': "✅ تم حذف القناة",
+            'delete_failed': "❌ فشل الحذف",
+            'no_posts': "📭 لا توجد منشورات",
+            'my_posts_title': "📋 **منشوراتي غير المنشورة**",
+            'confirm_delete': "⚠️ هل أنت متأكد من حذف جميع المنشورات؟",
+            'deleted_all': "✅ تم حذف جميع المنشورات",
+            'recycled': "♻️ تم إعادة تدوير جميع المنشورات",
+            'pending_stats': "📊 **إحصائيات المنشورات**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 غير المنشورة: {0}\n📋 الإجمالي: {1}",
+            'stats': "📈 **إحصائياتي الكاملة**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n⚙️ النشر التلقائي: {4}",
+            'settings': "⚙️ **الإعدادات**\nاختر الإعداد المطلوب:",
+            'disabled': "❌ تعطيل",
+            'enabled': "✅ تفعيل",
+            'auto_toggled': "✅ تم تغيير حالة النشر التلقائي إلى: {0}",
+            'schedule_settings': "⏰ **إعدادات الجدولة**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nاختر نوع الجدولة:",
+            'interval_minutes': "دقائق: {0}",
+            'interval_hours': "ساعات: {0}",
+            'interval_days': "أيام: {0}",
+            'days_week': "أيام الأسبوع: {0}",
+            'specific_dates': "تواريخ محددة: {0}",
+            'nothing': "لا شيء",
+            'send_minutes': "⏱️ أرسل عدد الدقائق (مثال: 30)",
+            'send_hours': "⏱️ أرسل عدد الساعات (مثال: 2)",
+            'send_days': "⏱️ أرسل عدد الأيام (مثال: 1)",
+            'send_dates': "📅 أرسل التواريخ مفصولة بفواصل (مثال: 2024-12-25,2025-01-01)",
+            'send_time': "🕐 أرسل وقت النشر (مثال: 14:30)",
+            'interval_set': "✅ تم حفظ الإعدادات",
+            'invalid_number': "❌ رقم غير صالح",
+            'invalid_date': "❌ تاريخ غير صالح",
+            'invalid_time': "❌ وقت غير صالح",
+            'days_saved': "✅ تم حفظ أيام النشر",
+            'monday': "الإثنين",
+            'tuesday': "الثلاثاء",
+            'wednesday': "الأربعاء",
+            'thursday': "الخميس",
+            'friday': "الجمعة",
+            'saturday': "السبت",
+            'sunday': "الأحد",
+            'admin_only': "🔒 هذا الأمر للمشرفين فقط!",
+            'group_only': "🔒 هذا الأمر يعمل فقط في المجموعات!",
+            'locked': "🔒 تم قفل المجموعة",
+            'unlocked': "🔓 تم فتح المجموعة",
+            'cancelled': "❌ تم الإلغاء",
+            'error': "⚠️ حدث خطأ، حاول مرة أخرى",
+            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات",
+            'support_welcome': "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
+            'support_help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
+            'trial_used': "❌ لقد استخدمت التجربة المجانية مسبقاً",
+            'already_subscribed': "✅ لديك اشتراك فعال بالفعل",
+            'trial': "🎁 **تم تفعيل التجربة المجانية!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ لديك 30 يوماً مجاناً\n📌 استمتع بجميع الميزات\n💎 يمكنك الاشتراك بعد انتهاء التجربة",
+            'subscribe': "💎 **الاشتراك**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الباقة المناسبة لك:\n\n⭐ 1 يوم - 5 نجوم\n⭐ 2 يوم - 9 نجوم\n⭐ شهر (30 يوم) - 50 نجمة\n⭐ 3 أشهر (90 يوم) - 120 نجمة\n\n📌 الدفع عبر نجوم تيليجرام",
+            'updates_text': "📢 **آخر التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تابع قناة التحديثات لمعرفة كل جديد:\n• إضافات جديدة\n• تحسينات الأداء\n• إصلاحات الأخطاء\n• ميزات حصرية",
+            'referral_title': "🔗 **الإحالات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 رابط الإحالة الخاص بك:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 عدد المحالين: {3}\n🎁 المكافآت المتاحة: {4} يوم\n⭐ المكافأة لكل إحالة: {5} يوم\n🎁 نقاط الترحيب: {6}",
+            'copy_link': "📋 نسخ الرابط",
+            'claim_reward': "🎁 صرف المكافآت",
+            'referral_list': "📋 قائمة المحالين",
+            'no_referrals': "📭 لا توجد إحالات بعد",
+            'no_reward_available': "❌ لا توجد مكافآت متاحة للصرف",
+            'reward_claimed': "✅ تم صرف {0} يوم اشتراك!",
+            'reminder_title': "⏰ **إعدادات التذكيرات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تذكير انتهاء الاشتراك: {0}\n📊 تقرير يومي: {1}\n📈 تقرير أسبوعي: {2}\n⏰ التذكير قبل: {3} أيام",
+            'reminder_sub': "🔔 تذكير الاشتراك",
+            'reminder_daily': "📊 تقرير يومي",
+            'reminder_weekly': "📈 تقرير أسبوعي",
+            'reminder_days_btn': "⏰ عدد الأيام",
+            'reminder_lang_btn': "🌐 لغة الإشعارات",
+            'subscription_warning': "⚠️ **تنبيه!**\nاشتراكك ينتهي خلال {0} أيام\nقم بتجديده الآن لتستمر الميزات 💎",
+            'daily_stats': "📊 **تقريرك اليومي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}",
+            'weekly_report': "📈 **تقريرك الأسبوعي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n🔗 الإحالات: {4}",
+            'translation_status_off': "معطلة ❌",
+            'translation_status_on': "مفعلة ✅ إلى {0}",
+            'translation_settings': "إعدادات الترجمة",
+            'translation_how_it_works': "📌 كيفية العمل:\nسيتم ترجمة المنشورات تلقائياً عند النشر إلى اللغة التي تختارها",
+            'translation_choose': "اختر لغة الترجمة:",
+            'translation_off': "🚫 إيقاف الترجمة",
+            'translation_disabled': "✅ تم إيقاف الترجمة",
+            'translation_enabled': "✅ تم تفعيل الترجمة إلى {0}",
+            'admin_panel': "👑 **لوحة الأدمن**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الإجراء المطلوب:",
+            'admin_users': "👥 المستخدمين",
+            'admin_banned': "🚫 المحظورين",
+            'admin_channels': "📡 القنوات",
+            'enter_admin_id': "👑 أرسل معرف المستخدم لإضافته كمشرف:",
+            'enter_remove_admin_id': "🗑️ أرسل معرف المستخدم لإزالته من المشرفين:",
+            'no_admins': "📭 لا يوجد مشرفون",
+            'add_admin_success': "✅ تم إضافة {0} كمشرف",
+            'remove_admin_success': "✅ تم إزالة {0} من المشرفين",
+            'cannot_remove_main_admin': "❌ لا يمكن إزالة المطور الأساسي",
+            'invalid_user_id': "❌ معرف مستخدم غير صالح",
+            'select_backup': "💾 اختر النسخة الاحتياطية للاستعادة:",
+            'no_backups': "📭 لا توجد نسخ احتياطية",
+            'current_allowed_user': "📁 المستخدم الحالي المصرح له بـ /sendcode: {0}",
+            'no_allowed_user': "لا يوجد",
+            'set_new_sendcode_user': "➕ تعيين مستخدم جديد",
+            'sendcode_user_set': "✅ تم تعيين {0} كمستخدم مصرح له بـ /sendcode",
+            'confirm_delete_tickets': "⚠️ هل أنت متأكد من حذف جميع تذاكر الدعم؟",
+            'tickets_deleted': "✅ تم حذف {0} تذكرة",
+            'post_published': "✅ تم نشر المنشور بنجاح",
+            'publish_error': "❌ فشل النشر: {0}",
+            'not_admin': "❌ أنت لست مشرفاً في هذه المجموعة",
+        },
+        'en': {
+            'welcome': "🌿 **Welcome to Relax Manager**\nChoose your language",
+            'main_title': "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: `{1}`\n👥 My Groups: {2}\n💎 Subscription: {3}\n📡 Active Channel: {4}\n📝 Unpublished Posts: {5}\n⚙️ Auto Publish: {6}",
+            'no_channels': "No channels",
+            'add_channel': "➕ Add Channel",
+            'my_channels': "📡 My Channels",
+            'add_15_posts': "📥 Add 15 Posts",
+            'publish_one': "📤 Publish One",
+            'my_posts_btn': "📋 My Posts",
+            'recycle': "♻️ Recycle",
+            'stats_btn': "📊 My Stats",
+            'my_stats_btn': "📈 Full Stats",
+            'my_groups_btn': "👥 My Groups",
+            'settings_btn': "⚙️ Settings",
+            'schedule_btn': "⏰ Schedule",
+            'help_btn': "❓ Help",
+            'trial_btn': "🎁 Free Trial",
+            'subscribe_btn': "💎 Subscribe",
+            'developer_btn': "👨‍💻 Developer",
+            'language_btn': "🌐 Language",
+            'support_btn': "📞 Support",
+            'referral': "🔗 Referrals",
+            'reminder_settings': "⏰ Reminders",
+            'translation_settings': "🌐 Translation",
+            'publish_all': "📤 Publish All",
+            'updates_btn': "📢 Updates",
+            'add_to_group': "➕ Add to Group",
+            'admin_panel': "👑 Admin Panel",
+            'my_rank_btn': "📊 My Rank",
+            'top_10_btn': "🏆 Top 10",
+            'schedule_post_btn': "📝 Schedule Post",
+            'channel_stats': "📊 Channel Stats",
+            'my_channels_summary': "📊 My Channels Summary",
+            'auto_on': "Enabled",
+            'auto_off': "Disabled",
+            'subscribed': "✅ Active",
+            'not_subscribed': "❌ Inactive",
+            'send_channel_id': "📡 Send channel ID (e.g., @channel or -100123456)",
+            'channel_added': "✅ Channel {0} added",
+            'channel_exists': "⚠️ Channel already exists",
+            'no_channels_list': "📭 No channels registered",
+            'channels_list': "📡 **My Channels**\nSelect a channel to control:",
+            'delete_channel': "🗑️ Delete",
+            'channel_deleted': "✅ Channel deleted",
+            'delete_failed': "❌ Delete failed",
+            'no_posts': "📭 No posts",
+            'my_posts_title': "📋 **My Unpublished Posts**",
+            'confirm_delete': "⚠️ Are you sure you want to delete all posts?",
+            'deleted_all': "✅ All posts deleted",
+            'recycled': "♻️ All posts recycled",
+            'pending_stats': "📊 **Post Statistics**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Unpublished: {0}\n📋 Total: {1}",
+            'stats': "📈 **My Full Stats**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n⚙️ Auto Publish: {4}",
+            'settings': "⚙️ **Settings**\nSelect the setting:",
+            'disabled': "❌ Disable",
+            'enabled': "✅ Enable",
+            'auto_toggled': "✅ Auto publish status changed to: {0}",
+            'schedule_settings': "⏰ **Schedule Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nSelect schedule type:",
+            'interval_minutes': "Minutes: {0}",
+            'interval_hours': "Hours: {0}",
+            'interval_days': "Days: {0}",
+            'days_week': "Days of week: {0}",
+            'specific_dates': "Specific dates: {0}",
+            'nothing': "Nothing",
+            'send_minutes': "⏱️ Send number of minutes (e.g., 30)",
+            'send_hours': "⏱️ Send number of hours (e.g., 2)",
+            'send_days': "⏱️ Send number of days (e.g., 1)",
+            'send_dates': "📅 Send dates separated by commas (e.g., 2024-12-25,2025-01-01)",
+            'send_time': "🕐 Send publish time (e.g., 14:30)",
+            'interval_set': "✅ Settings saved",
+            'invalid_number': "❌ Invalid number",
+            'invalid_date': "❌ Invalid date",
+            'invalid_time': "❌ Invalid time",
+            'days_saved': "✅ Days saved",
+            'monday': "Monday",
+            'tuesday': "Tuesday",
+            'wednesday': "Wednesday",
+            'thursday': "Thursday",
+            'friday': "Friday",
+            'saturday': "Saturday",
+            'sunday': "Sunday",
+            'admin_only': "🔒 This command is for admins only!",
+            'group_only': "🔒 This command works only in groups!",
+            'locked': "🔒 Group locked",
+            'unlocked': "🔓 Group unlocked",
+            'cancelled': "❌ Cancelled",
+            'error': "⚠️ An error occurred, try again",
+            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates",
+            'support_welcome': "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
+            'support_help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
+            'trial_used': "❌ You have already used the free trial",
+            'already_subscribed': "✅ You already have an active subscription",
+            'trial': "🎁 **Free Trial Activated!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ You have 30 days free\n📌 Enjoy all features\n💎 You can subscribe after trial ends",
+            'subscribe': "💎 **Subscription**\n━━━━━━━━━━━━━━━━━━━━━━\nChoose your plan:\n\n⭐ 1 Day - 5 Stars\n⭐ 2 Days - 9 Stars\n⭐ 30 Days (Month) - 50 Stars\n⭐ 90 Days (3 Months) - 120 Stars\n\n📌 Payment via Telegram Stars",
+            'updates_text': "📢 **Latest Updates**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Follow updates channel for news:\n• New features\n• Performance improvements\n• Bug fixes\n• Exclusive features",
+            'referral_title': "🔗 **Referrals**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Your referral link:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 Total Referrals: {3}\n🎁 Available Rewards: {4} days\n⭐ Reward per Referral: {5} days\n🎁 Welcome Bonus: {6}",
+            'copy_link': "📋 Copy Link",
+            'claim_reward': "🎁 Claim Rewards",
+            'referral_list': "📋 Referral List",
+            'no_referrals': "📭 No referrals yet",
+            'no_reward_available': "❌ No rewards available to claim",
+            'reward_claimed': "✅ Claimed {0} days subscription!",
+            'reminder_title': "⏰ **Reminder Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Subscription Reminder: {0}\n📊 Daily Report: {1}\n📈 Weekly Report: {2}\n⏰ Remind Before: {3} days",
+            'reminder_sub': "🔔 Subscription Reminder",
+            'reminder_daily': "📊 Daily Report",
+            'reminder_weekly': "📈 Weekly Report",
+            'reminder_days_btn': "⏰ Days Before",
+            'reminder_lang_btn': "🌐 Notification Language",
+            'subscription_warning': "⚠️ **Warning!**\nYour subscription expires in {0} days\nRenew now to keep features 💎",
+            'daily_stats': "📊 **Your Daily Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}",
+            'weekly_report': "📈 **Your Weekly Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n🔗 Referrals: {4}",
+            'translation_status_off': "Disabled ❌",
+            'translation_status_on': "Enabled ✅ to {0}",
+            'translation_settings': "Translation Settings",
+            'translation_how_it_works': "📌 How it works:\nPosts will be automatically translated to your chosen language when published",
+            'translation_choose': "Choose translation language:",
+            'translation_off': "🚫 Disable Translation",
+            'translation_disabled': "✅ Translation disabled",
+            'translation_enabled': "✅ Translation enabled to {0}",
+            'admin_panel': "👑 **Admin Panel**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the action:",
+            'admin_users': "👥 Users",
+            'admin_banned': "🚫 Banned",
+            'admin_channels': "📡 Channels",
+            'enter_admin_id': "👑 Send user ID to add as admin:",
+            'enter_remove_admin_id': "🗑️ Send user ID to remove from admins:",
+            'no_admins': "📭 No admins",
+            'add_admin_success': "✅ Added {0} as admin",
+            'remove_admin_success': "✅ Removed {0} from admins",
+            'cannot_remove_main_admin': "❌ Cannot remove main developer",
+            'invalid_user_id': "❌ Invalid user ID",
+            'select_backup': "💾 Select backup to restore:",
+            'no_backups': "📭 No backups",
+            'current_allowed_user': "📁 Currently allowed /sendcode user: {0}",
+            'no_allowed_user': "None",
+            'set_new_sendcode_user': "➕ Set new user",
+            'sendcode_user_set': "✅ Set {0} as allowed /sendcode user",
+            'confirm_delete_tickets': "⚠️ Are you sure you want to delete all support tickets?",
+            'tickets_deleted': "✅ Deleted {0} tickets",
+            'post_published': "✅ Post published successfully",
+            'publish_error': "❌ Publish failed: {0}",
+            'not_admin': "❌ You are not an admin in this group",
+        }
+    }
+    lang_texts = texts.get(lang, texts['ar'])
+    return lang_texts.get(key, key)
+
+async def set_user_language(user_id: int, lang: str):
+    async with _user_language_lock:
+        user_language[user_id] = lang
+
 # ===================== دوال القوائم والأزرار =====================
 class CallbackData:
     MAIN_MENU = "main_menu"
@@ -1306,7 +1602,7 @@ async def db_get_user_channels_count(user_id: int) -> int:
 
 async def db_get_user_groups_count(user_id: int) -> int:
     async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
+        cur = await conn.execute("SELECT COUNT(*) FROM bot_groups WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)", (user_id, user_id))
         row = await cur.fetchone()
         return row[0] if row else 0
     return await execute_db(_get)
@@ -2742,7 +3038,9 @@ async def db_get_channel_growth(channel_db_id: int, days: int = 30) -> dict:
         }
     return await execute_db(_get_growth)
 
-# ===================== دوال Google Drive المحسّنة =====================
+# ============================================================
+# دوال Google Drive المحسّنة
+# ============================================================
 _DRIVE_SERVICE_CACHE = None
 _DRIVE_SERVICE_CACHE_TIME = 0
 _DRIVE_SERVICE_CACHE_TTL = 3600
@@ -2997,847 +3295,382 @@ async def auto_backup():
             backoff = min(backoff * 1.5, max_backoff)
             await asyncio.sleep(backoff)
 
-# ===================== جلسات الويب =====================
-async def db_get_session(session_id: str):
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_data, expires FROM web_sessions WHERE session_id=?", (session_id,))
-        row = await cur.fetchone()
-        if row:
-            return {'user_data': json.loads(row[0]), 'expires': row[1]}
-        return None
-    return await execute_db(_get)
-
-async def db_save_session(session_id: str, user_data: dict, expires: int):
-    async def _save(conn):
-        await conn.execute("INSERT OR REPLACE INTO web_sessions (session_id, user_data, expires) VALUES (?, ?, ?)", 
-                          (session_id, json.dumps(user_data), expires))
-        await conn.commit()
-    return await execute_db(_save)
-
-async def db_delete_session(session_id: str):
-    async def _delete(conn):
-        await conn.execute("DELETE FROM web_sessions WHERE session_id=?", (session_id,))
-        await conn.commit()
-    return await execute_db(_delete)
-
-def generate_qr_code(data: str) -> bytes:
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    img_byte_arr = BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    return img_byte_arr.getvalue()
-
-def generate_stats_chart(stats: dict) -> bytes:
-    fig = go.Figure(data=[
-        go.Bar(name='المستخدمين', x=['المجموع', 'النشطاء', 'المحظورون'], 
-               y=[stats['total_users'], stats['active_users'], stats['banned_users']],
-               marker_color=['#2ecc71', '#3498db', '#e74c3c'])
-    ])
-    fig.update_layout(title='إحصائيات المستخدمين', template='plotly_dark')
-    return fig.to_image(format='png')
-
-# ===================== واجهة الويب =====================
-web_app = web.Application()
-CSRF_TOKEN = secrets.token_urlsafe(32)
-
-async def web_login_page(request):
-    csrf_token = secrets.token_urlsafe(32)
-    request.app['csrf_token'] = csrf_token
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>{BOT_NAME} - تسجيل الدخول</title>
-            <style>
-                *{{margin:0;padding:0;box-sizing:border-box;}}
-                body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);min-height:100vh;display:flex;justify-content:center;align-items:center;}}
-                .login-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:20px;padding:40px;width:100%;max-width:400px;border:1px solid rgba(255,255,255,0.1);}}
-                .login-container h2{{text-align:center;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:30px;font-size:28px;}}
-                .input-group{{margin-bottom:20px;}}
-                .input-group label{{display:block;margin-bottom:8px;color:#aaa;font-weight:500;}}
-                .input-group input{{width:100%;padding:12px 15px;border:2px solid rgba(255,255,255,0.1);border-radius:10px;font-size:16px;transition:all 0.3s;background:rgba(255,255,255,0.05);color:white;}}
-                .input-group input:focus{{border-color:#667eea;outline:none;box-shadow:0 0 20px rgba(102,126,234,0.3);}}
-                button{{width:100%;padding:12px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border:none;border-radius:10px;color:white;font-size:16px;font-weight:bold;cursor:pointer;transition:all 0.3s;}}
-                button:hover{{transform:scale(1.02);box-shadow:0 5px 20px rgba(102,126,234,0.4);}}
-                .error{{color:#e74c3c;text-align:center;margin-top:15px;}}
-            </style>
-        </head>
-        <body>
-            <div class="login-container">
-                <h2>🔐 {BOT_NAME}</h2>
-                <form method="POST" action="/login">
-                    <input type="hidden" name="csrf_token" value="{csrf_token}">
-                    <div class="input-group">
-                        <label>👤 اسم المستخدم</label>
-                        <input type="text" name="username" required>
-                    </div>
-                    <div class="input-group">
-                        <label>🔑 كلمة المرور</label>
-                        <input type="password" name="password">
-                    </div>
-                    <button type="submit">🚀 تسجيل الدخول</button>
-                </form>
-                <div id="error" class="error"></div>
-            </div>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_handle_login(request):
-    data = await request.post()
-    csrf_token = data.get('csrf_token')
-    stored_token = request.app.get('csrf_token')
-    if not csrf_token or csrf_token != stored_token:
-        return web.Response(status=403, text="CSRF token غير صالح")
-    username = data.get('username')
-    password = data.get('password')
-    if username == WEB_USERNAME and (not WEB_PASSWORD or password == WEB_PASSWORD):
-        session_id = secrets.token_urlsafe(32)
-        session_data = {'user': username}
-        expires = int(time_module.time() + 3600)
-        await db_save_session(session_id, session_data, expires)
-        response = web.Response(status=302, headers={'Location': '/dashboard'})
-        response.set_cookie('session', session_id, max_age=3600, httponly=True, secure=True if not ENV['is_development'] else False)
-        return response
-    return web.Response(status=302, headers={'Location': '/'})
-
-async def check_session(request):
-    session_id = request.cookies.get('session')
-    if session_id:
-        session = await db_get_session(session_id)
-        if session and session['expires'] > time_module.time():
-            return True
-        else:
-            await db_delete_session(session_id)
-    return False
-
-# ===================== دوال الويب الرئيسية =====================
-async def web_dashboard(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    total, banned, posts, groups, channels = await db_stats()
-    active_users = total - banned
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - لوحة التحكم</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin-bottom:30px;}}
-            .stat-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;text-align:center;border:1px solid rgba(255,255,255,0.1);transition:all 0.3s;}}
-            .stat-card:hover{{transform:translateY(-5px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}}
-            .stat-card h3{{font-size:14px;color:#aaa;margin-bottom:10px;}}
-            .stat-card .number{{font-size:32px;font-weight:bold;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .table-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;overflow-x:auto;border:1px solid rgba(255,255,255,0.1);}}
-            table{{width:100%;border-collapse:collapse;}}
-            th,td{{padding:12px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.1);}}
-            th{{color:#667eea;}}
-            .badge-active{{background:rgba(39,174,96,0.3);color:#27ae60;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            .badge-banned{{background:rgba(231,76,60,0.3);color:#e74c3c;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:6px 12px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .online-indicator{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;}}
-            .online{{background:#2ecc71;animation:pulse 2s infinite;}}
-            @keyframes pulse{{0%{{opacity:1}}50%{{opacity:0.5}}100%{{opacity:1}}}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard" class="active">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="stats-grid" id="stats-grid">
-                    <div class="stat-card"><h3>👥 إجمالي المستخدمين</h3><div class="number" id="total-users">{total}</div></div>
-                    <div class="stat-card"><h3>✅ النشطاء</h3><div class="number" id="active-users">{active_users}</div></div>
-                    <div class="stat-card"><h3>🚫 المحظورين</h3><div class="number" id="banned-users">{banned}</div></div>
-                    <div class="stat-card"><h3>📝 المنشورات</h3><div class="number" id="pending-posts">{posts}</div></div>
-                </div>
-                <div class="table-container">
-                    <h3>📋 آخر المستخدمين</h3>
-                    <table>
-                        <thead>
-                            <tr><th>المعرف</th><th>الاسم</th><th>الحالة</th></tr>
-                        </thead>
-                        <tbody id="users-table"></tbody>
-                    </table>
-                </div>
-            </div>
-            <script>
-                const ws = new WebSocket(`ws://${{window.location.host}}/ws`);
-                ws.onmessage = function(event) {{
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'stats') {{
-                        document.getElementById('total-users').textContent = data.data.total_users;
-                        document.getElementById('active-users').textContent = data.data.active_users;
-                        document.getElementById('banned-users').textContent = data.data.banned_users;
-                        document.getElementById('pending-posts').textContent = data.data.pending_posts;
-                    }}
-                }};
-                fetch('/api/users?limit=10').then(r=>r.json()).then(users=>{{
-                    const tbody=document.getElementById('users-table');
-                    users.forEach(user=>{{
-                        const row=tbody.insertRow();
-                        row.insertCell(0).innerHTML=`<code>${{user.id}}</code>`;
-                        row.insertCell(1).innerHTML=user.name;
-                        row.insertCell(2).innerHTML=`<span class="${{user.banned?'badge-banned':'badge-active'}}">${{user.banned?'محظور':'نشط'}}</span>`;
-                    }});
-                }});
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-# ===================== باقي دوال الويب =====================
-async def web_users_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - المستخدمين</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .search-bar{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;margin-bottom:20px;display:flex;gap:10px;border:1px solid rgba(255,255,255,0.1);}}
-            .search-bar input{{flex:1;padding:10px;border:none;border-radius:10px;background:rgba(255,255,255,0.05);color:white;}}
-            .search-bar input:focus{{outline:none;box-shadow:0 0 20px rgba(102,126,234,0.2);}}
-            .search-bar button{{padding:10px 20px;}}
-            .table-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;overflow-x:auto;border:1px solid rgba(255,255,255,0.1);}}
-            table{{width:100%;border-collapse:collapse;}}
-            th,td{{padding:12px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.1);}}
-            th{{color:#667eea;}}
-            .badge-active{{background:rgba(39,174,96,0.3);color:#27ae60;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            .badge-banned{{background:rgba(231,76,60,0.3);color:#e74c3c;padding:4px 12px;border-radius:20px;font-size:12px;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:6px 12px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;margin:2px;}}
-            button:hover{{transform:scale(1.05);}}
-            .pagination{{margin-top:20px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap;}}
-            .pagination button{{padding:8px 16px;}}
-            .pagination button.active{{background:linear-gradient(135deg,#667eea,#764ba2);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users" class="active">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="search-bar">
-                    <input type="text" id="searchInput" placeholder="🔍 بحث عن مستخدم..." onkeyup="if(event.key==='Enter')searchUsers()">
-                    <button onclick="searchUsers()">بحث</button>
-                </div>
-                <div class="table-container">
-                    <h3>📋 قائمة المستخدمين</h3>
-                    <table>
-                        <thead>
-                            <tr><th>المعرف</th><th>الاسم</th><th>اليوزر</th><th>النقاط</th><th>المستوى</th><th>الحالة</th><th>الإجراءات</th></tr>
-                        </thead>
-                        <tbody id="users-table"></tbody>
-                    </table>
-                    <div class="pagination" id="pagination"></div>
-                </div>
-            </div>
-            <script>
-                let currentPage=1;
-                let currentSearch='';
-                function loadUsers(page, search) {{
-                    const url = search ? `/api/users/search?q=${{encodeURIComponent(search)}}&page=${{page}}` : `/api/users?page=${{page}}&limit=20`;
-                    fetch(url).then(r=>r.json()).then(data=>{{
-                        const tbody=document.getElementById('users-table');
-                        tbody.innerHTML='';
-                        (data.users||data).forEach(user=>{{
-                            const row=tbody.insertRow();
-                            row.insertCell(0).innerHTML=`<code>${{user.id}}</code>`;
-                            row.insertCell(1).innerHTML=user.name||'بدون اسم';
-                            row.insertCell(2).innerHTML=user.username?`@${{user.username}}`:'-';
-                            row.insertCell(3).innerHTML=user.points||0;
-                            row.insertCell(4).innerHTML=user.level||1;
-                            row.insertCell(5).innerHTML=`<span class="${{user.banned?'badge-banned':'badge-active'}}">${{user.banned?'محظور':'نشط'}}</span>`;
-                            row.insertCell(6).innerHTML=`<button onclick="toggleBan(${{user.id}},${{user.banned}})">${{user.banned?'🔓 إلغاء الحظر':'🚫 حظر'}}</button><button onclick="viewProfile(${{user.id}})">👤 عرض</button><button onclick="addPoints(${{user.id}})">⭐ نقاط</button>`;
-                        }});
-                        if(data.totalPages) {{
-                            const pagination=document.getElementById('pagination');
-                            pagination.innerHTML='';
-                            for(let i=1;i<=data.totalPages;i++){{
-                                const btn=document.createElement('button');
-                                btn.textContent=i;
-                                btn.onclick=()=>{{currentPage=i;loadUsers(currentPage,currentSearch);}};
-                                if(i===currentPage)btn.classList.add('active');
-                                pagination.appendChild(btn);
-                            }}
-                        }}
-                    }});
-                }}
-                function searchUsers(){{
-                    currentSearch = document.getElementById('searchInput').value;
-                    currentPage = 1;
-                    loadUsers(currentPage, currentSearch);
-                }}
-                function toggleBan(id,banned){{fetch(`/api/ban_user?user_id=${{id}}&ban=${{!banned}}`,{{method:'POST'}}).then(()=>loadUsers(currentPage,currentSearch));}}
-                function viewProfile(id){{window.location.href=`/profile?user_id=${{id}}`;}}
-                function addPoints(id){{const points=prompt('أدخل عدد النقاط للإضافة:');if(points){{fetch(`/api/add_points?user_id=${{id}}&points=${{points}}`,{{method:'POST'}}).then(()=>loadUsers(currentPage,currentSearch));}}}}
-                loadUsers(1,'');
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_contests_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - المسابقات</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .create-card{{background:linear-gradient(135deg,#667eea,#764ba2);border-radius:15px;padding:20px;margin-bottom:20px;}}
-            .create-card input,.create-card textarea{{width:100%;padding:10px;margin:10px 0;border:none;border-radius:10px;background:rgba(255,255,255,0.2);color:white;}}
-            .create-card input::placeholder,.create-card textarea::placeholder{{color:rgba(255,255,255,0.7);}}
-            .contest-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:15px;cursor:pointer;transition:all 0.3s;border:1px solid rgba(255,255,255,0.1);}}
-            .contest-card:hover{{transform:translateX(-5px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}}
-            .contest-title{{font-size:20px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:10px;}}
-            .contest-prize{{color:#f1c40f;margin:10px 0;}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:10px 20px;border-radius:10px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .modal{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);justify-content:center;align-items:center;z-index:1000;}}
-            .modal-content{{background:#1a1a2e;border-radius:20px;padding:30px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests" class="active">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="create-card">
-                    <h3>➕ إنشاء مسابقة جديدة</h3>
-                    <input type="text" id="contestTitle" placeholder="عنوان المسابقة">
-                    <textarea id="contestDesc" placeholder="وصف المسابقة" rows="3"></textarea>
-                    <input type="text" id="contestPrize" placeholder="الجائزة">
-                    <input type="datetime-local" id="contestEnd">
-                    <button onclick="createContest()">🚀 إنشاء مسابقة</button>
-                </div>
-                <h3>🏆 المسابقات النشطة</h3>
-                <div id="contests-list"></div>
-            </div>
-            <div id="modal" class="modal">
-                <div class="modal-content">
-                    <h3 id="modalTitle"></h3>
-                    <p id="modalDesc"></p>
-                    <p id="modalPrize"></p>
-                    <p id="modalEnd"></p>
-                    <h4>📋 المشاركون:</h4>
-                    <div id="participantsList"></div>
-                    <button onclick="closeModal()">إغلاق</button>
-                </div>
-            </div>
-            <script>
-                function loadContests(){{
-                    fetch('/api/contests').then(r=>r.json()).then(contests=>{{
-                        const container=document.getElementById('contests-list');
-                        container.innerHTML='';
-                        contests.forEach(contest=>{{
-                            const card=document.createElement('div');
-                            card.className='contest-card';
-                            card.onclick=()=>viewContest(contest.id);
-                            card.innerHTML=`<div class="contest-title">🏆 ${{contest.title}}</div><div class="contest-prize">🎁 الجائزة: ${{contest.prize}}</div><div>⏰ ينتهي: ${{new Date(contest.end_date).toLocaleString('ar')}}</div><div>👥 عدد المشاركين: ${{contest.participants||0}}</div>`;
-                            container.appendChild(card);
-                        }});
-                    }});
-                }}
-                function createContest(){{
-                    const data={{title:document.getElementById('contestTitle').value,description:document.getElementById('contestDesc').value,prize:document.getElementById('contestPrize').value,end_date:document.getElementById('contestEnd').value}};
-                    fetch('/api/create_contest',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}}).then(()=>location.reload());
-                }}
-                function viewContest(id){{
-                    fetch(`/api/contest/${{id}}`).then(r=>r.json()).then(contest=>{{
-                        document.getElementById('modalTitle').innerHTML=`🏆 ${{contest.title}}`;
-                        document.getElementById('modalDesc').innerHTML=contest.description;
-                        document.getElementById('modalPrize').innerHTML=`🎁 الجائزة: ${{contest.prize}}`;
-                        document.getElementById('modalEnd').innerHTML=`⏰ ينتهي: ${{new Date(contest.end_date).toLocaleString('ar')}}`;
-                        const participantsDiv=document.getElementById('participantsList');
-                        participantsDiv.innerHTML='';
-                        contest.participants.forEach(p=>{{
-                            participantsDiv.innerHTML+=`<div>👤 ${{p.name}} - ${{new Date(p.joined_at).toLocaleString('ar')}}</div>`;
-                        }});
-                        document.getElementById('modal').style.display='flex';
-                    }});
-                }}
-                function closeModal(){{document.getElementById('modal').style.display='none';}}
-                loadContests();
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_backups_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - النسخ الاحتياطية</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .action-bar{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;border:1px solid rgba(255,255,255,0.1);}}
-            .backup-card{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border:1px solid rgba(255,255,255,0.1);}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:8px 16px;border-radius:8px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-            .success{{background:linear-gradient(135deg,#27ae60,#2ecc71);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups" class="active">💾 النسخ الاحتياطية</a>
-                    <a href="/profile">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="action-bar">
-                    <button onclick="createBackup()" class="success">💾 إنشاء نسخة احتياطية</button>
-                    <button onclick="uploadToCloud()">☁️ رفع إلى السحابة</button>
-                    <button onclick="loadBackups()">🔄 تحديث</button>
-                </div>
-                <h3>💾 النسخ الاحتياطية المحلية</h3>
-                <div id="local-backups"></div>
-                <h3>☁️ النسخ الاحتياطية السحابية</h3>
-                <div id="cloud-backups"></div>
-            </div>
-            <script>
-                function loadBackups(){{
-                    fetch('/api/backups').then(r=>r.json()).then(data=>{{
-                        const localDiv=document.getElementById('local-backups');
-                        localDiv.innerHTML='';
-                        data.local.forEach(backup=>{{
-                            localDiv.innerHTML+=`<div class="backup-card"><span>📁 ${{backup.name}}</span><div><button onclick="restoreLocal('${{backup.name}}')">🔄 استعادة</button></div></div>`;
-                        }});
-                        const cloudDiv=document.getElementById('cloud-backups');
-                        cloudDiv.innerHTML='';
-                        data.cloud.forEach(backup=>{{
-                            cloudDiv.innerHTML+=`<div class="backup-card"><span>☁️ ${{backup.name}}</span><div><button onclick="restoreCloud('${{backup.name}}')">🔄 استعادة من السحابة</button></div></div>`;
-                        }});
-                    }});
-                }}
-                function createBackup(){{fetch('/api/create_backup',{{method:'POST'}}).then(()=>loadBackups());}}
-                function uploadToCloud(){{fetch('/api/upload_backup',{{method:'POST'}}).then(()=>loadBackups());}}
-                function restoreLocal(name){{if(confirm('هل أنت متأكد من استعادة النسخة ${{name}}؟')){{fetch(`/api/restore_backup?name=${{encodeURIComponent(name)}}`,{{method:'POST'}}).then(()=>alert('تمت الاستعادة بنجاح!'));}}}}
-                function restoreCloud(name){{if(confirm('هل أنت متأكد من استعادة النسخة ${{name}} من السحابة؟')){{fetch(`/api/restore_cloud_backup?name=${{encodeURIComponent(name)}}`,{{method:'POST'}}).then(()=>alert('تمت الاستعادة من السحابة بنجاح!'));}}}}
-                loadBackups();
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_profile_page(request):
-    if not await check_session(request):
-        return web.Response(status=302, headers={'Location': '/'})
-    user_id = request.query.get('user_id', MAIN_ADMIN_ID)
-    try:
-        user_id = int(user_id)
-    except:
-        user_id = MAIN_ADMIN_ID
-    profile = await db_get_user_profile(user_id)
-    async def _get_user(conn):
-        cur = await conn.execute("SELECT first_name FROM users_cache WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else str(user_id)
-    user_name = await execute_db(_get_user)
-    badges = await db_get_user_badges(user_id)
-    return web.Response(
-        text=f'''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head><meta charset="UTF-8"><title>{BOT_NAME} - الملف الشخصي</title>
-        <style>
-            *{{margin:0;padding:0;box-sizing:border-box;}}
-            body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#0f0f1a;color:#fff;}}
-            .sidebar{{width:260px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);height:100vh;position:fixed;padding:20px;overflow-y:auto;}}
-            .sidebar h2{{text-align:center;margin-bottom:30px;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-            .sidebar nav a{{display:block;padding:12px 15px;color:#aaa;text-decoration:none;border-radius:10px;margin-bottom:5px;transition:all 0.3s;}}
-            .sidebar nav a:hover,.sidebar nav a.active{{background:rgba(102,126,234,0.2);color:white;transform:translateX(5px);}}
-            .main{{margin-right:260px;padding:20px;}}
-            .profile-header{{background:linear-gradient(135deg,#667eea,#764ba2);border-radius:20px;padding:40px;text-align:center;margin-bottom:20px;}}
-            .profile-name{{font-size:28px;margin-bottom:10px;}}
-            .profile-stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;margin-bottom:20px;}}
-            .stat-box{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:15px;text-align:center;border:1px solid rgba(255,255,255,0.1);}}
-            .badges-container{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;margin-bottom:20px;border:1px solid rgba(255,255,255,0.1);}}
-            .badge{{display:inline-block;background:linear-gradient(135deg,#667eea,#764ba2);padding:8px 15px;border-radius:30px;margin:5px;font-size:14px;}}
-            .edit-form{{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:15px;padding:20px;border:1px solid rgba(255,255,255,0.1);}}
-            .edit-form input,.edit-form textarea{{width:100%;padding:10px;margin:10px 0;border:none;border-radius:10px;background:rgba(255,255,255,0.05);color:white;}}
-            .edit-form input:focus,.edit-form textarea:focus{{outline:none;box-shadow:0 0 20px rgba(102,126,234,0.2);}}
-            button{{background:linear-gradient(135deg,#667eea,#764ba2);border:none;padding:10px 20px;border-radius:10px;color:white;cursor:pointer;transition:all 0.3s;}}
-            button:hover{{transform:scale(1.05);}}
-        </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <h2>🎮 {BOT_NAME}</h2>
-                <nav>
-                    <a href="/dashboard">📊 الرئيسية</a>
-                    <a href="/users">👥 المستخدمين</a>
-                    <a href="/contests">🏆 المسابقات</a>
-                    <a href="/backups">💾 النسخ الاحتياطية</a>
-                    <a href="/profile" class="active">👤 ملفي الشخصي</a>
-                    <a href="/logout">🚪 تسجيل الخروج</a>
-                </nav>
-            </div>
-            <div class="main">
-                <div class="profile-header">
-                    <div class="profile-name">{user_name}</div>
-                    <div>🆔 {user_id}</div>
-                </div>
-                <div class="profile-stats">
-                    <div class="stat-box">⭐ النقاط<br><strong>{profile['points']}</strong></div>
-                    <div class="stat-box">📊 المستوى<br><strong>{profile['level']}</strong></div>
-                    <div class="stat-box">📅 تاريخ الانضمام<br><strong>{profile['join_date'][:10] if profile['join_date'] else ''}</strong></div>
-                </div>
-                <div class="badges-container">
-                    <h3>🏅 الأوسمة</h3>
-                    <div id="badges-list"></div>
-                </div>
-                <div class="edit-form">
-                    <h3>✏️ تحرير الملف الشخصي</h3>
-                    <textarea id="bio" placeholder="السيرة الذاتية...">{profile['bio']}</textarea>
-                    <input type="text" id="location" placeholder="الموقع" value="{profile['location']}">
-                    <input type="text" id="website" placeholder="الموقع الإلكتروني" value="{profile['website']}">
-                    <button onclick="saveProfile()">💾 حفظ التغييرات</button>
-                </div>
-            </div>
-            <script>
-                const badges={json.dumps(badges)};
-                const badgesDiv=document.getElementById('badges-list');
-                badges.forEach(badge=>{{badgesDiv.innerHTML+=`<span class="badge">${{badge.icon||'🏆'}} ${{badge.name}}</span>`;}});
-                function saveProfile(){{const data={{bio:document.getElementById('bio').value,location:document.getElementById('location').value,website:document.getElementById('website').value}};fetch('/api/update_profile',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}}).then(()=>alert('تم حفظ التغييرات!'));}}
-            </script>
-        </body>
-        </html>
-        ''',
-        content_type='text/html'
-    )
-
-async def web_logout(request):
-    session_id = request.cookies.get('session')
-    if session_id:
-        await db_delete_session(session_id)
-    return web.Response(status=302, headers={'Location': '/'})
-
-# ===================== دوال API =====================
-async def api_get_stats(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    total, banned, posts, groups, channels = await db_stats()
-    active = total - banned
-    return web.json_response({'total_users': total, 'active_users': active, 'banned_users': banned, 'posts_count': posts, 'groups_count': groups, 'channels_count': channels})
-
-async def api_get_users(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    page = int(request.query.get('page', 1))
-    limit = int(request.query.get('limit', 20))
-    offset = (page - 1) * limit
-    async def _get_users(conn):
-        cur = await conn.execute("SELECT u.user_id, u.banned, c.first_name, c.username, up.points, up.level FROM users u LEFT JOIN users_cache c ON u.user_id = c.user_id LEFT JOIN user_profiles up ON u.user_id = up.user_id ORDER BY u.user_id LIMIT ? OFFSET ?", (limit, offset))
-        users = []
-        for row in cur:
-            users.append({'id': row[0], 'banned': row[1] == 1, 'name': row[2] or str(row[0]), 'username': row[3], 'points': row[4] or 0, 'level': row[5] or 1})
-        cur2 = await conn.execute("SELECT COUNT(*) FROM users")
-        total = (await cur2.fetchone())[0]
-        return {'users': users, 'total': total, 'page': page, 'totalPages': (total + limit - 1) // limit}
-    result = await execute_db(_get_users)
-    return web.json_response(result)
-
-async def api_search_users(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    query = request.query.get('q', '')
-    async def _search(conn):
-        cur = await conn.execute("SELECT u.user_id, u.banned, c.first_name, c.username, up.points, up.level FROM users u LEFT JOIN users_cache c ON u.user_id = c.user_id LEFT JOIN user_profiles up ON u.user_id = up.user_id WHERE c.first_name LIKE ? OR c.username LIKE ? OR CAST(u.user_id AS TEXT) LIKE ? LIMIT 50", (f'%{query}%', f'%{query}%', f'%{query}%'))
-        users = []
-        for row in cur:
-            users.append({'id': row[0], 'banned': row[1] == 1, 'name': row[2] or str(row[0]), 'username': row[3], 'points': row[4] or 0, 'level': row[5] or 1})
-        return users
-    users = await execute_db(_search)
-    return web.json_response(users)
-
-async def api_ban_user(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', 0))
-    ban = request.query.get('ban', 'true').lower() == 'true'
-    await db_set_ban(user_id, ban)
-    return web.json_response({'success': True})
-
-async def api_add_points(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', 0))
-    points = int(request.query.get('points', 0))
-    data = await db_get_user_level(user_id)
-    new_points = data['points'] + points
-    level = data['level']
-    for lvl, pts in LEVEL_REQUIREMENTS.items():
-        if new_points >= pts and lvl > level:
-            level = lvl
-    await db_update_user_level(user_id, new_points, level)
-    return web.json_response({'success': True})
-
-async def api_get_contests(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    contests = await db_get_active_contests(20)
-    result = []
-    for contest in contests:
-        participants = await db_get_contest_participants(contest[0], 20)
-        result.append({'id': contest[0], 'title': contest[2], 'description': contest[3], 'prize': contest[4], 'end_date': contest[5], 'participants': len(participants)})
-    return web.json_response(result)
-
-async def api_get_contest(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    contest_id = int(request.match_info['id'])
-    contest = await db_get_contest(contest_id)
-    participants = await db_get_contest_participants(contest_id, 50)
-    return web.json_response({'id': contest[0], 'title': contest[2], 'description': contest[3], 'prize': contest[4], 'end_date': contest[5], 'participants': [{'user_id': p[0], 'name': p[1], 'joined_at': p[3]} for p in participants]})
-
-async def api_create_contest(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    data = await request.json()
-    contest_id = await db_create_contest(MAIN_ADMIN_ID, data['title'], data['description'], data['prize'], datetime.fromisoformat(data['end_date']))
-    return web.json_response({'id': contest_id})
-
-async def api_get_backups(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    local = await list_backups()
-    cloud = await list_cloud_backups()
-    return web.json_response({'local': [{'name': b.name} for b in local], 'cloud': cloud})
-
-async def api_create_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    await create_backup()
-    return web.json_response({'success': True})
-
-async def api_upload_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    backup_path = await create_backup()
-    await upload_backup_to_drive(backup_path)
-    return web.json_response({'success': True})
-
-async def api_restore_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    name = request.query.get('name')
-    backup_path = BACKUP_DIR / name
-    await restore_backup(backup_path)
-    return web.json_response({'success': True})
-
-async def api_restore_cloud_backup(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    name = request.query.get('name')
-    backup_path = await download_backup_from_drive(name)
-    await restore_backup(backup_path)
-    return web.json_response({'success': True})
-
-async def api_get_profile(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    user_id = int(request.query.get('user_id', MAIN_ADMIN_ID))
-    profile = await db_get_user_profile(user_id)
-    badges = await db_get_user_badges(user_id)
-    async def _get_user(conn):
-        cur = await conn.execute("SELECT first_name FROM users_cache WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else str(user_id)
-    name = await execute_db(_get_user)
-    return web.json_response({'id': user_id, 'name': name, 'bio': profile['bio'], 'location': profile['location'], 'website': profile['website'], 'join_date': profile['join_date'], 'points': profile['points'], 'level': profile['level'], 'badges': profile['badges']})
-
-async def api_update_profile(request):
-    if not await check_session(request):
-        return web.Response(status=401, text="Unauthorized")
-    session_id = request.cookies.get('session')
-    session = await db_get_session(session_id)
-    if not session or session['user_data'].get('user') != WEB_USERNAME:
-        return web.Response(status=403, text="Forbidden")
-    data = await request.json()
-    await db_update_user_profile(MAIN_ADMIN_ID, **data)
-    return web.json_response({'success': True})
-
-def setup_web_routes():
-    web_app.router.add_get('/', web_login_page)
-    web_app.router.add_post('/login', web_handle_login)
-    web_app.router.add_get('/dashboard', web_dashboard)
-    web_app.router.add_get('/users', web_users_page)
-    web_app.router.add_get('/contests', web_contests_page)
-    web_app.router.add_get('/backups', web_backups_page)
-    web_app.router.add_get('/profile', web_profile_page)
-    web_app.router.add_get('/logout', web_logout)
-    web_app.router.add_get('/api/stats', api_get_stats)
-    web_app.router.add_get('/api/users', api_get_users)
-    web_app.router.add_get('/api/users/search', api_search_users)
-    web_app.router.add_post('/api/ban_user', api_ban_user)
-    web_app.router.add_post('/api/add_points', api_add_points)
-    web_app.router.add_get('/api/contests', api_get_contests)
-    web_app.router.add_get('/api/contest/{id}', api_get_contest)
-    web_app.router.add_post('/api/create_contest', api_create_contest)
-    web_app.router.add_get('/api/backups', api_get_backups)
-    web_app.router.add_post('/api/create_backup', api_create_backup)
-    web_app.router.add_post('/api/upload_backup', api_upload_backup)
-    web_app.router.add_post('/api/restore_backup', api_restore_backup)
-    web_app.router.add_post('/api/restore_cloud_backup', api_restore_cloud_backup)
-    web_app.router.add_get('/api/profile', api_get_profile)
-    web_app.router.add_post('/api/update_profile', api_update_profile)
-    web_app.router.add_get('/ws', ws_manager.handler)
-
-async def start_web_server():
-    global WEB_PORT
-    setup_web_routes()
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    ports_to_try = [WEB_PORT] + list(range(8080, 8100))
-    for port in ports_to_try:
+# ============================================================
+# دوال الكولباك - دوال إحصائيات القنوات
+# ============================================================
+async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض إحصائيات القناة"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    ch_db_id = int(query.data.split(":")[-1])
+    
+    stats = await db_get_channel_stats(ch_db_id)
+    ch_info = await db_get_channel_info(ch_db_id)
+    channel_name = ch_info[1] if ch_info else "القناة"
+    
+    if stats['total_posts'] == 0:
+        text = f"📊 **إحصائيات {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n📭 لا توجد منشورات بعد"
+        await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 تحديث", callback_data=f"{CallbackData.CHANNEL_STATS_REFRESH}:{ch_db_id}")],
+            [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{ch_db_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+        ]))
+        return
+    
+    text = f"📊 **إحصائيات {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📝 إجمالي المنشورات: {stats['total_posts']}\n"
+    text += f"✅ المنشورة: {stats['published_posts']}\n"
+    text += f"⏳ غير المنشورة: {stats['unpublished_posts']}\n"
+    text += f"👁️ إجمالي المشاهدات: {stats['total_views']}\n"
+    text += f"📊 متوسط المشاهدات: {stats['avg_views']}\n"
+    if stats['last_post_time']:
         try:
-            site = web.TCPSite(runner, WEB_HOST, port)
-            await site.start()
-            logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
-            return
-        except OSError as e:
-            if "address already in use" in str(e):
-                logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
-                continue
-            raise
-    raise RuntimeError("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
+            last_dt = datetime.fromisoformat(stats['last_post_time'])
+            last_mecca = utc_to_mecca(last_dt)
+            text += f"🕐 آخر نشر: {last_mecca.strftime('%Y-%m-%d %H:%M')}\n"
+        except:
+            pass
+    if stats['first_post_time']:
+        try:
+            first_dt = datetime.fromisoformat(stats['first_post_time'])
+            first_mecca = utc_to_mecca(first_dt)
+            text += f"📅 أول نشر: {first_mecca.strftime('%Y-%m-%d %H:%M')}\n"
+        except:
+            pass
+    text += f"⏱️ متوسط الوقت بين المنشورات: {stats['avg_time_between_posts']} ساعة\n"
+    text += f"🕐 أفضل وقت للنشر: {stats['best_publish_hour']}:00\n"
+    day_names = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت']
+    text += f"📅 أفضل يوم للنشر: {day_names[stats['best_publish_day']] if stats['best_publish_day'] < 7 else 'غير محدد'}\n"
+    text += f"📊 المنشورات اليوم: {stats['published_today']}\n"
+    text += f"📊 هذا الأسبوع: {stats['published_this_week']}\n"
+    text += f"📊 هذا الشهر: {stats['published_this_month']}\n"
+    
+    if stats['most_viewed_post']:
+        text += f"\n🏆 **الأكثر مشاهدة:**\n{stats['most_viewed_post']['text']}\n👁️ {stats['most_viewed_post']['views']} مشاهدة\n"
+    if stats['least_viewed_post']:
+        text += f"\n📉 **الأقل مشاهدة:**\n{stats['least_viewed_post']['text']}\n👁️ {stats['least_viewed_post']['views']} مشاهدة\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data=f"{CallbackData.CHANNEL_STATS_REFRESH}:{ch_db_id}")],
+        [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{ch_db_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+    ])
+    await safe_edit_markdown(query, text, reply_markup=keyboard)
 
-# ===================== دوال الكولباك =====================
+async def channel_growth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض رسم بياني لنمو القناة"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    ch_db_id = int(query.data.split(":")[-1])
+    
+    growth = await db_get_channel_growth(ch_db_id, 30)
+    ch_info = await db_get_channel_info(ch_db_id)
+    channel_name = ch_info[1] if ch_info else "القناة"
+    
+    if not growth['dates']:
+        text = f"📈 **نمو {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n📭 لا توجد بيانات كافية"
+        await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+        ]))
+        return
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name='المنشورات', x=growth['dates'], y=growth['counts'], marker_color='#2ecc71'))
+    fig.add_trace(go.Scatter(name='المشاهدات', x=growth['dates'], y=growth['views'], mode='lines+markers', marker_color='#3498db'))
+    fig.update_layout(
+        title=f'نمو قناة {channel_name} - آخر 30 يوم',
+        template='plotly_dark',
+        xaxis_title='التاريخ',
+        yaxis_title='العدد',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+    
+    try:
+        img_bytes = fig.to_image(format='png', width=800, height=400)
+        photo_file = BytesIO(img_bytes)
+        photo_file.name = 'growth.png'
+        await query.message.reply_photo(photo=photo_file, caption=f"📈 **نمو {channel_name}**\n📊 إجمالي المنشورات: {growth['total_posts']}\n👁️ إجمالي المشاهدات: {growth['total_views']}")
+        await query.delete_message()
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+        ])
+        await safe_send_markdown(context.bot, uid, "📊 استخدم الأزرار للتنقل:", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"خطأ في توليد الرسم البياني: {e}")
+        text = f"📈 **نمو {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i in range(min(10, len(growth['dates']))):
+            text += f"📅 {growth['dates'][i]}: {growth['counts'][i]} منشورات, {growth['views'][i]} مشاهدة\n"
+        text += f"\n📊 إجمالي المنشورات: {growth['total_posts']}\n👁️ إجمالي المشاهدات: {growth['total_views']}"
+        await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+        ]))
+
+async def channel_stats_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحديث إحصائيات القناة"""
+    query = update.callback_query
+    await query.answer()
+    ch_db_id = int(query.data.split(":")[-1])
+    await channel_stats_callback(update, context)
+
+async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض ملخص إحصائيات جميع قنوات المستخدم"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    
+    summary = await db_get_channel_stats_summary(uid)
+    if not summary or summary['total_channels'] == 0:
+        text = "📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n📭 لا توجد قنوات مسجلة"
+        await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ إضافة قناة", callback_data=CallbackData.CHANNELS_ADD)],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+        ]))
+        return
+    
+    text = f"📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📡 عدد القنوات: {summary['total_channels']}\n"
+    text += f"✅ القنوات النشطة: {summary['active_channels']}\n"
+    text += f"📝 إجمالي المنشورات: {summary['total_posts']}\n"
+    text += f"✅ المنشورة: {summary['total_published']}\n"
+    text += f"👁️ إجمالي المشاهدات: {summary['total_views']}\n"
+    text += f"📊 متوسط المشاهدات لكل قناة: {summary['avg_views_per_channel']}\n"
+    
+    if summary['best_channel']:
+        text += f"\n🏆 **أفضل قناة:**\n"
+        text += f"📌 {summary['best_channel']['name']}\n"
+        text += f"👁️ {summary['best_channel']['views']} مشاهدة\n"
+        text += f"📝 {summary['best_channel']['posts']} منشور\n"
+        text += f"📊 متوسط المشاهدات: {summary['best_channel']['avg_views']}\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data=CallbackData.MY_CHANNEL_STATS)],
+        [InlineKeyboardButton("📡 قنواتي", callback_data=CallbackData.CHANNELS_MY)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
+    ])
+    await safe_edit_markdown(query, text, reply_markup=keyboard)
+
+# ============================================================
+# معالج الأخطاء العام
+# ============================================================
+async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الأخطاء العام"""
+    try:
+        error = context.error
+        logger.error(f"خطأ غير متوقع: {error}")
+        import traceback
+        traceback.print_exc()
+        
+        if update and update.effective_user:
+            user_id = update.effective_user.id
+            try:
+                await safe_send_markdown(
+                    context.bot,
+                    user_id,
+                    f"❌ **حدث خطأ غير متوقع**\n\n```\n{str(error)[:200]}```\n\n🔄 جرب مرة أخرى لاحقاً"
+                )
+            except:
+                pass
+        
+        # إرسال تقرير للمطور
+        if MAIN_ADMIN_ID:
+            try:
+                error_text = f"🚨 **خطأ في البوت**\n\n"
+                error_text += f"📌 المستخدم: {update.effective_user.id if update and update.effective_user else 'غير معروف'}\n"
+                error_text += f"⚠️ الخطأ: `{str(error)[:300]}`\n"
+                if update and update.effective_message and update.effective_message.text:
+                    error_text += f"📝 الرسالة: `{update.effective_message.text[:100]}`\n"
+                await context.bot.send_message(MAIN_ADMIN_ID, error_text, parse_mode="MarkdownV2")
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"فشل معالج الأخطاء: {e}")
+
+# ============================================================
+# معالج الرسائل في المجموعات
+# ============================================================
+class MessageProcessor:
+    def __init__(self):
+        self.rate_limit = {}
+        self.cooldown = 2
+    
+    async def add_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.effective_chat or not update.effective_user:
+            return
+        
+        chat = update.effective_chat
+        user = update.effective_user
+        chat_id = chat.id
+        user_id = user.id
+        
+        if chat.type not in ['group', 'supergroup']:
+            return
+        
+        if user.is_bot:
+            return
+        
+        # التحقق من القفل
+        if await is_chat_locked(chat_id):
+            try:
+                await update.message.delete()
+                await safe_send_markdown(context.bot, chat_id, f"🔒 المجموعة مقفلة من قبل المشرف", 5)
+            except:
+                pass
+            return
+        
+        # التحقق من صلاحيات البوت
+        bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
+        if not bot_perms['can_act']:
+            return
+        
+        # التحقق من الوضع البطيء
+        if not await db_check_slow_mode(chat_id, user_id):
+            try:
+                await update.message.delete()
+                await safe_send_markdown(context.bot, chat_id, f"⏱️ **وضع بطيء مفعل**\n@{user.username or str(user_id)} يرجى الانتظار قبل إرسال رسالة جديدة", 3)
+            except:
+                pass
+            return
+        
+        settings = await db_get_security_settings(chat_id)
+        text = update.message.text or update.message.caption or ""
+        
+        # التحقق من الكلمات المحظورة
+        if settings.get('delete_banned_words'):
+            banned_word = await db_contains_banned_word(text, chat_id)
+            if banned_word:
+                try:
+                    await update.message.delete()
+                    await safe_send_markdown(context.bot, chat_id, f"🚫 **كلمة محظورة**\n@{user.username or str(user_id)} الكلمة `{banned_word}` غير مسموح بها")
+                except:
+                    pass
+                await self._apply_penalty(context.bot, chat_id, user_id, settings)
+                return
+        
+        # التحقق من الروابط
+        if settings.get('links') and contains_link(text):
+            try:
+                await update.message.delete()
+                await safe_send_markdown(context.bot, chat_id, f"🔗 **الروابط غير مسموح بها**\n@{user.username or str(user_id)}")
+            except:
+                pass
+            await self._apply_penalty(context.bot, chat_id, user_id, settings)
+            return
+        
+        # التحقق من المعرفات
+        if settings.get('mentions') and contains_mention(text):
+            try:
+                await update.message.delete()
+                await safe_send_markdown(context.bot, chat_id, f"@ **المعرفات غير مسموح بها**\n@{user.username or str(user_id)}")
+            except:
+                pass
+            await self._apply_penalty(context.bot, chat_id, user_id, settings)
+            return
+        
+        # ردود المجموعة
+        reply = await db_get_reply(text.lower())
+        if reply:
+            try:
+                await update.message.reply_text(reply)
+            except:
+                pass
+    
+    async def _apply_penalty(self, bot, chat_id, user_id, settings):
+        penalty = settings.get('auto_penalty', 'none')
+        if penalty == 'none':
+            return
+        
+        if penalty == 'kick':
+            await execute_kick(bot, chat_id, user_id, "مخالفة قواعد المجموعة")
+        elif penalty == 'ban':
+            await execute_ban(bot, chat_id, user_id, reason="مخالفة قواعد المجموعة")
+        elif penalty == 'mute':
+            duration = settings.get('auto_mute_duration', 60)
+            await execute_mute(bot, chat_id, user_id, duration, "مخالفة قواعد المجموعة")
+
+message_processor = MessageProcessor()
+
+async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await message_processor.add_message(update, context)
+
+# ============================================================
+# نظام Rate Limiting
+# ============================================================
+class RateLimiter:
+    def __init__(self):
+        self.requests = defaultdict(list)
+        self.lock = asyncio.Lock()
+    
+    async def check_rate_limit(self, user_id: int, action: str, max_requests: int, time_window: int) -> bool:
+        async with self.lock:
+            key = f"{user_id}:{action}"
+            now = time_module.time()
+            self.requests[key] = [t for t in self.requests[key] if now - t < time_window]
+            if len(self.requests[key]) >= max_requests:
+                return False
+            self.requests[key].append(now)
+            return True
+
+rate_limiter = RateLimiter()
+
+# ============================================================
+# دوال التحقق من الصلاحيات
+# ============================================================
+async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """التحقق من أن المستخدم مشرف في المجموعة أو مالك مخفي"""
+    try:
+        # التحقق من المالك المخفي
+        if await db_is_hidden_owner(chat_id, user_id):
+            return True
+        
+        # التحقق من المشرفين العاديين
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ['administrator', 'creator']
+    except:
+        return False
+
+async def send_addition_report(bot, adder, chat, chat_type_name):
+    """إرسال تقرير عند إضافة البوت"""
+    try:
+        if not adder:
+            return
+        text = f"✅ **تم إضافة البوت إلى {chat_type_name}**\n\n"
+        text += f"📌 **المجموعة:** {chat.title or 'بدون اسم'}\n"
+        text += f"🆔 **المعرف:** `{chat.id}`\n"
+        if chat.username:
+            text += f"🔗 **الرابط:** @{chat.username}\n"
+        text += f"👤 **المضيف:** {adder.full_name or adder.first_name or adder.id}\n"
+        text += f"🆔 **معرف المضيف:** `{adder.id}`\n"
+        text += f"📅 **التاريخ:** {mecca_now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        text += "📌 استخدم /syncgroup لتفعيل الميزات المتقدمة"
+        await bot.send_message(MAIN_ADMIN_ID, text, parse_mode="MarkdownV2")
+    except:
+        pass
+
+async def detect_owner_type(bot, chat_id: int) -> dict:
+    """كشف نوع المالك في المجموعة"""
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if admin.status == 'creator':
+                user = admin.user
+                return {
+                    'is_hidden': user.username is None,
+                    'user_id': user.id,
+                    'username': user.username,
+                    'full_name': user.full_name
+                }
+        return {'is_hidden': False, 'user_id': None}
+    except:
+        return {'is_hidden': False, 'user_id': None}
+
+# ============================================================
+# دوال الكولباك الأخرى
+# ============================================================
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4112,6 +3945,22 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=reply_markup
     )
 
+# ============================================================
+# دوال مساعدة للتخزين المؤقت
+# ============================================================
+async def invalidate_user_cache(user_id: int):
+    """إبطال التخزين المؤقت للمستخدم"""
+    try:
+        if user_id in _admin_cache:
+            del _admin_cache[user_id]
+    except:
+        pass
+
+# ============================================================
+# الدوال المتبقية - دوال الكولباك والقوائم والأوامر
+# ============================================================
+# ملاحظة: سيتم إكمال باقي الدوال في الأجزاء التالية
+# نظراً لطول الكود، سيتم إكماله في ردود منفصلة
 async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4318,7 +4167,6 @@ async def banned_words_remove_callback(update: Update, context: ContextTypes.DEF
     context.user_data['state'] = f'waiting_for_remove_group_banned_word_{chat_id}'
     await query.edit_message_text("🗑️ أرسل الكلمة التي تريد حذفها من قائمة المحظورات")
 
-# ===================== دوال المساعدة والدعم =====================
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4366,7 +4214,6 @@ async def support_ticket_callback(update: Update, context: ContextTypes.DEFAULT_
 async def support_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await support_menu_callback(update, context)
 
-# ===================== دوال الاشتراك والتجربة =====================
 async def trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4498,7 +4345,6 @@ async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     await safe_edit_markdown(query, text, reply_markup=keyboard)
 
-# ===================== دوال الإحالات والإشعارات =====================
 async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4635,7 +4481,6 @@ async def reminder_lang_callback(update: Update, context: ContextTypes.DEFAULT_T
     await db_update_reminder_settings(uid, notification_lang=lang)
     await reminder_menu_callback(update, context)
 
-# ===================== دوال الترجمة =====================
 async def translation_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4692,7 +4537,6 @@ async def translation_set_callback(update: Update, context: ContextTypes.DEFAULT
     lang_name = lang_names.get(lang, lang)
     await query.edit_message_text(get_text(uid, 'translation_enabled').format(lang_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]]))
 
-# ===================== دوال النصوص العامة =====================
 async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4737,7 +4581,6 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await query.edit_message_text(get_text(uid, 'welcome'), reply_markup=keyboard)
 
-# ===================== دوال الأمان والإجراءات المتقدمة =====================
 async def security_select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4940,7 +4783,6 @@ async def group_action_unban_callback(update: Update, context: ContextTypes.DEFA
     context.user_data['state'] = f'waiting_for_unban_user_{chat_id}'
     await safe_edit_markdown(query, "🔓 **إلغاء حظر مستخدم**\n\nأرسل معرف المستخدم (user_id) لإلغاء حظره:\n`/unban 123456789`")
 
-# ===================== دوال العقوبات =====================
 async def penalty_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5009,7 +4851,6 @@ async def penalty_mute_duration_callback(update: Update, context: ContextTypes.D
         await db_set_security_settings(chat_id, auto_penalty='mute', auto_mute_duration=minutes)
         await query.edit_message_text(f"✅ تم تعيين العقوبة التلقائية إلى: **كتم {text}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]]))
 
-# ===================== دوال لوحة الأدمن =====================
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5130,6 +4971,7 @@ async def admin_groups_callback(update: Update, context: ContextTypes.DEFAULT_TY
     uid = query.from_user.id
     if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
         await query.answer(get_text(uid, 'admin_only'), show_alert=True)
+        return
     groups = await db_get_all_groups(only_banned=False)
     if not groups:
         await query.edit_message_text("📭 لا توجد مجموعات مسجلة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]]))
@@ -5291,7 +5133,7 @@ async def admin_ram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ram = metrics.get_ram_usage()
     text = f"🖥️ **حالة الرام**\n━━━━━━━━━━━━━━━━━━━━━━\n• الإجمالي: {ram['total']} GB\n• المستخدم: {ram['used']} GB\n• النسبة: {ram['percent']}%"
     await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]]))
-
+    groups = await db_get_all_groups(only_banned=False)
 async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5748,7 +5590,6 @@ async def admin_del_banned_word_callback(update: Update, context: ContextTypes.D
     await query.answer(f"✅ تم حذف {word}", show_alert=True)
     await admin_list_banned_words_callback(update, context)
 
-# ===================== دوال أخرى =====================
 async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5901,7 +5742,6 @@ async def save_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await query.edit_message_text(get_text(uid, 'error'))
 
-# ===================== دوال القوائم والأزرار المساعدة =====================
 def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"), 
@@ -6071,7 +5911,7 @@ async def get_main_keyboard(user_id: int):
         ]
         if active:
             keyboard.append([
-                InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")
+                [InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")]
             ])
         keyboard.extend([
             [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
@@ -6126,11 +5966,9 @@ async def get_main_keyboard(user_id: int):
         keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
     return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
 
-# ===================== معالج فحص الرسائل =====================
 async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message_processor.add_message(update, context)
 
-# ===================== دوال الأوامر =====================
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -6786,8 +6624,7 @@ async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DE
 
 async def successful_payment_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_user is None:
-        return
-    uid = update.effective_user.id
+        uid = update.effective_user.id
     payment = update.message.successful_payment
     try:
         parts = payment.invoice_payload.split('_')
@@ -6797,7 +6634,6 @@ async def successful_payment_callback_handler(update: Update, context: ContextTy
     await db_activate_subscription(uid, days)
     await update.message.reply_text(f"✅ **تم تفعيل اشتراكك لمدة {days} يوماً!**\nشكراً لدعمك ❤️", parse_mode="MarkdownV2")
 
-# ===================== دوال الحلقات الخلفية =====================
 async def auto_publish_loop_improved(bot):
     await asyncio.sleep(5)
     consecutive_errors = 0
@@ -7203,7 +7039,6 @@ async def publish_all_channels_callback_handler(update: Update, context: Context
     ])
     await safe_edit_markdown(query, result_text, reply_markup=keyboard)
 
-# ===================== معالج الرسائل الرئيسي =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -7611,7 +7446,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'cancelled'))
             await main_menu_callback(update, context)
 
-# ===================== دوال الأحداث =====================
 async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.new_chat_members:
         return
@@ -7693,7 +7527,6 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-# ===================== إعداد قاعدة البيانات =====================
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -7812,7 +7645,29 @@ async def init_db_improved():
     init_db_encryption()
     logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات والإحصائيات المتقدمة")
 
-# ===================== الدالة الرئيسية =====================
+# ============================================================
+# تشغيل خادم الويب
+# ============================================================
+async def start_web_server():
+    """تشغيل خادم الويب"""
+    try:
+        ports_to_try = [WEB_PORT, 8080, 8081, 8082, 8083, 8084, 8085]
+        for port in ports_to_try:
+            try:
+                runner = web.AppRunner(web_app)
+                await runner.setup()
+                site = web.TCPSite(runner, WEB_HOST, port)
+                await site.start()
+                logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
+                return
+            except OSError as e:
+                if "address already in use" in str(e):
+                    logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
+                    continue
+                raise
+        logger.error("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
+    except Exception as e:
+        logger.error(f"❌ فشل تشغيل خادم الويب: {e}")
 async def main():
     await init_db_improved()
     if USE_PROXY:
@@ -7836,7 +7691,7 @@ async def main():
         }
         request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
-    # application.add_error_handler(global_error_handler)
+    application.add_error_handler(global_error_handler)
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -8114,3 +7969,7 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+# ============================================================
+# تشغيل خادم الويب
+# ============================================================
