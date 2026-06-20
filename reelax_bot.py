@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.1 - النسخة العالمية المحسنة (المصححة)
+الإصدار: 19.0.2 - النسخة العالمية المحسنة (المصححة بالكامل)
 المطور: @RelaxMgr
 
 الميزات:
@@ -294,7 +294,7 @@ CLOUD_BACKUP_ENABLED = get_env_or_default("CLOUD_BACKUP_ENABLED", False, bool)
 GOOGLE_CREDENTIALS_FILE = get_env_or_default("GOOGLE_CREDENTIALS_FILE", "credentials.json", str)
 TOKEN_FILE = get_env_or_default("TOKEN_FILE", "token.json", str)
 
-WEB_PORT = get_env_or_default("WEB_PORT", 8080, int)
+WEB_PORT = get_env_or_default("WEB_PORT", 10000, int)  # تغيير المنفذ الافتراضي إلى 10000 لـ Render
 WEB_HOST = get_env_or_default("WEB_HOST", "0.0.0.0", str)
 WEB_PASSWORD = get_env_or_default("WEB_PASSWORD", "", str)
 if not WEB_PASSWORD and os.getenv('ENVIRONMENT', 'development') == 'production':
@@ -1120,6 +1120,7 @@ class CallbackData:
     POSTS_DELETE_SINGLE_PREFIX = "posts:delete_single:"
     POSTS_CONFIRM_CLEAR_ALL_PREFIX = "posts:confirm_clear_all:"
     POSTS_CLEAR_ALL_PREFIX = "posts:clear_all:"
+    CONFIRM_RECYCLE = "confirm_recycle:"  # جديد: تأكيد إعادة التدوير
     
     # الإحصائيات
     STATS_PENDING = "stats:pending"
@@ -3990,18 +3991,55 @@ async def clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT
     await main_menu_callback(update, context)
 
 async def recycle_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إعادة تدوير المنشورات - مع تأكيد"""
     query = update.callback_query
     await safe_query_answer(query)
     if query is None:
         return
     uid = query.from_user.id
     active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-    if active:
-        await db_reset_posts_to_unpublished(active, uid)
-        await query.edit_message_text(get_text(uid, 'recycled'))
-    else:
+    if not active:
         await query.edit_message_text("⚠️ اختر قناة أولاً")
-    await main_menu_callback(update, context)
+        return
+    
+    # جلب عدد المنشورات
+    total_posts = await db_get_posts_count(active)
+    published_posts = await db_get_published_count(active)
+    
+    if total_posts == 0:
+        await query.edit_message_text("📭 لا توجد منشورات لإعادة تدويرها")
+        return
+    
+    if published_posts == 0:
+        await query.edit_message_text("📭 لا توجد منشورات منشورة لإعادة تدويرها")
+        return
+    
+    # عرض تأكيد
+    text = f"⚠️ **تأكيد إعادة التدوير**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 إجمالي المنشورات: {total_posts}\n✅ المنشورة: {published_posts}\n⏳ غير المنشورة: {total_posts - published_posts}\n━━━━━━━━━━━━━━━━━━━━━━\n\nسيتم إعادة تعيين **جميع** المنشورات المنشورة إلى حالة غير منشورة.\nهل أنت متأكد؟"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ نعم، إعادة تدوير", callback_data=f"{CallbackData.CONFIRM_RECYCLE}{active}"),
+         InlineKeyboardButton("❌ لا، إلغاء", callback_data=CallbackData.BACK)]
+    ])
+    
+    await safe_edit_markdown(query, text, reply_markup=keyboard)
+
+async def confirm_recycle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأكيد إعادة التدوير"""
+    query = update.callback_query
+    await safe_query_answer(query)
+    if query is None:
+        return
+    uid = query.from_user.id
+    active = int(query.data.split(":")[-1])
+    
+    # تنفيذ إعادة التدوير
+    await db_reset_posts_to_unpublished(active, uid)
+    
+    text = f"♻️ **تم إعادة تدوير المنشورات بنجاح!**\n\n📡 تم إعادة تعيين جميع المنشورات إلى حالة غير منشورة."
+    await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
+    ]))
 
 async def my_pending_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4466,11 +4504,11 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.1 (المصحح)
+📦 **الإصدار:** 19.0.2 (المصحح بالكامل)
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
-• إعادة تدوير المنشورات تلقائياً
+• إعادة تدوير المنشورات تلقائياً مع تأكيد
 • إحصائيات متقدمة للقنوات
 • رسم بياني لنمو القناة
 • نظام أمان متكامل للمجموعات
@@ -6582,11 +6620,11 @@ async def developer_command_handler(update: Update, context: ContextTypes.DEFAUL
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.1 (المصحح)
+📦 **الإصدار:** 19.0.2 (المصحح بالكامل)
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
-• إعادة تدوير المنشورات تلقائياً
+• إعادة تدوير المنشورات تلقائياً مع تأكيد
 • إحصائيات متقدمة للقنوات
 • رسم بياني لنمو القناة
 • نظام أمان متكامل للمجموعات
@@ -8019,7 +8057,7 @@ async def init_db_improved():
 async def start_web_server():
     """تشغيل خادم الويب - متوافق مع Render وجميع البيئات"""
     try:
-        # محاولة استخدام المنفذ من متغيرات البيئة أولاً
+        # Render يحدد PORT في متغيرات البيئة
         port = int(os.getenv('PORT', WEB_PORT))
         host = os.getenv('HOST', WEB_HOST)
         
@@ -8147,6 +8185,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(publish_one_callback, pattern=f"^{CallbackData.POSTS_PUBLISH_ONE}$"))
     application.add_handler(CallbackQueryHandler(my_posts_callback, pattern=f"^{CallbackData.POSTS_MY}$"))
     application.add_handler(CallbackQueryHandler(recycle_posts_callback, pattern=f"^{CallbackData.POSTS_RECYCLE}$"))
+    application.add_handler(CallbackQueryHandler(confirm_recycle_callback, pattern=f"^{CallbackData.CONFIRM_RECYCLE}"))
     application.add_handler(CallbackQueryHandler(delete_single_post_callback, pattern=f"^{CallbackData.POSTS_DELETE_SINGLE_PREFIX}"))
     application.add_handler(CallbackQueryHandler(confirm_clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CONFIRM_CLEAR_ALL_PREFIX}"))
     application.add_handler(CallbackQueryHandler(clear_all_posts_callback, pattern=f"^{CallbackData.POSTS_CLEAR_ALL_PREFIX}"))
@@ -8295,14 +8334,15 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
     application.add_handler(MessageHandler(filters.CAPTION & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
     
-    # ===================== معالجات الرسائل الخاصة =====================
+    # ===================== معالجات الرسائل الخاصة (المصححة) =====================
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler_main))
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.AUDIO & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
-    application.add_handler(MessageHandler(filters.Document & filters.ChatType.PRIVATE, message_handler_main))
+    # ✅ التصحيح: استخدام filters.Document() بدلاً من filters.Document
+    application.add_handler(MessageHandler(filters.Document() & filters.ChatType.PRIVATE, message_handler_main))
     
     # ===================== تعيين الأوامر =====================
     commands = [
@@ -8347,9 +8387,9 @@ async def main():
     asyncio.create_task(broadcast_stats_periodically())
     asyncio.create_task(cleanup_points_cache())
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.1 - المصحح)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.2 - المصحح بالكامل)")
     print(f"✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print(f"   • إعادة تدوير المنشورات تلقائياً")
+    print(f"   • إعادة تدوير المنشورات تلقائياً مع تأكيد")
     print(f"   • إحصائيات متقدمة للقنوات")
     print(f"   • رسم بياني لنمو القناة")
     print(f"   • تحسين الذاكرة باستخدام LRU Cache")
@@ -8368,6 +8408,7 @@ async def main():
     print(f"   • أزرار محسّنة في قائمة المجموعات")
     print(f"   • إصلاح تداخل معالجات الكوبلات")
     print(f"   • توحيد جميع الكوبلات في كلاس واحد")
+    print(f"   • ✅ إصلاح خطأ filters.Document")
     
     try:
         await application.run_polling(
