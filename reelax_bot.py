@@ -1,7 +1,7 @@
 # ============================================================
 # ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-06-18 18:43:35
-# SIGNATURE: fa486cdd7fb2c8d9
+# GENERATED_AT: 2026-06-20 18:29:47
+# SIGNATURE: 041ea28bb84cbb38
 # ============================================================
 # ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
 # لا تشاركه مع أي شخص غير موثوق
@@ -210,6 +210,7 @@ from deep_translator import GoogleTranslator
 from cryptography.fernet import Fernet
 from aiohttp import web, WSMsgType
 import aiohttp
+
 # ===================== واجهة الويب =====================
 web_app = web.Application()
 CSRF_TOKEN = secrets.token_urlsafe(32)
@@ -368,6 +369,8 @@ lock_socket = check_single_instance()
 def clean_text_for_telegram(text: str) -> str:
     if not text:
         return ""
+    if hasattr(text, '__await__'):
+        return ""
     text = re.sub(r'[\u200b\u200c\u200d\u2060\uFEFF\u202a\u202b\u202c\u202d\u202e]', '', text)
     text = text.replace('\ufeff', '').replace('\ufffc', '')
     text = re.sub(r'\s+', ' ', text)
@@ -375,6 +378,8 @@ def clean_text_for_telegram(text: str) -> str:
 
 def escape_markdown_v2(text: str) -> str:
     if not text:
+        return ""
+    if hasattr(text, '__await__'):
         return ""
     text = clean_text_for_telegram(text)
     special_chars = r'_*[]()~`>#+\-=|{}.!'
@@ -386,6 +391,8 @@ def escape_markdown_v2(text: str) -> str:
 async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
     if not text:
         return None
+    if hasattr(text, '__await__'):
+        text = await text
     clean_text = clean_text_for_telegram(text)
     formats = [
         ("MarkdownV2", lambda t: escape_markdown_v2(t)),
@@ -422,6 +429,8 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
 async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
     if not text:
         return None
+    if hasattr(text, '__await__'):
+        text = await text
     clean_text = clean_text_for_telegram(text)
     formats = [
         ("MarkdownV2", lambda t: escape_markdown_v2(t)),
@@ -434,6 +443,8 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
             formatted_text = formatter(clean_text)
             if len(formatted_text) > 4096:
                 formatted_text = formatted_text[:4093] + "..."
+            if query.message.text == formatted_text and query.message.reply_markup == reply_markup:
+                return query.message
             return await query.edit_message_text(
                 text=formatted_text,
                 parse_mode=parse_mode,
@@ -441,6 +452,8 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                 **kwargs
             )
         except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return query.message
             last_error = e
             if "can't parse entities" in str(e).lower():
                 continue
@@ -452,7 +465,12 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
     plain_text = re.sub(r'[*_`\[\]()~>#+\-=|{}.!\\]', '', clean_text)
     if len(plain_text) > 4096:
         plain_text = plain_text[:4093] + "..."
-    return await query.edit_message_text(text=plain_text, reply_markup=reply_markup, **kwargs)
+    try:
+        return await query.edit_message_text(text=plain_text, reply_markup=reply_markup, **kwargs)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return query.message
+        raise
 
 async def safe_send_error(bot, chat_id: int, text: str):
     try:
@@ -571,198 +589,18 @@ security_audit = SecurityAudit()
 def escape_html(text: str) -> str:
     if not text:
         return ""
+    if hasattr(text, '__await__'):
+        return str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-# ===================== دوال الاتصال الآمن =====================
-async def safe_api_call(func, *args, max_retries=3, **kwargs):
-    for attempt in range(max_retries):
-        try:
-            return await func(*args, **kwargs)
-        except (NetworkError, TimeoutError, httpx.ConnectError, httpx.ReadError, TimedOut) as e:
-            if attempt == max_retries - 1:
-                raise
-            wait_time = (attempt + 1) * 2
-            logger.warning(f"⚠️ فشل الاتصال، إعادة محاولة {attempt + 1}/{max_retries} بعد {wait_time} ثانية: {e}")
-            await asyncio.sleep(wait_time)
-    return None
-
-def get_ram_usage():
-    try:
-        import psutil
-        mem = psutil.virtual_memory()
-        return {
-            'total': round(mem.total / (1024**3), 1),
-            'used': round(mem.used / (1024**3), 1),
-            'percent': mem.percent
-        }
-    except:
-        try:
-            with open('/proc/meminfo', 'r') as f:
-                lines = f.readlines()
-            mem_total = 0
-            mem_available = 0
-            for line in lines:
-                if 'MemTotal:' in line:
-                    mem_total = int(line.split()[1]) / (1024 * 1024)
-                if 'MemAvailable:' in line:
-                    mem_available = int(line.split()[1]) / (1024 * 1024)
-            if mem_total > 0:
-                used = mem_total - mem_available
-                percent = (used / mem_total) * 100
-                return {'total': round(mem_total, 1), 'used': round(used, 1), 'percent': round(percent, 1)}
-        except:
-            pass
-        return {'total': 0, 'used': 0, 'percent': 0}
-
-def parse_days_of_week_safe(days_str):
-    if not days_str: 
-        return []
-    try: 
-        return json.loads(days_str)
-    except: 
-        return []
-
-def parse_dates_safe(dates_str):
-    if not dates_str: 
-        return []
-    try: 
-        return json.loads(dates_str)
-    except: 
-        return []
-
-def contains_link(text):
-    patterns = [
-        r'https?://\S+',
-        r'www\.\S+',
-        r't\.me/\S+',
-        r'telegram\.me/\S+',
-        r'\b[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+\S*'
-    ]
-    return any(re.search(p, text, re.IGNORECASE) for p in patterns)
-
-def contains_mention(text):
-    return bool(re.search(r'@\w+', text))
 
 def sanitize_text(text: str, max_length: int = 4096) -> str:
     if not text:
         return ""
+    if hasattr(text, '__await__'):
+        return str(text)[:max_length]
     text = re.sub(r'<script.*?>.*?</script>', '', text, flags=re.DOTALL)
     text = re.sub(r'javascript:', '', text, flags=re.IGNORECASE)
     return text[:max_length]
-
-# ===================== نظام جمع المقاييس =====================
-class MetricsCollector:
-    def __init__(self):
-        self.commands_count = defaultdict(int)
-        self.errors_count = defaultdict(int)
-        self.response_times = []
-        self.start_time = time_module.time()
-    
-    def record_command(self, command: str):
-        self.commands_count[command] += 1
-    
-    def record_error(self, error_type: str):
-        self.errors_count[error_type] += 1
-    
-    def record_response_time(self, seconds: float):
-        self.response_times.append(seconds)
-        if len(self.response_times) > 1000:
-            self.response_times.pop(0)
-    
-    def get_stats(self) -> dict:
-        avg_response = sum(self.response_times) / len(self.response_times) if self.response_times else 0
-        return {
-            'uptime': time_module.time() - self.start_time,
-            'total_commands': sum(self.commands_count.values()),
-            'commands': dict(self.commands_count),
-            'errors': dict(self.errors_count),
-            'avg_response_time': avg_response,
-        }
-    
-    def get_ram_usage(self):
-        return get_ram_usage()
-
-metrics = MetricsCollector()
-
-# ===================== نظام الترجمة المحسن =====================
-class SmartTranslator:
-    def __init__(self):
-        self.cache = {}
-        self.pending = defaultdict(list)
-        self.last_cleanup = time_module.time()
-        self.lock = asyncio.Lock()
-    
-    async def translate(self, text: str, target_lang: str) -> str:
-        if not text or len(text.strip()) == 0:
-            return text
-        
-        lang_map = {'ar': 'ar', 'en': 'en', 'fr': 'fr', 'tr': 'tr', 'zh': 'zh-CN', 'ru': 'ru'}
-        if target_lang not in lang_map:
-            return text
-        target = lang_map[target_lang]
-        
-        cache_key = hashlib.md5(f"{text}_{target}".encode()).hexdigest()
-        async with self.lock:
-            if cache_key in self.cache:
-                return self.cache[cache_key]
-        
-        if text in self.pending:
-            future = asyncio.Future()
-            self.pending[text].append(future)
-            return await future
-        
-        self.pending[text] = []
-        try:
-            translator = GoogleTranslator(source='auto', target=target)
-            translated = await asyncio.to_thread(translator.translate, text)
-            
-            async with self.lock:
-                self.cache[cache_key] = translated
-                if len(self.cache) > 500:
-                    keys = list(self.cache.keys())[:200]
-                    for k in keys:
-                        del self.cache[k]
-            
-            for future in self.pending[text]:
-                if not future.done():
-                    future.set_result(translated)
-            
-            return translated
-        except Exception as e:
-            logger.error(f"خطأ في الترجمة: {e}")
-            for future in self.pending[text]:
-                if not future.done():
-                    future.set_result(text)
-            return text
-        finally:
-            if text in self.pending:
-                del self.pending[text]
-
-smart_translator = SmartTranslator()
-
-async def translate_text(text: str, target_lang: str, source_lang: str = 'auto') -> str:
-    return await smart_translator.translate(text, target_lang)
-
-async def get_user_translation_language(user_id: int) -> str:
-    async with _user_translation_cache_lock:
-        if user_id in user_translation_settings_cache:
-            return user_translation_settings_cache[user_id]
-    async def _get(conn):
-        cur = await conn.execute("SELECT lang FROM user_translation WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 'off'
-    lang = await execute_db(_get)
-    async with _user_translation_cache_lock:
-        user_translation_settings_cache[user_id] = lang
-    return lang
-
-async def set_user_translation_language(user_id: int, lang: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO user_translation (user_id, lang) VALUES (?, ?)", (user_id, lang))
-        await conn.commit()
-    await execute_db(_set)
-    async with _user_translation_cache_lock:
-        user_translation_settings_cache[user_id] = lang
 
 # ===================== نظام اللغة =====================
 user_language = {}
@@ -1210,7 +1048,6 @@ class CallbackData:
     CHANNEL_GROWTH = "channel_growth"
     CHANNEL_STATS_REFRESH = "channel_stats_refresh"
     MY_CHANNEL_STATS = "my_channel_stats"
-
 # ===================== نظام WebSocket =====================
 class WebSocketManager:
     def __init__(self):
@@ -3476,7 +3313,6 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             except:
                 pass
         
-        # إرسال تقرير للمطور
         if MAIN_ADMIN_ID:
             try:
                 error_text = f"🚨 **خطأ في البوت**\n\n"
@@ -3513,7 +3349,6 @@ class MessageProcessor:
         if user.is_bot:
             return
         
-        # التحقق من القفل
         if await is_chat_locked(chat_id):
             try:
                 await update.message.delete()
@@ -3522,12 +3357,10 @@ class MessageProcessor:
                 pass
             return
         
-        # التحقق من صلاحيات البوت
         bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
         if not bot_perms['can_act']:
             return
         
-        # التحقق من الوضع البطيء
         if not await db_check_slow_mode(chat_id, user_id):
             try:
                 await update.message.delete()
@@ -3539,7 +3372,6 @@ class MessageProcessor:
         settings = await db_get_security_settings(chat_id)
         text = update.message.text or update.message.caption or ""
         
-        # التحقق من الكلمات المحظورة
         if settings.get('delete_banned_words'):
             banned_word = await db_contains_banned_word(text, chat_id)
             if banned_word:
@@ -3551,7 +3383,6 @@ class MessageProcessor:
                 await self._apply_penalty(context.bot, chat_id, user_id, settings)
                 return
         
-        # التحقق من الروابط
         if settings.get('links') and contains_link(text):
             try:
                 await update.message.delete()
@@ -3561,7 +3392,6 @@ class MessageProcessor:
             await self._apply_penalty(context.bot, chat_id, user_id, settings)
             return
         
-        # التحقق من المعرفات
         if settings.get('mentions') and contains_mention(text):
             try:
                 await update.message.delete()
@@ -3571,7 +3401,6 @@ class MessageProcessor:
             await self._apply_penalty(context.bot, chat_id, user_id, settings)
             return
         
-        # ردود المجموعة
         reply = await db_get_reply(text.lower())
         if reply:
             try:
@@ -3621,20 +3450,15 @@ rate_limiter = RateLimiter()
 # دوال التحقق من الصلاحيات
 # ============================================================
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """التحقق من أن المستخدم مشرف في المجموعة أو مالك مخفي"""
     try:
-        # التحقق من المالك المخفي
         if await db_is_hidden_owner(chat_id, user_id):
             return True
-        
-        # التحقق من المشرفين العاديين
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['administrator', 'creator']
     except:
         return False
 
 async def send_addition_report(bot, adder, chat, chat_type_name):
-    """إرسال تقرير عند إضافة البوت"""
     try:
         if not adder:
             return
@@ -3652,7 +3476,6 @@ async def send_addition_report(bot, adder, chat, chat_type_name):
         pass
 
 async def detect_owner_type(bot, chat_id: int) -> dict:
-    """كشف نوع المالك في المجموعة"""
     try:
         admins = await bot.get_chat_administrators(chat_id)
         for admin in admins:
@@ -3949,7 +3772,6 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # دوال مساعدة للتخزين المؤقت
 # ============================================================
 async def invalidate_user_cache(user_id: int):
-    """إبطال التخزين المؤقت للمستخدم"""
     try:
         if user_id in _admin_cache:
             del _admin_cache[user_id]
@@ -3959,8 +3781,6 @@ async def invalidate_user_cache(user_id: int):
 # ============================================================
 # الدوال المتبقية - دوال الكولباك والقوائم والأوامر
 # ============================================================
-# ملاحظة: سيتم إكمال باقي الدوال في الأجزاء التالية
-# نظراً لطول الكود، سيتم إكماله في ردود منفصلة
 async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5133,7 +4953,7 @@ async def admin_ram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ram = metrics.get_ram_usage()
     text = f"🖥️ **حالة الرام**\n━━━━━━━━━━━━━━━━━━━━━━\n• الإجمالي: {ram['total']} GB\n• المستخدم: {ram['used']} GB\n• النسبة: {ram['percent']}%"
     await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]]))
-    groups = await db_get_all_groups(only_banned=False)
+
 async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -7668,6 +7488,7 @@ async def start_web_server():
         logger.error("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
     except Exception as e:
         logger.error(f"❌ فشل تشغيل خادم الويب: {e}")
+
 async def main():
     await init_db_improved()
     if USE_PROXY:
@@ -7969,7 +7790,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
-# ============================================================
-# تشغيل خادم الويب
-# ============================================================
