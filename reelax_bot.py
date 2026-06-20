@@ -4504,7 +4504,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.2 (المصحح بالكامل)
+📦 **الإصدار:** 19.0.3 (المصحح بالكامل)
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -6620,7 +6620,7 @@ async def developer_command_handler(update: Update, context: ContextTypes.DEFAUL
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.2 (المصحح بالكامل)
+📦 **الإصدار:** 19.0.3 (المصحح بالكامل)
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -8387,7 +8387,7 @@ async def main():
     asyncio.create_task(broadcast_stats_periodically())
     asyncio.create_task(cleanup_points_cache())
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.2 - المصحح بالكامل)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.3 - المصحح بالكامل)")
     print(f"✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print(f"   • إعادة تدوير المنشورات تلقائياً مع تأكيد")
     print(f"   • إحصائيات متقدمة للقنوات")
