@@ -429,6 +429,12 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
     return await bot.send_message(chat_id=chat_id, text=plain_text, reply_markup=reply_markup, **kwargs)
 
 async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
+    if query.message and query.message.text == text:
+        try:
+            await query.answer("✅ تم التحديث")
+        except:
+            pass
+        return
     if not text:
         return None
     clean_text = clean_text_for_telegram(text)
