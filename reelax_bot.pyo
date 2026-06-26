@@ -1,18 +1,10 @@
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-06-26 00:18:54
-# SIGNATURE: c7e7557d74f5bd14
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
+#```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 18.0.9 - نسخة محسنة مع تحسينات الأمان والأداء
+الإصدار: 18.0.7 - نسخة عالمية (Portable) مع نظام المسابقات المتكامل
 المطور: @RelaxMgr
 """
 
@@ -181,7 +173,6 @@ import gzip
 import io
 import secrets
 import string
-import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
@@ -224,46 +215,9 @@ from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
 
-# ===================== الثوابت الجديدة =====================
-MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 20 * 1024 * 1024))
-MAX_CHANNELS_PER_CYCLE = int(os.getenv('MAX_CHANNELS_PER_CYCLE', '20'))
-PUBLISH_RETRY_DELAY = 300
-
 # ===================== واجهة الويب =====================
 web_app = web.Application()
 CSRF_TOKEN = secrets.token_urlsafe(32)
-
-# ===================== نظام مصادقة واجهة الويب =====================
-import base64
-import hmac
-import hashlib
-
-def check_web_auth(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        return True
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
-    return False
-
-@web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ['/', '/health', '/ws', '/ws_extended']:
-        return await handler(request)
-    if not check_web_auth(request):
-        headers = {'WWW-Authenticate': 'Basic realm="البوت"'}
-        return web.Response(status=401, headers=headers, text="🔒 مطلوب مصادقة")
-    return await handler(request)
-
-web_app.middlewares.append(auth_middleware)
 
 async def root_handler(request):
     return web.Response(text="✅ Bot is alive!", status=200)
@@ -293,188 +247,6 @@ async def health_check_handler(request):
         }, status=503)
 
 web_app.router.add_get('/health', health_check_handler)
-
-# ===================== واجهة المستخدم (لوحة التحكم) =====================
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم البوت</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { text-align: center; margin-bottom: 30px; color: #00d2ff; }
-        .card { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        .card h2 { color: #00d2ff; margin-bottom: 15px; border-bottom: 1px solid #0f3460; padding-bottom: 10px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; }
-        .stat-item { background: #0f3460; padding: 15px; border-radius: 8px; text-align: center; }
-        .stat-item .number { font-size: 2rem; font-weight: bold; color: #00d2ff; }
-        .stat-item .label { font-size: 0.9rem; color: #aaa; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 10px; text-align: right; border-bottom: 1px solid #0f3460; }
-        th { color: #00d2ff; }
-        .btn { background: #00d2ff; color: #1a1a2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        .btn-danger { background: #e74c3c; color: #fff; }
-        .btn-success { background: #2ecc71; color: #fff; }
-        .btn-warning { background: #f39c12; color: #fff; }
-        .btn-sm { padding: 4px 10px; font-size: 0.8rem; }
-        .flex { display: flex; gap: 10px; flex-wrap: wrap; }
-        .status-badge { padding: 2px 10px; border-radius: 20px; font-size: 0.8rem; }
-        .status-active { background: #2ecc71; color: #fff; }
-        .status-banned { background: #e74c3c; color: #fff; }
-        .status-pending { background: #f39c12; color: #fff; }
-        .nav { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
-        .nav a { color: #00d2ff; text-decoration: none; padding: 8px 16px; background: #0f3460; border-radius: 6px; }
-        .nav a:hover { background: #00d2ff; color: #1a1a2e; }
-        .refresh-btn { margin-bottom: 15px; }
-        .json-view { background: #0a0a1a; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; }
-        .form-group { margin-bottom: 15px; }
-        .form-group label { display: block; margin-bottom: 5px; color: #aaa; }
-        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px; border-radius: 6px; border: none; background: #0f3460; color: #eee; }
-        .form-group input:focus, .form-group textarea:focus { outline: 2px solid #00d2ff; }
-        .toast { position: fixed; bottom: 20px; right: 20px; background: #2ecc71; color: #fff; padding: 12px 24px; border-radius: 8px; display: none; z-index: 1000; }
-        .toast.error { background: #e74c3c; }
-        @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr 1fr; } }
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>🤖 لوحة تحكم البوت</h1>
-    <div class="nav">
-        <a href="/dashboard">📊 الرئيسية</a>
-        <a href="/dashboard/channels">📡 القنوات</a>
-        <a href="/dashboard/posts">📝 المنشورات</a>
-        <a href="/dashboard/groups">👥 المجموعات</a>
-        <a href="/dashboard/users">👤 المستخدمين</a>
-        <a href="/dashboard/contests">🏆 المسابقات</a>
-        <a href="/dashboard/settings">⚙️ الإعدادات</a>
-    </div>
-    <div id="content">
-        <div class="card">
-            <h2>📊 إحصائيات سريعة</h2>
-            <div class="stats-grid" id="stats-grid">
-                <div class="stat-item"><div class="number" id="stat-users">...</div><div class="label">المستخدمين</div></div>
-                <div class="stat-item"><div class="number" id="stat-posts">...</div><div class="label">منشورات غير منشورة</div></div>
-                <div class="stat-item"><div class="number" id="stat-channels">...</div><div class="label">القنوات</div></div>
-                <div class="stat-item"><div class="number" id="stat-groups">...</div><div class="label">المجموعات</div></div>
-                <div class="stat-item"><div class="number" id="stat-contests">...</div><div class="label">مسابقات نشطة</div></div>
-                <div class="stat-item"><div class="number" id="stat-uptime">...</div><div class="label">وقت التشغيل</div></div>
-            </div>
-            <button class="btn refresh-btn" onclick="refreshStats()">🔄 تحديث</button>
-        </div>
-        <div class="card">
-            <h2>📋 آخر النشاطات</h2>
-            <div id="recent-activity">جاري التحميل...</div>
-        </div>
-    </div>
-</div>
-<div id="toast" class="toast"></div>
-
-<script>
-    async function fetchJSON(url) {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-    }
-
-    function showToast(msg, isError = false) {
-        const t = document.getElementById('toast');
-        t.textContent = msg;
-        t.className = 'toast' + (isError ? ' error' : '');
-        t.style.display = 'block';
-        setTimeout(() => t.style.display = 'none', 5000);
-    }
-
-    async function refreshStats() {
-        try {
-            const data = await fetchJSON('/api/stats');
-            document.getElementById('stat-users').textContent = data.total_users || 0;
-            document.getElementById('stat-posts').textContent = data.pending_posts || 0;
-            document.getElementById('stat-channels').textContent = data.channels || 0;
-            document.getElementById('stat-groups').textContent = data.groups || 0;
-            document.getElementById('stat-contests').textContent = data.active_contests || 0;
-            const uptime = data.uptime || 0;
-            const hours = Math.floor(uptime / 3600);
-            const minutes = Math.floor((uptime % 3600) / 60);
-            document.getElementById('stat-uptime').textContent = hours + 'h ' + minutes + 'm';
-        } catch(e) {
-            showToast('❌ فشل تحميل الإحصائيات', true);
-        }
-    }
-
-    async function loadActivity() {
-        try {
-            const data = await fetchJSON('/api/activity');
-            let html = '<ul>';
-            data.forEach(item => {
-                html += `<li>${item.time} - ${item.event}</li>`;
-            });
-            html += '</ul>';
-            document.getElementById('recent-activity').innerHTML = html;
-        } catch(e) {
-            document.getElementById('recent-activity').innerHTML = '❌ لا يمكن تحميل النشاطات';
-        }
-    }
-
-    refreshStats();
-    loadActivity();
-    setInterval(refreshStats, 30000);
-</script>
-</body>
-</html>
-"""
-
-# ===================== دوال API للواجهة =====================
-
-async def api_stats_handler(request):
-    try:
-        total, banned, posts, groups, channels = await db_stats()
-        async def _active_contests(conn):
-            now = utc_now().isoformat()
-            cur = await conn.execute("SELECT COUNT(*) FROM contests WHERE status='active' AND end_date > ?", (now,))
-            row = await cur.fetchone()
-            return row[0] if row else 0
-        active_contests = await execute_db(_active_contests)
-        uptime = time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        return web.json_response({
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels,
-            'active_contests': active_contests,
-            'uptime': uptime
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_activity_handler(request):
-    try:
-        async def _get_recent(conn):
-            cur = await conn.execute(
-                "SELECT created_at, action, user_id FROM moderation_log ORDER BY created_at DESC LIMIT 10"
-            )
-            rows = await cur.fetchall()
-            return [{'time': row[0][:16] if row[0] else '?', 'event': f"{row[1]} بواسطة {row[2]}"} for row in rows]
-        activities = await execute_db(_get_recent) or []
-        if not activities:
-            activities = [{'time': datetime.now().strftime('%Y-%m-%d %H:%M'), 'event': 'لا توجد نشاطات مسجلة'}]
-        return web.json_response(activities)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def dashboard_handler(request):
-    return web.Response(text=DASHBOARD_HTML, content_type='text/html')
-
-web_app.router.add_get('/dashboard', dashboard_handler)
-web_app.router.add_get('/api/stats', api_stats_handler)
-web_app.router.add_get('/api/activity', api_activity_handler)
-
-# ===================== دوال إضافية للواجهة =====================
 
 import aiofiles
 import qrcode
@@ -601,78 +373,35 @@ def get_encryption_key() -> bytes:
         except:
             pass
     
-    password = os.getenv('DB_ENCRYPTION_PASSWORD')
-    if password and len(password) >= 8:
-        salt = os.urandom(16)
-        key = derive_key_from_password(password, salt)
-        with open(key_file, 'wb') as f:
-            f.write(key)
-        with open(salt_file, 'wb') as f:
-            f.write(salt)
-        print("✅ تم إنشاء مفتاح التشفير من متغير البيئة")
-        return key
+    import getpass
+    print("🔐 لإعداد تشفير قاعدة البيانات، أدخل كلمة مرور قوية:")
+    password = getpass.getpass("كلمة المرور: ")
+    confirm = getpass.getpass("تأكيد كلمة المرور: ")
     
-    try:
-        import getpass
-        if sys.stdin.isatty():
-            print("🔐 لإعداد تشفير قاعدة البيانات، أدخل كلمة مرور قوية:")
-            password = getpass.getpass("كلمة المرور: ")
-            confirm = getpass.getpass("تأكيد كلمة المرور: ")
-            
-            if password != confirm:
-                print("❌ كلمات المرور غير متطابقة!")
-                sys.exit(1)
-            
-            if len(password) < 8:
-                print("❌ كلمة المرور يجب أن تكون 8 أحرف على الأقل!")
-                sys.exit(1)
-            
-            salt = os.urandom(16)
-            key = derive_key_from_password(password, salt)
-            
-            with open(key_file, 'wb') as f:
-                f.write(key)
-            with open(salt_file, 'wb') as f:
-                f.write(salt)
-            
-            print("✅ تم إنشاء مفتاح التشفير وحفظه بشكل آمن")
-            return key
-        else:
-            print("⚠️ بيئة غير تفاعلية و DB_ENCRYPTION_PASSWORD غير معيّنة!")
-            print("📌 سيتم استخدام مفتاح عشوائي مؤقت (غير آمن للإنتاج)")
-            key = Fernet.generate_key()
-            with open(key_file, 'wb') as f:
-                f.write(key)
-            return key
-    except Exception as e:
-        print(f"⚠️ فشل في الحصول على كلمة المرور: {e}")
-        print("📌 سيتم استخدام مفتاح عشوائي (غير مستحسن للإنتاج)")
-        key = Fernet.generate_key()
-        with open(key_file, 'wb') as f:
-            f.write(key)
-        return key
+    if password != confirm:
+        print("❌ كلمات المرور غير متطابقة!")
+        sys.exit(1)
+    
+    if len(password) < 8:
+        print("❌ كلمة المرور يجب أن تكون 8 أحرف على الأقل!")
+        sys.exit(1)
+    
+    salt = os.urandom(16)
+    key = derive_key_from_password(password, salt)
+    
+    with open(key_file, 'wb') as f:
+        f.write(key)
+    with open(salt_file, 'wb') as f:
+        f.write(salt)
+    
+    print("✅ تم إنشاء مفتاح التشفير وحفظه بشكل آمن")
+    return key
 
 ENCRYPTION_KEY = get_encryption_key()
 cipher_suite = Fernet(ENCRYPTION_KEY)
 
-# ===================== مفتاح منفصل للنسخ الاحتياطي =====================
-def get_backup_encryption_key() -> bytes:
-    backup_key_file = DATA_PATH / ".backup_key"
-    if backup_key_file.exists():
-        try:
-            with open(backup_key_file, 'rb') as f:
-                return f.read()
-        except:
-            pass
-    
-    new_key = Fernet.generate_key()
-    with open(backup_key_file, 'wb') as f:
-        f.write(new_key)
-    print("✅ تم توليد مفتاح جديد لتشفير النسخ الاحتياطية")
-    return new_key
-
-BACKUP_ENCRYPTION_KEY = get_backup_encryption_key()
-BACKUP_CIPHER = Fernet(BACKUP_ENCRYPTION_KEY)
+BACKUP_KEY = hashlib.sha256(TOKEN.encode()).digest()
+BACKUP_CIPHER = Fernet(base64.urlsafe_b64encode(BACKUP_KEY[:32]))
 
 # ===================== متغيرات تشغيل الخلفية =====================
 _background_tasks_started = False
@@ -699,6 +428,7 @@ _user_translation_cache_lock = asyncio.Lock()
 
 # ===================== تخزين مؤقت محسن للترجمة =====================
 class TimedLRUCache:
+    """تخزين مؤقت مع انتهاء صلاحية وحد أقصى للحجم."""
     def __init__(self, maxsize=200, ttl=3600):
         self.cache = {}
         self.maxsize = maxsize
@@ -766,26 +496,6 @@ def escape_markdown_v2(text: str) -> str:
     text = re.sub(r'(\d+)\.', r'\1\.', text)
     return text
 
-def sanitize_text(text: str, max_length: int = 4096, allow_tags: list = None) -> str:
-    if not text:
-        return ""
-    text = clean_text_for_telegram(text)
-    try:
-        if allow_tags is None:
-            allow_tags = ['b', 'i', 'u', 's', 'a', 'code', 'pre', 'strong', 'em']
-        cleaned = bleach.clean(
-            text,
-            tags=allow_tags,
-            attributes={'a': ['href', 'title']},
-            styles=[],
-            strip=True
-        )
-    except:
-        cleaned = text
-    if len(cleaned) > max_length:
-        cleaned = cleaned[:max_length]
-    return cleaned
-
 ERROR_MESSAGES = {
     "Forbidden": "🔒 البوت ليس لديه صلاحية للقيام بهذا الإجراء",
     "BadRequest": "⚠️ طلب غير صحيح، تأكد من البيانات المدخلة",
@@ -814,7 +524,9 @@ def log_error(error: Exception, context: dict = None, severity: str = "ERROR") -
 async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
     if not text:
         return None
-    clean_text = sanitize_text(text)
+    
+    clean_text = clean_text_for_telegram(text)
+    
     try:
         escaped = escape_markdown_v2(clean_text)
         if len(escaped) > 4096:
@@ -854,8 +566,10 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
 async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
     if not query or not query.message:
         return None
+    
     current_text = query.message.text or ""
     current_reply_markup = query.message.reply_markup
+    
     if current_text == text:
         if reply_markup is None and current_reply_markup is None:
             try:
@@ -870,9 +584,12 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                 except:
                     pass
                 return None
+    
     if not text:
         return None
-    clean_text = sanitize_text(text)
+    
+    clean_text = clean_text_for_telegram(text)
+    
     try:
         escaped = escape_markdown_v2(clean_text)
         if len(escaped) > 4096:
@@ -969,15 +686,11 @@ def to_naive(dt):
     return dt
 
 def mecca_to_utc(mecca_dt):
-    if mecca_dt is None:
-        return None
     if hasattr(mecca_dt, 'tzinfo') and mecca_dt.tzinfo is not None:
         mecca_dt = mecca_dt.replace(tzinfo=None)
     return mecca_dt - timedelta(hours=3)
 
 def utc_to_mecca(utc_dt):
-    if utc_dt is None:
-        return None
     if hasattr(utc_dt, 'tzinfo') and utc_dt.tzinfo is not None:
         utc_dt = utc_dt.replace(tzinfo=None)
     return utc_dt + timedelta(hours=3)
@@ -995,13 +708,8 @@ class CustomFormatter(logging.Formatter):
                     msg = msg.replace(key_str, "[ENCRYPTION_KEY_HIDDEN]")
             except:
                 pass
-        if BACKUP_ENCRYPTION_KEY and isinstance(BACKUP_ENCRYPTION_KEY, bytes):
-            try:
-                key_str = BACKUP_ENCRYPTION_KEY.decode()
-                if key_str in msg:
-                    msg = msg.replace(key_str, "[BACKUP_KEY_HIDDEN]")
-            except:
-                pass
+        if BACKUP_KEY and BACKUP_KEY.hex() in msg:
+            msg = msg.replace(BACKUP_KEY.hex(), "[BACKUP_KEY_HIDDEN]")
         return msg
 
 from logging.handlers import RotatingFileHandler
@@ -1050,24 +758,6 @@ class SecurityAudit:
                 f.write(json.dumps(log_entry) + "\n")
         except:
             pass
-        
-        # إرسال إلى قناة التقارير
-        try:
-            log_channel = await db_get_log_channel_id()
-            if log_channel:
-                try:
-                    from telegram import Bot
-                    bot = Bot(token=TOKEN)
-                    await bot.send_message(
-                        chat_id=log_channel,
-                        text=f"🔐 **تقرير أمني**\n\n📌 الحدث: {event_type}\n👤 المستخدم: `{user_id}`\n📊 التفاصيل: {json.dumps(details, default=str)[:200]}\n⚠️ الخطورة: {severity}\n🕐 الوقت: {mecca_now().strftime('%Y-%m-%d %H:%M:%S')}",
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.warning(f"فشل إرسال التقرير إلى القناة: {e}")
-        except:
-            pass
-        
         return True
 
 security_audit = SecurityAudit()
@@ -1215,7 +905,41 @@ cache_manager = CacheManager()
 
 # ===================== دوال التشفير المحسنة =====================
 def init_db_encryption():
-    pass
+    global ENCRYPTION_KEY
+    db_key_file = DATA_PATH / ".db_key"
+    db_salt_file = DATA_PATH / ".db_salt"
+    
+    if db_key_file.exists() and db_salt_file.exists():
+        try:
+            with open(db_key_file, 'rb') as f:
+                ENCRYPTION_KEY = f.read()
+            return
+        except:
+            pass
+    
+    import getpass
+    print("🔐 لإعداد تشفير قاعدة البيانات، أدخل كلمة مرور قوية:")
+    password = getpass.getpass("كلمة المرور: ")
+    confirm = getpass.getpass("تأكيد كلمة المرور: ")
+    
+    if password != confirm:
+        print("❌ كلمات المرور غير متطابقة!")
+        sys.exit(1)
+    
+    if len(password) < 8:
+        print("❌ كلمة المرور يجب أن تكون 8 أحرف على الأقل!")
+        sys.exit(1)
+    
+    salt = os.urandom(16)
+    key = derive_key_from_password(password, salt)
+    
+    with open(db_key_file, 'wb') as f:
+        f.write(key)
+    with open(db_salt_file, 'wb') as f:
+        f.write(salt)
+    
+    ENCRYPTION_KEY = key
+    logger.info("✅ تم إنشاء مفتاح تشفير قاعدة البيانات")
 
 def encrypt_file_stream(src: Path, dst: Path, cipher: Fernet, chunk_size: int = 64*1024):
     with open(src, 'rb') as f_in, open(dst, 'wb') as f_out:
@@ -1332,15 +1056,19 @@ class AsyncTranslator:
     async def translate(self, text: str, target: str) -> str:
         if not text or len(text.strip()) == 0:
             return text
+        
         cache_key = hashlib.md5(f"{text}_{target}".encode()).hexdigest()
         cached = await _translation_cache.get(cache_key)
         if cached:
             return cached
+        
         if text in self.pending:
             future = asyncio.Future()
             self.pending[text].append(future)
             return await future
+        
         self.pending[text] = []
+        
         try:
             session = await self.get_session()
             url = "https://translate.googleapis.com/translate_a/single"
@@ -1354,10 +1082,13 @@ class AsyncTranslator:
             async with session.get(url, params=params, timeout=10) as resp:
                 data = await resp.json()
                 translated = data[0][0][0] if data and data[0] and data[0][0] else text
+                
                 await _translation_cache.set(cache_key, translated)
+                
                 for future in self.pending[text]:
                     if not future.done():
                         future.set_result(translated)
+                
                 return translated
         except Exception as e:
             logger.error(f"خطأ في الترجمة: {e}")
@@ -2019,168 +1750,6 @@ class WebSocketManager:
 ws_manager = WebSocketManager()
 web_app.router.add_get('/ws', ws_manager.handler)
 
-# ===================== WebSocket Extended =====================
-class WebSocketExtendedHandler:
-    def __init__(self):
-        self.connections = {}
-        self.subscriptions = defaultdict(set)
-        self.lock = asyncio.Lock()
-    
-    async def handle_auth(self, ws, token: str):
-        if token == WEB_SECRET_KEY:
-            self.connections[token] = ws
-            await ws.send_str(json.dumps({'type': 'auth', 'status': 'success'}))
-            return True
-        await ws.send_str(json.dumps({'type': 'auth', 'status': 'failed'}))
-        return False
-    
-    async def handle_subscribe(self, ws, channel: str):
-        async with self.lock:
-            self.subscriptions[channel].add(ws)
-            await ws.send_str(json.dumps({'type': 'subscribe', 'channel': channel, 'status': 'success'}))
-    
-    async def handle_unsubscribe(self, ws, channel: str):
-        async with self.lock:
-            if channel in self.subscriptions:
-                self.subscriptions[channel].discard(ws)
-            await ws.send_str(json.dumps({'type': 'unsubscribe', 'channel': channel, 'status': 'success'}))
-    
-    async def broadcast(self, channel: str, data: dict):
-        async with self.lock:
-            if channel in self.subscriptions:
-                message = json.dumps({'type': 'broadcast', 'channel': channel, 'data': data})
-                for ws in list(self.subscriptions[channel]):
-                    try:
-                        await ws.send_str(message)
-                    except:
-                        self.subscriptions[channel].discard(ws)
-    
-    async def get_stats(self) -> dict:
-        total, banned, posts, groups, channels = await db_stats()
-        return {
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        }
-    
-    async def get_logs(self, limit: int = 50) -> list:
-        logs = []
-        try:
-            with open(LOG_PATH, 'r') as f:
-                lines = f.readlines()
-                for line in lines[-limit:]:
-                    logs.append(line.strip())
-        except:
-            pass
-        return logs
-    
-    async def get_users(self, limit: int = 50) -> list:
-        users = await db_get_all_users()
-        return users[:limit]
-    
-    async def get_channels(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_channels(user_id)
-        return await db_get_all_user_channels_no_limit()
-    
-    async def get_groups(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_user_groups(user_id)
-        return await db_get_all_groups()
-    
-    async def get_contests(self, limit: int = 10) -> list:
-        return await db_get_active_contests_with_participants(limit)
-    
-    async def notify(self, user_id: int, message: str):
-        try:
-            from telegram import Bot
-            bot = Bot(token=TOKEN)
-            await bot.send_message(chat_id=user_id, text=message)
-        except:
-            pass
-
-ws_extended = WebSocketExtendedHandler()
-
-async def websocket_extended_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    
-    token = request.query.get('token')
-    if not token:
-        await ws.close()
-        return ws
-    
-    authenticated = await ws_extended.handle_auth(ws, token)
-    if not authenticated:
-        await ws.close()
-        return ws
-    
-    try:
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    action = data.get('action')
-                    
-                    if action == 'subscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_subscribe(ws, channel)
-                    
-                    elif action == 'unsubscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_unsubscribe(ws, channel)
-                    
-                    elif action == 'get_stats':
-                        stats = await ws_extended.get_stats()
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_stats', 'data': stats}))
-                    
-                    elif action == 'get_logs':
-                        logs = await ws_extended.get_logs(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_logs', 'data': logs}))
-                    
-                    elif action == 'get_users':
-                        users = await ws_extended.get_users(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_users', 'data': users}))
-                    
-                    elif action == 'get_channels':
-                        channels = await ws_extended.get_channels(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_channels', 'data': channels}))
-                    
-                    elif action == 'get_groups':
-                        groups = await ws_extended.get_groups(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_groups', 'data': groups}))
-                    
-                    elif action == 'get_contests':
-                        contests = await ws_extended.get_contests(limit=data.get('limit', 10))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_contests', 'data': contests}))
-                    
-                    elif action == 'notify':
-                        user_id = data.get('user_id')
-                        message = data.get('message')
-                        if user_id and message:
-                            await ws_extended.notify(user_id, message)
-                            await ws.send_str(json.dumps({'type': 'response', 'action': 'notify', 'status': 'sent'}))
-                    
-                    elif action == 'ping':
-                        await ws.send_str(json.dumps({'type': 'pong'}))
-                    
-                except Exception as e:
-                    await ws.send_str(json.dumps({'type': 'error', 'message': str(e)}))
-    
-    except Exception as e:
-        logger.error(f"خطأ في WebSocket: {e}")
-    
-    finally:
-        for channel in list(ws_extended.subscriptions):
-            ws_extended.subscriptions[channel].discard(ws)
-    
-    return ws
-
-web_app.router.add_get('/ws_extended', websocket_extended_handler)
 # ===================== دوال قاعدة البيانات الأساسية =====================
 async def db_register_user(user_id: int) -> bool:
     async def _register(conn):
@@ -2310,24 +1879,8 @@ async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> in
 
 async def db_get_channels(user_id: int):
     async def _get(conn):
-        try:
-            cur = await conn.execute("SELECT id, channel_id, channel_name, banned FROM user_channels WHERE user_id=? ORDER BY id", (user_id,))
-            rows = await cur.fetchall()
-            safe_rows = []
-            for row in rows:
-                try:
-                    if len(row) >= 4:
-                        ch_id = row[0] if row[0] is not None else 0
-                        ch_tele_id = row[1] if row[1] is not None else "unknown"
-                        ch_name = row[2] if row[2] is not None else ch_tele_id
-                        banned = row[3] if row[3] is not None else 0
-                        safe_rows.append((ch_id, ch_tele_id, ch_name, banned))
-                except:
-                    continue
-            return safe_rows
-        except Exception as e:
-            logger.error(f"خطأ في جلب قنوات المستخدم {user_id}: {e}")
-            return []
+        cur = await conn.execute("SELECT id, channel_id, channel_name, banned FROM user_channels WHERE user_id=? ORDER BY id", (user_id,))
+        return await cur.fetchall()
     return await execute_db(_get)
 
 async def db_get_channel_info(channel_db_id: int):
@@ -2367,6 +1920,7 @@ async def db_save_posts(channel_db_id: int, posts: list) -> int:
         values = []
         for text_content, media_type, media_file_id in posts:
             values.append((channel_db_id, sanitize_text(text_content), media_type, media_file_id, utc_now_iso()))
+        
         await conn.executemany(
             "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
             values
@@ -2412,7 +1966,7 @@ async def db_get_published_count(channel_db_id: int) -> int:
 
 async def db_reset_all_posts_to_unpublished(channel_db_id: int) -> int:
     async def _reset(conn):
-        await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
+        await conn.execute("UPDATE posts SET published=0 WHERE channel_db_id=?", (channel_db_id,))
         await conn.commit()
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
         row = await cur.fetchone()
@@ -2426,7 +1980,7 @@ async def db_should_auto_recycle(channel_db_id: int) -> bool:
 
 async def db_reset_posts_to_unpublished(channel_db_id: int, user_id: int = None):
     async def _reset(conn):
-        await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
+        await conn.execute("UPDATE posts SET published=0 WHERE channel_db_id=?", (channel_db_id,))
         await conn.commit()
     return await execute_db(_reset)
 
@@ -2653,14 +2207,14 @@ async def db_get_security_settings(chat_id: int):
                 'mentions': row[1] == 1,
                 'warn': row[2] == 1,
                 'slow_mode': row[3] == 1,
-                'slow_mode_seconds': row[4] if row[4] is not None else 5,
+                'slow_mode_seconds': row[4] if row[4] else 5,
                 'welcome_enabled': row[5] == 1,
                 'welcome_text': row[6] if row[6] else "مرحباً {user} في {chat} 🤍",
                 'goodbye_enabled': row[7] == 1,
                 'goodbye_text': row[8] if row[8] else "وداعاً {user} 👋",
                 'delete_banned_words': row[9] == 1,
                 'auto_penalty': row[10] if row[10] else 'none',
-                'auto_mute_duration': row[11] if row[11] is not None else 60
+                'auto_mute_duration': row[11] if row[11] else 60
             }
             if CACHETOOLS_AVAILABLE:
                 _security_cache[chat_id] = settings
@@ -2750,7 +2304,7 @@ async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
     settings = await db_get_security_settings(chat_id)
     if not settings['slow_mode']:
         return True
-    seconds = settings.get('slow_mode_seconds', 5)
+    seconds = settings['slow_mode_seconds']
     async def _check(conn):
         cur = await conn.execute("SELECT message_time FROM user_messages WHERE chat_id=? AND user_id=?", (chat_id, user_id))
         row = await cur.fetchone()
@@ -2900,12 +2454,7 @@ async def db_update_next_publish_date(channel_db_id: int):
         last_time = datetime.fromisoformat(last_row[0]) if last_row else utc_now()
         schedule_type = schedule['type']
         publish_time_str = schedule.get('publish_time', '00:00')
-        if ':' not in publish_time_str:
-            publish_time_str = '00:00'
-        try:
-            hour, minute = map(int, publish_time_str.split(':'))
-        except:
-            hour, minute = 0, 0
+        hour, minute = map(int, publish_time_str.split(':'))
         next_date = None
         now = utc_now()
         if schedule_type == 'interval_minutes':
@@ -3351,70 +2900,45 @@ async def db_set_allowed_sendcode_user(user_id: int) -> None:
         await conn.commit()
     return await execute_db(_set)
 
-# ===================== دوال المسابقات (مصححة بالكامل) =====================
-async def db_get_active_contests_with_participants(limit: int = 10) -> list:
-    try:
-        async def _get(conn):
-            now = utc_now().isoformat()
-            try:
-                cur = await conn.execute(
-                    """SELECT c.id, c.title, c.description, c.prize, c.end_date,
-                              COALESCE((SELECT COUNT(*) FROM contest_participants cp WHERE cp.contest_id = c.id), 0) as participants
-                       FROM contests c
-                       WHERE c.status = 'active' AND c.end_date > ?
-                       ORDER BY c.end_date ASC LIMIT ?""",
-                    (now, limit)
-                )
-                rows = await cur.fetchall()
-                result = []
-                for row in rows:
-                    try:
-                        if hasattr(row, 'keys'):
-                            result.append((
-                                row['id'],
-                                row['title'],
-                                row['description'],
-                                row['prize'],
-                                row['end_date'],
-                                row['participants']
-                            ))
-                        else:
-                            result.append((row[0], row[1], row[2], row[3], row[4], row[5] if len(row) > 5 else 0))
-                    except:
-                        continue
-                return result
-            except Exception as e:
-                logger.error(f"خطأ في تنفيذ الاستعلام: {e}")
-                return []
-        return await execute_db(_get)
-    except Exception as e:
-        logger.error(f"خطأ في db_get_active_contests_with_participants: {e}")
-        return []
-
+# ===================== دوال المسابقات =====================
 async def db_create_contest(creator_id: int, title: str, description: str, prize: str, end_date: datetime) -> int:
-    try:
-        async def _create(conn):
-            if not isinstance(end_date, datetime):
-                raise ValueError("end_date must be datetime object")
-            end_date_str = end_date.isoformat()
-            created_at_str = utc_now_iso()
-            cur = await conn.execute(
-                """INSERT INTO contests (creator_id, title, description, prize, end_date, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'active', ?) RETURNING id""",
-                (creator_id, title, description, prize, end_date_str, created_at_str)
-            )
-            row = await cur.fetchone()
-            await conn.commit()
-            return row[0] if row else None
-        contest_id = await execute_db(_create)
-        if contest_id:
-            logger.info(f"✅ تم إنشاء مسابقة جديدة (ID: {contest_id}) بواسطة المستخدم {creator_id}")
-        else:
-            logger.warning(f"⚠️ فشل إنشاء المسابقة، لم يتم إرجاع ID للمستخدم {creator_id}")
-        return contest_id
-    except Exception as e:
-        logger.error(f"❌ خطأ في db_create_contest: {e}")
-        raise
+    async def _create(conn):
+        cur = await conn.execute(
+            """INSERT INTO contests (creator_id, title, description, prize, end_date, status, created_at)
+               VALUES (?, ?, ?, ?, ?, 'active', ?) RETURNING id""",
+            (creator_id, title, description, prize, end_date.isoformat(), utc_now_iso())
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+        return row[0] if row else None
+    return await execute_db(_create)
+
+async def db_get_active_contests(limit: int = 10) -> list:
+    async def _get(conn):
+        now = utc_now().isoformat()
+        cur = await conn.execute(
+            """SELECT id, title, description, prize, end_date, creator_id, created_at
+               FROM contests WHERE status = 'active' AND end_date > ? ORDER BY end_date ASC LIMIT ?""",
+            (now, limit)
+        )
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+async def db_get_active_contests_with_participants(limit: int = 10) -> list:
+    async def _get(conn):
+        now = utc_now().isoformat()
+        cur = await conn.execute(
+            """SELECT c.id, c.title, c.description, c.prize, c.end_date,
+                      COUNT(cp.id) as participants
+               FROM contests c
+               LEFT JOIN contest_participants cp ON c.id = cp.contest_id
+               WHERE c.status = 'active' AND c.end_date > ?
+               GROUP BY c.id
+               ORDER BY c.end_date ASC LIMIT ?""",
+            (now, limit)
+        )
+        return await cur.fetchall()
+    return await execute_db(_get)
 
 async def db_get_contest(contest_id: int) -> dict | None:
     async def _get(conn):
@@ -3445,6 +2969,16 @@ async def db_participate_in_contest(user_id: int, contest_id: int, answer: str =
         except sqlite3.IntegrityError:
             return False
     return await execute_db(_participate)
+
+async def db_get_participants_count(contest_id: int) -> int:
+    async def _count(conn):
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM contest_participants WHERE contest_id = ?",
+            (contest_id,)
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+    return await execute_db(_count)
 
 async def db_get_user_participation(user_id: int, contest_id: int) -> dict | None:
     async def _get(conn):
@@ -3603,6 +3137,13 @@ def contains_link(text):
 
 def contains_mention(text):
     return bool(re.search(r'@\w+', text))
+
+def sanitize_text(text: str, max_length: int = 4096) -> str:
+    if not text:
+        return ""
+    text = re.sub(r'<script.*?>.*?</script>', '', text, flags=re.DOTALL)
+    text = re.sub(r'javascript:', '', text, flags=re.IGNORECASE)
+    return text[:max_length]
 
 # ===================== نظام جمع المقاييس =====================
 class MetricsCollector:
@@ -4252,99 +3793,52 @@ async def build_days_keyboard(uid, context):
 
 async def get_main_keyboard(user_id: int):
     channels = await db_get_channels(user_id)
-    active = None
-    if channels:
-        try:
-            active = await db_get_active_channel(user_id)
-            if active is not None:
-                channel_exists = False
-                for ch in channels:
-                    if ch[0] == active:
-                        channel_exists = True
-                        break
-                if not channel_exists:
-                    active = channels[0][0]
-                    await db_set_active_channel(user_id, active)
-            else:
-                active = channels[0][0]
-                await db_set_active_channel(user_id, active)
-        except:
-            active = channels[0][0] if channels else None
+    active = await db_get_active_channel(user_id)
     cnt = 0
     ch_display = get_text(user_id, 'no_channels')
-    if active is not None:
-        try:
-            cnt = await db_unpublished_count(active)
-            ch_info = await db_get_channel_info(active)
-            if ch_info and len(ch_info) >= 2:
-                ch_tele_id = ch_info[0] if ch_info[0] is not None else "unknown"
-                ch_name = ch_info[1] if ch_info[1] is not None else ch_tele_id
-                ch_display = f"{ch_name} ({ch_tele_id})"
-        except:
-            ch_display = get_text(user_id, 'no_channels')
-    my_groups = 0
-    try:
-        my_groups = await db_get_user_groups_count(user_id)
-    except:
-        my_groups = 0
-    has_sub = False
-    try:
-        has_sub = await db_has_active_subscription(user_id)
-    except:
-        has_sub = False
+    if channels:
+        if active is None or active not in [ch[0] for ch in channels]:
+            active = channels[0][0]
+            await db_set_active_channel(user_id, active)
+        cnt = await db_unpublished_count(active)
+        ch_info = await db_get_channel_info(active)
+        ch_display = f"{ch_info[1]} ({ch_info[0]})" if ch_info else get_text(user_id, 'no_channels')
+    my_groups = await db_get_user_groups_count(user_id)
+    has_sub = await db_has_active_subscription(user_id)
     sub_text = get_text(user_id, 'subscribed') if has_sub else get_text(user_id, 'not_subscribed')
-    auto_status = False
-    try:
-        auto_status = await db_auto_status(user_id)
-    except:
-        auto_status = False
-    auto_text = get_text(user_id, 'auto_on') if auto_status else get_text(user_id, 'auto_off')
+    auto_text = get_text(user_id, 'auto_on') if await db_auto_status(user_id) else get_text(user_id, 'auto_off')
     title = get_text(user_id, 'main_title').format(BOT_NAME, user_id, my_groups, sub_text, ch_display, cnt, auto_text)
-    updates_channel = None
-    try:
-        updates_channel = await db_get_updates_channel()
-    except:
-        updates_channel = None
+    updates_channel = await db_get_updates_channel()
     updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
     keyboard = []
     if not channels:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)])
-        if active is not None:
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")])
-    else:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15), InlineKeyboardButton(get_text(user_id, 'publish_one'), callback_data=CallbackData.POSTS_PUBLISH_ONE)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_posts_btn'), callback_data=CallbackData.POSTS_MY), InlineKeyboardButton(get_text(user_id, 'recycle'), callback_data=CallbackData.POSTS_RECYCLE)])
-        keyboard.append([InlineKeyboardButton(f"{get_text(user_id, 'stats_btn')} ({cnt})", callback_data=CallbackData.STATS_PENDING), InlineKeyboardButton(get_text(user_id, 'my_stats_btn'), callback_data=CallbackData.STATS_FULL)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY), InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)])
-        if active is not None:
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'schedule_btn'), callback_data=f"{CallbackData.SCHEDULE_MENU_PREFIX}{active}"), InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_channels_summary'), callback_data=CallbackData.MY_CHANNEL_STATS), InlineKeyboardButton(get_text(user_id, 'my_rank_btn'), callback_data="rank")])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'top_10_btn'), callback_data="top"), InlineKeyboardButton(get_text(user_id, 'schedule_post_btn'), callback_data="schedule_post")])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)])
-    if updates_url:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    is_admin = False
-    try:
-        is_admin = (user_id == MAIN_ADMIN_ID) or (await is_bot_admin(user_id))
-    except:
-        is_admin = False
-    if is_admin:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
-    valid_keyboard = []
-    for row in keyboard:
-        if row and all(isinstance(btn, InlineKeyboardButton) for btn in row):
-            valid_keyboard.append(row)
-    if not valid_keyboard:
-        valid_keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
-    return InlineKeyboardMarkup(valid_keyboard), title, active
+        keyboard = [
+            [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
+             InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
+        ]
+        if active:
+            keyboard.append([
+                [InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")]
+            ])
+        keyboard.extend([
+            [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
+             InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
+            [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
+             InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
+            [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
+             InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
+             InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)],
+            [InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)],
+        ])
+        if updates_url:
+            keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
+        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
+        if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
+            keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
+        return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
     keyboard = [
         [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
          InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
@@ -4381,461 +3875,162 @@ async def get_main_keyboard(user_id: int):
         keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
     return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
 
-# ===================== دوال إحصائيات القنوات =====================
-async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    try:
-        channel_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('channel_stats_id')
-    except:
-        channel_db_id = context.user_data.get('channel_stats_id')
-    if not channel_db_id:
-        if query:
-            await query.edit_message_text("⚠️ لم يتم تحديد القناة.")
-        else:
-            await update.message.reply_text("⚠️ لم يتم تحديد القناة.")
-        return
-    channels = await db_get_channels(user_id)
-    if not any(ch[0] == channel_db_id for ch in channels):
-        if query:
-            await query.answer("❌ هذه القناة ليست لك", show_alert=True)
-        else:
-            await update.message.reply_text("❌ هذه القناة ليست لك")
-        return
-    stats = await db_get_channel_stats(channel_db_id)
-    ch_info = await db_get_channel_info(channel_db_id)
-    channel_name = ch_info[1] if ch_info else "القناة"
-    if stats['total_posts'] == 0:
-        text = f"📊 **إحصائيات {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n📭 لا توجد منشورات بعد"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 تحديث", callback_data=f"{CallbackData.CHANNEL_STATS_REFRESH}:{channel_db_id}")],
-            [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{channel_db_id}")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-        ])
-        if query:
-            await safe_edit_markdown(query, text, reply_markup=keyboard)
-        else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-        return
-    text = f"📊 **إحصائيات {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📝 إجمالي المنشورات: {stats['total_posts']}\n"
-    text += f"✅ المنشورة: {stats['published_posts']}\n"
-    text += f"⏳ غير المنشورة: {stats['unpublished_posts']}\n"
-    text += f"👁️ إجمالي المشاهدات: {stats['total_views']}\n"
-    text += f"📊 متوسط المشاهدات: {stats['avg_views']}\n"
-    if stats['last_post_time']:
-        try:
-            last_dt = datetime.fromisoformat(stats['last_post_time'])
-            last_mecca = utc_to_mecca(last_dt)
-            text += f"🕐 آخر نشر: {last_mecca.strftime('%Y-%m-%d %H:%M')}\n"
-        except:
-            pass
-    if stats['first_post_time']:
-        try:
-            first_dt = datetime.fromisoformat(stats['first_post_time'])
-            first_mecca = utc_to_mecca(first_dt)
-            text += f"📅 أول نشر: {first_mecca.strftime('%Y-%m-%d %H:%M')}\n"
-        except:
-            pass
-    text += f"⏱️ متوسط الوقت بين المنشورات: {stats['avg_time_between_posts']} ساعة\n"
-    text += f"🕐 أفضل وقت للنشر: {stats['best_publish_hour']}:00\n"
-    day_names = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت']
-    text += f"📅 أفضل يوم للنشر: {day_names[stats['best_publish_day']] if stats['best_publish_day'] < 7 else 'غير محدد'}\n"
-    text += f"📊 المنشورات اليوم: {stats['published_today']}\n"
-    text += f"📊 هذا الأسبوع: {stats['published_this_week']}\n"
-    text += f"📊 هذا الشهر: {stats['published_this_month']}\n"
-    if stats['most_viewed_post']:
-        text += f"\n🏆 **الأكثر مشاهدة:**\n{stats['most_viewed_post']['text']}\n👁️ {stats['most_viewed_post']['views']} مشاهدة\n"
-    if stats['least_viewed_post']:
-        text += f"\n📉 **الأقل مشاهدة:**\n{stats['least_viewed_post']['text']}\n👁️ {stats['least_viewed_post']['views']} مشاهدة\n"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 تحديث", callback_data=f"{CallbackData.CHANNEL_STATS_REFRESH}:{channel_db_id}")],
-        [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{channel_db_id}")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-    ])
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
-async def channel_growth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    try:
-        channel_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('channel_stats_id')
-    except:
-        channel_db_id = context.user_data.get('channel_stats_id')
-    if not channel_db_id:
-        if query:
-            await query.edit_message_text("⚠️ لم يتم تحديد القناة.")
-        else:
-            await update.message.reply_text("⚠️ لم يتم تحديد القناة.")
-        return
-    channels = await db_get_channels(user_id)
-    if not any(ch[0] == channel_db_id for ch in channels):
-        if query:
-            await query.answer("❌ هذه القناة ليست لك", show_alert=True)
-        else:
-            await update.message.reply_text("❌ هذه القناة ليست لك")
-        return
-    growth = await db_get_channel_growth(channel_db_id, days=30)
-    ch_info = await db_get_channel_info(channel_db_id)
-    channel_name = ch_info[1] if ch_info else "القناة"
-    if not growth['dates']:
-        text = f"📈 **نمو {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\nلا توجد بيانات كافية لعرض النمو."
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.CHANNEL_STATS}:{channel_db_id}")]
-        ])
-        if query:
-            await safe_edit_markdown(query, text, reply_markup=keyboard)
-        else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-        return
-    text = f"📈 **نمو {channel_name} (آخر 30 يوم)**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📝 إجمالي المنشورات في الفترة: {growth['total_posts']}\n"
-    text += f"👁️ إجمالي المشاهدات: {growth['total_views']}\n"
-    text += f"📅 عدد الأيام: {growth['total_days']}\n"
-    text += f"📊 متوسط المنشورات يومياً: {growth['total_posts'] / max(1, growth['total_days']):.1f}\n"
-    text += f"📊 متوسط المشاهدات يومياً: {growth['total_views'] / max(1, growth['total_days']):.1f}\n"
-    text += "\n📅 **التفاصيل اليومية:**\n"
-    for i, (date, count, views) in enumerate(zip(growth['dates'], growth['counts'], growth['views'])):
-        if i >= 10:
-            break
-        text += f"• {date}: {count} منشورات، {views} مشاهدة\n"
-    if len(growth['dates']) > 10:
-        text += f"\n... و {len(growth['dates']) - 10} أيام أخرى"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data=f"{CallbackData.CHANNEL_STATS}:{channel_db_id}")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-    ])
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
-async def channel_stats_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await channel_stats_callback(update, context)
-
-async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    summary = await db_get_channel_stats_summary(user_id)
-    if not summary:
-        text = "📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n📭 لا توجد قنوات مسجلة."
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ إضافة قناة", callback_data=CallbackData.CHANNELS_ADD)],
-            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-        ])
-        if query:
-            await safe_edit_markdown(query, text, reply_markup=keyboard)
-        else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-        return
-    text = f"📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📡 عدد القنوات: {summary['total_channels']}\n"
-    text += f"✅ القنوات النشطة: {summary['active_channels']}\n"
-    text += f"📝 إجمالي المنشورات: {summary['total_posts']}\n"
-    text += f"✅ المنشورة: {summary['total_published']}\n"
-    text += f"👁️ إجمالي المشاهدات: {summary['total_views']}\n"
-    text += f"📊 متوسط المشاهدات لكل قناة: {summary['avg_views_per_channel']}\n"
-    if summary['best_channel']:
-        text += f"\n🏆 **أفضل قناة:**\n"
-        text += f"• {summary['best_channel']['name']}\n"
-        text += f"• مشاهدات: {summary['best_channel']['views']}\n"
-        text += f"• منشورات: {summary['best_channel']['posts']}\n"
-        text += f"• متوسط المشاهدات: {summary['best_channel']['avg_views']}\n"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📡 عرض القنوات", callback_data=CallbackData.CHANNELS_MY)],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-    ])
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
 # ===================== دوال المسابقات - المعالجات =====================
-async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة المسابقات النشطة (نسخة آمنة بالكامل)."""
-    try:
-        if not update or not update.effective_user:
-            logger.error("update أو effective_user غير موجود")
-            return
-        
-        user_id = update.effective_user.id
-        
-        contests = []
-        try:
-            contests = await db_get_active_contests_with_participants(limit=10)
-        except Exception as e:
-            logger.error(f"خطأ في جلب المسابقات: {e}")
-            contests = []
-        
-        if not contests:
-            text = get_text(user_id, 'no_contests')
-            if update.callback_query:
-                try:
-                    await safe_edit_markdown(update.callback_query, text)
-                except:
-                    await update.callback_query.edit_message_text(text)
-            else:
-                await safe_send_markdown(context.bot, user_id, text)
-            return
-        
-        text = get_text(user_id, 'contests_active').format("")
-        keyboard = []
-        
-        for contest in contests:
-            try:
-                if len(contest) < 6:
-                    continue
-                cid, title, desc, prize, end_date, participants = contest
-                
-                try:
-                    end_dt = datetime.fromisoformat(end_date)
-                    days_left = (end_dt - utc_now()).days
-                    time_left = get_text(user_id, 'contest_time_left').format(days_left) if days_left > 0 else get_text(user_id, 'contest_expired_label')
-                except:
-                    time_left = "📅 تاريخ غير صحيح"
-                    days_left = 0
-                
-                try:
-                    participated = await db_get_user_participation(user_id, cid)
-                except Exception as e:
-                    logger.error(f"خطأ في db_get_user_participation للمستخدم {user_id} والمسابقة {cid}: {e}")
-                    participated = None
-                
-                status_icon = "✅" if participated else "📝"
-                
-                text += f"📌 **{title or 'بدون عنوان'}**\n"
-                text += f"📝 {(desc or '')[:100]}{'...' if len(desc or '') > 100 else ''}\n"
-                text += f"🎁 الجائزة: {prize or 'غير محددة'}\n"
-                text += f"👥 المشاركون: {participants or 0}\n"
-                text += f"🕐 {time_left}\n"
-                text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                
-                if not participated and days_left > 0:
-                    keyboard.append([InlineKeyboardButton(
-                        f"{status_icon} شارك في {title[:20]}",
-                        callback_data=f"{CallbackData.CONTEST_JOIN_PREFIX}{cid}"
-                    )])
-            except Exception as e:
-                logger.error(f"خطأ في معالجة مسابقة: {e}")
-                continue
-        
-        keyboard.append([InlineKeyboardButton("🏆 الفائزون السابقون", callback_data=CallbackData.CONTEST_WINNERS)])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
-        
-        if update.callback_query:
-            try:
-                await safe_edit_markdown(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
-            except:
-                await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
-            
-    except Exception as e:
-        error_id = log_error(e, {
-            'user_id': update.effective_user.id if update and update.effective_user else None,
-            'chat_id': update.effective_chat.id if update and update.effective_chat else None,
-        })
-        msg = f"❌ حدث خطأ أثناء تحميل المسابقات (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى لاحقاً."
-        try:
-            if update.callback_query:
-                await safe_edit_markdown(update.callback_query, msg)
-            else:
-                await safe_send_markdown(context.bot, user_id, msg)
-        except:
-            try:
-                if update.callback_query:
-                    await update.callback_query.edit_message_text("❌ حدث خطأ أثناء تحميل المسابقات.")
-                else:
-                    await context.bot.send_message(chat_id=user_id, text="❌ حدث خطأ أثناء تحميل المسابقات.")
-            except:
-                pass
-
 async def contests_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر المسابقات."""
-    if update.callback_query:
-        try:
-            await update.callback_query.answer()
-        except:
-            pass
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
     await contests_command_handler(update, context)
 
-async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر المشاركة في مسابقة (نسخة آمنة)."""
-    query = update.callback_query
-    if not query:
-        return
-    
-    try:
-        await query.answer()
-    except:
-        pass
-    
+async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    contests = await db_get_active_contests_with_participants(limit=10)
     
-    try:
-        contest_id = int(query.data.split(":")[-1])
-    except (ValueError, IndexError):
-        try:
-            await query.edit_message_text("❌ بيانات غير صالحة.")
-        except:
-            pass
+    if not contests:
+        if isinstance(update, Update) and update.callback_query:
+            await safe_edit_markdown(update.callback_query, get_text(user_id, 'no_contests'))
+        else:
+            await safe_send_markdown(context.bot, user_id, get_text(user_id, 'no_contests'))
         return
     
-    try:
-        contest = await db_get_contest(contest_id)
-        if not contest:
-            try:
-                await query.edit_message_text("❌ المسابقة غير موجودة.")
-            except:
-                pass
-            return
-        
-        if contest['status'] != 'active':
-            try:
-                await query.edit_message_text("❌ هذه المسابقة غير متاحة حالياً.")
-            except:
-                pass
-            return
-        
+    text = get_text(user_id, 'contests_active').format("")
+    keyboard = []
+    
+    for contest in contests:
+        cid, title, desc, prize, end_date, participants = contest
         try:
-            end_date = datetime.fromisoformat(contest['end_date'])
-            if end_date < utc_now():
-                try:
-                    await query.edit_message_text("❌ هذه المسابقة قد انتهت.")
-                except:
-                    pass
-                return
+            end_dt = datetime.fromisoformat(end_date)
+            end_mecca = utc_to_mecca(end_dt)
+            days_left = (end_dt - utc_now()).days
+            time_left = get_text(user_id, 'contest_time_left').format(days_left) if days_left > 0 else get_text(user_id, 'contest_expired_label')
         except:
-            pass
+            time_left = "📅 تاريخ غير صحيح"
         
-        participation = await db_get_user_participation(user_id, contest_id)
-        if participation:
-            try:
-                await query.edit_message_text(get_text(user_id, 'contest_participated'))
-            except:
-                pass
-            return
+        participated = await db_get_user_participation(user_id, cid)
+        status_icon = "✅" if participated else "📝"
         
-        context.user_data['contest_join_id'] = contest_id
-        context.user_data['state'] = UserState.WAITING_CONTEST_ANSWER
+        text += f"📌 **{title}**\n"
+        text += f"📝 {desc[:100]}{'...' if len(desc) > 100 else ''}\n"
+        text += f"🎁 الجائزة: {prize}\n"
+        text += f"👥 المشاركون: {participants}\n"
+        text += f"🕐 {time_left}\n"
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         
-        msg = (
-            f"📝 **المشاركة في المسابقة: {contest['title']}**\n\n"
-            f"📌 أرسل إجابتك (نص) أو اضغط /skip للمشاركة بدون إجابة.\n"
-            f"⏳ يمكنك تعديل إجابتك قبل انتهاء المسابقة."
-        )
-        try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
-        except:
-            await query.edit_message_text(msg)
-            
-    except Exception as e:
-        error_id = log_error(e, {'user_id': user_id, 'contest_id': contest_id})
-        try:
-            await query.edit_message_text(f"❌ حدث خطأ أثناء المشاركة (الرمز: `{error_id}`).")
-        except:
-            pass
+        if not participated and days_left > 0:
+            keyboard.append([InlineKeyboardButton(
+                f"{status_icon} شارك في {title[:20]}",
+                callback_data=f"{CallbackData.CONTEST_JOIN_PREFIX}{cid}"
+            )])
+    
+    keyboard.append([InlineKeyboardButton("🏆 الفائزون السابقون", callback_data=CallbackData.CONTEST_WINNERS)])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
+    
+    if isinstance(update, Update) and update.callback_query:
+        await safe_edit_markdown(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    contest_id = int(query.data.split(":")[-1])
+    
+    contest = await db_get_contest(contest_id)
+    if not contest or contest['status'] != 'active':
+        await query.edit_message_text("❌ هذه المسابقة غير متاحة حالياً.")
+        return
+    
+    participation = await db_get_user_participation(user_id, contest_id)
+    if participation:
+        await query.edit_message_text(get_text(user_id, 'contest_participated'))
+        return
+    
+    context.user_data['contest_join_id'] = contest_id
+    context.user_data['state'] = UserState.WAITING_CONTEST_ANSWER
+    
+    await query.edit_message_text(
+        f"📝 **المشاركة في المسابقة: {contest['title']}**\n\n"
+        f"📌 أرسل إجابتك (نص) أو اضغط /skip للمشاركة بدون إجابة.\n"
+        f"⏳ يمكنك تعديل إجابتك قبل انتهاء المسابقة."
+    )
 
 async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    try:
-        if query:
-            await query.answer()
-    except:
-        pass
+    await query.answer()
     user_id = update.effective_user.id
-    try:
-        winners = await db_get_contest_winners(limit=10)
-        if not winners:
-            if query:
-                try:
-                    await query.edit_message_text(get_text(user_id, 'no_winners'))
-                except:
-                    pass
-            else:
-                await safe_send_markdown(context.bot, user_id, get_text(user_id, 'no_winners'))
-            return
-        text = get_text(user_id, 'contest_winners_title')
-        for contest_id, title, prize, winner_id, announced_at in winners:
-            try:
-                winner = await context.bot.get_chat(winner_id)
-                winner_name = winner.first_name or str(winner_id)
-            except:
-                winner_name = str(winner_id)
-            try:
-                announced_dt = datetime.fromisoformat(announced_at)
-                announced_mecca = utc_to_mecca(announced_dt)
-                date_str = announced_mecca.strftime("%Y-%m-%d")
-            except:
-                date_str = announced_at[:10] if announced_at else "?"
-            text += f"📌 **{title}**\n🎁 {prize}\n👤 {winner_name}\n📅 {date_str}\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 تحديث", callback_data=CallbackData.CONTEST_WINNERS)],
-            [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.CONTESTS_BACK)]
-        ])
-        if query:
-            try:
-                await safe_edit_markdown(query, text, reply_markup=keyboard)
-            except:
-                await query.edit_message_text(text, reply_markup=keyboard)
-        else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-    except Exception as e:
-        error_id = log_error(e, {'user_id': user_id})
-        if query:
-            try:
-                await query.edit_message_text(f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
-            except:
-                pass
-        else:
-            await safe_send_markdown(context.bot, user_id, f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
+    
+    winners = await db_get_contest_winners(limit=10)
+    if not winners:
+        await query.edit_message_text(get_text(user_id, 'no_winners'))
+        return
+    
+    text = get_text(user_id, 'contest_winners_title')
+    for contest_id, title, prize, winner_id, announced_at in winners:
+        try:
+            winner = await context.bot.get_chat(winner_id)
+            winner_name = winner.first_name or str(winner_id)
+        except:
+            winner_name = str(winner_id)
+        try:
+            announced_dt = datetime.fromisoformat(announced_at)
+            announced_mecca = utc_to_mecca(announced_dt)
+            date_str = announced_mecca.strftime("%Y-%m-%d")
+        except:
+            date_str = announced_at[:10] if announced_at else "?"
+        text += f"📌 **{title}**\n🎁 {prize}\n👤 {winner_name}\n📅 {date_str}\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data=CallbackData.CONTEST_WINNERS)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.CONTESTS_BACK)]
+    ])
+    await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def contests_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await contests_command_handler(update, context)
 
 async def create_contest_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != MAIN_ADMIN_ID and not await is_bot_admin(user_id):
+    if not await is_bot_admin(user_id) and user_id != MAIN_ADMIN_ID:
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
+    
     context.user_data['state'] = UserState.WAITING_CONTEST_TITLE
     await update.message.reply_text(get_text(user_id, 'create_contest_title'))
 
 async def declare_winner_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != MAIN_ADMIN_ID and not await is_bot_admin(user_id):
+    if not await is_bot_admin(user_id) and user_id != MAIN_ADMIN_ID:
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
+    
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(get_text(user_id, 'declare_winner_usage'))
         return
+    
     try:
         contest_id = int(args[0])
         winner_id = int(args[1])
     except ValueError:
         await update.message.reply_text("❌ معرف غير صالح.")
         return
+    
     contest = await db_get_contest(contest_id)
     if not contest:
         await update.message.reply_text(get_text(user_id, 'contest_not_found'))
         return
+    
     if contest['status'] != 'active':
         await update.message.reply_text(get_text(user_id, 'contest_expired'))
         return
+    
     participation = await db_get_user_participation(winner_id, contest_id)
     if not participation:
         await update.message.reply_text(get_text(user_id, 'contest_not_participant'))
         return
+    
     success = await db_set_contest_winner(contest_id, winner_id)
     if success:
         await update.message.reply_text(
@@ -4854,75 +4049,17 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
         await update.message.reply_text(get_text(user_id, 'contest_declared_error'))
 
 async def admin_create_contest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر إنشاء مسابقة من لوحة الأدمن (نسخة مستقرة)."""
     query = update.callback_query
-    if query:
-        try:
-            await query.answer()
-        except:
-            pass
-    
-    user_id = update.effective_user.id
-    
-    if user_id != MAIN_ADMIN_ID and not await is_bot_admin(user_id):
-        if query:
-            try:
-                await query.edit_message_text("🔒 هذا الأمر للمشرفين فقط!")
-            except:
-                pass
-        return
-    
-    context.user_data['state'] = UserState.WAITING_CONTEST_TITLE
-    msg = "📝 **إنشاء مسابقة جديدة**\n\nأرسل **عنوان** المسابقة:"
-    
-    if query:
-        try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
-        except:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
-            except:
-                pass
-    else:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
-        except:
-            pass
+    await query.answer()
+    await create_contest_command_handler(update, context)
 
 async def admin_declare_winner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر إعلان فائز من لوحة الأدمن (نسخة مستقرة)."""
     query = update.callback_query
-    if query:
-        try:
-            await query.answer()
-        except:
-            pass
-    
-    user_id = update.effective_user.id
-    
-    if user_id != MAIN_ADMIN_ID and not await is_bot_admin(user_id):
-        if query:
-            try:
-                await query.edit_message_text("🔒 هذا الأمر للمشرفين فقط!")
-            except:
-                pass
-        return
-    
-    msg = "📝 **إعلان فائز في مسابقة**\n\nاستخدم الأمر:\n`/declare_winner معرف_المسابقة معرف_المستخدم`\n\nمثال: `/declare_winner 5 123456789`\n\n📌 لعرض المسابقات النشطة استخدم `/contests`"
-    
-    if query:
-        try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
-        except:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
-            except:
-                pass
-    else:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
-        except:
-            pass
+    await query.answer()
+    await query.edit_message_text(
+        "📝 استخدم الأمر:\n`/declare_winner معرف_المسابقة معرف_المستخدم`\n\n"
+        "لعرض المسابقات النشطة استخدم /contests"
+    )
 
 # ===================== دوال معالجة اللغة والكولباك النصية =====================
 async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5025,20 +4162,6 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(get_text(uid, 'welcome'), reply_markup=keyboard)
     elif data == CallbackData.CONTESTS_MENU:
         await contests_command_handler(update, context)
-
-# ===================== دوال المساعدة =====================
-async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
-    ])
-    if query:
-        await safe_edit_markdown(query, get_text(user_id, 'help'), reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, get_text(user_id, 'help'), reply_markup=keyboard)
 
 # ===================== دوال التجربة والاشتراك =====================
 async def trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5154,7 +4277,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 18.0.9
+📦 **الإصدار:** 18.0.7
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -5174,11 +4297,6 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • Health Check متقدم
 • مراقبة الذاكرة التلقائية
 • نظام المسابقات المتكامل
-• واجهة ويب متكاملة
-• حماية واجهة الويب بكلمة مرور
-• مفتاح تشفير منفصل للنسخ الاحتياطي
-• تنقية النصوص باستخدام bleach
-• إدارة المهام بـ Semaphore
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -6458,7 +5576,9 @@ async def admin_change_interval_callback(update: Update, context: ContextTypes.D
     current_min = current // 60
     context.user_data['state'] = UserState.WAITING_INTERVAL_MINUTES
     context.user_data['admin_interval'] = True
-    msg = f"⏱️ **وقت النشر العام الحالي:** {current_min} دقيقة\n\n📌 **ملاحظة:** هذا الإعداد يؤثر على الفاصل الزمني بين دورات النشر.\nأرسل العدد الجديد من الدقائق (الحد الأدنى 1 دقيقة، الحد الأقصى 1440 دقيقة = 24 ساعة):"
+    msg = (f"⏱️ **وقت النشر العام الحالي:** {current_min} دقيقة\n\n"
+           f"📌 **ملاحظة:** هذا الإعداد يؤثر على الفاصل الزمني بين دورات النشر.\n"
+           f"أرسل العدد الجديد من الدقائق (الحد الأدنى 1 دقيقة، الحد الأقصى 1440 دقيقة = 24 ساعة):")
     if query:
         await safe_edit_markdown(query, msg)
     else:
@@ -6643,7 +5763,6 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         await query.edit_message_text("📨 جاري الإرسال... يرجى الانتظار")
     else:
         await update.message.reply_text("📨 جاري الإرسال... يرجى الانتظار")
-    
     async def _get_active_users(conn):
         cur = await conn.execute("SELECT user_id FROM users WHERE banned = 0")
         return [row[0] for row in await cur.fetchall()]
@@ -6656,21 +5775,14 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         else:
             await update.message.reply_text("📭 لا يوجد مستخدمين نشطين لإرسال الرسالة لهم.")
         return
-    
-    sem = asyncio.Semaphore(20)
-    async def send_one(user_id):
-        async with sem:
-            try:
-                await safe_send_markdown(context.bot, user_id, broadcast_text)
-                return True
-            except:
-                return False
-    
-    tasks = [send_one(uid) for uid in users]
-    results = await asyncio.gather(*tasks)
-    sent = sum(results)
-    failed = len(results) - sent
-    
+    for i, user_id in enumerate(users):
+        try:
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await safe_send_markdown(context.bot, user_id, broadcast_text)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"فشل إرسال broadcast للمستخدم {user_id}: {e}")
     context.user_data.pop('broadcast_text', None)
     context.user_data.pop('state', None)
     msg = f"✅ **تم إرسال الرسالة**\n\n📨 تم الإرسال إلى: {sent} مستخدم\n❌ فشل الإرسال إلى: {failed} مستخدم"
@@ -7100,110 +6212,84 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
 
 # ===================== دوال المسابقات - استقبال الحالات =====================
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState) -> bool:
-    """معالج حالات إنشاء المسابقة (مع تحسينات الأمان والتحقق)."""
-    try:
-        user_id = update.effective_user.id
-        text = update.message.text.strip() if update.message.text else ""
-        
-        if state == UserState.WAITING_CONTEST_TITLE:
-            if not text:
-                await update.message.reply_text("❌ الرجاء إدخال عنوان صحيح.")
-                return True
-            context.user_data['contest_title'] = text
-            context.user_data['state'] = UserState.WAITING_CONTEST_DESCRIPTION
-            await update.message.reply_text(get_text(user_id, 'create_contest_description'))
-            return True
-        
-        elif state == UserState.WAITING_CONTEST_DESCRIPTION:
-            if not text:
-                await update.message.reply_text("❌ الرجاء إدخال وصف صحيح.")
-                return True
-            context.user_data['contest_description'] = text
-            context.user_data['state'] = UserState.WAITING_CONTEST_PRIZE
-            await update.message.reply_text(get_text(user_id, 'create_contest_prize'))
-            return True
-        
-        elif state == UserState.WAITING_CONTEST_PRIZE:
-            if not text:
-                await update.message.reply_text("❌ الرجاء إدخال جائزة صحيحة.")
-                return True
-            context.user_data['contest_prize'] = text
-            context.user_data['state'] = UserState.WAITING_CONTEST_END_DATE
-            await update.message.reply_text(get_text(user_id, 'create_contest_end_date'))
-            return True
-        
-        elif state == UserState.WAITING_CONTEST_END_DATE:
-            try:
-                end_date = datetime.strptime(text, "%Y-%m-%d %H:%M")
-                now_mecca = mecca_now()
-                if end_date <= now_mecca:
-                    await update.message.reply_text(get_text(user_id, 'contest_date_future'))
-                    return True
-                end_date_utc = mecca_to_utc(end_date)
-                title = context.user_data.pop('contest_title', 'بدون عنوان')
-                description = context.user_data.pop('contest_description', '')
-                prize = context.user_data.pop('contest_prize', '')
-                contest_id = await db_create_contest(user_id, title, description, prize, end_date_utc)
-                if contest_id:
-                    await update.message.reply_text(
-                        get_text(user_id, 'contest_created').format(
-                            title, prize, end_date.strftime('%Y-%m-%d %H:%M'), contest_id
-                        )
-                    )
-                    try:
-                        await context.bot.send_message(
-                            MAIN_ADMIN_ID,
-                            get_text(MAIN_ADMIN_ID, 'contest_creator').format(user_id, title)
-                        )
-                    except:
-                        pass
-                else:
-                    await update.message.reply_text(get_text(user_id, 'contest_created_error'))
-            except ValueError:
-                await update.message.reply_text(get_text(user_id, 'contest_date_invalid'))
-                logger.warning(f"تنسيق تاريخ غير صحيح من المستخدم {user_id}: {text}")
-                return True
-            except Exception as e:
-                error_id = log_error(e, {'user_id': user_id, 'action': 'create_contest', 'date_input': text})
-                await update.message.reply_text(f"❌ حدث خطأ أثناء إنشاء المسابقة (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى أو إبلاغ المطور.")
-                logger.error(f"خطأ في إنشاء المسابقة: {e}")
-                return True
-            context.user_data.pop('state', None)
-            await main_menu_callback(update, context)
-            return True
-        
-        elif state == UserState.WAITING_CONTEST_ANSWER:
-            contest_id = context.user_data.get('contest_join_id')
-            if not contest_id:
-                await update.message.reply_text("❌ لم يتم العثور على المسابقة.")
-                context.user_data.pop('state', None)
-                return True
-            answer = text if text else ""
-            if answer.lower() == '/skip':
-                answer = ""
-            success = await db_participate_in_contest(user_id, contest_id, answer)
-            if success:
-                await update.message.reply_text(get_text(user_id, 'contest_join_success'))
-                try:
-                    level_data = await db_get_user_level(user_id)
-                    await db_update_user_level(user_id, level_data['points'] + 5, level_data['level'])
-                except:
-                    pass
-            else:
-                await update.message.reply_text(get_text(user_id, 'contest_join_error'))
-            context.user_data.pop('contest_join_id', None)
-            context.user_data.pop('state', None)
-            await contests_command_handler(update, context)
-            return True
-        
-        return False
-    except Exception as e:
-        error_id = log_error(e, {'user_id': user_id, 'state': state.name if state else 'None'})
-        await update.message.reply_text(f"❌ حدث خطأ غير متوقع أثناء إنشاء المسابقة (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى لاحقاً.")
-        context.user_data.pop('state', None)
+    user_id = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
+    
+    if state == UserState.WAITING_CONTEST_TITLE:
+        context.user_data['contest_title'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_DESCRIPTION
+        await update.message.reply_text(get_text(user_id, 'create_contest_description'))
         return True
+    
+    elif state == UserState.WAITING_CONTEST_DESCRIPTION:
+        context.user_data['contest_description'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_PRIZE
+        await update.message.reply_text(get_text(user_id, 'create_contest_prize'))
+        return True
+    
+    elif state == UserState.WAITING_CONTEST_PRIZE:
+        context.user_data['contest_prize'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_END_DATE
+        await update.message.reply_text(get_text(user_id, 'create_contest_end_date'))
+        return True
+    
+    elif state == UserState.WAITING_CONTEST_END_DATE:
+        try:
+            end_date = datetime.strptime(text, "%Y-%m-%d %H:%M")
+            if end_date <= mecca_now():
+                await update.message.reply_text(get_text(user_id, 'contest_date_future'))
+                return True
+            end_date_utc = mecca_to_utc(end_date)
+            
+            title = context.user_data.pop('contest_title')
+            description = context.user_data.pop('contest_description')
+            prize = context.user_data.pop('contest_prize')
+            
+            contest_id = await db_create_contest(user_id, title, description, prize, end_date_utc)
+            if contest_id:
+                await update.message.reply_text(
+                    get_text(user_id, 'contest_created').format(
+                        title, prize, end_date.strftime('%Y-%m-%d %H:%M'), contest_id
+                    )
+                )
+                await context.bot.send_message(
+                    MAIN_ADMIN_ID,
+                    get_text(MAIN_ADMIN_ID, 'contest_creator').format(user_id, title)
+                )
+            else:
+                await update.message.reply_text(get_text(user_id, 'contest_created_error'))
+        except ValueError:
+            await update.message.reply_text(get_text(user_id, 'contest_date_invalid'))
+            return True
+        context.user_data.pop('state', None)
+        await main_menu_callback(update, context)
+        return True
+    
+    elif state == UserState.WAITING_CONTEST_ANSWER:
+        contest_id = context.user_data.get('contest_join_id')
+        if not contest_id:
+            return False
+        
+        answer = text.strip() if text else ""
+        if answer.lower() == '/skip':
+            answer = ""
+        
+        success = await db_participate_in_contest(user_id, contest_id, answer)
+        if success:
+            await update.message.reply_text(get_text(user_id, 'contest_join_success'))
+            level_data = await db_get_user_level(user_id)
+            await db_update_user_level(user_id, level_data['points'] + 5, level_data['level'])
+        else:
+            await update.message.reply_text(get_text(user_id, 'contest_join_error'))
+        
+        context.user_data.pop('contest_join_id', None)
+        context.user_data.pop('state', None)
+        await contests_command_handler(update, context)
+        return True
+    
+    return False
 
-# ===================== دوال الكلمات المحظورة للمجموعات =====================
+# ===================== دوال الكلمات المحظورة للمجموعات (المفقودة) =====================
 async def banned_words_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -7281,56 +6367,6 @@ async def banned_words_remove_callback(update: Update, context: ContextTypes.DEF
     else:
         await update.message.reply_text(msg)
 
-# ===================== دوال الدعم =====================
-async def support_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    context.user_data['support_mode'] = True
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 كتابة تذكرة", callback_data=CallbackData.SUPPORT_TICKET)],
-        [InlineKeyboardButton("❓ المساعدة", callback_data=CallbackData.SUPPORT_HELP)],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
-    ])
-    text = get_text(user_id, 'support_welcome')
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
-async def support_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.SUPPORT_MENU)]
-    ])
-    text = get_text(user_id, 'support_help')
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
-async def support_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    context.user_data['support_mode'] = True
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 إلغاء", callback_data=CallbackData.SUPPORT_MENU)]
-    ])
-    text = "📝 **اكتب رسالتك** (سيتم إرسالها كتذكرة دعم)\nيمكنك إلغاء العملية بالضغط على الزر أدناه."
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
-
-async def support_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await support_menu_callback(update, context)
-
 # ===================== معالج الرسائل الرئيسي =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
@@ -7341,37 +6377,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip() if update.message.text else ""
     if user and user.is_bot:
         return
-    
-    if update.message.photo:
-        file = await context.bot.get_file(update.message.photo[-1].file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الصورة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.video:
-        file = await context.bot.get_file(update.message.video.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الفيديو كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.document:
-        file = await context.bot.get_file(update.message.document.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الملف كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.audio:
-        file = await context.bot.get_file(update.message.audio.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الصوت كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.voice:
-        file = await context.bot.get_file(update.message.voice.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الرسالة الصوتية كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.animation:
-        file = await context.bot.get_file(update.message.animation.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم المتحركة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
     
     if text == "/cancel":
         context.user_data.pop('state', None)
@@ -7474,11 +6479,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                  UserState.WAITING_CONTEST_ANSWER]:
         if await handle_contest_creation_states(update, context, state):
             return
-
-    # ===== التصحيح: معالجة WAITING_SENDCODE_PASSWORD =====
-    if state == UserState.WAITING_SENDCODE_PASSWORD:
-        await handle_sendcode_confirmation_handler(update, context)
-        return
     
     if state == UserState.WAITING_CHANNEL_ID:
         context.user_data.pop('state', None)
@@ -7945,7 +6945,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get('support_mode') and chat.type == 'private' and text and not text.startswith('/'):
         ticket_num = await db_get_next_ticket_number()
         username = user.full_name or user.first_name or str(uid)
-        clean_text = sanitize_text(text, max_length=2000)
+        clean_text = bleach.clean(text, strip=True)[:2000]
         await db_save_ticket(uid, username, clean_text, ticket_num)
         now_mecca = mecca_now()
         now_str = now_mecca.strftime("%Y-%m-%d %H:%M:%S")
@@ -8060,29 +7060,22 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
 
 """
             watermarked_content = watermark + content
-            
             temp_dir = tempfile.gettempdir()
             temp_file = os.path.join(temp_dir, f"bot_code_{user_id}_{int(time_module.time())}.py")
             with open(temp_file, 'w', encoding='utf-8') as f:
                 f.write(watermarked_content)
-            
-            # إرسال الملف مباشرة
-            with open(temp_file, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=user_id,
-                    document=f,
-                    filename=f"relax_bot_secure_{mecca_now().strftime('%Y%m%d')}.py",
-                    caption="⚠️ **هذا الكود موقع رقمياً - لا تشاركه مع أي شخص غير موثوق!**\n\n📌 يحتوي على:\n• التوكن والمفاتيح\n• هيكل قاعدة البيانات\n• معلومات حساسة أخرى"
-                )
-            
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=open(temp_file, 'rb'),
+                filename=f"relax_bot_secure_{mecca_now().strftime('%Y%m%d')}.py",
+                caption="⚠️ **هذا الكود موقع رقمياً - لا تشاركه مع أي شخص غير موثوق!**\n\n📌 يحتوي على:\n• التوكن والمفاتيح\n• هيكل قاعدة البيانات\n• معلومات حساسة أخرى"
+            )
             os.unlink(temp_file)
-            
             await security_audit.log("SENDCODE_EXECUTED", user_id, {"timestamp": mecca_now_iso()}, "CRITICAL")
-            await update.message.reply_text("✅ تم إرسال الكود بنجاح على الخاص!")
-            logger.info(f"📁 تم إرسال كود البوت للمستخدم {user_id} على الخاص")
+            await update.message.reply_text("✅ تم إرسال الكود بنجاح مع توقيع رقمي")
+            logger.info(f"📁 تم إرسال كود البوت من المستخدم {user_id} مع توقيع رقمي")
         except Exception as e:
-            await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
-            logger.error(f"خطأ في إرسال الكود: {e}")
+            await update.message.reply_text(f"❌ فشل إرسال الكود: {e}")
         context.user_data.pop('sendcode_temp_password', None)
         context.user_data.pop('sendcode_temp_timestamp', None)
         context.user_data.pop('state', None)
@@ -9986,80 +8979,10 @@ async def auto_publish_loop_improved(bot):
     consecutive_errors = 0
     backoff = 10
     max_backoff = 60
-    
-    semaphore = asyncio.Semaphore(5)
-    
-    async def publish_one(row):
-        async with semaphore:
-            ch_db_id, ch_tele_id, user_id = row
-            if not await db_has_active_subscription(user_id) and not await db_has_used_trial(user_id):
-                return
-            has_permission, permission_msg = await check_bot_permissions(bot, ch_tele_id)
-            if not has_permission:
-                return
-            if await db_should_auto_recycle(ch_db_id):
-                total_posts = await db_get_posts_count(ch_db_id)
-                logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id}: تم نشر جميع {total_posts} منشور، جاري إعادة التعيين...")
-                await db_reset_all_posts_to_unpublished(ch_db_id)
-                try:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total_posts} منشور للنشر من جديد.",
-                        parse_mode="MarkdownV2"
-                    )
-                except:
-                    pass
-                return
-            post = await db_get_next_post(ch_db_id)
-            if not post:
-                return
-            translation_lang = await get_user_translation_language(user_id)
-            final_text = post['text']
-            if translation_lang != 'off' and final_text:
-                try:
-                    translated = await translate_text(final_text, translation_lang)
-                    if translated and translated != final_text:
-                        final_text = f"{final_text}\n\n🌐 {translated}"
-                except:
-                    pass
-            success = False
-            for attempt in range(3):
-                try:
-                    if post['media_type'] == 'photo' and post['media_file_id']:
-                        await bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'video' and post['media_file_id']:
-                        await bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'document' and post['media_file_id']:
-                        await bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'audio' and post['media_file_id']:
-                        await bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'voice' and post['media_file_id']:
-                        await bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'animation' and post['media_file_id']:
-                        await bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    else:
-                        await bot.send_message(ch_tele_id, final_text)
-                    success = True
-                    break
-                except Exception as e:
-                    logger.warning(f"محاولة {attempt+1} فشلت في النشر للقناة {ch_tele_id}: {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
-            if success:
-                await db_mark_published(post['id'])
-                await db_set_last_publish(ch_db_id, utc_now())
-                await db_update_next_publish_date(ch_db_id)
-            else:
-                await db_increment_fail_count(post['id'])
-                logger.error(f"فشل دائم في نشر المنشور {post['id']} في القناة {ch_tele_id}")
-                next_retry = utc_now() + timedelta(seconds=PUBLISH_RETRY_DELAY)
-                await db_set_next_publish_date(ch_db_id, next_retry)
-            await asyncio.sleep(random.uniform(2, 5))
-    
     while True:
         try:
             publish_interval = await db_get_publish_interval_seconds()
-            async def _get_due_channels(conn, limit=MAX_CHANNELS_PER_CYCLE):
+            async def _get_due_channels(conn, limit=50):
                 now_utc_iso = utc_now().isoformat()
                 cur = await conn.execute("""
                     SELECT uc.id, uc.channel_id, u.user_id 
@@ -10075,14 +8998,73 @@ async def auto_publish_loop_improved(bot):
                 """, (now_utc_iso, limit))
                 return await cur.fetchall()
             rows = await execute_db(_get_due_channels)
-            
-            tasks = [publish_one(row) for row in rows]
-            await asyncio.gather(*tasks, return_exceptions=True)
-            
+            for row in rows:
+                ch_db_id = row[0]
+                ch_tele_id = row[1]
+                user_id = row[2]
+                if not await db_has_active_subscription(user_id) and not await db_has_used_trial(user_id):
+                    continue
+                has_permission, permission_msg = await check_bot_permissions(bot, ch_tele_id)
+                if not has_permission:
+                    continue
+                if await db_should_auto_recycle(ch_db_id):
+                    total_posts = await db_get_posts_count(ch_db_id)
+                    logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id}: تم نشر جميع {total_posts} منشور، جاري إعادة التعيين...")
+                    await db_reset_all_posts_to_unpublished(ch_db_id)
+                    try:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total_posts} منشور للنشر من جديد.",
+                            parse_mode="MarkdownV2"
+                        )
+                    except:
+                        pass
+                    continue
+                post = await db_get_next_post(ch_db_id)
+                if not post:
+                    continue
+                translation_lang = await get_user_translation_language(user_id)
+                final_text = post['text']
+                if translation_lang != 'off' and final_text:
+                    try:
+                        translated = await translate_text(final_text, translation_lang)
+                        if translated and translated != final_text:
+                            final_text = f"{final_text}\n\n🌐 {translated}"
+                    except:
+                        pass
+                success = False
+                for attempt in range(2):
+                    try:
+                        if post['media_type'] == 'photo' and post['media_file_id']:
+                            await bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        elif post['media_type'] == 'video' and post['media_file_id']:
+                            await bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        elif post['media_type'] == 'document' and post['media_file_id']:
+                            await bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        elif post['media_type'] == 'audio' and post['media_file_id']:
+                            await bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        elif post['media_type'] == 'voice' and post['media_file_id']:
+                            await bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        elif post['media_type'] == 'animation' and post['media_file_id']:
+                            await bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                        else:
+                            await bot.send_message(ch_tele_id, final_text)
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.warning(f"محاولة {attempt+1} فشلت في النشر للقناة {ch_tele_id}: {e}")
+                        await asyncio.sleep(1)
+                if success:
+                    await db_mark_published(post['id'])
+                    await db_set_last_publish(ch_db_id, utc_now())
+                    await db_update_next_publish_date(ch_db_id)
+                else:
+                    await db_increment_fail_count(post['id'])
+                    logger.error(f"فشل دائم في نشر المنشور {post['id']} في القناة {ch_tele_id}")
+                await asyncio.sleep(random.uniform(2, 5))
             consecutive_errors = 0
             backoff = publish_interval
             await asyncio.sleep(publish_interval)
-            
         except Exception as e:
             logger.error(f"خطأ في حلقة النشر: {e}")
             consecutive_errors += 1
@@ -10309,25 +9291,19 @@ async def memory_monitor():
 
 # ===================== نظام إدارة المهام =====================
 class TaskManager:
-    def __init__(self, max_tasks=50, max_concurrent=10):
+    def __init__(self, max_tasks=50):
         self.tasks = set()
         self._lock = asyncio.Lock()
         self.max_tasks = max_tasks
-        self.semaphore = asyncio.Semaphore(max_concurrent)
     
     def create_task(self, coro: Awaitable) -> asyncio.Task:
-        async def _wrapped():
-            async with self.semaphore:
-                return await coro
-        
         if len(self.tasks) >= self.max_tasks:
             try:
                 oldest = next(iter(self.tasks))
                 oldest.cancel()
             except StopIteration:
                 pass
-        
-        task = asyncio.create_task(_wrapped())
+        task = asyncio.create_task(coro)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
@@ -10339,7 +9315,7 @@ class TaskManager:
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
 
-task_manager = TaskManager(max_concurrent=10)
+task_manager = TaskManager()
 
 # ===================== تشغيل خادم الويب =====================
 async def start_web_server():
@@ -10375,9 +9351,8 @@ async def self_ping_loop():
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
         await asyncio.sleep(600)
 
-# ===================== معالج الأخطاء العالمي (آمن) =====================
+# ===================== معالج الأخطاء العالمي =====================
 async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الأخطاء العالمي الآمن."""
     try:
         error = context.error
         error_id = log_error(error, {
@@ -10385,25 +9360,16 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'chat_id': update.effective_chat.id if update and update.effective_chat else None,
             'message': update.effective_message.text if update and update.effective_message else None
         })
-        
-        if update and update.effective_user and context and context.bot:
+        if update and update.effective_user:
             try:
                 await safe_send_markdown(
                     context.bot,
                     update.effective_user.id,
                     f"❌ **حدث خطأ غير متوقع** (الرمز: `{error_id}`)\n\nتم تسجيل المشكلة وسيتم حلها قريباً. جرب مرة أخرى لاحقاً."
                 )
-            except Exception as e:
-                logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e}")
-                try:
-                    await context.bot.send_message(
-                        chat_id=update.effective_user.id,
-                        text=f"❌ حدث خطأ (الرمز: {error_id}). سيتم حله قريباً."
-                    )
-                except:
-                    pass
-        
-        if MAIN_ADMIN_ID and context and context.bot:
+            except:
+                pass
+        if MAIN_ADMIN_ID:
             try:
                 error_text = f"🚨 **خطأ في البوت** (الرمز: {error_id})\n\n"
                 error_text += f"📌 المستخدم: {update.effective_user.id if update and update.effective_user else 'غير معروف'}\n"
@@ -10411,10 +9377,10 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 if update and update.effective_message and update.effective_message.text:
                     error_text += f"📝 الرسالة: `{update.effective_message.text[:100]}`\n"
                 await context.bot.send_message(MAIN_ADMIN_ID, error_text, parse_mode="MarkdownV2")
-            except Exception as e:
-                logger.error(f"فشل إرسال إشعار الخطأ للمطور: {e}")
+            except:
+                pass
     except Exception as e:
-        logger.error(f"فشل معالج الأخطاء نفسه: {e}")
+        logger.error(f"فشل معالج الأخطاء: {e}")
 
 # ===================== تهيئة قاعدة البيانات =====================
 async def init_db_improved():
@@ -10429,6 +9395,7 @@ async def init_db_improved():
         await conn.execute("PRAGMA max_page_count=1000000")
         await conn.execute("PRAGMA secure_delete=ON")
         
+        # إنشاء الجداول
         await conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, auto_publish INTEGER DEFAULT 1, banned INTEGER DEFAULT 0, trial_used INTEGER DEFAULT 0, subscription_end TEXT DEFAULT NULL, referral_code TEXT DEFAULT NULL, referred_by INTEGER DEFAULT NULL, active_channel INTEGER DEFAULT NULL)")
         await conn.execute("CREATE TABLE IF NOT EXISTS user_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id TEXT, channel_name TEXT, created_at TIMESTAMP, banned INTEGER DEFAULT 0, FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE)")
         await conn.execute("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER, text TEXT, media_type TEXT DEFAULT 'text', media_file_id TEXT, published INTEGER DEFAULT 0, fail_count INTEGER DEFAULT 0, views_count INTEGER DEFAULT 0, last_view_time TIMESTAMP, created_at TIMESTAMP, FOREIGN KEY(channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE)")
@@ -10462,10 +9429,12 @@ async def init_db_improved():
         await conn.execute("CREATE TABLE IF NOT EXISTS channel_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER NOT NULL, total_posts INTEGER DEFAULT 0, published_posts INTEGER DEFAULT 0, unpublished_posts INTEGER DEFAULT 0, total_views INTEGER DEFAULT 0, avg_views_per_post REAL DEFAULT 0, last_post_time TIMESTAMP, avg_time_between_posts REAL DEFAULT 0, best_publish_hour INTEGER DEFAULT 0, best_publish_day INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE, UNIQUE(channel_db_id))")
         await conn.execute("CREATE TABLE IF NOT EXISTS web_sessions (session_id TEXT PRIMARY KEY, user_data TEXT, expires INTEGER)")
         
+        # جداول المسابقات
         await conn.execute("CREATE TABLE IF NOT EXISTS contests (id INTEGER PRIMARY KEY AUTOINCREMENT, creator_id INTEGER, title TEXT, description TEXT, prize TEXT, end_date TEXT, status TEXT DEFAULT 'active', winner_id INTEGER, created_at TIMESTAMP)")
         await conn.execute("CREATE TABLE IF NOT EXISTS contest_participants (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, contest_id INTEGER, answer TEXT, joined_at TIMESTAMP, UNIQUE(user_id, contest_id))")
         await conn.execute("CREATE TABLE IF NOT EXISTS contest_winners (id INTEGER PRIMARY KEY AUTOINCREMENT, contest_id INTEGER, winner_id INTEGER, announced_at TIMESTAMP)")
         
+        # إنشاء الفهارس
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule(next_publish_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_id)")
@@ -10481,6 +9450,7 @@ async def init_db_improved():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_published_views ON posts(published, views_count)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_contests_active ON contests(status, end_date)")
         
+        # تحديث الجداول
         try:
             cursor = await conn.execute("PRAGMA table_info(group_security)")
             columns = await cursor.fetchall()
@@ -10523,6 +9493,7 @@ async def init_db_improved():
         except Exception as e:
             logger.warning(f"⚠️ خطأ في تحديث جدول posts: {e}")
         
+        # إدراج القيم الافتراضية
         await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (MAIN_ADMIN_ID,))
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('updates_channel', '')")
@@ -10539,6 +9510,7 @@ async def init_db_improved():
         await conn.commit()
     
     await db_pool.initialize()
+    init_db_encryption()
     await cache_manager.init()
     logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات ونظام المسابقات")
 
@@ -10570,6 +9542,7 @@ async def main():
     
     application.add_error_handler(global_error_handler)
     
+    # تسجيل الأوامر
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -10602,6 +9575,7 @@ async def main():
     application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
     application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
     
+    # تسجيل الكولباك
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CallbackData.MAIN_MENU}$"))
@@ -10723,6 +9697,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_remove_banned_word_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_BANNED_WORD}$"))
     application.add_handler(CallbackQueryHandler(admin_del_banned_word_callback, pattern="^admin_del_banned_word_"))
     
+    # مسابقات
     application.add_handler(CallbackQueryHandler(contests_menu_callback, pattern=f"^{CallbackData.CONTESTS_MENU}$"))
     application.add_handler(CallbackQueryHandler(contest_join_callback, pattern=f"^{CallbackData.CONTEST_JOIN_PREFIX}"))
     application.add_handler(CallbackQueryHandler(contest_winners_callback, pattern=f"^{CallbackData.CONTEST_WINNERS}$"))
@@ -10766,9 +9741,11 @@ async def main():
     application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
     application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
     
+    # معالجات الدفع
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
     
+    # معالجات المجموعات
     application.add_handler(ChatMemberHandler(track_chat_add, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added))
@@ -10781,6 +9758,7 @@ async def main():
     application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
     
+    # إعداد قائمة الأوامر
     commands = [
         BotCommand("start", "بدء البوت"),
         BotCommand("trial", "تجربة مجانية"),
@@ -10816,6 +9794,7 @@ async def main():
     ]
     await application.bot.set_my_commands(commands)
     
+    # تشغيل المهام الخلفية
     task_manager.create_task(auto_publish_loop_improved(application.bot))
     task_manager.create_task(auto_backup())
     task_manager.create_task(run_scheduled_posts_loop_improved(application.bot))
@@ -10828,7 +9807,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 18.0.9)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 18.0.7)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • تشفير قاعدة البيانات بكلمة مرور (PBKDF2)")
     print("   • نظام كشف النشاط المشبوه")
@@ -10842,12 +9821,6 @@ async def main():
     print("   • مراقبة الذاكرة التلقائية")
     print("   • 💓 نبض داخلي كل 10 دقائق")
     print("   • 🏆 نظام المسابقات المتكامل")
-    print("   • 🌐 واجهة ويب متكاملة مع مصادقة")
-    print("   • 🔑 مفتاح منفصل للنسخ الاحتياطي")
-    print("   • 🧹 تنقية النصوص باستخدام bleach")
-    print("   • 🔄 إدارة المهام بـ Semaphore")
-    print("   • 📦 فحص حجم الملفات")
-    print("   • ⏱️ إعادة محاولة النشر الفاشل")
     
     try:
         await application.run_polling(
