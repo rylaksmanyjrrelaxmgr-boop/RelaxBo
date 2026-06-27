@@ -1,7 +1,7 @@
 # ============================================================
 # ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-06-26 00:18:54
-# SIGNATURE: c7e7557d74f5bd14
+# GENERATED_AT: 2026-06-27 10:30:00
+# SIGNATURE: a7f8e9d1c2b3a4f5
 # ============================================================
 # ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
 # لا تشاركه مع أي شخص غير موثوق
@@ -12,7 +12,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 18.0.9 - نسخة محسنة مع تحسينات الأمان والأداء
+الإصدار: 18.5.0 - نظام الردود التلقائية المتقدم
 المطور: @RelaxMgr
 """
 
@@ -228,272 +228,6 @@ import aiohttp
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 20 * 1024 * 1024))
 MAX_CHANNELS_PER_CYCLE = int(os.getenv('MAX_CHANNELS_PER_CYCLE', '20'))
 PUBLISH_RETRY_DELAY = 300
-
-# ===================== واجهة الويب =====================
-web_app = web.Application()
-CSRF_TOKEN = secrets.token_urlsafe(32)
-
-# ===================== نظام مصادقة واجهة الويب =====================
-import base64
-import hmac
-import hashlib
-
-def check_web_auth(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        return True
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
-    return False
-
-@web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ['/', '/health', '/ws', '/ws_extended']:
-        return await handler(request)
-    if not check_web_auth(request):
-        headers = {'WWW-Authenticate': 'Basic realm="البوت"'}
-        return web.Response(status=401, headers=headers, text="🔒 مطلوب مصادقة")
-    return await handler(request)
-
-web_app.middlewares.append(auth_middleware)
-
-async def root_handler(request):
-    return web.Response(text="✅ Bot is alive!", status=200)
-
-web_app.router.add_get('/', root_handler)
-
-async def health_check_handler(request):
-    try:
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        ram = get_ram_usage()
-        checks = {
-            'database': db_healthy,
-            'telegram_api': tg_healthy,
-            'memory': ram,
-            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        }
-        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
-        return web.json_response({
-            'status': 'healthy' if status == 200 else 'unhealthy',
-            'checks': checks
-        }, status=status)
-    except Exception as e:
-        return web.json_response({
-            'status': 'unhealthy',
-            'error': str(e)
-        }, status=503)
-
-web_app.router.add_get('/health', health_check_handler)
-
-# ===================== واجهة المستخدم (لوحة التحكم) =====================
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم البوت</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { text-align: center; margin-bottom: 30px; color: #00d2ff; }
-        .card { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        .card h2 { color: #00d2ff; margin-bottom: 15px; border-bottom: 1px solid #0f3460; padding-bottom: 10px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; }
-        .stat-item { background: #0f3460; padding: 15px; border-radius: 8px; text-align: center; }
-        .stat-item .number { font-size: 2rem; font-weight: bold; color: #00d2ff; }
-        .stat-item .label { font-size: 0.9rem; color: #aaa; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 10px; text-align: right; border-bottom: 1px solid #0f3460; }
-        th { color: #00d2ff; }
-        .btn { background: #00d2ff; color: #1a1a2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        .btn-danger { background: #e74c3c; color: #fff; }
-        .btn-success { background: #2ecc71; color: #fff; }
-        .btn-warning { background: #f39c12; color: #fff; }
-        .btn-sm { padding: 4px 10px; font-size: 0.8rem; }
-        .flex { display: flex; gap: 10px; flex-wrap: wrap; }
-        .status-badge { padding: 2px 10px; border-radius: 20px; font-size: 0.8rem; }
-        .status-active { background: #2ecc71; color: #fff; }
-        .status-banned { background: #e74c3c; color: #fff; }
-        .status-pending { background: #f39c12; color: #fff; }
-        .nav { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
-        .nav a { color: #00d2ff; text-decoration: none; padding: 8px 16px; background: #0f3460; border-radius: 6px; }
-        .nav a:hover { background: #00d2ff; color: #1a1a2e; }
-        .refresh-btn { margin-bottom: 15px; }
-        .json-view { background: #0a0a1a; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; }
-        .form-group { margin-bottom: 15px; }
-        .form-group label { display: block; margin-bottom: 5px; color: #aaa; }
-        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px; border-radius: 6px; border: none; background: #0f3460; color: #eee; }
-        .form-group input:focus, .form-group textarea:focus { outline: 2px solid #00d2ff; }
-        .toast { position: fixed; bottom: 20px; right: 20px; background: #2ecc71; color: #fff; padding: 12px 24px; border-radius: 8px; display: none; z-index: 1000; }
-        .toast.error { background: #e74c3c; }
-        @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr 1fr; } }
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>🤖 لوحة تحكم البوت</h1>
-    <div class="nav">
-        <a href="/dashboard">📊 الرئيسية</a>
-        <a href="/dashboard/channels">📡 القنوات</a>
-        <a href="/dashboard/posts">📝 المنشورات</a>
-        <a href="/dashboard/groups">👥 المجموعات</a>
-        <a href="/dashboard/users">👤 المستخدمين</a>
-        <a href="/dashboard/contests">🏆 المسابقات</a>
-        <a href="/dashboard/settings">⚙️ الإعدادات</a>
-    </div>
-    <div id="content">
-        <div class="card">
-            <h2>📊 إحصائيات سريعة</h2>
-            <div class="stats-grid" id="stats-grid">
-                <div class="stat-item"><div class="number" id="stat-users">...</div><div class="label">المستخدمين</div></div>
-                <div class="stat-item"><div class="number" id="stat-posts">...</div><div class="label">منشورات غير منشورة</div></div>
-                <div class="stat-item"><div class="number" id="stat-channels">...</div><div class="label">القنوات</div></div>
-                <div class="stat-item"><div class="number" id="stat-groups">...</div><div class="label">المجموعات</div></div>
-                <div class="stat-item"><div class="number" id="stat-contests">...</div><div class="label">مسابقات نشطة</div></div>
-                <div class="stat-item"><div class="number" id="stat-uptime">...</div><div class="label">وقت التشغيل</div></div>
-            </div>
-            <button class="btn refresh-btn" onclick="refreshStats()">🔄 تحديث</button>
-        </div>
-        <div class="card">
-            <h2>📋 آخر النشاطات</h2>
-            <div id="recent-activity">جاري التحميل...</div>
-        </div>
-    </div>
-</div>
-<div id="toast" class="toast"></div>
-
-<script>
-    async function fetchJSON(url) {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-    }
-
-    function showToast(msg, isError = false) {
-        const t = document.getElementById('toast');
-        t.textContent = msg;
-        t.className = 'toast' + (isError ? ' error' : '');
-        t.style.display = 'block';
-        setTimeout(() => t.style.display = 'none', 5000);
-    }
-
-    async function refreshStats() {
-        try {
-            const data = await fetchJSON('/api/stats');
-            document.getElementById('stat-users').textContent = data.total_users || 0;
-            document.getElementById('stat-posts').textContent = data.pending_posts || 0;
-            document.getElementById('stat-channels').textContent = data.channels || 0;
-            document.getElementById('stat-groups').textContent = data.groups || 0;
-            document.getElementById('stat-contests').textContent = data.active_contests || 0;
-            const uptime = data.uptime || 0;
-            const hours = Math.floor(uptime / 3600);
-            const minutes = Math.floor((uptime % 3600) / 60);
-            document.getElementById('stat-uptime').textContent = hours + 'h ' + minutes + 'm';
-        } catch(e) {
-            showToast('❌ فشل تحميل الإحصائيات', true);
-        }
-    }
-
-    async function loadActivity() {
-        try {
-            const data = await fetchJSON('/api/activity');
-            let html = '<ul>';
-            data.forEach(item => {
-                html += `<li>${item.time} - ${item.event}</li>`;
-            });
-            html += '</ul>';
-            document.getElementById('recent-activity').innerHTML = html;
-        } catch(e) {
-            document.getElementById('recent-activity').innerHTML = '❌ لا يمكن تحميل النشاطات';
-        }
-    }
-
-    refreshStats();
-    loadActivity();
-    setInterval(refreshStats, 30000);
-</script>
-</body>
-</html>
-"""
-
-# ===================== دوال API للواجهة =====================
-
-async def api_stats_handler(request):
-    try:
-        total, banned, posts, groups, channels = await db_stats()
-        async def _active_contests(conn):
-            now = utc_now().isoformat()
-            cur = await conn.execute("SELECT COUNT(*) FROM contests WHERE status='active' AND end_date > ?", (now,))
-            row = await cur.fetchone()
-            return row[0] if row else 0
-        active_contests = await execute_db(_active_contests)
-        uptime = time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        return web.json_response({
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels,
-            'active_contests': active_contests,
-            'uptime': uptime
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_activity_handler(request):
-    try:
-        async def _get_recent(conn):
-            cur = await conn.execute(
-                "SELECT created_at, action, user_id FROM moderation_log ORDER BY created_at DESC LIMIT 10"
-            )
-            rows = await cur.fetchall()
-            return [{'time': row[0][:16] if row[0] else '?', 'event': f"{row[1]} بواسطة {row[2]}"} for row in rows]
-        activities = await execute_db(_get_recent) or []
-        if not activities:
-            activities = [{'time': datetime.now().strftime('%Y-%m-%d %H:%M'), 'event': 'لا توجد نشاطات مسجلة'}]
-        return web.json_response(activities)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def dashboard_handler(request):
-    return web.Response(text=DASHBOARD_HTML, content_type='text/html')
-
-web_app.router.add_get('/dashboard', dashboard_handler)
-web_app.router.add_get('/api/stats', api_stats_handler)
-web_app.router.add_get('/api/activity', api_activity_handler)
-
-# ===================== دوال إضافية للواجهة =====================
-
-import aiofiles
-import qrcode
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-import plotly.graph_objects as go
-import plotly.utils
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-import zstandard as zstd
-
-try:
-    import pyotp
-    PYOTP_AVAILABLE = True
-except ImportError:
-    PYOTP_AVAILABLE = False
-    print("⚠️ مكتبة pyotp غير مثبتة، تم تعطيل المصادقة الثنائية")
 
 # ===================== تحميل ملفات البيئة =====================
 def load_env_files():
@@ -1488,7 +1222,7 @@ def get_text(user_id: int, key: str) -> str:
             'unlocked': "🔓 تم فتح المجموعة",
             'cancelled': "❌ تم الإلغاء",
             'error': "⚠️ حدث خطأ، حاول مرة أخرى",
-            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
+            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز\n/addreply - إضافة رد تلقائي\n/delreply - حذف رد تلقائي\n/listreplies - عرض الردود\n/autoreply - تفعيل/تعطيل الردود",
             'support_welcome': "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
             'support_help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
             'trial_used': "❌ لقد استخدمت التجربة المجانية مسبقاً",
@@ -1571,6 +1305,12 @@ def get_text(user_id: int, key: str) -> str:
             'contest_participants_count': "👥 عدد المشاركين: {0}",
             'contest_time_left': "⏳ متبقي {0} يوم",
             'contest_expired_label': "🔴 انتهت",
+            'auto_reply_added': "✅ تم إضافة الرد التلقائي: `{0}`",
+            'auto_reply_deleted': "✅ تم حذف الرد التلقائي: `{0}`",
+            'auto_reply_list': "📋 **قائمة الردود التلقائية:**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            'auto_reply_enabled': "✅ تم تفعيل الردود التلقائية",
+            'auto_reply_disabled': "❌ تم تعطيل الردود التلقائية",
+            'auto_reply_usage': "📝 **الاستخدام:**\n/addreply الكلمة الرد\n/delreply الكلمة\n/listreplies - عرض الردود\n/autoreply on/off - تفعيل/تعطيل",
         },
         'en': {
             'welcome': "🌿 **Welcome to Relax Manager**\nChoose your language",
@@ -1658,7 +1398,7 @@ def get_text(user_id: int, key: str) -> str:
             'unlocked': "🔓 Group unlocked",
             'cancelled': "❌ Cancelled",
             'error': "⚠️ An error occurred, try again",
-            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
+            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner\n/addreply - Add Auto Reply\n/delreply - Delete Auto Reply\n/listreplies - List Replies\n/autoreply - Enable/Disable Replies",
             'support_welcome': "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
             'support_help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
             'trial_used': "❌ You have already used the free trial",
@@ -1741,6 +1481,12 @@ def get_text(user_id: int, key: str) -> str:
             'contest_participants_count': "👥 Participants: {0}",
             'contest_time_left': "⏳ {0} days left",
             'contest_expired_label': "🔴 Expired",
+            'auto_reply_added': "✅ Auto reply added: `{0}`",
+            'auto_reply_deleted': "✅ Auto reply deleted: `{0}`",
+            'auto_reply_list': "📋 **Auto Replies List:**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            'auto_reply_enabled': "✅ Auto replies enabled",
+            'auto_reply_disabled': "❌ Auto replies disabled",
+            'auto_reply_usage': "📝 **Usage:**\n/addreply keyword reply\n/delreply keyword\n/listreplies - List replies\n/autoreply on/off - Enable/Disable",
         }
     }
     lang_texts = texts.get(lang, texts['ar'])
@@ -1909,6 +1655,10 @@ class CallbackData:
     CONTEST_WINNERS = "contest_winners"
     CONTESTS_BACK = "contests_back"
     ADMIN_DEL_CONTEST_PREFIX = "admin:del_contest:"
+    AUTO_REPLY_ADD = "auto_reply_add:"
+    AUTO_REPLY_DEL = "auto_reply_del:"
+    AUTO_REPLY_LIST = "auto_reply_list:"
+    AUTO_REPLY_SETTINGS = "auto_reply_settings:"
 
 # ===================== نظام إدارة الحالات المتقدم =====================
 class UserState(Enum):
@@ -1955,6 +1705,9 @@ class UserState(Enum):
     WAITING_CONTEST_ANSWER = auto()
     WAITING_DELETE_CONTEST = auto()
     WAITING_GROUP_SECURITY = auto()
+    WAITING_AUTO_REPLY_KEYWORD = auto()
+    WAITING_AUTO_REPLY_REPLY = auto()
+    WAITING_AUTO_REPLY_DELETE = auto()
 
 class StateDispatcher:
     def __init__(self):
@@ -1975,1665 +1728,634 @@ class StateDispatcher:
 
 state_dispatcher = StateDispatcher()
 
-# ===================== WebSocket Manager =====================
-class WebSocketManager:
-    def __init__(self):
-        self.connections = set()
-        self.lock = asyncio.Lock()
-    
-    async def broadcast(self, data: dict):
-        async with self.lock:
-            if not self.connections:
-                return
-            message = json.dumps(data)
-            to_remove = []
-            for ws in self.connections:
-                try:
-                    await ws.send_str(message)
-                except:
-                    to_remove.append(ws)
-            for ws in to_remove:
-                self.connections.discard(ws)
-    
-    async def handler(self, request):
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        async with self.lock:
-            self.connections.add(ws)
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                        if data.get('type') == 'ping':
-                            await ws.send_str(json.dumps({'type': 'pong'}))
-                    except:
-                        pass
-                elif msg.type == WSMsgType.ERROR:
-                    logger.error(f"خطأ في WebSocket: {ws.exception()}")
-        finally:
-            async with self.lock:
-                self.connections.discard(ws)
-        return ws
+# ===================== نظام الردود التلقائية المتقدم للمجموعات =====================
 
-ws_manager = WebSocketManager()
-web_app.router.add_get('/ws', ws_manager.handler)
+# ===================== قائمة الردود التلقائية المدمجة (أكثر من 200 رد) =====================
+DEFAULT_AUTO_REPLIES = {
+    # التحيات والسلام (30 رد)
+    'السلام عليكم': 'وعليكم السلام ورحمة الله وبركاته 🌸',
+    'السلام عليكم ورحمة الله': 'وعليكم السلام ورحمة الله وبركاته 🌸',
+    'السلام عليكم ورحمة الله وبركاته': 'وعليكم السلام ورحمة الله وبركاته 🌸',
+    'سلام': 'وعليكم السلام 🌸',
+    'اهلا': 'أهلاً وسهلاً بك 🌷',
+    'اهلين': 'أهلين وسهلين 🌷',
+    'مرحبا': 'مرحباً بك 🌸',
+    'مرحباً': 'مرحباً بك 🌸',
+    'هلا': 'هلا وغلا 🌸',
+    'هلا بك': 'هلا وغلا بك 🌸',
+    'صباح الخير': 'صباح النور والسرور ☀️',
+    'صباح النور': 'صباح الورد والفل 🌹',
+    'صباح الفل': 'صباح الياسمين 🌹',
+    'مساء الخير': 'مساء النور والجمال 🌙',
+    'مساء النور': 'مساء الورد 🌹',
+    'مساء الورد': 'مساء الفل والياسمين 🌹',
+    'مساء الفل': 'مساء الياسمين 🌹',
+    'طاب مسائك': 'طاب مساؤك 🌙',
+    'طاب صباحك': 'طاب صباحك ☀️',
+    'كيفك': 'أنا بخير الحمد لله، كيف أنت؟ 😊',
+    'كيف حالك': 'أنا بخير الحمد لله، كيف حالك أنت؟ 😊',
+    'كيف الحال': 'الحال بخير الحمد لله 😊',
+    'بخير': 'الحمد لله 😊',
+    'الحمد لله': 'الحمد لله على كل حال 🤍',
+    'ايش اخبارك': 'أخبارك طيبة إن شاء الله 😊',
+    'اخبارك': 'أخبارك طيبة إن شاء الله 😊',
+    'شو اخبارك': 'أخبارك طيبة إن شاء الله 😊',
+    'شخبارك': 'أخبارك طيبة إن شاء الله 😊',
+    'تفضل': 'تفضل يا غالي 🤍',
+    'تفضلي': 'تفضلي يا غالية 🤍',
 
-# ===================== WebSocket Extended =====================
-class WebSocketExtendedHandler:
-    def __init__(self):
-        self.connections = {}
-        self.subscriptions = defaultdict(set)
-        self.lock = asyncio.Lock()
-    
-    async def handle_auth(self, ws, token: str):
-        if token == WEB_SECRET_KEY:
-            self.connections[token] = ws
-            await ws.send_str(json.dumps({'type': 'auth', 'status': 'success'}))
-            return True
-        await ws.send_str(json.dumps({'type': 'auth', 'status': 'failed'}))
-        return False
-    
-    async def handle_subscribe(self, ws, channel: str):
-        async with self.lock:
-            self.subscriptions[channel].add(ws)
-            await ws.send_str(json.dumps({'type': 'subscribe', 'channel': channel, 'status': 'success'}))
-    
-    async def handle_unsubscribe(self, ws, channel: str):
-        async with self.lock:
-            if channel in self.subscriptions:
-                self.subscriptions[channel].discard(ws)
-            await ws.send_str(json.dumps({'type': 'unsubscribe', 'channel': channel, 'status': 'success'}))
-    
-    async def broadcast(self, channel: str, data: dict):
-        async with self.lock:
-            if channel in self.subscriptions:
-                message = json.dumps({'type': 'broadcast', 'channel': channel, 'data': data})
-                for ws in list(self.subscriptions[channel]):
-                    try:
-                        await ws.send_str(message)
-                    except:
-                        self.subscriptions[channel].discard(ws)
-    
-    async def get_stats(self) -> dict:
-        total, banned, posts, groups, channels = await db_stats()
-        return {
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        }
-    
-    async def get_logs(self, limit: int = 50) -> list:
-        logs = []
-        try:
-            with open(LOG_PATH, 'r') as f:
-                lines = f.readlines()
-                for line in lines[-limit:]:
-                    logs.append(line.strip())
-        except:
-            pass
-        return logs
-    
-    async def get_users(self, limit: int = 50) -> list:
-        users = await db_get_all_users()
-        return users[:limit]
-    
-    async def get_channels(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_channels(user_id)
-        return await db_get_all_user_channels_no_limit()
-    
-    async def get_groups(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_user_groups(user_id)
-        return await db_get_all_groups()
-    
-    async def get_contests(self, limit: int = 10) -> list:
-        return await db_get_active_contests_with_participants(limit)
-    
-    async def notify(self, user_id: int, message: str):
-        try:
-            from telegram import Bot
-            bot = Bot(token=TOKEN)
-            await bot.send_message(chat_id=user_id, text=message)
-        except:
-            pass
+    # الردود على الشكر (15 رد)
+    'شكرا': 'عفواً 🤍',
+    'شكراً': 'عفواً 🤍',
+    'تسلم': 'الله يسلمك 🤍',
+    'تسلمي': 'الله يسلمك 🤍',
+    'تسلمون': 'الله يسلمكم 🤍',
+    'يسلمو': 'الله يسلمك 🤍',
+    'مشكور': 'الشكر لله 🤍',
+    'مشكورة': 'الشكر لله 🤍',
+    'جزيل الشكر': 'أهلاً وسهلاً 🤍',
+    'اشكرك': 'أنا أشكرك 🤍',
+    'اشكركم': 'أشكركم جميعاً 🤍',
+    'متشكر': 'متشكر يا غالي 🤍',
+    'متشكرة': 'متشكرة يا غالية 🤍',
+    'شكرا جزيلا': 'عفواً، تحت أمرك 🤍',
+    'شكراً جزيلاً': 'عفواً، تحت أمرك 🤍',
 
-ws_extended = WebSocketExtendedHandler()
+    # ردود المودة (20 رد)
+    'حبيبي': 'حبيبي الغالي 🤍',
+    'حبيبتي': 'حبيبتي الغالية 🤍',
+    'قلبي': 'قلبك الطيب 🤍',
+    'قلبي انت': 'قلبي كله لك 🤍',
+    'روحي': 'روحك الطيبة 🤍',
+    'روحي انت': 'روحي فداك 🤍',
+    'عيوني': 'عيونك الحلوة 🤍',
+    'عيوني انت': 'عيوني لك 🤍',
+    'عمري': 'عمرك الطيب 🤍',
+    'عمرك': 'عمرك الطيب 🤍',
+    'غلا': 'غلاك عندي كبير 🤍',
+    'غلاي': 'غلاي كله لك 🤍',
+    'نور عيني': 'نور عيونك 🤍',
+    'نور عيونك': 'نور عينيّ 🤍',
+    'يا روحي': 'روحك الطيبة 🤍',
+    'يا قلبي': 'قلبك الأبيض 🤍',
+    'يا عيني': 'عينيّ لك 🤍',
+    'يا عمري': 'عمرك الطيب 🤍',
+    'يا غلا': 'غلاك عندي 🤍',
+    'يا حبيبي': 'حبيبي الغالي 🤍',
 
-async def websocket_extended_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    
-    token = request.query.get('token')
-    if not token:
-        await ws.close()
-        return ws
-    
-    authenticated = await ws_extended.handle_auth(ws, token)
-    if not authenticated:
-        await ws.close()
-        return ws
-    
-    try:
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    action = data.get('action')
-                    
-                    if action == 'subscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_subscribe(ws, channel)
-                    
-                    elif action == 'unsubscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_unsubscribe(ws, channel)
-                    
-                    elif action == 'get_stats':
-                        stats = await ws_extended.get_stats()
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_stats', 'data': stats}))
-                    
-                    elif action == 'get_logs':
-                        logs = await ws_extended.get_logs(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_logs', 'data': logs}))
-                    
-                    elif action == 'get_users':
-                        users = await ws_extended.get_users(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_users', 'data': users}))
-                    
-                    elif action == 'get_channels':
-                        channels = await ws_extended.get_channels(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_channels', 'data': channels}))
-                    
-                    elif action == 'get_groups':
-                        groups = await ws_extended.get_groups(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_groups', 'data': groups}))
-                    
-                    elif action == 'get_contests':
-                        contests = await ws_extended.get_contests(limit=data.get('limit', 10))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_contests', 'data': contests}))
-                    
-                    elif action == 'notify':
-                        user_id = data.get('user_id')
-                        message = data.get('message')
-                        if user_id and message:
-                            await ws_extended.notify(user_id, message)
-                            await ws.send_str(json.dumps({'type': 'response', 'action': 'notify', 'status': 'sent'}))
-                    
-                    elif action == 'ping':
-                        await ws.send_str(json.dumps({'type': 'pong'}))
-                    
-                except Exception as e:
-                    await ws.send_str(json.dumps({'type': 'error', 'message': str(e)}))
-    
-    except Exception as e:
-        logger.error(f"خطأ في WebSocket: {e}")
-    
-    finally:
-        for channel in list(ws_extended.subscriptions):
-            ws_extended.subscriptions[channel].discard(ws)
-    
-    return ws
+    # الأدعية (25 رد)
+    'ما شاء الله': 'تبارك الله 🤍',
+    'ماشاء الله': 'تبارك الله 🤍',
+    'بارك الله فيك': 'وفيك بارك الله 🤍',
+    'الله يبارك فيك': 'وفيك بارك الله 🤍',
+    'جزاك الله خير': 'وإياكم 🤍',
+    'جزاك الله خيراً': 'وإياكم 🤍',
+    'جازاك الله خير': 'وإياكم 🤍',
+    'جازاك الله خيراً': 'وإياكم 🤍',
+    'الله يجزيك خير': 'وإياكم 🤍',
+    'الله يجزيك الخير': 'وإياكم 🤍',
+    'الله يرحمك': 'يرحمنا وإياكم 🤍',
+    'رحم الله والديك': 'آمين 🤍',
+    'شفاك الله': 'آمين، شفاك الله وعافاك 🤍',
+    'الله يعينك': 'الله يعينك ويساعدك 🤍',
+    'الله يسهل': 'الله يسهل أمرك 🤍',
+    'الله يفرجها': 'آمين يا رب 🤍',
+    'اللهم آمين': 'آمين يا رب العالمين 🤍',
+    'آمين': 'آمين يا رب 🤍',
+    'يا رب': 'اللهم استجب 🤍',
+    'اللهم': 'اللهم صل على محمد 🤍',
+    'سبحان الله': 'سبحان الله وبحمده 🤍',
+    'الحمدلله': 'الحمد لله على كل حال 🤍',
+    'الله اكبر': 'الله أكبر 🤍',
+    'لا اله الا الله': 'لا إله إلا الله 🤍',
+    'استغفر الله': 'اللهم اغفر لي 🤍',
 
-web_app.router.add_get('/ws_extended', websocket_extended_handler)
-# ===================== دوال قاعدة البيانات الأساسية =====================
-async def db_register_user(user_id: int) -> bool:
-    async def _register(conn):
-        cur = await conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
-        if await cur.fetchone():
-            return False
-        await conn.execute("INSERT INTO users (user_id, auto_publish, banned, trial_used) VALUES (?, 1, 0, 0)", (user_id,))
+    # ردود الترحيب (15 رد)
+    'اهلا بك': 'أهلاً بك في المجموعة 🌸',
+    'مرحباً بك': 'مرحباً بك في المجموعة 🌸',
+    'تشرفنا': 'تشرفنا بك 🌷',
+    'نورت': 'نورت المجموعة 🌟',
+    'نورتنا': 'نورنا الله 🌟',
+    'نورتو': 'نورتم الله 🌟',
+    'أهلا وسهلا': 'أهلاً وسهلاً بك 🌸',
+    'حياك الله': 'الله يحييك 🌸',
+    'حياكم الله': 'الله يحييكم 🌸',
+    'منور': 'نور الله عليك 🌟',
+    'منورة': 'نور الله عليك 🌟',
+    'اشرقت': 'أشرق الله وجهك 🌟',
+    'اشرقت علينا': 'أشرق الله وجهك 🌟',
+    'تشرفنا بوجودك': 'تشرفنا بك 🌷',
+    'سعدنا بوجودك': 'سعدنا بك 🌸',
+
+    # ردود الوداع (10 رد)
+    'مع السلامة': 'مع السلامة 🌸',
+    'باي': 'مع السلامة 🌸',
+    'سلام': 'مع السلامة 🌸',
+    'سلامو': 'مع السلامة 🌸',
+    'تصبح على خير': 'تصبح على خير 🌙',
+    'تصبحي على خير': 'تصبحي على خير 🌙',
+    'تصبحو على خير': 'تصبحوا على خير 🌙',
+    '晚安': 'تصبح على خير 🌙',
+    'وداعاً': 'مع السلامة 🌸',
+    'وداعا': 'مع السلامة 🌸',
+
+    # ردود مضحكة (20 رد)
+    'هههه': '😄😄😄',
+    'ههه': '😄😄😄',
+    'هاهاها': '😂😂😂',
+    'ههههه': '😂😂😂',
+    'ضحك': '😄😄😄',
+    'موت من الضحك': '😂😂😂',
+    'طش': '🌊🌊🌊',
+    'عجيب': '😮😮😮',
+    'غريب': '🤔🤔🤔',
+    'حلو': '😊😊😊',
+    'جميل': '😍😍😍',
+    'رائع': '👍👍👍',
+    'ممتاز': '👏👏👏',
+    'زي الفل': '😎😎😎',
+    'ولا غلطة': '👌👌👌',
+    'يسطا': '😄😄😄',
+    'يا راجل': '😄😄😄',
+    'يا رجال': '😄😄😄',
+    'يا عم': '😄😄😄',
+    'يا عمي': '😄😄😄',
+
+    # ردود البوت (20 رد)
+    'اريد مساعدة': 'كيف يمكنني مساعدتك؟ 😊',
+    'اريد مساعده': 'كيف يمكنني مساعدتك؟ 😊',
+    'مساعد': 'أنا هنا لمساعدتك 🤍',
+    'مساعدة': 'كيف يمكنني خدمتك؟ 😊',
+    'خدمة العملاء': 'نحن هنا لخدمتك 🤍',
+    'شكوى': 'نأسف لأي إزعاج، كيف يمكننا حل المشكلة؟ 🤍',
+    'اقتراح': 'نرحب باقتراحاتك 🤍',
+    'فكرة': 'فكرة رائعة! هل تود مشاركتها؟ 😊',
+    'وينك': 'أنا هنا 😊',
+    'وينك انت': 'أنا هنا، وينك أنت؟ 😊',
+    'شو بتسوي': 'أنا بوت لإدارة المجموعات والقنوات 🤖',
+    'ماذا تفعل': 'أنا بوت لإدارة المجموعات والقنوات 🤖',
+    'مين انت': 'أنا بوت ريلاكس مانيجر 🤖',
+    'تعريف': 'أنا بوت متخصص في إدارة المجموعات والقنوات 🤖',
+    'البوت': 'أنا هنا لخدمتك 🤖',
+    'بوت': 'أنا هنا لخدمتك 🤖',
+    'مشرف': 'المشرفون هنا 👑',
+    'ادمن': 'المشرفون هنا 👑',
+    'مدير': 'المشرفون هنا 👑',
+    'يا بوت': 'نعم، أنا هنا 🤖',
+
+    # ردود المشاعر (15 رد)
+    '❤️': '❤️❤️❤️',
+    '♥️': '♥️♥️♥️',
+    '💕': '💕💕💕',
+    '💗': '💗💗💗',
+    '💖': '💖💖💖',
+    '😍': '😍😍😍',
+    '🥰': '🥰🥰🥰',
+    '😘': '😘😘😘',
+    '🤍': '🤍🤍🤍',
+    '💛': '💛💛💛',
+    '💚': '💚💚💚',
+    '💙': '💙💙💙',
+    '💜': '💜💜💜',
+    '🧡': '🧡🧡🧡',
+    '🖤': '🖤🖤🖤',
+
+    # ردود دينية (15 رد)
+    'بسم الله': 'بسم الله الرحمن الرحيم 🤍',
+    'توكلت على الله': 'حسبنا الله ونعم الوكيل 🤍',
+    'استغفر الله': 'اللهم اغفر لنا ولجميع المسلمين 🤍',
+    'سبحان الله': 'سبحان الله وبحمده 🤍',
+    'الله اكبر': 'الله أكبر 🤍',
+    'لا اله الا الله': 'لا إله إلا الله 🤍',
+    'محمد رسول الله': 'صلى الله عليه وسلم 🤍',
+    'اللهم صلي على محمد': 'اللهم صل وسلم عليه 🤍',
+    'اللهم صل على محمد': 'اللهم صل وسلم عليه 🤍',
+    'اللهم بارك': 'اللهم بارك 🤍',
+    'ربنا يوفقك': 'آمين يا رب 🤍',
+    'ربنا يسعدك': 'آمين يا رب 🤍',
+    'ربنا يحفظك': 'آمين يا رب 🤍',
+    'ربنا يعافيك': 'آمين يا رب 🤍',
+    'ربنا يشفيك': 'آمين يا رب 🤍',
+
+    # ردود الوقت (10 رد)
+    'شو الوقت': 'الوقت الان ⏰',
+    'الساعة كم': 'الساعة الان ⏰',
+    'اي يوم': 'اليوم 📅',
+    'شو التاريخ': 'التاريخ الان 📅',
+    'الساعه كم': 'الساعة الان ⏰',
+    'كم الساعة': 'الساعة الان ⏰',
+    'أي يوم': 'اليوم 📅',
+    'ما التاريخ': 'التاريخ الان 📅',
+    'التاريخ': 'التاريخ الان 📅',
+    'الوقت': 'الوقت الان ⏰',
+
+    # ردود عامة (15 رد)
+    'تمام': 'تمام 🤍',
+    'ممتاز': '👏👏👏',
+    'حاضر': 'حاضر 🤍',
+    'اوكي': '👍',
+    'OK': '👍',
+    'تمامم': '👍',
+    'ياب': '👍',
+    'نعم': '👍',
+    'لا': '🙅',
+    'ايوه': '👍',
+    'ايوا': '👍',
+    'مش مشكلة': 'حبيبي 🤍',
+    'عادي': 'تمام 🤍',
+    'طيب': 'تمام 🤍',
+    'خلاص': 'تمام 🤍',
+
+    # ردود خاصة بالمستخدمين (10 رد)
+    'you': 'أنا 😊',
+    'me': 'أنت 😊',
+    'we': 'نحن 😊',
+    'us': 'نحن 😊',
+    'our': 'نحن 😊',
+    'my': 'لك 😊',
+    'your': 'لي 😊',
+    'yourself': 'نفسك 😊',
+    'myself': 'نفسي 😊',
+    'ourselves': 'نفسنا 😊',
+
+    # ردود المجموعة (15 رد)
+    'القناة': 'قناتنا على التليجرام 📢',
+    'الرابط': 'رابط الدعوة 📎',
+    'الدعوة': 'رابط الدعوة 📎',
+    'انضم': 'مرحباً بك! انضم إلى قناتنا 📢',
+    'اشتراك': 'اشترك في قناتنا 📢',
+    'مجموعة': 'مجموعتنا ترحب بكم 🌸',
+    'جروب': 'جروبنا ترحب بكم 🌸',
+    'المنشن': 'منشن الكل 📢',
+    'تاغ': 'تاغ الكل 📢',
+    'إعلان': 'للإعلانات تواصل مع المشرف 📢',
+    'اعلان': 'للإعلانات تواصل مع المشرف 📢',
+    'منشن': 'منشن الكل 📢',
+    'تاك': 'تاك الكل 📢',
+    'الكول': 'كول الكل 📢',
+    'رابط الدعوة': 'رابط الدعوة 📎',
+}
+
+# ===================== دوال قاعدة البيانات للردود التلقائية =====================
+async def db_add_auto_reply(chat_id: int, keyword: str, reply: str, reply_type: str = 'text', media_file_id: str = None):
+    """إضافة رد تلقائي جديد للمجموعة"""
+    async def _add(conn):
+        await conn.execute(
+            "INSERT OR REPLACE INTO auto_replies (chat_id, keyword, reply, reply_type, media_file_id) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, keyword.lower(), reply, reply_type, media_file_id)
+        )
         await conn.commit()
         return True
-    return await execute_db(_register)
+    return await execute_db(_add)
 
-async def db_get_all_users():
+async def db_delete_auto_reply(chat_id: int, keyword: str):
+    """حذف رد تلقائي"""
+    async def _delete(conn):
+        await conn.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?", (chat_id, keyword.lower()))
+        await conn.commit()
+        return True
+    return await execute_db(_delete)
+
+async def db_get_auto_reply(chat_id: int, keyword: str):
+    """جلب رد تلقائي محدد"""
     async def _get(conn):
-        cur = await conn.execute("SELECT user_id, banned FROM users ORDER BY user_id")
+        cur = await conn.execute(
+            "SELECT reply, reply_type, media_file_id FROM auto_replies WHERE chat_id=? AND keyword=?",
+            (chat_id, keyword.lower())
+        )
+        row = await cur.fetchone()
+        if row:
+            return {'reply': row[0], 'type': row[1], 'media_file_id': row[2]}
+        return None
+    return await execute_db(_get)
+
+async def db_get_all_auto_replies(chat_id: int):
+    """جلب جميع الردود التلقائية للمجموعة"""
+    async def _get(conn):
+        cur = await conn.execute(
+            "SELECT keyword, reply, reply_type FROM auto_replies WHERE chat_id=? ORDER BY keyword",
+            (chat_id,)
+        )
         return await cur.fetchall()
     return await execute_db(_get)
 
-async def db_update_user_cache(user_id: int, username: str, first_name: str):
-    async def _update(conn):
-        await conn.execute("INSERT OR REPLACE INTO users_cache (user_id, username, first_name, last_updated) VALUES (?, ?, ?, ?)", 
-                          (user_id, username or "", first_name or "", utc_now_iso()))
-        await conn.commit()
-    return await execute_db(_update)
-
-async def db_is_banned(user_id: int) -> bool:
-    async def _check(conn):
-        cur = await conn.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row and row[0] == 1
-    return await execute_db(_check)
-
-async def db_set_ban(user_id: int, banned: bool):
-    async def _set(conn):
-        await conn.execute("UPDATE users SET banned=? WHERE user_id=?", (1 if banned else 0, user_id))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_has_used_trial(user_id: int) -> bool:
-    async def _check(conn):
-        cur = await conn.execute("SELECT trial_used FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row and row[0] == 1
-    return await execute_db(_check)
-
-async def db_activate_trial(user_id: int) -> int:
-    async def _activate(conn):
-        cur = await conn.execute("SELECT trial_used FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row and row[0] == 1:
-            return 0
-        end_date = (utc_now() + timedelta(days=30)).isoformat()
-        await conn.execute("UPDATE users SET trial_used=1, subscription_end=? WHERE user_id=?", (end_date, user_id))
-        await conn.commit()
-        return 30
-    return await execute_db(_activate)
-
-async def db_activate_subscription(user_id: int, days: int):
-    async def _activate(conn):
-        cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row and row[0]:
-            try:
-                current_end = datetime.fromisoformat(row[0])
-                if current_end > utc_now():
-                    new_end = current_end + timedelta(days=days)
-                else:
-                    new_end = utc_now() + timedelta(days=days)
-            except:
-                new_end = utc_now() + timedelta(days=days)
-        else:
-            new_end = utc_now() + timedelta(days=days)
-        await conn.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (new_end.isoformat(), user_id))
-        await conn.commit()
-    return await execute_db(_activate)
-
-async def db_has_active_subscription(user_id: int) -> bool:
-    async def _check(conn):
-        cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row and row[0]:
-            try:
-                end_date = datetime.fromisoformat(row[0])
-                return end_date > utc_now()
-            except:
-                return False
-        return False
-    return await execute_db(_check)
-
-async def db_get_subscription_days_left(user_id: int) -> int:
+async def db_get_auto_reply_by_keyword(chat_id: int, text: str):
+    """البحث عن رد تلقائي مطابق للنص"""
     async def _get(conn):
-        cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row and row[0]:
-            try:
-                end_date = datetime.fromisoformat(row[0])
-                days = (end_date - utc_now()).days
-                return max(0, days)
-            except:
-                return 0
-        return 0
+        text_lower = text.lower()
+        cur = await conn.execute(
+            "SELECT keyword, reply, reply_type, media_file_id FROM auto_replies WHERE chat_id=?",
+            (chat_id,)
+        )
+        rows = await cur.fetchall()
+        
+        # البحث عن تطابق تام أو جزئي مع تفضيل الأطول
+        best_match = None
+        best_match_len = 0
+        
+        for keyword, reply, reply_type, media_file_id in rows:
+            if keyword in text_lower:
+                if len(keyword) > best_match_len:
+                    best_match_len = len(keyword)
+                    best_match = {
+                        'keyword': keyword,
+                        'reply': reply,
+                        'type': reply_type,
+                        'media_file_id': media_file_id
+                    }
+        
+        return best_match
     return await execute_db(_get)
 
-async def db_auto_status(user_id: int) -> bool:
-    async def _get(conn):
-        cur = await conn.execute("SELECT auto_publish FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row and row[0] == 1
-    return await execute_db(_get)
-
-async def db_set_auto(user_id: int, enabled: bool):
-    async def _set(conn):
-        await conn.execute("UPDATE users SET auto_publish=? WHERE user_id=?", (1 if enabled else 0, user_id))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> int:
-    async def _add(conn):
-        cur = await conn.execute("SELECT id FROM user_channels WHERE user_id=? AND channel_id=?", (user_id, channel_id))
-        if await cur.fetchone():
-            return None
-        cur = await conn.execute("INSERT INTO user_channels (user_id, channel_id, channel_name, created_at) VALUES (?, ?, ?, ?) RETURNING id", 
-                                (user_id, channel_id, channel_name, utc_now_iso()))
-        row = await cur.fetchone()
-        await conn.commit()
-        return row[0] if row else None
-    return await execute_db(_add)
-
-async def db_get_channels(user_id: int):
-    async def _get(conn):
+async def update_auto_reply_table():
+    """تحديث جدول group_security بإضافة عمود auto_reply_enabled"""
+    async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         try:
-            cur = await conn.execute("SELECT id, channel_id, channel_name, banned FROM user_channels WHERE user_id=? ORDER BY id", (user_id,))
-            rows = await cur.fetchall()
-            safe_rows = []
-            for row in rows:
-                try:
-                    if len(row) >= 4:
-                        ch_id = row[0] if row[0] is not None else 0
-                        ch_tele_id = row[1] if row[1] is not None else "unknown"
-                        ch_name = row[2] if row[2] is not None else ch_tele_id
-                        banned = row[3] if row[3] is not None else 0
-                        safe_rows.append((ch_id, ch_tele_id, ch_name, banned))
-                except:
-                    continue
-            return safe_rows
+            cursor = await conn.execute("PRAGMA table_info(group_security)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'auto_reply_enabled' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_reply_enabled INTEGER DEFAULT 1")
+                logger.info("✅ تم إضافة عمود auto_reply_enabled إلى جدول group_security")
+            await conn.commit()
         except Exception as e:
-            logger.error(f"خطأ في جلب قنوات المستخدم {user_id}: {e}")
-            return []
-    return await execute_db(_get)
-
-async def db_get_channel_info(channel_db_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
-        return await cur.fetchone()
-    return await execute_db(_get)
-
-async def db_delete_channel_by_id(user_id: int, channel_db_id: int) -> bool:
-    async def _delete(conn):
-        await conn.execute("DELETE FROM user_channels WHERE id=? AND user_id=?", (channel_db_id, user_id))
-        await conn.execute("DELETE FROM posts WHERE channel_db_id=?", (channel_db_id,))
-        await conn.execute("DELETE FROM schedule WHERE channel_db_id=?", (channel_db_id,))
-        await conn.commit()
-        return True
-    return await execute_db(_delete)
-
-async def db_get_active_channel(user_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT active_channel FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row and row[0] is not None:
-            return row[0]
-        cur = await conn.execute("SELECT id FROM user_channels WHERE user_id=? AND banned=0 ORDER BY id LIMIT 1", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_active_channel(user_id: int, channel_db_id: int):
-    async def _set(conn):
-        await conn.execute("UPDATE users SET active_channel=? WHERE user_id=?", (channel_db_id, user_id))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_save_posts(channel_db_id: int, posts: list) -> int:
-    async def _save(conn):
-        values = []
-        for text_content, media_type, media_file_id in posts:
-            values.append((channel_db_id, sanitize_text(text_content), media_type, media_file_id, utc_now_iso()))
-        await conn.executemany(
-            "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
-            values
-        )
-        await conn.commit()
-        return len(values)
-    return await execute_db(_save)
-
-async def db_get_next_post(channel_db_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT id, text, media_type, media_file_id FROM posts WHERE channel_db_id=? AND published=0 AND (fail_count IS NULL OR fail_count < 3) ORDER BY id LIMIT 1", (channel_db_id,))
-        row = await cur.fetchone()
-        if row:
-            return {'id': row[0], 'text': row[1], 'media_type': row[2], 'media_file_id': row[3]}
-        return None
-    return await execute_db(_get)
-
-async def db_mark_published(post_id: int):
-    async def _mark(conn):
-        await conn.execute("UPDATE posts SET published=1 WHERE id=?", (post_id,))
-        await conn.commit()
-    return await execute_db(_mark)
-
-async def db_increment_fail_count(post_id: int):
-    async def _inc(conn):
-        await conn.execute("UPDATE posts SET fail_count = fail_count + 1 WHERE id=?", (post_id,))
-        await conn.commit()
-    return await execute_db(_inc)
-
-async def db_get_posts_count(channel_db_id: int) -> int:
-    async def _count(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_count)
-
-async def db_get_published_count(channel_db_id: int) -> int:
-    async def _count(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=1", (channel_db_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_count)
-
-async def db_reset_all_posts_to_unpublished(channel_db_id: int) -> int:
-    async def _reset(conn):
-        await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
-        await conn.commit()
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_reset)
-
-async def db_should_auto_recycle(channel_db_id: int) -> bool:
-    total = await db_get_posts_count(channel_db_id)
-    published = await db_get_published_count(channel_db_id)
-    return total > 0 and published >= total
-
-async def db_reset_posts_to_unpublished(channel_db_id: int, user_id: int = None):
-    async def _reset(conn):
-        await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
-        await conn.commit()
-    return await execute_db(_reset)
-
-async def db_get_user_posts_for_channel(channel_db_id: int, limit=15):
-    async def _get(conn):
-        cur = await conn.execute("SELECT id, text, media_type FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT ?", (channel_db_id, limit))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_delete_single_post(post_id: int, user_id: int, channel_db_id: int) -> bool:
-    async def _delete(conn):
-        cur = await conn.execute("SELECT 1 FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE p.id=? AND uc.user_id=?", (post_id, user_id))
-        if not await cur.fetchone():
-            return False
-        await conn.execute("DELETE FROM posts WHERE id=?", (post_id,))
-        await conn.commit()
-        return True
-    return await execute_db(_delete)
-
-async def db_get_user_unpublished_posts(user_id: int) -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=? AND p.published=0", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_get)
-
-async def db_get_user_total_posts(user_id: int) -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_get)
-
-async def db_get_user_channels_count(user_id: int) -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM user_channels WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_get)
-
-async def db_get_user_groups_count(user_id: int) -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(DISTINCT chat_id) FROM bot_groups WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)", (user_id, user_id))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_get)
-
-async def db_stats():
-    async def _stats(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM users")
-        total = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM users WHERE banned=1")
-        banned = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")
-        posts = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM bot_groups")
-        groups = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM user_channels")
-        channels = (await cur.fetchone())[0]
-        return total, banned, posts, groups, channels
-    return await execute_db(_stats)
-
-async def db_register_group(chat_id: int, chat_name: str, added_by: int, username: str = None) -> bool:
-    async def _register(conn):
-        cur = await conn.execute("SELECT chat_id FROM bot_groups WHERE chat_id=?", (chat_id,))
-        if await cur.fetchone():
-            await conn.execute("UPDATE bot_groups SET chat_name=?, username=?, added_by=? WHERE chat_id=?", (chat_name, username, added_by, chat_id))
-            await conn.commit()
-            return False
-        await conn.execute("INSERT INTO bot_groups (chat_id, chat_name, username, added_by, added_at) VALUES (?, ?, ?, ?, ?)",
-                          (chat_id, chat_name, username, added_by, utc_now_iso()))
-        await conn.execute("INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?, ?)", (added_by, chat_id))
-        await conn.commit()
-        return True
-    return await execute_db(_register)
-
-async def db_get_user_groups(user_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)", (user_id, user_id))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_get_all_groups(only_banned: bool = False):
-    async def _get(conn):
-        if only_banned:
-            cur = await conn.execute("SELECT chat_id, chat_name, username, added_by, added_at, banned FROM bot_groups WHERE banned=1 ORDER BY added_at DESC")
-        else:
-            cur = await conn.execute("SELECT chat_id, chat_name, username, added_by, added_at, banned FROM bot_groups ORDER BY added_at DESC")
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_register_channel(channel_id: int, channel_name: str, added_by: int):
-    async def _register(conn):
-        cur = await conn.execute("SELECT channel_id FROM bot_channels WHERE channel_id=?", (channel_id,))
-        if await cur.fetchone():
-            await conn.execute("UPDATE bot_channels SET channel_name=?, added_by=? WHERE channel_id=?", (channel_name, added_by, channel_id))
-            await conn.commit()
-            return False
-        await conn.execute("INSERT INTO bot_channels (channel_id, channel_name, added_by, added_at) VALUES (?, ?, ?, ?)",
-                          (channel_id, channel_name, added_by, utc_now_iso()))
-        await conn.commit()
-        return True
-    return await execute_db(_register)
-
-async def db_get_all_bot_channels(only_banned: bool = False):
-    async def _get(conn):
-        if only_banned:
-            cur = await conn.execute("SELECT channel_id, channel_name, added_by, added_at, banned FROM bot_channels WHERE banned=1 ORDER BY added_at DESC")
-        else:
-            cur = await conn.execute("SELECT channel_id, channel_name, added_by, added_at, banned FROM bot_channels ORDER BY added_at DESC")
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_get_all_user_channels_no_limit():
-    async def _get(conn):
-        cur = await conn.execute("SELECT uc.user_id, uc.id, uc.channel_id, uc.channel_name, uc.banned FROM user_channels uc ORDER BY uc.id")
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_all_users_channels(only_banned: bool = False, limit: int = 500):
-    async def _get(conn):
-        if only_banned:
-            cur = await conn.execute("SELECT user_id, id, channel_id, channel_name, banned FROM user_channels WHERE banned=1 LIMIT ?", (limit,))
-        else:
-            cur = await conn.execute("SELECT user_id, id, channel_id, channel_name, banned FROM user_channels LIMIT ?", (limit,))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_get_publish_interval() -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='publish_interval'")
-        row = await cur.fetchone()
-        return int(row[0]) if row else DEFAULT_PUBLISH_INTERVAL_SECONDS
-    return await execute_db(_get)
-
-async def db_get_publish_interval_seconds() -> int:
-    return await db_get_publish_interval()
-
-async def db_set_publish_interval_seconds(seconds: int, admin_id: int, is_admin: bool = False):
-    if not is_admin and admin_id != MAIN_ADMIN_ID:
-        return False
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(seconds),))
-        await conn.commit()
-    await execute_db(_set)
-    return True
-
-async def db_get_updates_channel():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
-        row = await cur.fetchone()
-        if row and row[0]:
-            channel = row[0].strip()
-            if channel.startswith('@'):
-                channel = channel[1:]
-            return channel if channel else None
-        return None
-    return await execute_db(_get)
-
-async def db_set_updates_channel(channel: str):
-    if not channel:
-        return False
-    channel = channel.strip()
-    if channel.startswith('@'):
-        channel = channel[1:]
-    if not channel:
-        return False
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('updates_channel', ?)", (channel,))
-        await conn.commit()
-    await execute_db(_set)
-    logger.info(f"✅ تم حفظ قناة التحديثات: {channel}")
-    return True
-
-async def db_get_force_subscribe_status() -> bool:
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_enabled'")
-        row = await cur.fetchone()
-        return row and row[0] == '1'
-    return await execute_db(_get)
-
-async def db_set_force_subscribe_status(enabled: bool):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_enabled', ?)", ('1' if enabled else '0',))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_force_subscribe_channel():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_channel'")
-        row = await cur.fetchone()
-        return row[0] if row and row[0] else None
-    return await execute_db(_get)
-
-async def db_set_force_subscribe_channel(channel: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_channel', ?)", (channel,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_log_channel_id():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='log_channel_id'")
-        row = await cur.fetchone()
-        return row[0] if row and row[0] else None
-    return await execute_db(_get)
-
-async def db_set_log_channel_id(channel_id: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_channel_id', ?)", (channel_id,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_security_settings(chat_id: int):
-    if CACHETOOLS_AVAILABLE:
-        if chat_id in _security_cache:
-            return _security_cache[chat_id]
-    async def _get(conn):
-        cur = await conn.execute("SELECT delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration FROM group_security WHERE chat_id=?", (chat_id,))
-        row = await cur.fetchone()
-        if row:
-            settings = {
-                'links': row[0] == 1,
-                'mentions': row[1] == 1,
-                'warn': row[2] == 1,
-                'slow_mode': row[3] == 1,
-                'slow_mode_seconds': row[4] if row[4] is not None else 5,
-                'welcome_enabled': row[5] == 1,
-                'welcome_text': row[6] if row[6] else "مرحباً {user} في {chat} 🤍",
-                'goodbye_enabled': row[7] == 1,
-                'goodbye_text': row[8] if row[8] else "وداعاً {user} 👋",
-                'delete_banned_words': row[9] == 1,
-                'auto_penalty': row[10] if row[10] else 'none',
-                'auto_mute_duration': row[11] if row[11] is not None else 60
-            }
-            if CACHETOOLS_AVAILABLE:
-                _security_cache[chat_id] = settings
-            return settings
-        default_settings = {
-            'links': False, 'mentions': False, 'warn': True, 'slow_mode': False,
-            'slow_mode_seconds': 5, 'welcome_enabled': False, 'welcome_text': "مرحباً {user} في {chat} 🤍",
-            'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋", 'delete_banned_words': False,
-            'auto_penalty': 'none', 'auto_mute_duration': 60
-        }
-        if CACHETOOLS_AVAILABLE:
-            _security_cache[chat_id] = default_settings
-        return default_settings
-    return await execute_db(_get)
-
-async def db_set_security_settings(chat_id: int, **kwargs):
-    async def _set(conn):
-        cur = await conn.execute("SELECT 1 FROM group_security WHERE chat_id=?", (chat_id,))
-        exists = await cur.fetchone()
-        if exists:
-            updates = []
-            values = []
-            for key, value in kwargs.items():
-                if key == 'links':
-                    updates.append("delete_links=?")
-                    values.append(1 if value else 0)
-                elif key == 'mentions':
-                    updates.append("delete_mentions=?")
-                    values.append(1 if value else 0)
-                elif key == 'warn':
-                    updates.append("warn_message=?")
-                    values.append(1 if value else 0)
-                elif key == 'slow_mode':
-                    updates.append("slow_mode=?")
-                    values.append(1 if value else 0)
-                elif key == 'slow_mode_seconds':
-                    updates.append("slow_mode_seconds=?")
-                    values.append(value)
-                elif key == 'welcome_enabled':
-                    updates.append("welcome_enabled=?")
-                    values.append(1 if value else 0)
-                elif key == 'welcome_text':
-                    updates.append("welcome_text=?")
-                    values.append(value)
-                elif key == 'goodbye_enabled':
-                    updates.append("goodbye_enabled=?")
-                    values.append(1 if value else 0)
-                elif key == 'goodbye_text':
-                    updates.append("goodbye_text=?")
-                    values.append(value)
-                elif key == 'delete_banned_words':
-                    updates.append("delete_banned_words=?")
-                    values.append(1 if value else 0)
-                elif key == 'auto_penalty':
-                    updates.append("auto_penalty=?")
-                    values.append(value)
-                elif key == 'auto_mute_duration':
-                    updates.append("auto_mute_duration=?")
-                    values.append(value)
-            if updates:
-                query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id=?"
-                values.append(chat_id)
-                await conn.execute(query, values)
-        else:
+            logger.warning(f"⚠️ خطأ في تحديث جدول group_security: {e}")
+        
+        try:
             await conn.execute("""
-                INSERT INTO group_security (chat_id, delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (chat_id, 
-                  1 if kwargs.get('links', False) else 0,
-                  1 if kwargs.get('mentions', False) else 0,
-                  1 if kwargs.get('warn', True) else 0,
-                  1 if kwargs.get('slow_mode', False) else 0,
-                  kwargs.get('slow_mode_seconds', 5),
-                  1 if kwargs.get('welcome_enabled', False) else 0,
-                  kwargs.get('welcome_text', "مرحباً {user} في {chat} 🤍"),
-                  1 if kwargs.get('goodbye_enabled', False) else 0,
-                  kwargs.get('goodbye_text', "وداعاً {user} 👋"),
-                  1 if kwargs.get('delete_banned_words', False) else 0,
-                  kwargs.get('auto_penalty', 'none'),
-                  kwargs.get('auto_mute_duration', 60)))
-        await conn.commit()
-        if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
-            del _security_cache[chat_id]
-    return await execute_db(_set)
-
-async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
-    settings = await db_get_security_settings(chat_id)
-    if not settings['slow_mode']:
-        return True
-    seconds = settings.get('slow_mode_seconds', 5)
-    async def _check(conn):
-        cur = await conn.execute("SELECT message_time FROM user_messages WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-        row = await cur.fetchone()
-        now = utc_now()
-        if row:
-            last_time = datetime.fromisoformat(row[0])
-            if (now - last_time).total_seconds() < seconds:
-                return False
-        await conn.execute("INSERT OR REPLACE INTO user_messages (user_id, chat_id, message_time) VALUES (?, ?, ?)", (user_id, chat_id, now.isoformat()))
-        await conn.commit()
-        return True
-    return await execute_db(_check)
-
-async def db_add_banned_word(word: str, chat_id: int, added_by: int) -> bool:
-    async def _add(conn):
-        try:
-            await conn.execute("INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)", (word, chat_id, added_by, utc_now_iso()))
-            await conn.commit()
-            return True
-        except:
-            return False
-    return await execute_db(_add)
-
-async def db_remove_banned_word(word: str, chat_id: int) -> bool:
-    async def _remove(conn):
-        await conn.execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word, chat_id))
-        await conn.commit()
-        return True
-    return await execute_db(_remove)
-
-async def db_get_banned_words(chat_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT word, added_by, added_at FROM banned_words WHERE chat_id=? OR chat_id=-1 ORDER BY word", (chat_id,))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_contains_banned_word(text: str, chat_id: int) -> str:
-    words = await db_get_banned_words(chat_id)
-    text_lower = text.lower()
-    for word, _, _ in words:
-        if word in text_lower:
-            return word
-    return None
-
-async def db_register_hidden_owner_group(chat_id: int, owner_id: int):
-    async def _register(conn):
-        await conn.execute("INSERT OR REPLACE INTO hidden_owner_groups (chat_id, owner_id, is_hidden) VALUES (?, ?, 1)", (chat_id, owner_id))
-        await conn.commit()
-    return await execute_db(_register)
-
-async def db_is_hidden_owner(chat_id: int, user_id: int) -> bool:
-    async def _check(conn):
-        cur = await conn.execute("SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
-        return await cur.fetchone() is not None
-    return await execute_db(_check)
-
-async def db_set_chat_lock(chat_id: int, locked: bool, locked_by: int = None):
-    async def _set(conn):
-        if locked:
-            await conn.execute("INSERT OR REPLACE INTO chat_locks (chat_id, locked, locked_at, locked_by) VALUES (?, 1, ?, ?)", (chat_id, utc_now_iso(), locked_by))
-        else:
-            await conn.execute("DELETE FROM chat_locks WHERE chat_id=?", (chat_id,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def is_chat_locked(chat_id: int) -> bool:
-    async def _check(conn):
-        cur = await conn.execute("SELECT locked FROM chat_locks WHERE chat_id=?", (chat_id,))
-        row = await cur.fetchone()
-        return row and row[0] == 1
-    return await execute_db(_check)
-
-async def add_bot_admin(user_id: int):
-    async def _add(conn):
-        await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (user_id,))
-        await conn.commit()
-    return await execute_db(_add)
-
-async def remove_bot_admin(user_id: int):
-    async def _remove(conn):
-        await conn.execute("DELETE FROM bot_admins WHERE user_id=?", (user_id,))
-        await conn.commit()
-    return await execute_db(_remove)
-
-async def is_bot_admin(user_id: int) -> bool:
-    if user_id == MAIN_ADMIN_ID:
-        return True
-    async def _check(conn):
-        cur = await conn.execute("SELECT 1 FROM bot_admins WHERE user_id=?", (user_id,))
-        return await cur.fetchone() is not None
-    return await execute_db(_check)
-
-async def get_all_bot_admins():
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id FROM bot_admins")
-        rows = await cur.fetchall()
-        return [row[0] for row in rows]
-    return await execute_db(_get)
-
-async def db_save_schedule(channel_db_id: int, schedule_type: str, interval_minutes: int = None, interval_hours: int = None, interval_days: int = None, days_of_week: str = None, specific_dates: str = None, publish_time: str = None):
-    async def _save(conn):
-        await conn.execute("""
-            INSERT OR REPLACE INTO schedule (channel_db_id, schedule_type, interval_minutes, interval_hours, interval_days, days_of_week, specific_dates, publish_time, next_publish_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        """, (channel_db_id, schedule_type, interval_minutes, interval_hours, interval_days, days_of_week, specific_dates, publish_time or "00:00"))
-        await conn.commit()
-    return await execute_db(_save)
-
-async def db_get_schedule(channel_db_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT schedule_type, interval_minutes, interval_hours, interval_days, days_of_week, specific_dates, publish_time, next_publish_date FROM schedule WHERE channel_db_id=?", (channel_db_id,))
-        row = await cur.fetchone()
-        if row:
-            return {
-                'type': row[0] or 'interval_minutes',
-                'interval_minutes': row[1] or 12,
-                'interval_hours': row[2] or 0,
-                'interval_days': row[3] or 0,
-                'days_of_week': row[4] or '[]',
-                'specific_dates': row[5] or '[]',
-                'publish_time': row[6] or '00:00',
-                'next_publish_date': row[7]
-            }
-        return {'type': 'interval_minutes', 'interval_minutes': 12, 'interval_hours': 0, 'interval_days': 0, 'days_of_week': '[]', 'specific_dates': '[]', 'publish_time': '00:00', 'next_publish_date': None}
-    return await execute_db(_get)
-
-async def db_set_next_publish_date(channel_db_id: int, next_date: datetime):
-    async def _set(conn):
-        if next_date:
-            await conn.execute("UPDATE schedule SET next_publish_date=? WHERE channel_db_id=?", (next_date.isoformat(), channel_db_id))
-        else:
-            await conn.execute("UPDATE schedule SET next_publish_date=NULL WHERE channel_db_id=?", (channel_db_id,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_set_last_publish(channel_db_id: int, publish_time: datetime):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)", (channel_db_id, publish_time.isoformat()))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_update_next_publish_date(channel_db_id: int):
-    async def _update(conn):
-        schedule = await db_get_schedule(channel_db_id)
-        last_publish_cur = await conn.execute("SELECT last_publish_time FROM last_publish WHERE channel_db_id=?", (channel_db_id,))
-        last_row = await last_publish_cur.fetchone()
-        last_time = datetime.fromisoformat(last_row[0]) if last_row else utc_now()
-        schedule_type = schedule['type']
-        publish_time_str = schedule.get('publish_time', '00:00')
-        if ':' not in publish_time_str:
-            publish_time_str = '00:00'
-        try:
-            hour, minute = map(int, publish_time_str.split(':'))
-        except:
-            hour, minute = 0, 0
-        next_date = None
-        now = utc_now()
-        if schedule_type == 'interval_minutes':
-            minutes = schedule.get('interval_minutes', 12)
-            next_date = last_time + timedelta(minutes=minutes)
-        elif schedule_type == 'interval_hours':
-            hours = schedule.get('interval_hours', 1)
-            next_date = last_time + timedelta(hours=hours)
-        elif schedule_type == 'interval_days':
-            days = schedule.get('interval_days', 1)
-            next_date = last_time + timedelta(days=days)
-        elif schedule_type == 'days':
-            days_of_week = parse_days_of_week_safe(schedule.get('days_of_week', '[]'))
-            if days_of_week:
-                target_date = last_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                found = False
-                for i in range(1, 8):
-                    check_date = target_date + timedelta(days=i)
-                    if check_date.weekday() in days_of_week:
-                        next_date = check_date
-                        found = True
-                        break
-                if not found:
-                    next_date = target_date + timedelta(days=7)
-                    while next_date.weekday() not in days_of_week:
-                        next_date += timedelta(days=1)
-            else:
-                next_date = last_time + timedelta(days=1)
-        elif schedule_type == 'dates':
-            specific_dates = parse_dates_safe(schedule.get('specific_dates', '[]'))
-            if specific_dates:
-                target_date = last_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                for date_str in sorted(specific_dates):
-                    try:
-                        date_obj = datetime.strptime(date_str, '%Y-%m-%d').replace(hour=hour, minute=minute, second=0, microsecond=0)
-                        if date_obj > last_time:
-                            next_date = date_obj
-                            break
-                    except:
-                        continue
-                if not next_date:
-                    try:
-                        next_date = datetime.strptime(specific_dates[0], '%Y-%m-%d').replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=365)
-                    except:
-                        next_date = utc_now() + timedelta(days=1)
-            else:
-                next_date = utc_now() + timedelta(days=1)
-        if next_date:
-            await conn.execute("UPDATE schedule SET next_publish_date=? WHERE channel_db_id=?", (next_date.isoformat(), channel_db_id))
-            await conn.commit()
-    return await execute_db(_update)
-
-async def db_set_publish_time(channel_db_id: int, time_str: str):
-    async def _set(conn):
-        await conn.execute("UPDATE schedule SET publish_time=? WHERE channel_db_id=?", (time_str, channel_db_id))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_unpublished_count(channel_db_id: int) -> int:
-    async def _count(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
-        row = await cur.fetchone()
-        return row[0] if row else 0
-    return await execute_db(_count)
-
-async def check_bot_permissions(bot, channel_id: str) -> tuple:
-    try:
-        me = await bot.get_chat_member(channel_id, bot.id)
-        if me.status not in ['administrator', 'creator']:
-            return False, "البوت ليس مشرفاً في القناة"
-        if not me.can_post_messages:
-            return False, "البوت لا يملك صلاحية النشر"
-        return True, ""
-    except Exception as e:
-        return False, str(e)[:100]
-
-async def db_add_reply(keyword, reply):
-    async def _add(conn):
-        await conn.execute("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?,?)", (keyword.lower(), reply))
-        await conn.commit()
-    return await execute_db(_add)
-
-async def db_del_reply(keyword):
-    async def _del(conn):
-        await conn.execute("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
-        await conn.commit()
-    return await execute_db(_del)
-
-async def db_get_reply(keyword):
-    async def _get(conn):
-        cur = await conn.execute("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_get_all_replies():
-    async def _get(conn):
-        cur = await conn.execute("SELECT keyword, reply FROM group_replies ORDER BY keyword")
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_add_scheduled_post(chat_id: int, text: str, publish_time: datetime):
-    async def _add(conn):
-        await conn.execute("INSERT INTO scheduled_posts (chat_id, text, publish_time, fail_count) VALUES (?, ?, ?, 0)", (chat_id, sanitize_text(text), publish_time.isoformat()))
-        await conn.commit()
-    return await execute_db(_add)
-
-async def db_get_due_scheduled_posts(now: datetime):
-    async def _get(conn):
-        cur = await conn.execute("SELECT id, chat_id, text, fail_count FROM scheduled_posts WHERE publish_time <= ?", (now.isoformat(),))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_update_scheduled_post_fail(post_id: int, fail_count: int):
-    async def _update(conn):
-        await conn.execute("UPDATE scheduled_posts SET fail_count = ? WHERE id = ?", (fail_count, post_id))
-        await conn.commit()
-    return await execute_db(_update)
-
-async def db_delete_scheduled_post(post_id: int):
-    async def _delete(conn):
-        await conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (post_id,))
-        await conn.commit()
-    return await execute_db(_delete)
-
-async def db_get_next_ticket_number():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='last_ticket_number'")
-        row = await cur.fetchone()
-        return int(row[0]) if row else 0
-    return await execute_db(_get)
-
-async def db_save_ticket(user_id, username, message, ticket_num):
-    async def _save(conn):
-        created_at = utc_now_iso()
-        await conn.execute("INSERT INTO support_tickets (user_id, username, message, ticket_number, status, created_at) VALUES (?,?,?,?,?,?)", (user_id, username, sanitize_text(message), ticket_num, 'pending', created_at))
-        await conn.commit()
-        return True
-    return await execute_db(_save)
-
-async def db_get_user_ticket(user_id):
-    async def _get(conn):
-        cur = await conn.execute("SELECT ticket_number, status, created_at FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
-        return await cur.fetchone()
-    return await execute_db(_get)
-
-async def db_get_all_tickets(limit=20):
-    async def _get(conn):
-        cur = await conn.execute("SELECT id, user_id, username, message, ticket_number, status, created_at FROM support_tickets ORDER BY id DESC LIMIT ?", (limit,))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_get_last_ticket_id_for_user(user_id):
-    async def _get(conn):
-        cur = await conn.execute("SELECT id FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_mark_ticket_replied(ticket_id):
-    async def _mark(conn):
-        await conn.execute("UPDATE support_tickets SET status='replied', replied=1 WHERE id=?", (ticket_id,))
-        await conn.commit()
-    return await execute_db(_mark)
-
-async def db_delete_all_tickets() -> int:
-    async def _delete(conn):
-        cur = await conn.execute("DELETE FROM support_tickets")
-        count = cur.rowcount
-        await conn.execute("UPDATE settings SET value='0' WHERE key='last_ticket_number'")
-        await conn.commit()
-        return count
-    return await execute_db(_delete)
-
-async def db_get_referral_settings() -> dict:
-    async def _get(conn):
-        settings = {}
-        cur = await conn.execute("SELECT key, value FROM referral_settings")
-        rows = await cur.fetchall()
-        for key, value in rows:
-            settings[key] = value
-        return settings
-    return await execute_db(_get)
-
-async def db_get_referral_code(user_id: int) -> str:
-    async def _get(conn):
-        cur = await conn.execute("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row and row[0] else None
-    return await execute_db(_get)
-
-async def db_generate_referral_code(user_id: int) -> str:
-    async def _generate(conn):
-        code_hash = hashlib.md5(f"{user_id}{time_module.time()}".encode()).hexdigest()[:8]
-        referral_code = f"REF{code_hash.upper()}"
-        await conn.execute("UPDATE users SET referral_code=? WHERE user_id=?", (referral_code, user_id))
-        await conn.commit()
-        return referral_code
-    return await execute_db(_generate)
-
-async def db_get_user_by_referral_code(referral_code: str) -> int | None:
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id FROM users WHERE referral_code=?", (referral_code,))
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_add_referral(referrer_id: int, referred_id: int) -> bool:
-    async def _add(conn):
-        if referrer_id == referred_id:
-            return False
-        cur = await conn.execute("SELECT 1 FROM referrals WHERE referred_id=?", (referred_id,))
-        if await cur.fetchone():
-            return False
-        today_start = utc_now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        cur = await conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND referred_at >= ?", (referrer_id, today_start))
-        count_today = (await cur.fetchone())[0]
-        settings = await db_get_referral_settings()
-        max_per_day = int(settings.get('max_referrals_per_day', '5'))
-        if count_today >= max_per_day:
-            return False
-        await conn.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", (referrer_id, referred_id))
-        await conn.execute("INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days) VALUES (?, 1, 0, 0) ON CONFLICT(user_id) DO UPDATE SET referral_count = referral_count + 1", (referrer_id,))
-        await conn.commit()
-        return True
-    return await execute_db(_add)
-
-async def db_auto_reward_referral(referrer_id: int, referred_id: int) -> int:
-    async def _reward(conn):
-        settings = await db_get_referral_settings()
-        reward_days = int(settings.get('reward_days_per_referral', '3'))
-        await conn.execute("INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days) VALUES (?, 0, ?, 0) ON CONFLICT(user_id) DO UPDATE SET total_reward_days = total_reward_days + ?", (referrer_id, reward_days, reward_days))
-        await conn.execute("UPDATE referrals SET is_rewarded=1 WHERE referrer_id=? AND referred_id=?", (referrer_id, referred_id))
-        await conn.commit()
-        return reward_days
-    return await execute_db(_reward)
-
-async def db_get_referral_stats(user_id: int) -> dict:
-    async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
-        total_referrals = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT referral_count, total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return {
-            'total_referrals': total_referrals,
-            'referral_count': row[0] if row else 0,
-            'total_reward_days': row[1] if row else 0,
-            'claimed_reward_days': row[2] if row else 0,
-            'available_days': (row[1] if row else 0) - (row[2] if row else 0)
-        }
-    return await execute_db(_get)
-
-async def db_claim_referral_reward(user_id: int) -> int:
-    async def _claim(conn):
-        cur = await conn.execute("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if not row:
-            return 0
-        total = row[0]
-        claimed = row[1]
-        available = total - claimed
-        if available <= 0:
-            return 0
-        current_sub = await db_get_subscription_days_left(user_id)
-        new_sub_days = current_sub + available
-        end_date = (utc_now() + timedelta(days=new_sub_days)).isoformat()
-        await conn.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (end_date, user_id))
-        await conn.execute("UPDATE referral_rewards SET claimed_reward_days = claimed_reward_days + ? WHERE user_id=?", (available, user_id))
-        await conn.commit()
-        return available
-    return await execute_db(_claim)
-
-async def db_get_welcome_bonus_points() -> int:
-    settings = await db_get_referral_settings()
-    return int(settings.get('welcome_bonus_points', '10'))
-
-async def db_get_user_reminder_settings(user_id: int) -> dict:
-    async def _get(conn):
-        cur = await conn.execute("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before, last_reminder_sent, notification_lang FROM user_reminder_settings WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row:
-            return {
-                'subscription_reminder': row[0] == 1,
-                'daily_stats_reminder': row[1] == 1,
-                'weekly_report': row[2] == 1,
-                'reminder_days_before': row[3] if row[3] is not None else 3,
-                'last_reminder_sent': row[4] if row[4] else 0,
-                'notification_lang': row[5] if row[5] else 'ar'
-            }
-        else:
-            await conn.execute("INSERT INTO user_reminder_settings (user_id, subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before, last_reminder_sent, notification_lang) VALUES (?, 1, 0, 1, 3, 0, 'ar')", (user_id,))
-            await conn.commit()
-            return {'subscription_reminder': True, 'daily_stats_reminder': False, 'weekly_report': True, 'reminder_days_before': 3, 'last_reminder_sent': 0, 'notification_lang': 'ar'}
-    return await execute_db(_get)
-
-async def db_update_reminder_settings(user_id: int, **kwargs):
-    async def _update(conn):
-        fields, values = [], []
-        for key, value in kwargs.items():
-            if key == 'subscription_reminder':
-                fields.append("subscription_reminder=?")
-                values.append(1 if value else 0)
-            elif key == 'daily_stats_reminder':
-                fields.append("daily_stats_reminder=?")
-                values.append(1 if value else 0)
-            elif key == 'weekly_report':
-                fields.append("weekly_report=?")
-                values.append(1 if value else 0)
-            elif key == 'reminder_days_before':
-                fields.append("reminder_days_before=?")
-                values.append(value)
-            elif key == 'notification_lang':
-                fields.append("notification_lang=?")
-                values.append(value)
-        if fields:
-            query = f"UPDATE user_reminder_settings SET {', '.join(fields)} WHERE user_id=?"
-            values.append(user_id)
-            await conn.execute(query, values)
-            await conn.commit()
-    return await execute_db(_update)
-
-async def db_update_last_reminder_sent(user_id: int, reminder_type: str):
-    async def _update(conn):
-        now_timestamp = int(time_module.time())
-        await conn.execute("UPDATE user_reminder_settings SET last_reminder_sent=? WHERE user_id=?", (now_timestamp, user_id))
-        await conn.commit()
-    return await execute_db(_update)
-
-async def db_get_users_needing_reminder() -> list:
-    async def _get(conn):
-        now = utc_now()
-        users = []
-        cur = await conn.execute("SELECT user_id, subscription_end FROM users WHERE subscription_end IS NOT NULL AND banned=0")
-        rows = await cur.fetchall()
-        for user_id, subscription_end_str in rows:
-            try:
-                end_date = datetime.fromisoformat(subscription_end_str)
-                days_left = (end_date - now).days
-                if days_left < 0:
-                    continue
-                settings = await db_get_user_reminder_settings(user_id)
-                if settings['subscription_reminder']:
-                    reminder_days = settings['reminder_days_before']
-                    last_sent = settings['last_reminder_sent']
-                    now_timestamp = int(time_module.time())
-                    need_reminder = False
-                    if 0 < days_left <= reminder_days:
-                        if last_sent == 0:
-                            need_reminder = True
-                        elif (now_timestamp - last_sent) > (3 * 24 * 60 * 60):
-                            need_reminder = True
-                    if need_reminder:
-                        users.append({'user_id': user_id, 'days_left': days_left, 'notification_lang': settings['notification_lang']})
-            except:
-                continue
-        return users
-    return await execute_db(_get)
-
-async def db_get_all_active_users_for_report() -> list:
-    async def _get(conn):
-        thirty_days_ago = (utc_now() - timedelta(days=30)).isoformat()
-        cur = await conn.execute("SELECT user_id FROM users_cache WHERE last_updated >= ?", (thirty_days_ago,))
-        return [row[0] for row in await cur.fetchall()]
-    return await execute_db(_get)
-
-LEVEL_REQUIREMENTS = {1: 0, 2: 100, 3: 250, 4: 500, 5: 1000, 6: 2000, 7: 3500, 8: 5000, 9: 7500, 10: 10000}
-
-async def db_get_user_level(user_id: int):
-    async def _get(conn):
-        cur = await conn.execute("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if row:
-            return {'points': row[0], 'level': row[1]}
-        return {'points': 0, 'level': 1}
-    return await execute_db(_get)
-
-async def db_update_user_level(user_id: int, points: int, level: int):
-    async def _update(conn):
-        await conn.execute("INSERT OR REPLACE INTO user_levels (user_id, points, level) VALUES (?,?,?)", (user_id, points, level))
-        await conn.commit()
-    return await execute_db(_update)
-
-user_points_last_hour = defaultdict(lambda: (0, 0.0))
-async def cleanup_points_cache():
-    while True:
-        await asyncio.sleep(3600)
-        user_points_last_hour.clear()
-
-async def add_points(user_id: int, update: Update = None, context: ContextTypes.DEFAULT_TYPE = None):
-    now = utc_now()
-    count, last_timestamp = user_points_last_hour.get(user_id, (0, 0.0))
-    if last_timestamp > 0:
-        last_time = datetime.fromtimestamp(last_timestamp)
-        last_time = to_naive(last_time)
-        if (now - last_time).total_seconds() < 3600:
-            if count >= 20:
-                return
-            new_count = count + 1
-        else:
-            new_count = 1
-    else:
-        new_count = 1
-    user_points_last_hour[user_id] = (new_count, now.timestamp())
-    data = await db_get_user_level(user_id)
-    old_level = data['level']
-    points = data['points'] + 1
-    level = old_level
-    new_levels = []
-    for lvl, pts in LEVEL_REQUIREMENTS.items():
-        if points >= pts and lvl > level:
-            new_levels.append(lvl)
-            level = lvl
-    if new_levels and update and update.effective_user and context:
-        try:
-            if len(new_levels) == 1:
-                msg = f"🎉 **تهانينا!**\nلقد وصلت إلى المستوى {new_levels[0]}! 🎉"
-            else:
-                msg = f"🎉 **تهانينا!**\nلقد تقدمت {len(new_levels)} مستويات إلى المستوى {new_levels[-1]}! 🎉"
-            await safe_send_markdown(context.bot, user_id, msg)
-        except:
-            pass
-    await db_update_user_level(user_id, points, level)
-
-async def get_rank(user_id: int) -> dict:
-    return await db_get_user_level(user_id)
-
-async def get_top_users(limit: int = 10):
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_get_allowed_sendcode_user() -> int | None:
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_allowed_sendcode_user(user_id: int) -> None:
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
-        await conn.commit()
-    return await execute_db(_set)
-
-# ===================== دوال المسابقات (مصححة بالكامل) =====================
-async def db_get_active_contests_with_participants(limit: int = 10) -> list:
-    try:
-        async def _get(conn):
-            now = utc_now().isoformat()
-            try:
-                cur = await conn.execute(
-                    """SELECT c.id, c.title, c.description, c.prize, c.end_date,
-                              COALESCE((SELECT COUNT(*) FROM contest_participants cp WHERE cp.contest_id = c.id), 0) as participants
-                       FROM contests c
-                       WHERE c.status = 'active' AND c.end_date > ?
-                       ORDER BY c.end_date ASC LIMIT ?""",
-                    (now, limit)
+                CREATE TABLE IF NOT EXISTS auto_replies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    reply TEXT NOT NULL,
+                    reply_type TEXT DEFAULT 'text',
+                    media_file_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(chat_id, keyword)
                 )
-                rows = await cur.fetchall()
-                result = []
-                for row in rows:
-                    try:
-                        if hasattr(row, 'keys'):
-                            result.append((
-                                row['id'],
-                                row['title'],
-                                row['description'],
-                                row['prize'],
-                                row['end_date'],
-                                row['participants']
-                            ))
-                        else:
-                            result.append((row[0], row[1], row[2], row[3], row[4], row[5] if len(row) > 5 else 0))
-                    except:
-                        continue
-                return result
-            except Exception as e:
-                logger.error(f"خطأ في تنفيذ الاستعلام: {e}")
-                return []
-        return await execute_db(_get)
-    except Exception as e:
-        logger.error(f"خطأ في db_get_active_contests_with_participants: {e}")
-        return []
-
-async def db_create_contest(creator_id: int, title: str, description: str, prize: str, end_date: datetime) -> int:
-    try:
-        async def _create(conn):
-            if not isinstance(end_date, datetime):
-                raise ValueError("end_date must be datetime object")
-            end_date_str = end_date.isoformat()
-            created_at_str = utc_now_iso()
-            cur = await conn.execute(
-                """INSERT INTO contests (creator_id, title, description, prize, end_date, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'active', ?) RETURNING id""",
-                (creator_id, title, description, prize, end_date_str, created_at_str)
-            )
-            row = await cur.fetchone()
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_chat ON auto_replies(chat_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_keyword ON auto_replies(keyword)")
             await conn.commit()
-            return row[0] if row else None
-        contest_id = await execute_db(_create)
-        if contest_id:
-            logger.info(f"✅ تم إنشاء مسابقة جديدة (ID: {contest_id}) بواسطة المستخدم {creator_id}")
-        else:
-            logger.warning(f"⚠️ فشل إنشاء المسابقة، لم يتم إرجاع ID للمستخدم {creator_id}")
-        return contest_id
-    except Exception as e:
-        logger.error(f"❌ خطأ في db_create_contest: {e}")
-        raise
+            logger.info("✅ تم إنشاء جدول auto_replies")
+        except Exception as e:
+            logger.warning(f"⚠️ خطأ في إنشاء جدول auto_replies: {e}")
 
-async def db_get_contest(contest_id: int) -> dict | None:
-    async def _get(conn):
-        cur = await conn.execute(
-            """SELECT id, title, description, prize, end_date, status, winner_id, creator_id, created_at
-               FROM contests WHERE id = ?""",
-            (contest_id,)
+# ===================== أوامر إدارة الردود التلقائية =====================
+async def add_reply_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة رد تلقائي جديد"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/addreply الكلمة_المفتاحية الرد\n\n"
+            "📌 **مثال:**\n"
+            "/addreply مرحبا مرحباً بك في المجموعة\n\n"
+            "📌 **للرد بوسائط:**\n"
+            "• اكتب /addreply ثم الرد على رسالة تحتوي على الصورة أو الفيديو\n"
+            "• مثال: /addreply شكرا (مع الرد على صورة)"
         )
-        row = await cur.fetchone()
-        if row:
-            return {
-                'id': row[0], 'title': row[1], 'description': row[2],
-                'prize': row[3], 'end_date': row[4], 'status': row[5],
-                'winner_id': row[6], 'creator_id': row[7], 'created_at': row[8]
-            }
-        return None
-    return await execute_db(_get)
+        return
+    
+    keyword = args[0].lower()
+    reply = " ".join(args[1:])
+    
+    # التحقق من وجود وسائط مع الأمر
+    reply_type = 'text'
+    media_file_id = None
+    
+    if update.message.reply_to_message:
+        if update.message.reply_to_message.photo:
+            reply_type = 'photo'
+            media_file_id = update.message.reply_to_message.photo[-1].file_id
+        elif update.message.reply_to_message.video:
+            reply_type = 'video'
+            media_file_id = update.message.reply_to_message.video.file_id
+        elif update.message.reply_to_message.sticker:
+            reply_type = 'sticker'
+            media_file_id = update.message.reply_to_message.sticker.file_id
+        elif update.message.reply_to_message.animation:
+            reply_type = 'animation'
+            media_file_id = update.message.reply_to_message.animation.file_id
+    
+    await db_add_auto_reply(chat_id, keyword, reply, reply_type, media_file_id)
+    
+    reply_type_icon = "📝"
+    if reply_type == 'photo':
+        reply_type_icon = "🖼️"
+    elif reply_type == 'video':
+        reply_type_icon = "🎬"
+    elif reply_type == 'sticker':
+        reply_type_icon = "🎨"
+    elif reply_type == 'animation':
+        reply_type_icon = "🎥"
+    
+    await update.message.reply_text(
+        f"✅ تم إضافة الرد التلقائي: `{keyword}`\n"
+        f"📌 النوع: {reply_type_icon}\n"
+        f"📝 الرد: {reply[:50]}{'...' if len(reply) > 50 else ''}",
+        parse_mode="MarkdownV2"
+    )
 
-async def db_participate_in_contest(user_id: int, contest_id: int, answer: str = "") -> bool:
-    async def _participate(conn):
+async def del_reply_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف رد تلقائي"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/delreply الكلمة_المفتاحية\n\n"
+            "📌 **مثال:**\n"
+            "/delreply مرحبا"
+        )
+        return
+    
+    keyword = args[0].lower()
+    await db_delete_auto_reply(chat_id, keyword)
+    await update.message.reply_text(f"✅ تم حذف الرد التلقائي: `{keyword}`", parse_mode="MarkdownV2")
+
+async def list_replies_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض جميع الردود التلقائية في المجموعة"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    
+    replies = await db_get_all_auto_replies(chat_id)
+    
+    if not replies:
+        await update.message.reply_text("📭 لا توجد ردود تلقائية في هذه المجموعة.\n\n📌 يمكنك إضافة رد باستخدام:\n/addreply كلمة الرد")
+        return
+    
+    text = "📋 **قائمة الردود التلقائية:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    count = 0
+    for keyword, reply, reply_type in replies:
+        count += 1
+        icon = "📝"
+        if reply_type == 'photo':
+            icon = "🖼️"
+        elif reply_type == 'video':
+            icon = "🎬"
+        elif reply_type == 'sticker':
+            icon = "🎨"
+        elif reply_type == 'animation':
+            icon = "🎥"
+        
+        reply_preview = reply[:30] + '...' if len(reply) > 30 else reply
+        text += f"{icon} `{keyword}` → {reply_preview}\n"
+        
+        if count >= 50:
+            text += f"\n... و {len(replies) - 50} رد آخر"
+            break
+    
+    if len(text) > 4000:
+        # تقسيم النص الطويل
+        parts = []
+        current = ""
+        for line in text.split('\n'):
+            if len(current) + len(line) + 1 > 3500:
+                parts.append(current)
+                current = line
+            else:
+                current += "\n" + line if current else line
+        if current:
+            parts.append(current)
+        
+        for i, part in enumerate(parts):
+            if i == 0:
+                await update.message.reply_text(part, parse_mode="MarkdownV2")
+            else:
+                await update.message.reply_text(f"📋 **تابع الردود ({i+1}/{len(parts)})**\n\n{part}", parse_mode="MarkdownV2")
+    else:
+        await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+async def enable_auto_reply_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تفعيل/تعطيل الردود التلقائية في المجموعة"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    
+    args = context.args
+    if not args or args[0].lower() not in ['on', 'off', 'تفعيل', 'تعطيل']:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/autoreply on - تفعيل الردود التلقائية\n"
+            "/autoreply off - تعطيل الردود التلقائية\n\n"
+            "📌 **الحالة الحالية:** " + ("مفعلة ✅" if (await db_get_security_settings(chat_id)).get('auto_reply_enabled', True) else "معطلة ❌")
+        )
+        return
+    
+    status = args[0].lower() in ['on', 'تفعيل']
+    
+    # تحديث الإعدادات
+    settings = await db_get_security_settings(chat_id)
+    settings['auto_reply_enabled'] = status
+    await db_set_security_settings(chat_id, **settings)
+    
+    status_text = "مفعلة ✅" if status else "معطلة ❌"
+    await update.message.reply_text(f"✅ تم {status_text} الردود التلقائية في المجموعة.")
+
+# ===================== معالج الردود التلقائية =====================
+async def auto_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الردود التلقائية للمجموعات"""
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+    
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        return
+    
+    chat_id = chat.id
+    text = update.message.text or update.message.caption or ""
+    if not text:
+        return
+    
+    # تجاهل الأوامر
+    if text.startswith('/'):
+        return
+    
+    # تجاهل رسائل البوت نفسه
+    if update.effective_user.is_bot:
+        return
+    
+    # التحقق من تفعيل الردود التلقائية
+    settings = await db_get_security_settings(chat_id)
+    if not settings.get('auto_reply_enabled', True):
+        return
+    
+    # البحث عن رد تلقائي في قاعدة البيانات
+    auto_reply = await db_get_auto_reply_by_keyword(chat_id, text)
+    
+    if not auto_reply:
+        # البحث في الردود المدمجة
+        text_lower = text.lower()
+        for keyword, reply in DEFAULT_AUTO_REPLIES.items():
+            if keyword in text_lower:
+                auto_reply = {
+                    'keyword': keyword,
+                    'reply': reply,
+                    'type': 'text',
+                    'media_file_id': None
+                }
+                break
+    
+    if auto_reply:
         try:
-            await conn.execute(
-                "INSERT INTO contest_participants (user_id, contest_id, answer, joined_at) VALUES (?, ?, ?, ?)",
-                (user_id, contest_id, answer, utc_now_iso())
-            )
-            await conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-    return await execute_db(_participate)
-
-async def db_get_user_participation(user_id: int, contest_id: int) -> dict | None:
-    async def _get(conn):
-        cur = await conn.execute(
-            "SELECT id, answer, joined_at FROM contest_participants WHERE user_id = ? AND contest_id = ?",
-            (user_id, contest_id)
-        )
-        row = await cur.fetchone()
-        if row:
-            return {'id': row[0], 'answer': row[1], 'joined_at': row[2]}
-        return None
-    return await execute_db(_get)
-
-async def db_set_contest_winner(contest_id: int, winner_id: int) -> bool:
-    async def _set(conn):
-        await conn.execute(
-            "UPDATE contests SET status = 'finished', winner_id = ? WHERE id = ?",
-            (winner_id, contest_id)
-        )
-        await conn.execute(
-            "INSERT INTO contest_winners (contest_id, winner_id, announced_at) VALUES (?, ?, ?)",
-            (contest_id, winner_id, utc_now_iso())
-        )
-        await conn.commit()
-        return True
-    return await execute_db(_set)
-
-async def db_get_contest_winners(limit: int = 10) -> list:
-    async def _get(conn):
-        cur = await conn.execute(
-            """SELECT c.id, c.title, c.prize, cw.winner_id, cw.announced_at
-               FROM contest_winners cw
-               JOIN contests c ON cw.contest_id = c.id
-               ORDER BY cw.announced_at DESC LIMIT ?""",
-            (limit,)
-        )
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-async def db_delete_contest(contest_id: int, user_id: int) -> bool:
-    async def _delete(conn):
-        cur = await conn.execute("SELECT creator_id FROM contests WHERE id = ?", (contest_id,))
-        row = await cur.fetchone()
-        if row and (row[0] == user_id or await is_bot_admin(user_id)):
-            await conn.execute("DELETE FROM contest_participants WHERE contest_id = ?", (contest_id,))
-            await conn.execute("DELETE FROM contests WHERE id = ?", (contest_id,))
-            await conn.commit()
-            return True
-        return False
-    return await execute_db(_delete)
-
-async def db_get_random_participant(contest_id: int) -> int | None:
-    async def _get(conn):
-        cur = await conn.execute(
-            "SELECT user_id FROM contest_participants WHERE contest_id = ? ORDER BY RANDOM() LIMIT 1",
-            (contest_id,)
-        )
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-# ===================== دوال النسخ الاحتياطي =====================
-async def db_get_auto_backup() -> bool:
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='auto_backup'")
-        row = await cur.fetchone()
-        return row and row[0] == '1'
-    return await execute_db(_get)
-
-async def db_set_auto_backup(enabled: bool) -> None:
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_backup', ?)", ('1' if enabled else '0',))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_last_backup_time():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='last_backup'")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-# ===================== دوال الإحصائيات والصحة =====================
-async def check_database_health() -> bool:
-    try:
-        async def _check(conn):
-            cur = await conn.execute("SELECT 1")
-            row = await cur.fetchone()
-            return row is not None
-        return await execute_db(_check)
-    except:
-        return False
-
-async def check_telegram_health() -> bool:
-    try:
-        from telegram.ext import Application
-        app = Application.builder().token(TOKEN).build()
-        me = await app.bot.get_me()
-        return me is not None
-    except:
-        return False
-
-def get_ram_usage():
-    try:
-        import psutil
-        mem = psutil.virtual_memory()
-        return {
-            'total': round(mem.total / (1024**3), 1),
-            'used': round(mem.used / (1024**3), 1),
-            'percent': mem.percent
-        }
-    except:
-        try:
-            with open('/proc/meminfo', 'r') as f:
-                lines = f.readlines()
-            mem_total = 0
-            mem_available = 0
-            for line in lines:
-                if 'MemTotal:' in line:
-                    mem_total = int(line.split()[1]) / (1024 * 1024)
-                if 'MemAvailable:' in line:
-                    mem_available = int(line.split()[1]) / (1024 * 1024)
-            if mem_total > 0:
-                used = mem_total - mem_available
-                percent = (used / mem_total) * 100
-                return {'total': round(mem_total, 1), 'used': round(used, 1), 'percent': round(percent, 1)}
-        except:
-            pass
-        return {'total': 0, 'used': 0, 'percent': 0}
-
-def parse_days_of_week_safe(days_str):
-    if not days_str: 
-        return []
-    try: 
-        return json.loads(days_str)
-    except: 
-        return []
-
-def parse_dates_safe(dates_str):
-    if not dates_str: 
-        return []
-    try: 
-        return json.loads(dates_str)
-    except: 
-        return []
-
-def contains_link(text):
-    patterns = [
-        r'https?://\S+',
-        r'www\.\S+',
-        r't\.me/\S+',
-        r'telegram\.me/\S+',
-        r'\b[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+\S*'
-    ]
-    return any(re.search(p, text, re.IGNORECASE) for p in patterns)
-
-def contains_mention(text):
-    return bool(re.search(r'@\w+', text))
-
-# ===================== نظام جمع المقاييس =====================
-class MetricsCollector:
-    def __init__(self):
-        self.commands_count = defaultdict(int)
-        self.errors_count = defaultdict(int)
-        self.response_times = []
-        self.start_time = time_module.time()
-    
-    def record_command(self, command: str):
-        self.commands_count[command] += 1
-    
-    def record_error(self, error_type: str):
-        self.errors_count[error_type] += 1
-    
-    def record_response_time(self, seconds: float):
-        self.response_times.append(seconds)
-        if len(self.response_times) > 1000:
-            self.response_times.pop(0)
-    
-    def get_stats(self) -> dict:
-        avg_response = sum(self.response_times) / len(self.response_times) if self.response_times else 0
-        return {
-            'uptime': time_module.time() - self.start_time,
-            'total_commands': sum(self.commands_count.values()),
-            'commands': dict(self.commands_count),
-            'errors': dict(self.errors_count),
-            'avg_response_time': avg_response,
-        }
-
-metrics = MetricsCollector()
+            if auto_reply['type'] == 'text':
+                await update.message.reply_text(auto_reply['reply'])
+            elif auto_reply['type'] == 'photo' and auto_reply['media_file_id']:
+                await update.message.reply_photo(
+                    auto_reply['media_file_id'],
+                    caption=auto_reply['reply']
+                )
+            elif auto_reply['type'] == 'video' and auto_reply['media_file_id']:
+                await update.message.reply_video(
+                    auto_reply['media_file_id'],
+                    caption=auto_reply['reply']
+                )
+            elif auto_reply['type'] == 'sticker' and auto_reply['media_file_id']:
+                await update.message.reply_sticker(auto_reply['media_file_id'])
+            elif auto_reply['type'] == 'animation' and auto_reply['media_file_id']:
+                await update.message.reply_animation(
+                    auto_reply['media_file_id'],
+                    caption=auto_reply['reply']
+                )
+        except Exception as e:
+            logger.error(f"❌ فشل إرسال الرد التلقائي: {e}")
 
 # ===================== دوال الكولباك الأساسية =====================
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3694,13 +2416,17 @@ async def my_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     kb = []
     for ch in channels:
-        ch_db_id, ch_tele_id, ch_name, banned = ch
-        display = ch_name if ch_name != ch_tele_id else ch_tele_id
-        kb.append([
-            InlineKeyboardButton(f"📢 {display}", callback_data=f"{CallbackData.CHANNELS_SELECT_PREFIX}{ch_db_id}"),
-            InlineKeyboardButton(get_text(uid, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}"),
-            InlineKeyboardButton(get_text(uid, 'delete_channel'), callback_data=f"{CallbackData.CHANNELS_DELETE_PREFIX}{ch_db_id}")
-        ])
+        try:
+            ch_db_id, ch_tele_id, ch_name, banned = ch
+            display = ch_name if ch_name != ch_tele_id else ch_tele_id
+            kb.append([
+                InlineKeyboardButton(f"📢 {display}", callback_data=f"{CallbackData.CHANNELS_SELECT_PREFIX}{ch_db_id}"),
+                InlineKeyboardButton(get_text(uid, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{ch_db_id}"),
+                InlineKeyboardButton(get_text(uid, 'delete_channel'), callback_data=f"{CallbackData.CHANNELS_DELETE_PREFIX}{ch_db_id}")
+            ])
+        except Exception as e:
+            logger.error(f"❌ خطأ في عرض القناة: {e}")
+            continue
     kb.append([InlineKeyboardButton(get_text(uid, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD)])
     kb.append([InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)])
     if query:
@@ -3787,6 +2513,12 @@ async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'no_posts'))
         return
     ch_info = await db_get_channel_info(active)
+    if not ch_info:
+        if query:
+            await query.edit_message_text("❌ معلومات القناة غير متوفرة")
+        else:
+            await update.message.reply_text("❌ معلومات القناة غير متوفرة")
+        return
     translation_lang = await get_user_translation_language(uid)
     final_text = post['text']
     if translation_lang != 'off' and final_text:
@@ -3983,28 +2715,37 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await safe_send_markdown(context.bot, uid, msg, reply_markup=kb)
         return
     keyboard = []
-    for chat_id, chat_name, username, banned in groups:
-        display_name = chat_name[:28] + "..." if len(chat_name) > 31 else chat_name
-        status_icon = "⛔" if banned else "✅"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{status_icon} {display_name}",
-                callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}"
-            )
-        ])
-        keyboard.append([
-            InlineKeyboardButton("🔐 الأمان", callback_data=f"{CallbackData.SECURITY_SELECT_GROUP}{chat_id}"),
-            InlineKeyboardButton("📜 السجل", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}"),
-            InlineKeyboardButton("⚙️ متقدم", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")
-        ])
-        is_locked = await is_chat_locked(chat_id)
-        lock_label = "🔒 قفل" if not is_locked else "🔓 فتح"
-        lock_callback = f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}" if not is_locked else f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}"
-        keyboard.append([
-            InlineKeyboardButton(lock_label, callback_data=lock_callback),
-            InlineKeyboardButton("🗑️ حذف", callback_data=f"delete_group:{chat_id}")
-        ])
-        keyboard.append([InlineKeyboardButton("─" * 20, callback_data="noop")])
+    for group in groups:
+        try:
+            chat_id, chat_name, username, banned = group
+            display_name = chat_name[:28] + "..." if len(chat_name) > 31 else chat_name
+            status_icon = "⛔" if banned else "✅"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{status_icon} {display_name}",
+                    callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}"
+                )
+            ])
+            keyboard.append([
+                InlineKeyboardButton("🔐 الأمان", callback_data=f"{CallbackData.SECURITY_SELECT_GROUP}{chat_id}"),
+                InlineKeyboardButton("📜 السجل", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}"),
+                InlineKeyboardButton("⚙️ متقدم", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")
+            ])
+            keyboard.append([
+                InlineKeyboardButton("💬 الردود", callback_data=f"{CallbackData.AUTO_REPLY_SETTINGS}{chat_id}"),
+                InlineKeyboardButton("🔒 قفل", callback_data=f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}" if not await is_chat_locked(chat_id) else f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}")
+            ])
+            is_locked = await is_chat_locked(chat_id)
+            lock_label = "🔒 قفل" if not is_locked else "🔓 فتح"
+            lock_callback = f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}" if not is_locked else f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}"
+            keyboard.append([
+                InlineKeyboardButton(lock_label, callback_data=lock_callback),
+                InlineKeyboardButton("🗑️ حذف", callback_data=f"delete_group:{chat_id}")
+            ])
+            keyboard.append([InlineKeyboardButton("─" * 20, callback_data="noop")])
+        except Exception as e:
+            logger.error(f"❌ خطأ في عرض المجموعة: {e}")
+            continue
     keyboard.append([
         InlineKeyboardButton("🔄 تحديث القائمة", callback_data=CallbackData.SECURITY_REFRESH_GROUPS),
         InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)
@@ -4043,6 +2784,7 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await conn.execute("DELETE FROM group_security WHERE chat_id = ?", (chat_id,))
         await conn.execute("DELETE FROM chat_locks WHERE chat_id = ?", (chat_id,))
         await conn.execute("DELETE FROM moderation_log WHERE chat_id = ?", (chat_id,))
+        await conn.execute("DELETE FROM auto_replies WHERE chat_id = ?", (chat_id,))
         await conn.commit()
     await execute_db(_delete_group)
     if query:
@@ -4086,6 +2828,7 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
     text += f"🎯 رسالة ترحيب: {'✅' if settings.get('welcome_enabled', False) else '❌'}\n"
     text += f"👋 رسالة وداع: {'✅' if settings.get('goodbye_enabled', False) else '❌'}\n"
     text += f"🔊 رسالة تحذير: {'✅' if settings['warn'] else '❌'}\n"
+    text += f"💬 الردود التلقائية: {'✅' if settings.get('auto_reply_enabled', True) else '❌'}\n"
     text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"⚖️ **العقوبة التلقائية:** {'طرد' if settings.get('auto_penalty') == 'kick' else 'حظر' if settings.get('auto_penalty') == 'ban' else 'كتم' if settings.get('auto_penalty') == 'mute' else 'لا شيء'}\n"
     if settings.get('auto_penalty') == 'mute' and settings.get('auto_mute_duration'):
@@ -4101,11 +2844,12 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
     text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"📌 **اختر الإجراء المناسب:**"
     if query:
-        await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
+        await safe_edit_markdown(query, text, reply_markup=get_security_keyboard(chat_id))
     else:
-        await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
+        await safe_send_markdown(context.bot, uid, text, reply_markup=get_security_keyboard(chat_id))
 
-def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+def get_security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """لوحة الأمان المحسنة مع زر الردود التلقائية"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"), 
          InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
@@ -4113,8 +2857,8 @@ def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"{CallbackData.SECURITY_SLOWMODE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"), 
          InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("⚖️ تحديد العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}"), 
-         InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")],
+        [InlineKeyboardButton("💬 الردود التلقائية", callback_data=f"{CallbackData.AUTO_REPLY_SETTINGS}{chat_id}"),
+         InlineKeyboardButton("⚖️ العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}")],
         [InlineKeyboardButton("📜 سجل الإجراءات", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}")],
         [InlineKeyboardButton("🔙 إغلاق", callback_data=CallbackData.SECURITY_CLOSE)]
     ])
@@ -4251,135 +2995,123 @@ async def build_days_keyboard(uid, context):
     return InlineKeyboardMarkup(kb_buttons)
 
 async def get_main_keyboard(user_id: int):
-    channels = await db_get_channels(user_id)
-    active = None
-    if channels:
-        try:
-            active = await db_get_active_channel(user_id)
-            if active is not None:
-                channel_exists = False
-                for ch in channels:
-                    if ch[0] == active:
-                        channel_exists = True
-                        break
-                if not channel_exists:
-                    active = channels[0][0]
-                    await db_set_active_channel(user_id, active)
+    try:
+        channels = await db_get_channels(user_id)
+        
+        if not channels or not isinstance(channels, list):
+            title = get_text(user_id, 'main_title').format(
+                BOT_NAME, user_id, 
+                await db_get_user_groups_count(user_id),
+                get_text(user_id, 'subscribed') if await db_has_active_subscription(user_id) else get_text(user_id, 'not_subscribed'),
+                get_text(user_id, 'no_channels'), 0,
+                get_text(user_id, 'auto_on') if await db_auto_status(user_id) else get_text(user_id, 'auto_off')
+            )
+            keyboard = [
+                [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
+                 InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
+                [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
+                 InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
+                [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
+                 InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
+                [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
+                 InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
+                [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
+                 InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
+                [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
+                [InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)],
+                [InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")]
+            ]
+            updates_channel = await db_get_updates_channel()
+            if updates_channel:
+                keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
+            if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
+                keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
+            return InlineKeyboardMarkup(keyboard), title, None
+
+        active = await db_get_active_channel(user_id)
+        active_channel_id = None
+        cnt = 0
+        ch_display = get_text(user_id, 'no_channels')
+
+        if active is not None:
+            for ch in channels:
+                if isinstance(ch, (tuple, list)) and len(ch) >= 1 and ch[0] == active:
+                    active_channel_id = active
+                    break
             else:
-                active = channels[0][0]
-                await db_set_active_channel(user_id, active)
-        except:
-            active = channels[0][0] if channels else None
-    cnt = 0
-    ch_display = get_text(user_id, 'no_channels')
-    if active is not None:
-        try:
-            cnt = await db_unpublished_count(active)
-            ch_info = await db_get_channel_info(active)
-            if ch_info and len(ch_info) >= 2:
-                ch_tele_id = ch_info[0] if ch_info[0] is not None else "unknown"
-                ch_name = ch_info[1] if ch_info[1] is not None else ch_tele_id
-                ch_display = f"{ch_name} ({ch_tele_id})"
-        except:
-            ch_display = get_text(user_id, 'no_channels')
-    my_groups = 0
-    try:
+                if channels and isinstance(channels[0], (tuple, list)) and len(channels[0]) >= 1:
+                    active_channel_id = channels[0][0]
+                    await db_set_active_channel(user_id, active_channel_id)
+
+        if active_channel_id:
+            try:
+                cnt = await db_unpublished_count(active_channel_id)
+                ch_info = await db_get_channel_info(active_channel_id)
+                if ch_info and isinstance(ch_info, (tuple, list)) and len(ch_info) >= 2:
+                    ch_display = f"{ch_info[1]} ({ch_info[0]})"
+                else:
+                    ch_display = "قناة غير معروفة"
+            except Exception as e:
+                logger.error(f"⚠️ خطأ في جلب معلومات القناة النشطة {active_channel_id}: {e}")
+                ch_display = "خطأ في القناة"
+                cnt = 0
+
         my_groups = await db_get_user_groups_count(user_id)
-    except:
-        my_groups = 0
-    has_sub = False
-    try:
         has_sub = await db_has_active_subscription(user_id)
-    except:
-        has_sub = False
-    sub_text = get_text(user_id, 'subscribed') if has_sub else get_text(user_id, 'not_subscribed')
-    auto_status = False
-    try:
-        auto_status = await db_auto_status(user_id)
-    except:
-        auto_status = False
-    auto_text = get_text(user_id, 'auto_on') if auto_status else get_text(user_id, 'auto_off')
-    title = get_text(user_id, 'main_title').format(BOT_NAME, user_id, my_groups, sub_text, ch_display, cnt, auto_text)
-    updates_channel = None
-    try:
+        sub_text = get_text(user_id, 'subscribed') if has_sub else get_text(user_id, 'not_subscribed')
+        auto_text = get_text(user_id, 'auto_on') if await db_auto_status(user_id) else get_text(user_id, 'auto_off')
+        title = get_text(user_id, 'main_title').format(BOT_NAME, user_id, my_groups, sub_text, ch_display, cnt, auto_text)
+        
         updates_channel = await db_get_updates_channel()
-    except:
-        updates_channel = None
-    updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
-    keyboard = []
-    if not channels:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)])
-        if active is not None:
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")])
-    else:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15), InlineKeyboardButton(get_text(user_id, 'publish_one'), callback_data=CallbackData.POSTS_PUBLISH_ONE)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_posts_btn'), callback_data=CallbackData.POSTS_MY), InlineKeyboardButton(get_text(user_id, 'recycle'), callback_data=CallbackData.POSTS_RECYCLE)])
-        keyboard.append([InlineKeyboardButton(f"{get_text(user_id, 'stats_btn')} ({cnt})", callback_data=CallbackData.STATS_PENDING), InlineKeyboardButton(get_text(user_id, 'my_stats_btn'), callback_data=CallbackData.STATS_FULL)])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY), InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)])
-        if active is not None:
-            keyboard.append([InlineKeyboardButton(get_text(user_id, 'schedule_btn'), callback_data=f"{CallbackData.SCHEDULE_MENU_PREFIX}{active}"), InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'my_channels_summary'), callback_data=CallbackData.MY_CHANNEL_STATS), InlineKeyboardButton(get_text(user_id, 'my_rank_btn'), callback_data="rank")])
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'top_10_btn'), callback_data="top"), InlineKeyboardButton(get_text(user_id, 'schedule_post_btn'), callback_data="schedule_post")])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)])
-    if updates_url:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    is_admin = False
-    try:
-        is_admin = (user_id == MAIN_ADMIN_ID) or (await is_bot_admin(user_id))
-    except:
-        is_admin = False
-    if is_admin:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
-    valid_keyboard = []
-    for row in keyboard:
-        if row and all(isinstance(btn, InlineKeyboardButton) for btn in row):
-            valid_keyboard.append(row)
-    if not valid_keyboard:
-        valid_keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
-    return InlineKeyboardMarkup(valid_keyboard), title, active
-    keyboard = [
-        [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
-         InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
-        [InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15), 
-         InlineKeyboardButton(get_text(user_id, 'publish_one'), callback_data=CallbackData.POSTS_PUBLISH_ONE)],
-        [InlineKeyboardButton(get_text(user_id, 'my_posts_btn'), callback_data=CallbackData.POSTS_MY), 
-         InlineKeyboardButton(get_text(user_id, 'recycle'), callback_data=CallbackData.POSTS_RECYCLE)],
-        [InlineKeyboardButton(f"{get_text(user_id, 'stats_btn')} ({cnt})", callback_data=CallbackData.STATS_PENDING), 
-         InlineKeyboardButton(get_text(user_id, 'my_stats_btn'), callback_data=CallbackData.STATS_FULL)],
-        [InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY), 
-         InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'schedule_btn'), callback_data=f"{CallbackData.SCHEDULE_MENU_PREFIX}{active}"), 
-         InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active}")],
-        [InlineKeyboardButton(get_text(user_id, 'my_channels_summary'), callback_data=CallbackData.MY_CHANNEL_STATS),
-         InlineKeyboardButton(get_text(user_id, 'my_rank_btn'), callback_data="rank")],
-        [InlineKeyboardButton(get_text(user_id, 'top_10_btn'), callback_data="top"), 
-         InlineKeyboardButton(get_text(user_id, 'schedule_post_btn'), callback_data="schedule_post")],
-        [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
-         InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
-        [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
-         InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
-        [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
-         InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
-         InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
-        [InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)],
-        [InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)],
-    ]
-    if updates_url:
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
-    keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
-        keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
-    return InlineKeyboardMarkup([row for row in keyboard if row]), title, active
+        updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
+        
+        keyboard = [
+            [InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD), 
+             InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY)],
+            [InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15), 
+             InlineKeyboardButton(get_text(user_id, 'publish_one'), callback_data=CallbackData.POSTS_PUBLISH_ONE)],
+            [InlineKeyboardButton(get_text(user_id, 'my_posts_btn'), callback_data=CallbackData.POSTS_MY), 
+             InlineKeyboardButton(get_text(user_id, 'recycle'), callback_data=CallbackData.POSTS_RECYCLE)],
+            [InlineKeyboardButton(f"{get_text(user_id, 'stats_btn')} ({cnt})", callback_data=CallbackData.STATS_PENDING), 
+             InlineKeyboardButton(get_text(user_id, 'my_stats_btn'), callback_data=CallbackData.STATS_FULL)],
+            [InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY), 
+             InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'schedule_btn'), callback_data=f"{CallbackData.SCHEDULE_MENU_PREFIX}{active_channel_id or 0}"), 
+             InlineKeyboardButton(get_text(user_id, 'channel_stats'), callback_data=f"{CallbackData.CHANNEL_STATS}:{active_channel_id or 0}")],
+            [InlineKeyboardButton(get_text(user_id, 'my_channels_summary'), callback_data=CallbackData.MY_CHANNEL_STATS),
+             InlineKeyboardButton(get_text(user_id, 'my_rank_btn'), callback_data="rank")],
+            [InlineKeyboardButton(get_text(user_id, 'top_10_btn'), callback_data="top"), 
+             InlineKeyboardButton(get_text(user_id, 'schedule_post_btn'), callback_data="schedule_post")],
+            [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP), 
+             InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)],
+            [InlineKeyboardButton(get_text(user_id, 'subscribe_btn'), callback_data=CallbackData.SUBSCRIBE_MENU), 
+             InlineKeyboardButton(get_text(user_id, 'developer_btn'), callback_data=CallbackData.DEVELOPER)],
+            [InlineKeyboardButton(get_text(user_id, 'language_btn'), callback_data="language"), 
+             InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'referral'), callback_data=CallbackData.REFERRAL_MENU), 
+             InlineKeyboardButton(get_text(user_id, 'reminder_settings'), callback_data=CallbackData.REMINDER_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'translation_settings'), callback_data=CallbackData.TRANSLATION_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)],
+            [InlineKeyboardButton(get_text(user_id, 'contests_menu'), callback_data=CallbackData.CONTESTS_MENU)],
+        ]
+        
+        if updates_url:
+            keyboard.append([InlineKeyboardButton(get_text(user_id, 'updates_btn'), callback_data=CallbackData.UPDATES)])
+        keyboard.append([InlineKeyboardButton(get_text(user_id, 'add_to_group'), url=f"https://t.me/{BOT_USERNAME}?startgroup")])
+        if user_id == MAIN_ADMIN_ID or await is_bot_admin(user_id):
+            keyboard.append([InlineKeyboardButton(get_text(user_id, 'admin_panel'), callback_data=CallbackData.ADMIN_PANEL)])
+        
+        return InlineKeyboardMarkup([row for row in keyboard if row]), title, active_channel_id
+        
+    except Exception as e:
+        error_id = log_error(e, {'user_id': user_id, 'function': 'get_main_keyboard'})
+        title = f"🌿 **{BOT_NAME}**\n━━━━━━━━━━━━━━━━━━━━━━\n⚠️ حدث خطأ في تحميل القائمة (الرمز: `{error_id}`)"
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة تحميل", callback_data=CallbackData.MAIN_MENU)],
+            [InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP)],
+            [InlineKeyboardButton(get_text(user_id, 'support_btn'), callback_data=CallbackData.SUPPORT_MENU)]
+        ]
+        return InlineKeyboardMarkup(keyboard), title, None
 
 # ===================== دوال إحصائيات القنوات =====================
 async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5154,7 +3886,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 18.0.9
+📦 **الإصدار:** 18.5.0
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -5179,6 +3911,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • مفتاح تشفير منفصل للنسخ الاحتياطي
 • تنقية النصوص باستخدام bleach
 • إدارة المهام بـ Semaphore
+• 💬 نظام الردود التلقائية المتقدم (200+ رد مدمج)
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -5755,14 +4488,15 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
 🎯 ترحيب: {'✅' if settings['welcome_enabled'] else '❌'}
 👋 وداع: {'✅' if settings['goodbye_enabled'] else '❌'}
 🔊 تحذير: {'✅' if settings['warn'] else '❌'}
+💬 الردود التلقائية: {'✅' if settings.get('auto_reply_enabled', True) else '❌'}
 ━━━━━━━━━━━━━━━━━━━━━━
 ⚖️ **العقوبة التلقائية:** {'طرد' if settings.get('auto_penalty') == 'kick' else 'حظر' if settings.get('auto_penalty') == 'ban' else 'كتم' if settings.get('auto_penalty') == 'mute' else 'لا شيء'}
 ━━━━━━━━━━━━━━━━━━━━━━
 💡 **اختر الإجراء المناسب:**"""
     if query:
-        await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
+        await safe_edit_markdown(query, text, reply_markup=get_security_keyboard(chat_id))
     else:
-        await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
+        await safe_send_markdown(context.bot, uid, text, reply_markup=get_security_keyboard(chat_id))
 
 async def security_refresh_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -8283,7 +7017,8 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("🔒 قفل المجموعة", callback_data=f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}"),
          InlineKeyboardButton("🔓 فتح المجموعة", callback_data=f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}"),
-         InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data=CallbackData.PANEL_CLOSE)]
+         InlineKeyboardButton("💬 الردود التلقائية", callback_data=f"{CallbackData.AUTO_REPLY_SETTINGS}{chat_id}")],
+        [InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data=CallbackData.PANEL_CLOSE)]
     ])
     await update.message.reply_text(f"🔧 **لوحة تحكم المجموعة**\n━━━━━━━━━━━━━━\n📌 **المجموعة:** {chat.title}\n🔐 **الحالة:** {lock_status_text}\n━━━━━━━━━━━━━━\n\nاستخدم الأزرار للتحكم في قفل وفتح المجموعة والإجراءات المتقدمة", reply_markup=kb, parse_mode="MarkdownV2")
 
@@ -8611,48 +7346,54 @@ async def publish_all_channels_callback_handler(update: Update, context: Context
     success_count = 0
     fail_count = 0
     no_posts_count = 0
-    for ch_db_id, ch_tele_id, ch_name, banned in channels:
-        if banned:
-            results.append(f"⛔ {ch_name}: قناة محظورة")
-            continue
-        post = await db_get_next_post(ch_db_id)
-        if not post:
-            results.append(f"📭 {ch_name}: لا توجد منشورات")
-            no_posts_count += 1
-            continue
-        translation_lang = await get_user_translation_language(uid)
-        final_text = post['text']
-        if translation_lang != 'off' and final_text:
-            try:
-                translated = await translate_text(final_text, translation_lang)
-                if translated and translated != final_text:
-                    final_text = f"{final_text}\n\n🌐 {translated}"
-            except:
-                pass
+    for ch in channels:
         try:
-            if post['media_type'] == 'photo' and post['media_file_id']:
-                await context.bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            elif post['media_type'] == 'video' and post['media_file_id']:
-                await context.bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            elif post['media_type'] == 'document' and post['media_file_id']:
-                await context.bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            elif post['media_type'] == 'audio' and post['media_file_id']:
-                await context.bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            elif post['media_type'] == 'voice' and post['media_file_id']:
-                await context.bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            elif post['media_type'] == 'animation' and post['media_file_id']:
-                await context.bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-            else:
-                await context.bot.send_message(ch_tele_id, final_text)
-            await db_mark_published(post['id'])
-            await db_set_last_publish(ch_db_id, utc_now())
-            await db_update_next_publish_date(ch_db_id)
-            results.append(f"✅ {ch_name}: تم النشر بنجاح")
-            success_count += 1
+            ch_db_id, ch_tele_id, ch_name, banned = ch
+            if banned:
+                results.append(f"⛔ {ch_name}: قناة محظورة")
+                continue
+            post = await db_get_next_post(ch_db_id)
+            if not post:
+                results.append(f"📭 {ch_name}: لا توجد منشورات")
+                no_posts_count += 1
+                continue
+            translation_lang = await get_user_translation_language(uid)
+            final_text = post['text']
+            if translation_lang != 'off' and final_text:
+                try:
+                    translated = await translate_text(final_text, translation_lang)
+                    if translated and translated != final_text:
+                        final_text = f"{final_text}\n\n🌐 {translated}"
+                except:
+                    pass
+            try:
+                if post['media_type'] == 'photo' and post['media_file_id']:
+                    await context.bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                elif post['media_type'] == 'video' and post['media_file_id']:
+                    await context.bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                elif post['media_type'] == 'document' and post['media_file_id']:
+                    await context.bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                elif post['media_type'] == 'audio' and post['media_file_id']:
+                    await context.bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                elif post['media_type'] == 'voice' and post['media_file_id']:
+                    await context.bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                elif post['media_type'] == 'animation' and post['media_file_id']:
+                    await context.bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
+                else:
+                    await context.bot.send_message(ch_tele_id, final_text)
+                await db_mark_published(post['id'])
+                await db_set_last_publish(ch_db_id, utc_now())
+                await db_update_next_publish_date(ch_db_id)
+                results.append(f"✅ {ch_name}: تم النشر بنجاح")
+                success_count += 1
+            except Exception as e:
+                results.append(f"❌ {ch_name}: {str(e)[:50]}")
+                fail_count += 1
+            await asyncio.sleep(1)
         except Exception as e:
-            results.append(f"❌ {ch_name}: {str(e)[:50]}")
+            logger.error(f"❌ خطأ في معالجة القناة: {e}")
+            results.append(f"❌ {ch_name if 'ch_name' in locals() else 'قناة غير معروفة'}: خطأ في المعالجة")
             fail_count += 1
-        await asyncio.sleep(1)
     summary = f"📊 **نتائج النشر في جميع القنوات**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ نجح: {success_count}\n❌ فشل: {fail_count}\n📭 لا توجد منشورات: {no_posts_count}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
     result_text = summary + "\n".join(results[:20])
     if len(results) > 20:
@@ -9388,6 +8129,10 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
     if user.is_bot:
         return
+    
+    # الردود التلقائية أولاً
+    await auto_reply_handler(update, context)
+    
     if await is_chat_locked(chat_id):
         try:
             await update.message.delete()
@@ -9433,12 +8178,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
         await apply_penalty(context.bot, chat_id, user_id, settings)
         return
-    reply = await db_get_reply(text.lower())
-    if reply:
-        try:
-            await update.message.reply_text(reply)
-        except:
-            pass
 
 async def apply_penalty(bot, chat_id, user_id, settings):
     penalty = settings.get('auto_penalty', 'none')
@@ -9904,22 +8643,27 @@ async def db_get_channel_stats_summary(user_id: int) -> dict:
         best_channel = None
         best_channel_views = 0
         active_channels = 0
-        for ch_db_id, ch_tele_id, ch_name, banned in channels:
-            if not banned:
-                active_channels += 1
-            stats = await db_get_channel_stats(ch_db_id)
-            if stats and stats['total_posts'] > 0:
-                total_posts += stats['total_posts']
-                total_published += stats['published_posts']
-                total_views += stats['total_views']
-                if stats['total_views'] > best_channel_views:
-                    best_channel_views = stats['total_views']
-                    best_channel = {
-                        'name': ch_name,
-                        'views': stats['total_views'],
-                        'posts': stats['published_posts'],
-                        'avg_views': stats['avg_views']
-                    }
+        for ch in channels:
+            try:
+                ch_db_id, ch_tele_id, ch_name, banned = ch
+                if not banned:
+                    active_channels += 1
+                stats = await db_get_channel_stats(ch_db_id)
+                if stats and stats['total_posts'] > 0:
+                    total_posts += stats['total_posts']
+                    total_published += stats['published_posts']
+                    total_views += stats['total_views']
+                    if stats['total_views'] > best_channel_views:
+                        best_channel_views = stats['total_views']
+                        best_channel = {
+                            'name': ch_name,
+                            'views': stats['total_views'],
+                            'posts': stats['published_posts'],
+                            'avg_views': stats['avg_views']
+                        }
+            except Exception as e:
+                logger.error(f"❌ خطأ في معالجة القناة للإحصائيات: {e}")
+                continue
         return {
             'total_channels': total_channels,
             'active_channels': active_channels,
@@ -10523,6 +9267,9 @@ async def init_db_improved():
         except Exception as e:
             logger.warning(f"⚠️ خطأ في تحديث جدول posts: {e}")
         
+        # تحديث جدول auto_replies
+        await update_auto_reply_table()
+        
         await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (MAIN_ADMIN_ID,))
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('updates_channel', '')")
@@ -10540,7 +9287,7 @@ async def init_db_improved():
     
     await db_pool.initialize()
     await cache_manager.init()
-    logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات ونظام المسابقات")
+    logger.info("✅ قاعدة البيانات جاهزة مع جميع التحسينات ونظام المسابقات والردود التلقائية")
 
 # ===================== الوظيفة الرئيسية =====================
 async def main():
@@ -10601,6 +9348,10 @@ async def main():
     application.add_handler(CommandHandler("contests", contests_command_handler))
     application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
     application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
+    application.add_handler(CommandHandler("addreply", add_reply_command_handler))
+    application.add_handler(CommandHandler("delreply", del_reply_command_handler))
+    application.add_handler(CommandHandler("listreplies", list_replies_command_handler))
+    application.add_handler(CommandHandler("autoreply", enable_auto_reply_command_handler))
     
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
@@ -10765,6 +9516,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(penalty_mute_duration_callback, pattern=f"^{CallbackData.GROUP_MUTE_DURATION_PERMANENT}:"))
     application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
     application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
+    application.add_handler(CallbackQueryHandler(auto_reply_settings_callback, pattern=f"^{CallbackData.AUTO_REPLY_SETTINGS}"))
     
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
@@ -10813,6 +9565,10 @@ async def main():
         BotCommand("contests", "المسابقات"),
         BotCommand("create_contest", "إنشاء مسابقة"),
         BotCommand("declare_winner", "إعلان فائز"),
+        BotCommand("addreply", "إضافة رد تلقائي"),
+        BotCommand("delreply", "حذف رد تلقائي"),
+        BotCommand("listreplies", "عرض الردود"),
+        BotCommand("autoreply", "تفعيل/تعطيل الردود"),
     ]
     await application.bot.set_my_commands(commands)
     
@@ -10828,7 +9584,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 18.0.9)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 18.5.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • تشفير قاعدة البيانات بكلمة مرور (PBKDF2)")
     print("   • نظام كشف النشاط المشبوه")
@@ -10848,6 +9604,7 @@ async def main():
     print("   • 🔄 إدارة المهام بـ Semaphore")
     print("   • 📦 فحص حجم الملفات")
     print("   • ⏱️ إعادة محاولة النشر الفاشل")
+    print("   • 💬 نظام الردود التلقائية المتقدم (200+ رد مدمج)")
     
     try:
         await application.run_polling(
