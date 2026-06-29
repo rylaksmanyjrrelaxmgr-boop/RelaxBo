@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.0 - نسخة محسنة مع 200 رد تلقائي
+الإصدار: 19.0.0 - نسخة محسنة مع دعم متعدد للمالك والمشرفين المخفيين
 المطور: @RelaxMgr
 """
 
@@ -170,8 +170,6 @@ import base64
 import tempfile
 import gzip
 import io
-import secrets
-import string
 import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
@@ -222,7 +220,6 @@ PUBLISH_RETRY_DELAY = 300
 
 # ===================== 200 رد تلقائي للمجموعات =====================
 
-# الردود الترحيبية (20 رد)
 WELCOME_REPLIES = {
     "مرحباً": "أهلاً وسهلاً بك في مجموعتنا 🤍",
     "السلام عليكم": "وعليكم السلام ورحمة الله وبركاته 🌹",
@@ -246,7 +243,6 @@ WELCOME_REPLIES = {
     "فرحتنا": "فرحتنا بوجودك 🤍"
 }
 
-# الردود على الأسئلة الشائعة (25 رد)
 FAQ_REPLIES = {
     "كيف حالك": "الحمد لله، بخير وأنت؟ ❤️",
     "شو اخبارك": "كل الخير، كيفك أنت؟ 🌹",
@@ -275,7 +271,6 @@ FAQ_REPLIES = {
     "ماذا تفعل": "أساعد في إدارة المجموعة 🛡️"
 }
 
-# الردود الإيجابية (20 رد)
 POSITIVE_REPLIES = {
     "شكراً": "العفو، تحت أمرك دائماً ❤️",
     "شكرا": "العفو، أهلين 🙏",
@@ -299,7 +294,6 @@ POSITIVE_REPLIES = {
     "تقبل مروري": "نورتنا بمرورك 🌸"
 }
 
-# الردود الدينية (25 رد)
 RELIGIOUS_REPLIES = {
     "ما شاء الله": "تبارك الرحمن 🤍",
     "ماشاءالله": "تبارك الله 🌹",
@@ -328,7 +322,6 @@ RELIGIOUS_REPLIES = {
     "السلام": "السلام عليكم ورحمة الله 🌸"
 }
 
-# الردود النكات والترفيه (30 رد)
 JOKE_REPLIES = {
     "ضحك": "😂😂",
     "نكتة": "مرة واحد قال للبوت: وينك؟ قال البوت: هني 👻",
@@ -362,7 +355,6 @@ JOKE_REPLIES = {
     "جو": "جو حلو 😊"
 }
 
-# الردود التحفيزية (15 رد)
 MOTIVATIONAL_REPLIES = {
     "تعبت": "إرتاح شوي، تستاهل الراحة 😊",
     "زعلان": "لا تزعل، كل شيء بيصير خير ❤️",
@@ -381,7 +373,6 @@ MOTIVATIONAL_REPLIES = {
     "ناجح": "أنت ناجح دائماً 🎉"
 }
 
-# الردود الاجتماعية (20 رد)
 SOCIAL_REPLIES = {
     "كيفك": "بخير الحمد لله، وأنت؟ 🌹",
     "كيفك انت": "بخير، تسلم ❤️",
@@ -405,7 +396,6 @@ SOCIAL_REPLIES = {
     "العائلة": "الله يجمع شملكم 🤍"
 }
 
-# الردود الإدارية (10 رد)
 ADMIN_REPLIES = {
     "ممنوع": "تم التنبيه، يرجى احترام قوانين المجموعة 🚫",
     "انتبه": "رجاءً انتبه للقوانين ⚠️",
@@ -419,7 +409,6 @@ ADMIN_REPLIES = {
     "تنبيه": "تنبيه هام يرجى قراءة القوانين 📋"
 }
 
-# الردود على الطلبات (15 رد)
 REQUEST_REPLIES = {
     "بليز": "حاضر، بس أرسل طلبك بالتفصيل 📝",
     "من فضلك": "تفضل، أنا هنا للمساعدة 🤖",
@@ -438,7 +427,6 @@ REQUEST_REPLIES = {
     "رأي": "نرحب برأيك القيم 📝"
 }
 
-# الردود عن البوت (10 رد)
 ABOUT_BOT_REPLIES = {
     "مين انت": "أنا البوت، مساعد لإدارة المجموعات 🤖",
     "ايش تسوي": "أساعد في إدارة المجموعات، النشر، الأمان، والكثير 📋",
@@ -452,7 +440,6 @@ ABOUT_BOT_REPLIES = {
     "شنو فائدتك": "أسهل عليك إدارة القناة والمجموعة 🚀"
 }
 
-# الردود الإضافية (10 رد)
 EXTRA_REPLIES = {
     "تمام": "تمام يا غالي 🌸",
     "اوك": "أوكي، تحت أمرك 🙏",
@@ -466,7 +453,6 @@ EXTRA_REPLIES = {
     "ياحلو": "حلوك الله 🌸"
 }
 
-# دمج جميع الردود في قاموس واحد
 ALL_REPLIES = {}
 ALL_REPLIES.update(WELCOME_REPLIES)
 ALL_REPLIES.update(FAQ_REPLIES)
@@ -826,23 +812,19 @@ def clean_text_for_telegram(text: str) -> str:
         return ""
     text = re.sub(r'[\u200b\u200c\u200d\u2060\uFEFF\u202a\u202b\u202c\u202d\u202e]', '', text)
     text = text.replace('\ufeff', '').replace('\ufffc', '')
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    return text
 
 def escape_markdown_v2(text: str) -> str:
     if not text:
         return ""
-    text = clean_text_for_telegram(text)
     special_chars = r'_*[]()~`>#+\-=|{}.!'
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
-    text = re.sub(r'(\d+)\.', r'\1\.', text)
     return text
 
 def sanitize_text(text: str, max_length: int = 4096, allow_tags: list = None) -> str:
     if not text:
         return ""
-    text = clean_text_for_telegram(text)
     try:
         if allow_tags is None:
             allow_tags = ['b', 'i', 'u', 's', 'a', 'code', 'pre', 'strong', 'em']
@@ -1124,7 +1106,6 @@ class SecurityAudit:
         except:
             pass
         
-        # إرسال إلى قناة التقارير
         try:
             log_channel = await db_get_log_channel_id()
             if log_channel:
@@ -1561,7 +1542,7 @@ def get_text(user_id: int, key: str) -> str:
             'unlocked': "🔓 تم فتح المجموعة",
             'cancelled': "❌ تم الإلغاء",
             'error': "⚠️ حدث خطأ، حاول مرة أخرى",
-            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
+            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/add_hidden_admin - إضافة مشرف مخفي\n/remove_hidden_admin - إزالة مشرف مخفي\n/list_hidden_admins - عرض المشرفين المخفيين\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
             'support_welcome': "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
             'support_help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
             'trial_used': "❌ لقد استخدمت التجربة المجانية مسبقاً",
@@ -1644,6 +1625,12 @@ def get_text(user_id: int, key: str) -> str:
             'contest_participants_count': "👥 عدد المشاركين: {0}",
             'contest_time_left': "⏳ متبقي {0} يوم",
             'contest_expired_label': "🔴 انتهت",
+            'hidden_admin_added': "✅ تم إضافة المشرف المخفي `{0}` بنجاح",
+            'hidden_admin_removed': "✅ تم إزالة المشرف المخفي `{0}` بنجاح",
+            'hidden_admin_list': "🔒 **قائمة المشرفين المخفيين**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            'no_hidden_admins': "📭 لا يوجد مشرفين مخفيين في هذه المجموعة",
+            'hidden_owner_registered': "✅ تم تسجيل المالك المخفي بنجاح",
+            'hidden_owner_already': "⚠️ أنت مسجل بالفعل كمالك مخفي",
         },
         'en': {
             'welcome': "🌿 **Welcome to Relax Manager**\nChoose your language",
@@ -1731,7 +1718,7 @@ def get_text(user_id: int, key: str) -> str:
             'unlocked': "🔓 Group unlocked",
             'cancelled': "❌ Cancelled",
             'error': "⚠️ An error occurred, try again",
-            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
+            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/add_hidden_admin - Add Hidden Admin\n/remove_hidden_admin - Remove Hidden Admin\n/list_hidden_admins - List Hidden Admins\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
             'support_welcome': "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
             'support_help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
             'trial_used': "❌ You have already used the free trial",
@@ -1814,6 +1801,12 @@ def get_text(user_id: int, key: str) -> str:
             'contest_participants_count': "👥 Participants: {0}",
             'contest_time_left': "⏳ {0} days left",
             'contest_expired_label': "🔴 Expired",
+            'hidden_admin_added': "✅ Hidden admin `{0}` added successfully",
+            'hidden_admin_removed': "✅ Hidden admin `{0}` removed successfully",
+            'hidden_admin_list': "🔒 **Hidden Admins List**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            'no_hidden_admins': "📭 No hidden admins in this group",
+            'hidden_owner_registered': "✅ Hidden owner registered successfully",
+            'hidden_owner_already': "⚠️ You are already registered as hidden owner",
         }
     }
     lang_texts = texts.get(lang, texts['ar'])
@@ -1982,6 +1975,9 @@ class CallbackData:
     CONTEST_WINNERS = "contest_winners"
     CONTESTS_BACK = "contests_back"
     ADMIN_DEL_CONTEST_PREFIX = "admin:del_contest:"
+    HIDDEN_ADMIN_ADD = "hidden_admin:add"
+    HIDDEN_ADMIN_REMOVE_PREFIX = "hidden_admin:remove:"
+    HIDDEN_ADMIN_LIST = "hidden_admin:list"
 
 # ===================== نظام إدارة الحالات المتقدم =====================
 class UserState(Enum):
@@ -2028,6 +2024,8 @@ class UserState(Enum):
     WAITING_CONTEST_ANSWER = auto()
     WAITING_DELETE_CONTEST = auto()
     WAITING_GROUP_SECURITY = auto()
+    WAITING_HIDDEN_ADMIN_ADD = auto()
+    WAITING_HIDDEN_ADMIN_REMOVE = auto()
 
 class StateDispatcher:
     def __init__(self):
@@ -2543,9 +2541,29 @@ async def db_get_user_channels_count(user_id: int) -> int:
 
 async def db_get_user_groups_count(user_id: int) -> int:
     async def _get(conn):
-        cur = await conn.execute("SELECT COUNT(DISTINCT chat_id) FROM bot_groups WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)", (user_id, user_id))
-        row = await cur.fetchone()
-        return row[0] if row else 0
+        try:
+            cur = await conn.execute("""
+                SELECT COUNT(DISTINCT chat_id) 
+                FROM bot_groups 
+                WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)
+            """, (user_id, user_id))
+            total = (await cur.fetchone())[0]
+            
+            cur = await conn.execute("""
+                SELECT COUNT(DISTINCT chat_id) FROM hidden_admins WHERE admin_id=?
+            """, (user_id,))
+            hidden_admin_count = (await cur.fetchone())[0]
+            
+            cur = await conn.execute("""
+                SELECT COUNT(DISTINCT chat_id) FROM hidden_owner_groups WHERE owner_id=?
+            """, (user_id,))
+            hidden_owner_count = (await cur.fetchone())[0]
+            
+            visible_count = total - (hidden_admin_count - hidden_owner_count)
+            return max(0, visible_count)
+        except Exception as e:
+            logger.error(f"خطأ في حساب عدد مجموعات المستخدم: {e}")
+            return 0
     return await execute_db(_get)
 
 async def db_stats():
@@ -2579,8 +2597,40 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
 
 async def db_get_user_groups(user_id: int):
     async def _get(conn):
-        cur = await conn.execute("SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)", (user_id, user_id))
-        return await cur.fetchall()
+        try:
+            cur = await conn.execute("""
+                SELECT chat_id, chat_name, username, banned 
+                FROM bot_groups 
+                WHERE added_by=? OR chat_id IN (SELECT chat_id FROM user_groups_link WHERE user_id=?)
+            """, (user_id, user_id))
+            all_groups = await cur.fetchall()
+            
+            cur = await conn.execute("""
+                SELECT chat_id FROM hidden_admins WHERE admin_id=?
+            """, (user_id,))
+            hidden_admin_rows = await cur.fetchall()
+            hidden_admin_groups = [row[0] for row in hidden_admin_rows]
+            
+            cur = await conn.execute("""
+                SELECT chat_id FROM hidden_owner_groups WHERE owner_id=?
+            """, (user_id,))
+            hidden_owner_rows = await cur.fetchall()
+            hidden_owner_groups = [row[0] for row in hidden_owner_rows]
+            
+            visible_groups = []
+            for group in all_groups:
+                chat_id = group[0]
+                if chat_id in hidden_owner_groups:
+                    visible_groups.append(group)
+                elif chat_id in hidden_admin_groups:
+                    continue
+                else:
+                    visible_groups.append(group)
+            
+            return visible_groups
+        except Exception as e:
+            logger.error(f"خطأ في جلب مجموعات المستخدم {user_id}: {e}")
+            return []
     return await execute_db(_get)
 
 async def db_get_all_groups(only_banned: bool = False):
@@ -2869,17 +2919,303 @@ async def db_contains_banned_word(text: str, chat_id: int) -> str:
             return word
     return None
 
+# ===================== دوال المالك والمشرفين المخفيين المتعددين =====================
+
 async def db_register_hidden_owner_group(chat_id: int, owner_id: int):
+    """تسجيل مالك مخفي للمجموعة"""
     async def _register(conn):
-        await conn.execute("INSERT OR REPLACE INTO hidden_owner_groups (chat_id, owner_id, is_hidden) VALUES (?, ?, 1)", (chat_id, owner_id))
+        await conn.execute("""
+            INSERT OR REPLACE INTO hidden_owner_groups (chat_id, owner_id, is_hidden) 
+            VALUES (?, ?, 1)
+        """, (chat_id, owner_id))
+        await conn.execute("""
+            INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) 
+            VALUES (?, ?)
+        """, (owner_id, chat_id))
         await conn.commit()
     return await execute_db(_register)
 
 async def db_is_hidden_owner(chat_id: int, user_id: int) -> bool:
+    """التحقق مما إذا كان المستخدم مالكاً مخفياً"""
     async def _check(conn):
         cur = await conn.execute("SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
         return await cur.fetchone() is not None
     return await execute_db(_check)
+
+async def db_add_hidden_admin(chat_id: int, admin_id: int, added_by: int) -> bool:
+    """إضافة مشرف مخفي جديد"""
+    async def _add(conn):
+        try:
+            await conn.execute("""
+                INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, added_at)
+                VALUES (?, ?, ?, ?)
+            """, (chat_id, admin_id, added_by, utc_now_iso()))
+            await conn.execute("""
+                INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) 
+                VALUES (?, ?)
+            """, (admin_id, chat_id))
+            await conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"خطأ في إضافة مشرف مخفي: {e}")
+            return False
+    return await execute_db(_add)
+
+async def db_remove_hidden_admin(chat_id: int, admin_id: int) -> bool:
+    """إزالة مشرف مخفي"""
+    async def _remove(conn):
+        await conn.execute("""
+            DELETE FROM hidden_admins 
+            WHERE chat_id=? AND admin_id=?
+        """, (chat_id, admin_id))
+        await conn.execute("""
+            DELETE FROM user_groups_link 
+            WHERE user_id=? AND chat_id=?
+        """, (admin_id, chat_id))
+        await conn.commit()
+        return True
+    return await execute_db(_remove)
+
+async def db_is_hidden_admin(chat_id: int, user_id: int) -> bool:
+    """التحقق مما إذا كان المستخدم مشرفاً مخفياً"""
+    async def _check(conn):
+        cur = await conn.execute("""
+            SELECT 1 FROM hidden_admins 
+            WHERE chat_id=? AND admin_id=?
+        """, (chat_id, user_id))
+        return await cur.fetchone() is not None
+    return await execute_db(_check)
+
+async def db_get_hidden_admins(chat_id: int) -> List[Dict]:
+    """الحصول على قائمة المشرفين المخفيين"""
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT admin_id, added_by, added_at 
+            FROM hidden_admins 
+            WHERE chat_id=?
+            ORDER BY added_at DESC
+        """, (chat_id,))
+        rows = await cur.fetchall()
+        return [
+            {
+                'admin_id': row[0],
+                'added_by': row[1],
+                'added_at': row[2]
+            }
+            for row in rows
+        ]
+    return await execute_db(_get)
+
+async def db_get_all_hidden_admins(user_id: int) -> List[Dict]:
+    """الحصول على جميع المجموعات التي يكون فيها المستخدم مشرفاً مخفياً"""
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT chat_id, added_at 
+            FROM hidden_admins 
+            WHERE admin_id=?
+        """, (user_id,))
+        rows = await cur.fetchall()
+        return [
+            {
+                'chat_id': row[0],
+                'added_at': row[1]
+            }
+            for row in rows
+        ]
+    return await execute_db(_get)
+
+async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
+    """التحقق مما إذا كانت المجموعة يجب أن تكون مخفية عن المستخدم"""
+    async def _check(conn):
+        if await db_is_hidden_owner(chat_id, user_id):
+            return False
+        if await db_is_hidden_admin(chat_id, user_id):
+            return True
+        return False
+    return await execute_db(_check)
+
+async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """التحقق من صلاحيات المستخدم في المجموعة (يدعم المالك والمشرفين المخفيين)"""
+    try:
+        if await db_is_hidden_owner(chat_id, user_id):
+            return True
+        if await db_is_hidden_admin(chat_id, user_id):
+            return True
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ['administrator', 'creator']
+    except Exception as e:
+        logger.error(f"خطأ في التحقق من صلاحيات المستخدم: {e}")
+        return False
+
+# ===================== دوال المالك والمشرفين المخفيين - الأوامر =====================
+
+async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تسجيل المالك المخفي للمجموعة"""
+    if update.message is None:
+        return
+    user = update.effective_user
+    if user is None:
+        return
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ يعمل فقط في المجموعات")
+        return
+    
+    chat_id = chat.id
+    user_id = user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+    
+    if await db_is_hidden_owner(chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'hidden_owner_already'))
+        return
+    
+    await db_register_hidden_owner_group(chat_id, user_id)
+    await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
+
+async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة مشرف مخفي جديد إلى المجموعة"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+    
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/add_hidden_admin معرف_المستخدم\n\n"
+            "مثال: `/add_hidden_admin 123456789`"
+        )
+        return
+    
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
+        return
+    
+    if target_id == MAIN_ADMIN_ID:
+        await update.message.reply_text("❌ لا يمكن إضافة المطور الأساسي كمشرف مخفي!")
+        return
+    
+    if target_id == user_id:
+        await update.message.reply_text("❌ لا يمكن إضافة نفسك كمشرف مخفي!")
+        return
+    
+    try:
+        member = await context.bot.get_chat_member(chat_id, target_id)
+        if member.status in ['left', 'kicked']:
+            await update.message.reply_text("❌ المستخدم ليس في المجموعة!")
+            return
+    except Exception as e:
+        await update.message.reply_text(f"❌ لا يمكن العثور على المستخدم: {e}")
+        return
+    
+    try:
+        user = await context.bot.get_chat(target_id)
+        if user.is_bot:
+            await update.message.reply_text("❌ لا يمكن إضافة بوت كمشرف مخفي!")
+            return
+    except:
+        pass
+    
+    if await db_is_hidden_admin(chat_id, target_id):
+        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` مشرف مخفي بالفعل!")
+        return
+    
+    success = await db_add_hidden_admin(chat_id, target_id, user_id)
+    if success:
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
+        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
+            "chat_id": chat_id,
+            "target": target_id
+        }, "HIGH")
+    else:
+        await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
+
+async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إزالة مشرف مخفي من المجموعة"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+    
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/remove_hidden_admin معرف_المستخدم\n\n"
+            "مثال: `/remove_hidden_admin 123456789`"
+        )
+        return
+    
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
+        return
+    
+    if target_id == MAIN_ADMIN_ID:
+        await update.message.reply_text("❌ لا يمكن إزالة المطور الأساسي!")
+        return
+    
+    if not await db_is_hidden_admin(chat_id, target_id):
+        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` ليس مشرفاً مخفياً!")
+        return
+    
+    success = await db_remove_hidden_admin(chat_id, target_id)
+    if success:
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
+        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
+            "chat_id": chat_id,
+            "target": target_id
+        }, "HIGH")
+    else:
+        await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
+
+async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة المشرفين المخفيين في المجموعة"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+    
+    admins = await db_get_hidden_admins(chat_id)
+    if not admins:
+        await update.message.reply_text(get_text(user_id, 'no_hidden_admins'))
+        return
+    
+    text = get_text(user_id, 'hidden_admin_list').format("")
+    for admin in admins:
+        text += f"👤 المستخدم: `{admin['admin_id']}`\n"
+        text += f"➕ أضيف بواسطة: `{admin['added_by']}`\n"
+        text += f"🕐 التاريخ: {admin['added_at'][:16]}\n"
+        text += "━━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+# ===================== دوال قاعدة البيانات الأخرى =====================
 
 async def db_set_chat_lock(chat_id: int, locked: bool, locked_by: int = None):
     async def _set(conn):
@@ -3884,7 +4220,7 @@ async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         elif post['media_type'] == 'animation' and post['media_file_id']:
             await context.bot.send_animation(ch_info[0], post['media_file_id'], caption=final_text if final_text else None)
         else:
-            await context.bot.send_message(ch_info[0], final_text)
+            await context.bot.send_message(ch_info[0], final_text, parse_mode=None)
         await db_mark_published(post['id'])
         await db_set_last_publish(active, utc_now())
         await db_update_next_publish_date(active)
@@ -4043,7 +4379,9 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if query:
         await query.answer()
     uid = update.effective_user.id
+    
     groups = await db_get_user_groups(uid)
+    
     if not groups:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ أضف البوت", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
@@ -4600,7 +4938,6 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
 
 # ===================== دوال المسابقات - المعالجات =====================
 async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة المسابقات النشطة (نسخة آمنة بالكامل)."""
     try:
         if not update or not update.effective_user:
             logger.error("update أو effective_user غير موجود")
@@ -4699,7 +5036,6 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
                 pass
 
 async def contests_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر المسابقات."""
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -4708,7 +5044,6 @@ async def contests_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
     await contests_command_handler(update, context)
 
 async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر المشاركة في مسابقة (نسخة آمنة)."""
     query = update.callback_query
     if not query:
         return
@@ -4893,7 +5228,6 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
         await update.message.reply_text(get_text(user_id, 'contest_declared_error'))
 
 async def admin_create_contest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر إنشاء مسابقة من لوحة الأدمن (نسخة مستقرة)."""
     query = update.callback_query
     if query:
         try:
@@ -4929,7 +5263,6 @@ async def admin_create_contest_callback(update: Update, context: ContextTypes.DE
             pass
 
 async def admin_declare_winner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج زر إعلان فائز من لوحة الأدمن (نسخة مستقرة)."""
     query = update.callback_query
     if query:
         try:
@@ -5220,6 +5553,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • إدارة المهام بـ Semaphore
 • 200 رد تلقائي للمجموعات
 • نظام ردود ذكي مع تحليل المشاعر
+• دعم المالك والمشرفين المخفيين المتعددين
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -7141,7 +7475,6 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
 
 # ===================== دوال المسابقات - استقبال الحالات =====================
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState) -> bool:
-    """معالج حالات إنشاء المسابقة (مع تحسينات الأمان والتحقق)."""
     try:
         user_id = update.effective_user.id
         text = update.message.text.strip() if update.message.text else ""
@@ -7516,7 +7849,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         if await handle_contest_creation_states(update, context, state):
             return
 
-    # ===== معالجة WAITING_SENDCODE_PASSWORD =====
     if state == UserState.WAITING_SENDCODE_PASSWORD:
         await handle_sendcode_confirmation_handler(update, context)
         return
@@ -8327,22 +8659,6 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     ])
     await update.message.reply_text(f"🔧 **لوحة تحكم المجموعة**\n━━━━━━━━━━━━━━\n📌 **المجموعة:** {chat.title}\n🔐 **الحالة:** {lock_status_text}\n━━━━━━━━━━━━━━\n\nاستخدم الأزرار للتحكم في قفل وفتح المجموعة والإجراءات المتقدمة", reply_markup=kb, parse_mode="MarkdownV2")
 
-async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
-        return
-    user = update.effective_user
-    if user is None:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ يعمل فقط في المجموعات")
-        return
-    if not await is_authorized_in_group(context.bot, chat.id, user.id):
-        await update.message.reply_text(get_text(user.id, 'admin_only'))
-        return
-    await db_register_hidden_owner_group(chat.id, user.id)
-    await update.message.reply_text("✅ **تم تسجيل هذه المجموعة كمجموعة يملكها مالك مخفي!**\nالآن يمكنك استخدام /security داخل المجموعة ولن يظهر اسمك كمشرف.", parse_mode="MarkdownV2")
-
 async def schedule_post_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_user is None or update.effective_chat is None:
         return
@@ -8896,15 +9212,6 @@ async def upload_backup_to_drive(backup_path: Path, max_retries: int = 3) -> str
     return None
 
 # ===================== دوال الإجراءات المتقدمة =====================
-async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    try:
-        if await db_is_hidden_owner(chat_id, user_id):
-            return True
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in ['administrator', 'creator']
-    except:
-        return False
-
 async def check_bot_admin_permissions(bot, chat_id: int) -> dict:
     try:
         me = await bot.get_chat_member(chat_id, bot.id)
@@ -9428,6 +9735,10 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
     if user.is_bot:
         return
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        return
+    
     if await is_chat_locked(chat_id):
         try:
             await update.message.delete()
@@ -10078,7 +10389,7 @@ async def auto_publish_loop_improved(bot):
                     elif post['media_type'] == 'animation' and post['media_file_id']:
                         await bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
                     else:
-                        await bot.send_message(ch_tele_id, final_text)
+                        await bot.send_message(ch_tele_id, final_text, parse_mode=None)
                     success = True
                     break
                 except Exception as e:
@@ -10643,6 +10954,18 @@ async def init_db_improved():
             )
         """)
         
+        # جدول المشرفين المخفيين المتعددين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                added_by INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, admin_id)
+            )
+        """)
+        
         # جدول ربط المستخدمين بالمجموعات
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_groups_link (
@@ -10880,6 +11203,7 @@ async def init_db_improved():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_views ON posts(views_count)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_published_views ON posts(published, views_count)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_contests_active ON contests(status, end_date)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_admins_chat ON hidden_admins(chat_id)")
         
         # ========== تحديث الجداول القديمة ==========
         
@@ -10949,7 +11273,7 @@ async def init_db_improved():
     await cache_manager.init()
     
     logger.info("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
-    logger.info("✅ تم إنشاء 35+ جدول و 15+ فهرس")
+    logger.info("✅ تم إنشاء 37+ جدول و 16+ فهرس")
 
 # ===================== الوظيفة الرئيسية =====================
 async def main():
@@ -10979,14 +11303,20 @@ async def main():
     
     application.add_error_handler(global_error_handler)
     
+    # ========== Command Handlers ==========
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
     application.add_handler(CommandHandler("security", security_command_handler))
+    application.add_handler(CommandHandler("register_hidden_owner", register_hidden_owner_handler))
+    application.add_handler(CommandHandler("add_hidden_admin", add_hidden_admin_command))
+    application.add_handler(CommandHandler("remove_hidden_admin", remove_hidden_admin_command))
+    application.add_handler(CommandHandler("list_hidden_admins", list_hidden_admins_command))
     application.add_handler(CommandHandler("trial", trial_command_handler))
     application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
     application.add_handler(CommandHandler("help", help_command_handler))
     application.add_handler(CommandHandler("support", support_command_handler))
+    application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
     application.add_handler(CommandHandler("rank", rank_command_handler))
     application.add_handler(CommandHandler("top", top_command_handler))
     application.add_handler(CommandHandler("developer", developer_command_handler))
@@ -10997,9 +11327,7 @@ async def main():
     application.add_handler(CommandHandler("unlock", unlock_chat_command_handler))
     application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
     application.add_handler(CommandHandler("panel", panel_command_handler))
-    application.add_handler(CommandHandler("register_hidden_owner", register_hidden_owner_handler))
     application.add_handler(CommandHandler("set_log_channel", set_log_channel_command_handler))
-    application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
     application.add_handler(CommandHandler("ban", handle_moderation_commands))
     application.add_handler(CommandHandler("mute", handle_moderation_commands))
     application.add_handler(CommandHandler("warn", handle_moderation_commands))
@@ -11011,6 +11339,7 @@ async def main():
     application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
     application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
     
+    # ========== CallbackQuery Handlers ==========
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CallbackData.MAIN_MENU}$"))
@@ -11175,6 +11504,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
     application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
     
+    # ========== Handlers أخرى ==========
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
     
@@ -11190,6 +11520,7 @@ async def main():
     application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
     
+    # ========== قائمة الأوامر ==========
     commands = [
         BotCommand("start", "بدء البوت"),
         BotCommand("trial", "تجربة مجانية"),
@@ -11197,6 +11528,9 @@ async def main():
         BotCommand("syncgroup", "تفعيل المجموعة"),
         BotCommand("security", "إعدادات الأمان"),
         BotCommand("register_hidden_owner", "تسجيل مالك مخفي"),
+        BotCommand("add_hidden_admin", "إضافة مشرف مخفي"),
+        BotCommand("remove_hidden_admin", "إزالة مشرف مخفي"),
+        BotCommand("list_hidden_admins", "عرض المشرفين المخفيين"),
         BotCommand("rank", "رتبتك"),
         BotCommand("top", "أفضل 10"),
         BotCommand("stats", "إحصائيات القناة"),
@@ -11259,6 +11593,8 @@ async def main():
     print("   • ⏱️ إعادة محاولة النشر الفاشل")
     print("   • 💬 200 رد تلقائي للمجموعات")
     print("   • 🧠 نظام ردود ذكي مع تحليل المشاعر")
+    print("   • 👑 دعم المالك المخفي")
+    print("   • 🛡️ دعم المشرفين المخفيين المتعددين")
     
     try:
         await application.run_polling(
