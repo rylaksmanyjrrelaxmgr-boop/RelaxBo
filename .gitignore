@@ -15,3 +15,6 @@ credentials.json
 *.log
 __pycache__/
 bot_instances/
+*.save
+*.lock
+*_fixed.py
