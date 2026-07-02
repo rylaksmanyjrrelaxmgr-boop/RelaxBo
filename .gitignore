@@ -1,20 +1,39 @@
+# ملفات البيئة والمفاتيح
 .env
+.env.local
+*.key
+*.pem
+*.crt
+*.enc
 *.db
-.env*
-*.db*
-*.enc
-backups/
-*.key
-credentials.json
-.env*
-*.db*
-*.enc
-backups/
-*.key
-credentials.json
+*.sqlite3
 *.log
+
+# مجلدات النظام
 __pycache__/
-bot_instances/
-*.save
-*.lock
-*_fixed.py
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# مجلدات البوت
+data/
+backups/
+logs/
+temp/
+static/
+templates/
+
+# ملفات التخزين المؤقتة
+*.tmp
+*.swp
+*.swo
+
+# ملفات IDE
+.vscode/
+.idea/
+*.iml
+
+# ملفات نظام التشغيل
+.DS_Store
+Thumbs.db
