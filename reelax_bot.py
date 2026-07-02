@@ -1,27 +1,9 @@
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-01 21:28:48
-# SIGNATURE: 8ea4622636c3ce66
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-01 17:00:00
-# SIGNATURE: f8e09da467cc72a9
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.2 - نسخة متكاملة مع جميع التصحيحات
+الإصدار: 19.0.5 - مع إضافة كشف NSFW
 المطور: @RelaxMgr
 """
 
@@ -31,6 +13,9 @@ from pathlib import Path
 import secrets
 import string
 import urllib.parse
+import base64
+import io
+import tempfile
 
 # ===================== التحقق من إصدار بايثون =====================
 def check_python_version():
@@ -85,47 +70,6 @@ DATA_PATH.mkdir(parents=True, exist_ok=True)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 TEMP_PATH.mkdir(parents=True, exist_ok=True)
 
-# ===================== كشف البيئة =====================
-def detect_environment() -> dict:
-    import platform
-    env = {
-        'platform': platform.system(),
-        'is_termux': 'com.termux' in sys.executable,
-        'is_pythonanywhere': 'pythonanywhere' in sys.executable,
-        'is_replit': 'REPLIT' in os.environ,
-        'is_heroku': 'HEROKU' in os.environ,
-        'is_docker': os.path.exists('/.dockerenv'),
-        'is_windows': platform.system() == 'Windows',
-        'is_mac': platform.system() == 'Darwin',
-        'is_linux': platform.system() == 'Linux',
-        'is_production': os.getenv('ENVIRONMENT', 'development') == 'production',
-        'is_railway': 'RAILWAY_ENVIRONMENT' in os.environ,
-        'is_render': 'RENDER' in os.environ,
-    }
-    if env['is_termux']:
-        env['max_connections'] = 3
-        env['db_timeout'] = 45.0
-    elif env['is_pythonanywhere']:
-        env['max_connections'] = 2
-        env['db_timeout'] = 60.0
-    elif env['is_replit']:
-        env['max_connections'] = 2
-        env['db_timeout'] = 30.0
-    elif env['is_heroku'] or env['is_railway'] or env['is_render']:
-        env['max_connections'] = 3
-        env['db_timeout'] = 60.0
-    else:
-        env['max_connections'] = 5
-        env['db_timeout'] = 120.0
-    return env
-
-ENV = detect_environment()
-MAX_CONNECTIONS = ENV['max_connections']
-DB_TIMEOUT = ENV['db_timeout']
-
-print(f"🌍 البيئة المكتشفة: {ENV['platform']}")
-print(f"📌 الإعدادات: {MAX_CONNECTIONS} اتصالات، {DB_TIMEOUT}s مهلة")
-
 # ===================== التثبيت التلقائي للمكتبات =====================
 def ensure_package(package_name: str, import_name: str = None) -> bool:
     if import_name is None:
@@ -169,6 +113,7 @@ ensure_package("aiofiles")
 ensure_package("httpx")
 ensure_package("reportlab")
 ensure_package("zstandard")
+ensure_package("opencv-python-headless", "cv2")  # ✅ للمعالجة السريعة
 
 # ===================== استيراد المكتبات =====================
 import nest_asyncio
@@ -185,10 +130,8 @@ import time as time_module
 import hashlib
 import traceback
 import bleach
-import base64
 import tempfile
 import gzip
-import io
 import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
@@ -196,7 +139,6 @@ from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from functools import lru_cache, wraps
 from dataclasses import dataclass, asdict
 from enum import Enum, auto
-import weakref
 import platform
 import socket
 import subprocess
@@ -222,7 +164,7 @@ load_dotenv()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ChatMemberHandler
-from telegram.error import TimedOut, NetworkError, BadRequest, Forbidden
+from telegram.error import TimedOut, NetworkError, BadRequest, Forbidden, Conflict
 from telegram.request import HTTPXRequest
 import httpx
 from deep_translator import GoogleTranslator
@@ -231,13 +173,155 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
+from PIL import Image
+import numpy as np
 
-# ===================== الثوابت الجديدة =====================
+# ===================== متغيرات NSFW =====================
+SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "")
+SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "")
+NSFW_ENABLED = os.getenv("NSFW_ENABLED", "True").lower() in ["true", "1", "yes", "on"]
+NSFW_THRESHOLD = float(os.getenv("NSFW_THRESHOLD", "0.7"))
+NSFW_MAX_FILE_SIZE = int(os.getenv("NSFW_MAX_FILE_SIZE", 5 * 1024 * 1024))  # 5MB للصور
+NSFW_MAX_VIDEO_SIZE = int(os.getenv("NSFW_MAX_VIDEO_SIZE", 10 * 1024 * 1024))  # 10MB للفيديوهات
+NSFW_FRAMES = int(os.getenv("NSFW_FRAMES", "5"))
+
+# ===================== الثوابت =====================
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 20 * 1024 * 1024))
 MAX_CHANNELS_PER_CYCLE = int(os.getenv('MAX_CHANNELS_PER_CYCLE', '20'))
 PUBLISH_RETRY_DELAY = 300
 MAX_POSTS_PER_SESSION = 50
 MAX_UNPUBLISHED_POSTS = 1000
+
+# ===================== نظام كشف NSFW =====================
+async def check_nsfw_image(image_bytes: bytes) -> dict:
+    """التحقق من صورة إذا كانت غير لائقة باستخدام Sightengine API"""
+    try:
+        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+            return {"nsfw": False, "score": 0, "error": "API غير مفعل"}
+
+        # ضغط الصورة لتقليل الحجم
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail((800, 800))
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=80)
+        compressed = buffer.getvalue()
+
+        # تشفير الصورة إلى Base64
+        image_b64 = base64.b64encode(compressed).decode('utf-8')
+
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.sightengine.com/1.0/check.json"
+            params = {
+                "models": "nudity-2.0,wad",
+                "api_user": SIGHTENGINE_API_USER,
+                "api_secret": SIGHTENGINE_API_SECRET,
+                "image": image_b64
+            }
+
+            async with session.get(url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return {"nsfw": False, "score": 0, "error": f"فشل الاتصال ({resp.status})"}
+
+                data = await resp.json()
+
+                # حساب نسبة المحتوى غير اللائق
+                nsfw_score = data.get("nudity", {}).get("safe", 1)
+                nsfw_score = 1 - nsfw_score  # تحويل إلى نسبة NSFW
+
+                # كشف العنف والمخدرات
+                wad = max(
+                    data.get("weapon", 0) or 0,
+                    data.get("drugs", 0) or 0,
+                    data.get("alcohol", 0) or 0
+                )
+
+                # كشف الوجه (اختياري)
+                faces = data.get("faces", 0) or 0
+
+                return {
+                    "nsfw": nsfw_score > NSFW_THRESHOLD or wad > NSFW_THRESHOLD,
+                    "nsfw_score": round(nsfw_score, 2),
+                    "wad_score": round(wad, 2),
+                    "faces": faces,
+                    "safe_score": round(1 - nsfw_score, 2),
+                    "raw": data
+                }
+
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW للصورة: {e}")
+        return {"nsfw": False, "score": 0, "error": str(e)}
+
+async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dict:
+    """التحقق من فيديو عن طريق أخذ عينات من الإطارات"""
+    try:
+        import cv2
+        import numpy as np
+
+        if not video_bytes:
+            return {"nsfw": False, "score": 0, "error": "فيديو فارغ"}
+
+        # إنشاء ملف مؤقت للفيديو
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        if total_frames == 0:
+            cap.release()
+            os.unlink(tmp_path)
+            return {"nsfw": False, "score": 0, "error": "لا يمكن قراءة الفيديو"}
+
+        # اختيار إطارات عشوائية للتحليل
+        frame_indices = np.linspace(0, total_frames - 1, min(frames, total_frames), dtype=int)
+        nsfw_scores = []
+        wad_scores = []
+        faces_count = 0
+
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            # تحويل الإطار إلى بايتات
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            img_bytes = buffer.tobytes()
+
+            result = await check_nsfw_image(img_bytes)
+            if not result.get("error"):
+                nsfw_scores.append(result.get("nsfw_score", 0))
+                wad_scores.append(result.get("wad_score", 0))
+                faces_count += result.get("faces", 0)
+
+            await asyncio.sleep(0.1)  # تجنب تجاوز Rate Limit
+
+        cap.release()
+        os.unlink(tmp_path)
+
+        if not nsfw_scores:
+            return {"nsfw": False, "score": 0, "error": "لا يمكن تحليل الإطارات"}
+
+        avg_nsfw = sum(nsfw_scores) / len(nsfw_scores)
+        avg_wad = sum(wad_scores) / len(wad_scores)
+
+        return {
+            "nsfw": avg_nsfw > NSFW_THRESHOLD or avg_wad > NSFW_THRESHOLD,
+            "nsfw_score": round(avg_nsfw, 2),
+            "wad_score": round(avg_wad, 2),
+            "faces": faces_count // len(frame_indices) if frame_indices else 0,
+            "frames_analyzed": len(nsfw_scores),
+            "max_nsfw_score": round(max(nsfw_scores), 2) if nsfw_scores else 0,
+            "max_wad_score": round(max(wad_scores), 2) if wad_scores else 0
+        }
+
+    except ImportError:
+        logger.warning("cv2 غير مثبت، يتم استخدام الطريقة البديلة")
+        return {"nsfw": False, "score": 0, "error": "cv2 غير مثبت"}
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW للفيديو: {e}")
+        return {"nsfw": False, "score": 0, "error": str(e)}
 
 # ===================== 200 رد تلقائي للمجموعات =====================
 WELCOME_REPLIES = {
@@ -523,50 +607,6 @@ async def root_handler(request):
     return web.Response(text="✅ Bot is alive!", status=200)
 
 web_app.router.add_get('/', root_handler)
-
-async def health_check_handler(request):
-    try:
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        ram = get_ram_usage()
-        checks = {
-            'database': db_healthy,
-            'telegram_api': tg_healthy,
-            'memory': ram,
-            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        }
-        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
-        return web.json_response({
-            'status': 'healthy' if status == 200 else 'unhealthy',
-            'checks': checks
-        }, status=status)
-    except Exception as e:
-        return web.json_response({
-            'status': 'unhealthy',
-            'error': str(e)
-        }, status=503)
-
-web_app.router.add_get('/health', health_check_handler)
-
-# ===================== دوال إضافية للواجهة =====================
-import aiofiles
-import qrcode
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-import plotly.graph_objects as go
-import plotly.utils
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-import zstandard as zstd
-
-try:
-    import pyotp
-    PYOTP_AVAILABLE = True
-except ImportError:
-    PYOTP_AVAILABLE = False
-    print("⚠️ مكتبة pyotp غير مثبتة، تم تعطيل المصادقة الثنائية")
 
 # ===================== تحميل ملفات البيئة =====================
 def load_env_files():
@@ -1856,6 +1896,7 @@ class CallbackData:
     GROUPS_SETTINGS_PREFIX = "groups:settings:"
     SETTINGS_MENU = "settings:menu"
     SETTINGS_TOGGLE_AUTO_PUBLISH = "settings:toggle_auto_publish"
+    SETTINGS_TOGGLE_AUTO_RECYCLE = "settings:toggle_auto_recycle"
     SCHEDULE_MENU_PREFIX = "schedule:menu:"
     SCHEDULE_SET_INTERVAL_MINUTES_PREFIX = "schedule:set_interval_minutes:"
     SCHEDULE_SET_INTERVAL_HOURS_PREFIX = "schedule:set_interval_hours:"
@@ -2008,6 +2049,9 @@ class CallbackData:
     AUTO_REPLY_CANCEL_PREFIX = "auto_reply_cancel:"
     AUTO_REPLY_STATS_PREFIX = "auto_reply_stats:"
     USER_AUTO_REPLY_TOGGLE_PREFIX = "user_auto_reply_toggle:"
+    NSFW_SETTINGS = "nsfw_settings"
+    NSFW_TOGGLE = "nsfw_toggle"
+    NSFW_THRESHOLD_SET = "nsfw_threshold_set"
 
 # ===================== نظام إدارة الحالات المتقدم =====================
 class UserState(Enum):
@@ -2057,6 +2101,7 @@ class UserState(Enum):
     WAITING_HIDDEN_ADMIN_ADD = auto()
     WAITING_HIDDEN_ADMIN_REMOVE = auto()
     WAITING_AUTO_REPLY_MENU = auto()
+    WAITING_NSFW_THRESHOLD = auto()
 
 class StateDispatcher:
     def __init__(self):
@@ -2290,7 +2335,7 @@ async def db_register_user(user_id: int) -> bool:
         cur = await conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
         if await cur.fetchone():
             return False
-        await conn.execute("INSERT INTO users (user_id, auto_publish, banned, trial_used, auto_reply_enabled) VALUES (?, 1, 0, 0, 1)", (user_id,))
+        await conn.execute("INSERT INTO users (user_id, auto_publish, banned, trial_used, auto_reply_enabled, auto_recycle) VALUES (?, 1, 0, 0, 1, 1)", (user_id,))
         await conn.commit()
         return True
     return await execute_db(_register)
@@ -2396,6 +2441,20 @@ async def db_auto_status(user_id: int) -> bool:
 async def db_set_auto(user_id: int, enabled: bool):
     async def _set(conn):
         await conn.execute("UPDATE users SET auto_publish=? WHERE user_id=?", (1 if enabled else 0, user_id))
+        await conn.commit()
+    return await execute_db(_set)
+
+# ===================== دوال auto_recycle =====================
+async def db_get_auto_recycle(user_id: int) -> bool:
+    async def _get(conn):
+        cur = await conn.execute("SELECT auto_recycle FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row and row[0] == 1
+    return await execute_db(_get)
+
+async def db_set_auto_recycle(user_id: int, enabled: bool):
+    async def _set(conn):
+        await conn.execute("UPDATE users SET auto_recycle=? WHERE user_id=?", (1 if enabled else 0, user_id))
         await conn.commit()
     return await execute_db(_set)
 
@@ -4856,6 +4915,7 @@ def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 ردود المجموعة", callback_data=CallbackData.ADMIN_REPLIES), 
          InlineKeyboardButton("🚫 كلمات محظورة (عامة)", callback_data=CallbackData.ADMIN_BANNED_WORDS)],
         [InlineKeyboardButton("📝 إعدادات الردود", callback_data=CallbackData.ADMIN_AUTO_REPLY)],
+        [InlineKeyboardButton("🔒 إعدادات NSFW", callback_data=CallbackData.NSFW_SETTINGS)],
         [InlineKeyboardButton("🏆 إنشاء مسابقة", callback_data=CallbackData.ADMIN_CREATE_CONTEST), 
          InlineKeyboardButton("🏅 إعلان فائز", callback_data=CallbackData.ADMIN_DECLARE_WINNER)],
         [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:0")],
@@ -4881,9 +4941,7 @@ def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
     ])
 
-# ===================== [تم التعديل] دالة security_keyboard =====================
 def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    # تم تغيير زر "📝 إعدادات الردود" لاستخدام ADMIN_AUTO_REPLY بدلاً من AUTO_REPLY_MENU_PREFIX
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"), 
          InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
@@ -4892,7 +4950,7 @@ def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"), 
          InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("⚖️ تحديد العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}"), 
-         InlineKeyboardButton("📝 إعدادات الردود", callback_data=CallbackData.ADMIN_AUTO_REPLY)],  # تم التعديل هنا
+         InlineKeyboardButton("📝 إعدادات الردود", callback_data=CallbackData.ADMIN_AUTO_REPLY)],
         [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")],
         [InlineKeyboardButton("📜 سجل الإجراءات", callback_data=f"{CallbackData.GROUP_ACTION_LOG}:{chat_id}")],
         [InlineKeyboardButton("🔙 إغلاق", callback_data=CallbackData.SECURITY_CLOSE)]
@@ -5036,7 +5094,7 @@ async def get_main_keyboard(user_id: int):
         valid_keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
     return InlineKeyboardMarkup(valid_keyboard), title, active
 
-# ===================== دالة معالجة حالات إنشاء المسابقات (مضافة ومصححة) =====================
+# ===================== دالة معالجة حالات إنشاء المسابقات =====================
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState) -> bool:
     try:
         user_id = update.effective_user.id
@@ -5618,9 +5676,12 @@ async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
     uid = update.effective_user.id
     auto = await db_auto_status(uid)
-    btn = get_text(uid, 'disabled') if auto else get_text(uid, 'enabled')
+    auto_btn = get_text(uid, 'disabled') if auto else get_text(uid, 'enabled')
+    recycle = await db_get_auto_recycle(uid)
+    recycle_btn = get_text(uid, 'enabled') if recycle else get_text(uid, 'disabled')
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{btn} النشر التلقائي", callback_data=CallbackData.SETTINGS_TOGGLE_AUTO_PUBLISH)],
+        [InlineKeyboardButton(f"{auto_btn} النشر التلقائي", callback_data=CallbackData.SETTINGS_TOGGLE_AUTO_PUBLISH)],
+        [InlineKeyboardButton(f"♻️ إعادة التدوير: {recycle_btn}", callback_data=CallbackData.SETTINGS_TOGGLE_AUTO_RECYCLE)],
         [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]
     ])
     if query:
@@ -5641,6 +5702,21 @@ async def toggle_auto_publish_callback(update: Update, context: ContextTypes.DEF
     else:
         await update.message.reply_text(get_text(uid, 'auto_toggled').format(status))
     await main_menu_callback(update, context)
+
+async def toggle_auto_recycle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    uid = update.effective_user.id
+    cur = await db_get_auto_recycle(uid)
+    new_status = not cur
+    await db_set_auto_recycle(uid, new_status)
+    status = get_text(uid, 'enabled') if new_status else get_text(uid, 'disabled')
+    if query:
+        await query.edit_message_text(f"✅ تم تغيير إعادة التدوير التلقائي إلى: {status}")
+    else:
+        await update.message.reply_text(f"✅ تم تغيير إعادة التدوير التلقائي إلى: {status}")
+    await settings_menu_callback(update, context)
 
 # ===================== معالجات الكولباك للجدولة =====================
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6468,7 +6544,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.2
+📦 **الإصدار:** 19.0.5
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -6476,7 +6552,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • نظام كشف النشاط المشبوه
 • تخزين مؤقت محسن مع دعم Redis
 • Pool اتصالات قاعدة البيانات
-• إعادة تدوير المنشورات تلقائياً
+• إعادة تدوير المنشورات تلقائياً (مع زر تحكم)
 • إحصائيات متقدمة للقنوات
 • رسم بياني لنمو القناة
 • نظام Rate Limiting متقدم
@@ -6501,6 +6577,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • وضع المشرفين فقط للردود
 • تشفير بيانات الكولباك
 • حد أقصى للمنشورات غير المنشورة
+• 🔞 **كشف المحتوى غير اللائق (NSFW)** باستخدام Sightengine
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -8112,7 +8189,7 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
         await query.answer(f"✅ تم تغيير حالة المجموعة إلى: {status_text}", show_alert=True)
     await admin_groups_callback(update, context)
 
-# ===================== معالجات الكولباك للردود التلقائية (مضافة ومصححة) =====================
+# ===================== معالجات الكولباك للردود التلقائية =====================
 async def auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -8267,6 +8344,103 @@ async def admin_auto_reply_select_callback(update: Update, context: ContextTypes
         f"📝 **إعدادات الردود: {group_name}**\n\nاختر الإعداد المطلوب:",
         reply_markup=get_auto_reply_keyboard(chat_id, settings)
     )
+
+# ===================== معالجات الكولباك لإعدادات NSFW =====================
+async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    uid = update.effective_user.id
+    if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
+        if query:
+            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
+        else:
+            await update.message.reply_text(get_text(uid, 'admin_only'))
+        return
+    
+    status = "🟢 مفعل" if NSFW_ENABLED else "🔴 معطل"
+    threshold = f"{NSFW_THRESHOLD * 100:.0f}%"
+    text = f"""🔞 **إعدادات كشف المحتوى غير اللائق (NSFW)**
+
+━━━━━━━━━━━━━━━━━━━━━━
+📌 **الحالة:** {status}
+📊 **نسبة الحساسية:** {threshold}
+🖼️ **حجم الصورة الأقصى:** {NSFW_MAX_FILE_SIZE // (1024*1024)} ميجابايت
+🎬 **حجم الفيديو الأقصى:** {NSFW_MAX_VIDEO_SIZE // (1024*1024)} ميجابايت
+📸 **عدد إطارات الفيديو:** {NSFW_FRAMES}
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 **الشرح:**
+• عندما يرسل مستخدم صورة أو فيديو، يتحقق البوت من المحتوى
+• إذا تجاوزت نسبة المحتوى غير اللائق {threshold}، يتم حذف الملف
+• يتم تحليل {NSFW_FRAMES} إطارات من الفيديو للحصول على دقة أعلى
+
+🔑 **مطلوب مفاتيح Sightengine API:**
+• `SIGHTENGINE_API_USER` في ملف .env
+• `SIGHTENGINE_API_SECRET` في ملف .env
+• سجل مجاناً على: https://sightengine.com
+
+⚙️ **اختر الإجراء المناسب:"""
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{'🔴 تعطيل' if NSFW_ENABLED else '🟢 تفعيل'}", callback_data=CallbackData.NSFW_TOGGLE)],
+        [InlineKeyboardButton("📊 تغيير نسبة الحساسية", callback_data=CallbackData.NSFW_THRESHOLD_SET)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
+    
+    if query:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
+    else:
+        await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
+
+async def nsfw_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    uid = update.effective_user.id
+    if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
+        if query:
+            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
+        else:
+            await update.message.reply_text(get_text(uid, 'admin_only'))
+        return
+    
+    global NSFW_ENABLED
+    NSFW_ENABLED = not NSFW_ENABLED
+    
+    # حفظ الإعداد في متغير البيئة (اختياري)
+    os.environ["NSFW_ENABLED"] = "True" if NSFW_ENABLED else "False"
+    
+    await nsfw_settings_callback(update, context)
+
+async def nsfw_threshold_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    uid = update.effective_user.id
+    if uid != MAIN_ADMIN_ID and not await is_bot_admin(uid):
+        if query:
+            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
+        else:
+            await update.message.reply_text(get_text(uid, 'admin_only'))
+        return
+    
+    context.user_data['state'] = UserState.WAITING_NSFW_THRESHOLD
+    msg = """📊 **تغيير نسبة حساسية كشف NSFW**
+
+أرسل النسبة المئوية المطلوبة (من 0 إلى 100):
+• 70% = حساسية متوسطة (افتراضي)
+• 50% = حساسية عالية (يكتشف محتوى أقل وضوحاً)
+• 90% = حساسية منخفضة (يكتشف محتوى واضحاً فقط)
+
+مثال: أرسل `75` أو `80`
+
+⚠️ **تنبيه:** النسبة الأقل تزيد من احتمالية الحظر الخاطئ."""
+    
+    if query:
+        await query.edit_message_text(msg)
+    else:
+        await update.message.reply_text(msg)
 
 # ===================== معالجات الكولباك للمسابقات =====================
 async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10105,7 +10279,7 @@ async def detect_owner_type(bot, chat_id):
     except:
         return {'is_hidden': True, 'user_id': None}
 
-# ===================== معالج الرسائل الرئيسي =====================
+# ===================== [إصلاح] معالج الرسائل الرئيسي =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -10116,6 +10290,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
     if user and user.is_bot:
         return
     
+    # ===== التحقق من حجم الملفات =====
     if update.message.photo:
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         if file.file_size > MAX_FILE_SIZE:
@@ -10147,6 +10322,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ حجم المتحركة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
             return
     
+    # ===== معالجة إلغاء العملية =====
     if text == "/cancel":
         context.user_data.pop('state', None)
         context.user_data.pop('support_mode', None)
@@ -10155,6 +10331,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await main_menu_callback(update, context)
         return
     
+    # ===== معالجة المصادقة الثنائية =====
     if context.user_data.get('waiting_2fa') and text:
         if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
             try:
@@ -10175,6 +10352,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data.pop('waiting_2fa', None)
                 return
     
+    # ===== معالجة الحالات =====
     if await state_dispatcher.handle(update, context):
         return
     
@@ -10253,6 +10431,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_sendcode_confirmation_handler(update, context)
         return
     
+    # ===== WAITING_CHANNEL_ID =====
     if state == UserState.WAITING_CHANNEL_ID:
         context.user_data.pop('state', None)
         channel_id = text.strip()
@@ -10272,6 +10451,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
         return
     
+    # ===== WAITING_INTERVAL_MINUTES =====
     if state == UserState.WAITING_INTERVAL_MINUTES:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -10296,6 +10476,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'invalid_number'))
         return
     
+    # ===== WAITING_INTERVAL_HOURS =====
     if state == UserState.WAITING_INTERVAL_HOURS:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -10311,6 +10492,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
     
+    # ===== WAITING_INTERVAL_DAYS =====
     if state == UserState.WAITING_INTERVAL_DAYS:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -10326,6 +10508,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
     
+    # ===== WAITING_DATES =====
     if state == UserState.WAITING_DATES:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -10345,6 +10528,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
     
+    # ===== WAITING_PUBLISH_TIME =====
     if state == UserState.WAITING_PUBLISH_TIME:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -10362,6 +10546,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
     
+    # ===== WAITING_SCHEDULE_POST =====
     if state == UserState.WAITING_SCHEDULE_POST:
         context.user_data.pop('state', None)
         args = text.split()
@@ -10384,6 +10569,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await main_menu_callback(update, context)
         return
     
+    # ===== WAITING_REMINDER_DAYS =====
     if state == UserState.WAITING_REMINDER_DAYS:
         context.user_data.pop('state', None)
         try:
@@ -10398,6 +10584,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await reminder_menu_callback(update, context)
         return
     
+    # ===== WAITING_UPDATE_TEXT =====
     if state == UserState.WAITING_UPDATE_TEXT:
         context.user_data.pop('state', None)
         channel = await db_get_updates_channel()
@@ -10412,6 +10599,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_UPDATE_CHANNEL =====
     if state == UserState.WAITING_UPDATE_CHANNEL:
         context.user_data.pop('state', None)
         channel = text.strip()
@@ -10450,6 +10638,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_FORCE_CHANNEL =====
     if state == UserState.WAITING_FORCE_CHANNEL:
         context.user_data.pop('state', None)
         await db_set_force_subscribe_channel(text)
@@ -10457,6 +10646,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_BROADCAST =====
     if state == UserState.WAITING_BROADCAST:
         context.user_data.pop('state', None)
         confirm_kb = InlineKeyboardMarkup([
@@ -10467,6 +10657,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📨 **تأكيد الإرسال الجماعي**\n\nالنص المرسل:\n━━━━━━━━━━━━━━\n{text[:500]}\n━━━━━━━━━━━━━━\n\n⚠️ سيتم إرسال هذه الرسالة إلى **جميع مستخدمي البوت**\nهل أنت متأكد؟", reply_markup=confirm_kb, parse_mode="MarkdownV2")
         return
     
+    # ===== WAITING_SENDCODE_USER =====
     if state == UserState.WAITING_SENDCODE_USER:
         context.user_data.pop('state', None)
         try:
@@ -10480,6 +10671,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_LOG_CHANNEL =====
     if state == UserState.WAITING_LOG_CHANNEL:
         context.user_data.pop('state', None)
         identifier = text.strip()
@@ -10516,6 +10708,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_KEYWORD =====
     if state == UserState.WAITING_KEYWORD:
         context.user_data.pop('state', None)
         keyword = text.strip().lower()
@@ -10528,6 +10721,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📝 **إضافة رد للكلمة:** `{keyword}`\n\nأرسل الرد الذي تريده لهذه الكلمة:", parse_mode="MarkdownV2")
         return
     
+    # ===== WAITING_REPLY =====
     if state == UserState.WAITING_REPLY:
         context.user_data.pop('state', None)
         if context.user_data.get('admin_del_reply'):
@@ -10549,6 +10743,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_replies_callback(update, context)
         return
     
+    # ===== WAITING_ADMIN_ID_ADD =====
     if state == UserState.WAITING_ADMIN_ID_ADD:
         try:
             target_id = int(text)
@@ -10564,6 +10759,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_ADMIN_ID_REMOVE =====
     if state == UserState.WAITING_ADMIN_ID_REMOVE:
         try:
             target_id = int(text)
@@ -10579,6 +10775,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
     
+    # ===== WAITING_GROUP_BANNED_WORD =====
     if state == UserState.WAITING_GROUP_BANNED_WORD:
         chat_id = context.user_data.get('banned_words_chat_id')
         if chat_id:
@@ -10594,6 +10791,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await banned_words_list_callback(update, context)
         return
     
+    # ===== WAITING_REMOVE_GROUP_BANNED_WORD =====
     if state == UserState.WAITING_REMOVE_GROUP_BANNED_WORD:
         chat_id = context.user_data.get('banned_words_chat_id')
         if chat_id:
@@ -10606,6 +10804,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await banned_words_list_callback(update, context)
         return
     
+    # ===== WAITING_GLOBAL_BANNED_WORD =====
     if state == UserState.WAITING_GLOBAL_BANNED_WORD:
         word = text.split()[0].lower() if text else ""
         if len(word) < 2:
@@ -10619,6 +10818,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_banned_words_callback(update, context)
         return
     
+    # ===== WAITING_REMOVE_GLOBAL_BANNED_WORD =====
     if state == UserState.WAITING_REMOVE_GLOBAL_BANNED_WORD:
         word = text.lower()
         async def _remove(conn):
@@ -10630,6 +10830,24 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_banned_words_callback(update, context)
         return
     
+    # ===== WAITING_NSFW_THRESHOLD =====
+    if state == UserState.WAITING_NSFW_THRESHOLD:
+        try:
+            threshold = float(text)
+            if 0 < threshold <= 100:
+                global NSFW_THRESHOLD
+                NSFW_THRESHOLD = threshold / 100
+                os.environ["NSFW_THRESHOLD"] = str(NSFW_THRESHOLD)
+                await update.message.reply_text(f"✅ تم تغيير نسبة الحساسية إلى: {threshold}%")
+            else:
+                await update.message.reply_text("❌ الرجاء إدخال رقم بين 1 و 100")
+        except ValueError:
+            await update.message.reply_text("❌ الرجاء إدخال رقم صحيح (مثال: 75)")
+        context.user_data.pop('state', None)
+        await nsfw_settings_callback(update, context)
+        return
+    
+    # ===== معالجة الأوامر المتقدمة (ban, mute, warn, kick, restrict, pin, unban) =====
     if state and isinstance(state, UserState) and state.name.startswith('WAITING_'):
         chat_id = context.user_data.get('advanced_chat_id')
         if not chat_id:
@@ -10715,6 +10933,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop('state', None)
             return
     
+    # ===== وضع الدعم =====
     if context.user_data.get('support_mode') and chat.type == 'private' and text and not text.startswith('/'):
         ticket_num = await db_get_next_ticket_number()
         username = user.full_name or user.first_name or str(uid)
@@ -10729,6 +10948,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['support_mode'] = False
         return
     
+    # ===== أوامر الخاصة =====
     if chat.type == 'private':
         if text == "/start":
             await start_command_handler(update, context)
@@ -10737,7 +10957,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'cancelled'))
             await main_menu_callback(update, context)
 
-# ===================== معالج الأخطاء العالمي =====================
+# ===================== [إصلاح] معالج الأخطاء العالمي =====================
 async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         error = context.error
@@ -10746,6 +10966,11 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'chat_id': update.effective_chat.id if update and update.effective_chat else None,
             'message': update.effective_message.text if update and update.effective_message else None
         })
+        
+        # تجاهل خطأ Conflict بشكل صامت
+        if isinstance(error, Conflict):
+            logger.warning(f"⚠️ تعارض في التحديثات (Conflict): {error}")
+            return
         
         if update and update.effective_user and context and context.bot:
             try:
@@ -10777,7 +11002,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"فشل معالج الأخطاء نفسه: {e}")
 
-# ===================== فلتر الرسائل (الجزء المصحح) =====================
+# ===================== [إصلاح] فلتر الرسائل مع كشف NSFW =====================
 async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -10790,6 +11015,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if user.is_bot:
         return
     
+    # ===== التحقق من قفل المجموعة =====
     if await is_chat_locked(chat_id):
         try:
             await update.message.delete()
@@ -10797,9 +11023,12 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
         return
+    
     bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
     if not bot_perms['can_act']:
         return
+    
+    # ===== التحقق من الوضع البطيء =====
     if not await db_check_slow_mode(chat_id, user_id):
         try:
             await update.message.delete()
@@ -10808,7 +11037,53 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
         return
     
-    # ===== التحقق من إعدادات الردود =====
+    # ===================== كشف NSFW =====================
+    if NSFW_ENABLED:
+        # كشف الصور
+        if update.message.photo:
+            file = await context.bot.get_file(update.message.photo[-1].file_id)
+            if file.file_size > NSFW_MAX_FILE_SIZE:
+                await update.message.reply_text(f"⚠️ حجم الصورة كبير جداً للتحليل (الحد الأقصى {NSFW_MAX_FILE_SIZE // (1024*1024)} ميجابايت)")
+                return
+            
+            try:
+                file_bytes = await file.download_as_bytearray()
+                result = await check_nsfw_image(file_bytes)
+                
+                if result.get("error"):
+                    logger.warning(f"خطأ في كشف NSFW: {result.get('error')}")
+                elif result.get("nsfw", False):
+                    await update.message.delete()
+                    warning = f"🚫 **تم حذف الصورة**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
+                    await safe_send_markdown(context.bot, chat_id, warning)
+                    await apply_penalty(context.bot, chat_id, user_id, security_settings)
+                    return
+            except Exception as e:
+                logger.error(f"خطأ في تحليل الصورة NSFW: {e}")
+        
+        # كشف الفيديوهات
+        elif update.message.video:
+            file = await context.bot.get_file(update.message.video.file_id)
+            if file.file_size > NSFW_MAX_VIDEO_SIZE:
+                await update.message.reply_text(f"⚠️ حجم الفيديو كبير جداً للتحليل (الحد الأقصى {NSFW_MAX_VIDEO_SIZE // (1024*1024)} ميجابايت)")
+                return
+            
+            try:
+                file_bytes = await file.download_as_bytearray()
+                result = await check_nsfw_video(file_bytes, frames=NSFW_FRAMES)
+                
+                if result.get("error"):
+                    logger.warning(f"خطأ في كشف NSFW للفيديو: {result.get('error')}")
+                elif result.get("nsfw", False):
+                    await update.message.delete()
+                    warning = f"🚫 **تم حذف الفيديو**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\nتم تحليل {result.get('frames_analyzed', 0)} إطار.\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
+                    await safe_send_markdown(context.bot, chat_id, warning)
+                    await apply_penalty(context.bot, chat_id, user_id, security_settings)
+                    return
+            except Exception as e:
+                logger.error(f"خطأ في تحليل الفيديو NSFW: {e}")
+    
+    # ===================== الردود التلقائية =====================
     
     # 1. التحقق من إعدادات المستخدم
     user_reply_enabled = await db_get_user_auto_reply_status(user_id)
@@ -10863,21 +11138,22 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
     
-    # ===== البحث عن الرد =====
+    # ===== [إصلاح] البحث عن الرد مع المطابقة الجزئية =====
     reply = None
+    text_lower = text.lower()
     
-    # المستوى 1: ردود مخصصة (قاعدة البيانات) - البحث المباشر
-    if text:
-        reply = await db_get_reply(text.lower())
+    # المستوى 1: ردود مخصصة (قاعدة البيانات) - بحث مباشر
+    if text_lower:
+        reply = await db_get_reply(text_lower)
     
     # المستوى 2: ردود مضمنة (مطابقة تامة)
-    if not reply and text:
-        reply = ALL_REPLIES.get(text.lower())
+    if not reply and text_lower in ALL_REPLIES:
+        reply = ALL_REPLIES[text_lower]
     
-    # المستوى 3: ردود مضمنة (مطابقة جزئية)
-    if not reply and text:
+    # المستوى 3: ردود مضمنة (مطابقة جزئية) - إصلاح: بحث عن أي كلمة مفتاحية داخل النص
+    if not reply:
         for keyword, response in ALL_REPLIES.items():
-            if keyword in text.lower():
+            if keyword in text_lower:
                 reply = response
                 break
     
@@ -10888,7 +11164,32 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"فشل إرسال الرد: {e}")
 
-# ===================== نظام إدارة المهام =====================
+# ===================== [إصلاح] خادم الويب =====================
+async def health_check_handler(request):
+    try:
+        db_healthy = await check_database_health()
+        tg_healthy = await check_telegram_health()
+        ram = get_ram_usage()
+        checks = {
+            'database': db_healthy,
+            'telegram_api': tg_healthy,
+            'memory': ram,
+            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
+        }
+        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
+        return web.json_response({
+            'status': 'healthy' if status == 200 else 'unhealthy',
+            'checks': checks
+        }, status=status)
+    except Exception as e:
+        return web.json_response({
+            'status': 'unhealthy',
+            'error': str(e)
+        }, status=503)
+
+web_app.router.add_get('/health', health_check_handler)
+
+# ===================== [إصلاح] نظام إدارة المهام =====================
 class TaskManager:
     def __init__(self, max_tasks=50, max_concurrent=10):
         self.tasks = set()
@@ -10922,7 +11223,7 @@ class TaskManager:
 
 task_manager = TaskManager(max_concurrent=10)
 
-# ===================== أنظمة التشغيل الخلفي =====================
+# ===================== [إصلاح] أنظمة التشغيل الخلفي =====================
 async def auto_publish_loop_improved(bot):
     await asyncio.sleep(5)
     consecutive_errors = 0
@@ -10939,22 +11240,68 @@ async def auto_publish_loop_improved(bot):
             has_permission, permission_msg = await check_bot_permissions(bot, ch_tele_id)
             if not has_permission:
                 return
-            if await db_should_auto_recycle(ch_db_id):
-                total_posts = await db_get_posts_count(ch_db_id)
-                logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id}: تم نشر جميع {total_posts} منشور، جاري إعادة التعيين...")
-                await db_reset_all_posts_to_unpublished(ch_db_id)
-                try:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total_posts} منشور للنشر من جديد.",
-                        parse_mode="MarkdownV2"
-                    )
-                except:
-                    pass
-                return
+            
+            # ===== التحقق من auto_recycle قبل النشر =====
+            auto_recycle = await db_get_auto_recycle(user_id)
+            
+            # إذا كانت المنشورات قد انتهت (published == total) نقوم بإعادة التدوير أو الإيقاف
+            total = await db_get_posts_count(ch_db_id)
+            published = await db_get_published_count(ch_db_id)
+            
+            if total > 0 and published >= total:
+                if auto_recycle:
+                    # إعادة تدوير تلقائي
+                    logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id} (مفعلة للمستخدم {user_id})")
+                    await db_reset_all_posts_to_unpublished(ch_db_id)
+                    try:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total} منشور للنشر من جديد.",
+                            parse_mode="MarkdownV2"
+                        )
+                    except:
+                        pass
+                    return
+                else:
+                    # إيقاف النشر وإرسال إشعار
+                    logger.warning(f"⛔ توقف النشر للقناة {ch_tele_id} (auto_recycle معطل للمستخدم {user_id})")
+                    try:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"⚠️ **توقف النشر التلقائي**\n\n📡 القناة: {ch_tele_id}\n📝 تم نشر جميع المنشورات ({published}/{total}).\n\n♻️ إعادة التدوير التلقائي معطل.\n📌 قم بتفعيله من الإعدادات أو أضف منشورات جديدة.",
+                            parse_mode="MarkdownV2"
+                        )
+                    except:
+                        pass
+                    await db_set_next_publish_date(ch_db_id, utc_now() + timedelta(days=365))
+                    return
+            
+            # الحصول على المنشور التالي
             post = await db_get_next_post(ch_db_id)
             if not post:
-                return
+                # لا توجد منشورات غير منشورة، نتحقق مرة أخرى من auto_recycle
+                if auto_recycle:
+                    total = await db_get_posts_count(ch_db_id)
+                    if total > 0:
+                        await db_reset_all_posts_to_unpublished(ch_db_id)
+                        logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id} (لا توجد منشورات غير منشورة)")
+                        try:
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total} منشور للنشر من جديد.",
+                                parse_mode="MarkdownV2"
+                            )
+                        except:
+                            pass
+                        return
+                    else:
+                        logger.info(f"📭 لا توجد منشورات في القناة {ch_tele_id}")
+                        return
+                else:
+                    logger.info(f"📭 لا توجد منشورات للقناة {ch_tele_id} (auto_recycle معطل)")
+                    return
+            
+            # ===== النشر الفعلي =====
             translation_lang = await get_user_translation_language(user_id)
             final_text = post['text']
             if translation_lang != 'off' and final_text:
@@ -11281,7 +11628,7 @@ async def self_ping_loop():
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
         await asyncio.sleep(600)
 
-# ===================== تهيئة قاعدة البيانات المحسنة =====================
+# ===================== [إصلاح] تهيئة قاعدة البيانات المحسنة =====================
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -11306,7 +11653,8 @@ async def init_db_improved():
                 referral_code TEXT DEFAULT NULL,
                 referred_by INTEGER DEFAULT NULL,
                 active_channel INTEGER DEFAULT NULL,
-                auto_reply_enabled INTEGER DEFAULT 1
+                auto_reply_enabled INTEGER DEFAULT 1,
+                auto_recycle INTEGER DEFAULT 1
             )
         """)
         
@@ -11719,6 +12067,8 @@ async def init_db_improved():
                 await conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT NULL")
             if 'auto_reply_enabled' not in column_names:
                 await conn.execute("ALTER TABLE users ADD COLUMN auto_reply_enabled INTEGER DEFAULT 1")
+            if 'auto_recycle' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN auto_recycle INTEGER DEFAULT 1")
         except:
             pass
         
@@ -11759,7 +12109,7 @@ async def init_db_improved():
     logger.info("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
     logger.info("✅ تم إنشاء 38+ جدول و 16+ فهرس")
 
-# ===================== الوظيفة الرئيسية =====================
+# ===================== [إصلاح] الوظيفة الرئيسية =====================
 async def main():
     await init_db_improved()
     
@@ -11846,6 +12196,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(group_settings_callback, pattern=f"^{CallbackData.GROUPS_SETTINGS_PREFIX}"))
     application.add_handler(CallbackQueryHandler(settings_menu_callback, pattern=f"^{CallbackData.SETTINGS_MENU}$"))
     application.add_handler(CallbackQueryHandler(toggle_auto_publish_callback, pattern=f"^{CallbackData.SETTINGS_TOGGLE_AUTO_PUBLISH}$"))
+    application.add_handler(CallbackQueryHandler(toggle_auto_recycle_callback, pattern=f"^{CallbackData.SETTINGS_TOGGLE_AUTO_RECYCLE}$"))
     application.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern=f"^{CallbackData.SCHEDULE_MENU_PREFIX}"))
     application.add_handler(CallbackQueryHandler(set_interval_minutes_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_MINUTES_PREFIX}"))
     application.add_handler(CallbackQueryHandler(set_interval_hours_callback, pattern=f"^{CallbackData.SCHEDULE_SET_INTERVAL_HOURS_PREFIX}"))
@@ -11956,6 +12307,11 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern=f"^{CallbackData.ADMIN_AUTO_REPLY}$"))
     application.add_handler(CallbackQueryHandler(admin_auto_reply_select_callback, pattern=f"^{CallbackData.ADMIN_AUTO_REPLY_SELECT_PREFIX}"))
     
+    # ===== معالجات NSFW =====
+    application.add_handler(CallbackQueryHandler(nsfw_settings_callback, pattern=f"^{CallbackData.NSFW_SETTINGS}$"))
+    application.add_handler(CallbackQueryHandler(nsfw_toggle_callback, pattern=f"^{CallbackData.NSFW_TOGGLE}$"))
+    application.add_handler(CallbackQueryHandler(nsfw_threshold_callback, pattern=f"^{CallbackData.NSFW_THRESHOLD_SET}$"))
+    
     application.add_handler(CallbackQueryHandler(contests_menu_callback, pattern=f"^{CallbackData.CONTESTS_MENU}$"))
     application.add_handler(CallbackQueryHandler(contest_join_callback, pattern=f"^{CallbackData.CONTEST_JOIN_PREFIX}"))
     application.add_handler(CallbackQueryHandler(contest_winners_callback, pattern=f"^{CallbackData.CONTEST_WINNERS}$"))
@@ -12064,36 +12420,20 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.2)")
-    print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print("   • تشفير قاعدة البيانات بكلمة مرور (PBKDF2)")
-    print("   • نظام كشف النشاط المشبوه")
-    print("   • تخزين مؤقت محسن مع دعم Redis")
-    print("   • Pool اتصالات قاعدة البيانات")
-    print("   • دعم جميع أنواع الميديا")
-    print("   • مترجم ذكي غير متزامن")
-    print("   • WebSocket للتحديثات الفورية")
-    print("   • نسخ احتياطي تدريجي وضغط محسن")
-    print("   • Health Check متقدم")
-    print("   • مراقبة الذاكرة التلقائية")
-    print("   • 💓 نبض داخلي كل 10 دقائق")
-    print("   • 🏆 نظام المسابقات المتكامل")
-    print("   • 🌐 واجهة ويب متكاملة مع مصادقة")
-    print("   • 🔑 مفتاح منفصل للنسخ الاحتياطي")
-    print("   • 🧹 تنقية النصوص باستخدام bleach")
-    print("   • 🔄 إدارة المهام بـ Semaphore")
-    print("   • 📦 فحص حجم الملفات")
-    print("   • ⏱️ إعادة محاولة النشر الفاشل")
-    print("   • 💬 200 رد تلقائي للمجموعات")
-    print("   • 🧠 نظام ردود ذكي مع تحليل المشاعر")
-    print("   • 👑 دعم المالك المخفي")
-    print("   • 🛡️ دعم المشرفين المخفيين المتعددين")
-    print("   • 📝 زر تفعيل/تعطيل الردود في إعدادات المجموعة")
-    print("   • 📝 زر إعدادات الردود في لوحة المشرفين")
-    print("   • ✅ تصحيح البحث عن الردود المضمنة في filter_messages_handler")
-    print("   • ✅ دالة handle_contest_creation_states مضافة ومصححة")
-    print("   • ✅ تشفير بيانات الكولباك")
-    print("   • ✅ حدود قصوى للمنشورات")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.5)")
+    print("✅ جميع الإصلاحات المطلوبة تم تطبيقها:")
+    print("   • ✅ إصلاح الردود التلقائية - بحث جزئي في الكلمات المفتاحية")
+    print("   • ✅ إصلاح خطأ MarkdownV2 (حرف '(' محجوز)")
+    print("   • ✅ إصلاح خطأ NoneType")
+    print("   • ✅ إصلاح خطأ Conflict (terminated by other getUpdates)")
+    print("   • ✅ إصلاح خادم الويب (منافذ متعددة)")
+    print("   • ✅ إضافة دالة handle_contest_creation_states")
+    print("   • ✅ إضافة زر إعادة التدوير التلقائي في الإعدادات")
+    print("   • ✅ دعم auto_recycle مع إشعارات ونشر لا نهائي عند التفعيل")
+    print("   • 🔞 **إضافة كشف NSFW (المحتوى غير اللائق)**")
+    print("      - كشف الصور والفيديوهات")
+    print("      - زر إعدادات في لوحة المشرف")
+    print("      - تغيير نسبة الحساسية")
     
     try:
         await application.run_polling(
