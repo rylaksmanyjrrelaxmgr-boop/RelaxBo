@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.5 - مع إضافة كشف NSFW
+الإصدار: 19.0.6 - مع استيراد الكلمات المحظورة من ملف
 المطور: @RelaxMgr
 """
 
@@ -113,7 +113,7 @@ ensure_package("aiofiles")
 ensure_package("httpx")
 ensure_package("reportlab")
 ensure_package("zstandard")
-ensure_package("opencv-python-headless", "cv2")  # ✅ للمعالجة السريعة
+ensure_package("opencv-python-headless", "cv2")
 
 # ===================== استيراد المكتبات =====================
 import nest_asyncio
@@ -181,8 +181,8 @@ SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "")
 SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "")
 NSFW_ENABLED = os.getenv("NSFW_ENABLED", "True").lower() in ["true", "1", "yes", "on"]
 NSFW_THRESHOLD = float(os.getenv("NSFW_THRESHOLD", "0.7"))
-NSFW_MAX_FILE_SIZE = int(os.getenv("NSFW_MAX_FILE_SIZE", 5 * 1024 * 1024))  # 5MB للصور
-NSFW_MAX_VIDEO_SIZE = int(os.getenv("NSFW_MAX_VIDEO_SIZE", 10 * 1024 * 1024))  # 10MB للفيديوهات
+NSFW_MAX_FILE_SIZE = int(os.getenv("NSFW_MAX_FILE_SIZE", 5 * 1024 * 1024))
+NSFW_MAX_VIDEO_SIZE = int(os.getenv("NSFW_MAX_VIDEO_SIZE", 10 * 1024 * 1024))
 NSFW_FRAMES = int(os.getenv("NSFW_FRAMES", "5"))
 
 # ===================== الثوابت =====================
@@ -191,6 +191,74 @@ MAX_CHANNELS_PER_CYCLE = int(os.getenv('MAX_CHANNELS_PER_CYCLE', '20'))
 PUBLISH_RETRY_DELAY = 300
 MAX_POSTS_PER_SESSION = 50
 MAX_UNPUBLISHED_POSTS = 1000
+DB_TIMEOUT = 30
+MAX_CONNECTIONS = 20
+
+# ===================== [جديد] استيراد الكلمات المحظورة من ملف =====================
+BANNED_WORDS_FILE = BASE_PATH / "banned_words.txt"
+
+def load_banned_words_from_file(file_path: Path) -> List[str]:
+    """تحميل الكلمات المحظورة من ملف نصي"""
+    words = []
+    if not file_path.exists():
+        print(f"⚠️ ملف {file_path} غير موجود، سيتم إنشاؤه فارغاً")
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("# قائمة الكلمات المحظورة - كل كلمة في سطر منفصل\n")
+                f.write("# ابدأ السطر بـ # للتعليق\n")
+                f.write("\n")
+                f.write("بورن\n")
+                f.write("سكس\n")
+                f.write("جنس\n")
+                f.write("عري\n")
+                f.write("خمر\n")
+                f.write("خمور\n")
+                f.write("مخدرات\n")
+                f.write("حشيش\n")
+                f.write("كحول\n")
+                f.write("دعارة\n")
+            print(f"✅ تم إنشاء ملف {file_path} مع كلمات افتراضية")
+        except Exception as e:
+            print(f"❌ فشل إنشاء ملف الكلمات المحظورة: {e}")
+        return words
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('#'):
+                    continue
+                word = line.lower()
+                if len(word) >= 2:
+                    words.append(word)
+        print(f"✅ تم تحميل {len(words)} كلمة محظورة من {file_path}")
+    except Exception as e:
+        print(f"❌ فشل تحميل الكلمات المحظورة: {e}")
+    
+    return words
+
+def import_banned_words_from_file(conn, words: List[str], added_by: int = 1) -> int:
+    """استيراد الكلمات المحظورة إلى قاعدة البيانات مع chat_id=-1 (عامة)"""
+    if not words:
+        return 0
+    imported = 0
+    try:
+        for word in words:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)",
+                    (word, -1, added_by, utc_now_iso())
+                )
+                imported += 1
+            except:
+                continue
+        conn.commit()
+        print(f"✅ تم استيراد {imported} كلمة محظورة إلى قاعدة البيانات")
+    except Exception as e:
+        print(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+    return imported
 
 # ===================== نظام كشف NSFW =====================
 async def check_nsfw_image(image_bytes: bytes) -> dict:
@@ -199,14 +267,12 @@ async def check_nsfw_image(image_bytes: bytes) -> dict:
         if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
             return {"nsfw": False, "score": 0, "error": "API غير مفعل"}
 
-        # ضغط الصورة لتقليل الحجم
         img = Image.open(io.BytesIO(image_bytes))
         img.thumbnail((800, 800))
         buffer = io.BytesIO()
         img.save(buffer, format='JPEG', quality=80)
         compressed = buffer.getvalue()
 
-        # تشفير الصورة إلى Base64
         image_b64 = base64.b64encode(compressed).decode('utf-8')
 
         async with aiohttp.ClientSession() as session:
@@ -224,18 +290,15 @@ async def check_nsfw_image(image_bytes: bytes) -> dict:
 
                 data = await resp.json()
 
-                # حساب نسبة المحتوى غير اللائق
                 nsfw_score = data.get("nudity", {}).get("safe", 1)
-                nsfw_score = 1 - nsfw_score  # تحويل إلى نسبة NSFW
+                nsfw_score = 1 - nsfw_score
 
-                # كشف العنف والمخدرات
                 wad = max(
                     data.get("weapon", 0) or 0,
                     data.get("drugs", 0) or 0,
                     data.get("alcohol", 0) or 0
                 )
 
-                # كشف الوجه (اختياري)
                 faces = data.get("faces", 0) or 0
 
                 return {
@@ -260,7 +323,6 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dic
         if not video_bytes:
             return {"nsfw": False, "score": 0, "error": "فيديو فارغ"}
 
-        # إنشاء ملف مؤقت للفيديو
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
             tmp.write(video_bytes)
             tmp_path = tmp.name
@@ -273,7 +335,6 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dic
             os.unlink(tmp_path)
             return {"nsfw": False, "score": 0, "error": "لا يمكن قراءة الفيديو"}
 
-        # اختيار إطارات عشوائية للتحليل
         frame_indices = np.linspace(0, total_frames - 1, min(frames, total_frames), dtype=int)
         nsfw_scores = []
         wad_scores = []
@@ -285,7 +346,6 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dic
             if not ret:
                 continue
 
-            # تحويل الإطار إلى بايتات
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             img_bytes = buffer.tobytes()
 
@@ -295,7 +355,7 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dic
                 wad_scores.append(result.get("wad_score", 0))
                 faces_count += result.get("faces", 0)
 
-            await asyncio.sleep(0.1)  # تجنب تجاوز Rate Limit
+            await asyncio.sleep(0.1)
 
         cap.release()
         os.unlink(tmp_path)
@@ -6544,7 +6604,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.5
+📦 **الإصدار:** 19.0.6
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -6578,6 +6638,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • تشفير بيانات الكولباك
 • حد أقصى للمنشورات غير المنشورة
 • 🔞 **كشف المحتوى غير اللائق (NSFW)** باستخدام Sightengine
+• 📥 **استيراد الكلمات المحظورة من ملف** (banned_words.txt)
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -8408,7 +8469,6 @@ async def nsfw_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     global NSFW_ENABLED
     NSFW_ENABLED = not NSFW_ENABLED
     
-    # حفظ الإعداد في متغير البيئة (اختياري)
     os.environ["NSFW_ENABLED"] = "True" if NSFW_ENABLED else "False"
     
     await nsfw_settings_callback(update, context)
@@ -10967,7 +11027,6 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'message': update.effective_message.text if update and update.effective_message else None
         })
         
-        # تجاهل خطأ Conflict بشكل صامت
         if isinstance(error, Conflict):
             logger.warning(f"⚠️ تعارض في التحديثات (Conflict): {error}")
             return
@@ -11241,16 +11300,13 @@ async def auto_publish_loop_improved(bot):
             if not has_permission:
                 return
             
-            # ===== التحقق من auto_recycle قبل النشر =====
             auto_recycle = await db_get_auto_recycle(user_id)
             
-            # إذا كانت المنشورات قد انتهت (published == total) نقوم بإعادة التدوير أو الإيقاف
             total = await db_get_posts_count(ch_db_id)
             published = await db_get_published_count(ch_db_id)
             
             if total > 0 and published >= total:
                 if auto_recycle:
-                    # إعادة تدوير تلقائي
                     logger.info(f"♻️ إعادة تدوير تلقائي للقناة {ch_tele_id} (مفعلة للمستخدم {user_id})")
                     await db_reset_all_posts_to_unpublished(ch_db_id)
                     try:
@@ -11263,7 +11319,6 @@ async def auto_publish_loop_improved(bot):
                         pass
                     return
                 else:
-                    # إيقاف النشر وإرسال إشعار
                     logger.warning(f"⛔ توقف النشر للقناة {ch_tele_id} (auto_recycle معطل للمستخدم {user_id})")
                     try:
                         await bot.send_message(
@@ -11276,10 +11331,8 @@ async def auto_publish_loop_improved(bot):
                     await db_set_next_publish_date(ch_db_id, utc_now() + timedelta(days=365))
                     return
             
-            # الحصول على المنشور التالي
             post = await db_get_next_post(ch_db_id)
             if not post:
-                # لا توجد منشورات غير منشورة، نتحقق مرة أخرى من auto_recycle
                 if auto_recycle:
                     total = await db_get_posts_count(ch_db_id)
                     if total > 0:
@@ -11301,7 +11354,6 @@ async def auto_publish_loop_improved(bot):
                     logger.info(f"📭 لا توجد منشورات للقناة {ch_tele_id} (auto_recycle معطل)")
                     return
             
-            # ===== النشر الفعلي =====
             translation_lang = await get_user_translation_language(user_id)
             final_text = post['text']
             if translation_lang != 'off' and final_text:
@@ -12109,9 +12161,38 @@ async def init_db_improved():
     logger.info("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
     logger.info("✅ تم إنشاء 38+ جدول و 16+ فهرس")
 
+# ===================== [جديد] استيراد الكلمات المحظورة من ملف عند التشغيل =====================
+async def import_banned_words_on_startup():
+    """استيراد الكلمات المحظورة من ملف عند بدء التشغيل"""
+    try:
+        words = load_banned_words_from_file(BANNED_WORDS_FILE)
+        if words:
+            async def _import(conn):
+                imported = 0
+                for word in words:
+                    try:
+                        await conn.execute(
+                            "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)",
+                            (word, -1, MAIN_ADMIN_ID, utc_now_iso())
+                        )
+                        imported += 1
+                    except:
+                        continue
+                await conn.commit()
+                return imported
+            imported_count = await execute_db(_import)
+            logger.info(f"✅ تم استيراد {imported_count} كلمة محظورة من {BANNED_WORDS_FILE}")
+        else:
+            logger.info(f"📭 لا توجد كلمات محظورة في {BANNED_WORDS_FILE} للاستيراد")
+    except Exception as e:
+        logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+
 # ===================== [إصلاح] الوظيفة الرئيسية =====================
 async def main():
     await init_db_improved()
+    
+    # ===== [جديد] استيراد الكلمات المحظورة من ملف =====
+    await import_banned_words_on_startup()
     
     if USE_PROXY:
         request_kwargs = {
@@ -12420,7 +12501,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.5)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.6)")
     print("✅ جميع الإصلاحات المطلوبة تم تطبيقها:")
     print("   • ✅ إصلاح الردود التلقائية - بحث جزئي في الكلمات المفتاحية")
     print("   • ✅ إصلاح خطأ MarkdownV2 (حرف '(' محجوز)")
@@ -12430,10 +12511,8 @@ async def main():
     print("   • ✅ إضافة دالة handle_contest_creation_states")
     print("   • ✅ إضافة زر إعادة التدوير التلقائي في الإعدادات")
     print("   • ✅ دعم auto_recycle مع إشعارات ونشر لا نهائي عند التفعيل")
-    print("   • 🔞 **إضافة كشف NSFW (المحتوى غير اللائق)**")
-    print("      - كشف الصور والفيديوهات")
-    print("      - زر إعدادات في لوحة المشرف")
-    print("      - تغيير نسبة الحساسية")
+    print("   • 🔞 إضافة كشف NSFW (المحتوى غير اللائق)")
+    print("   • 📥 **استيراد الكلمات المحظورة من ملف** (banned_words.txt)")
     
     try:
         await application.run_polling(
