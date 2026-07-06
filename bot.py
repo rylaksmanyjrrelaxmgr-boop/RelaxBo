@@ -302,39 +302,14 @@ async def db_get_publish_interval():
     return int(rows[0][0]) if rows else 720
 
 async def db_register_group(chat_id: int, chat_name: str, added_by: int):
-    async def _register(conn):
-        await conn.execute("""
-            INSERT OR REPLACE INTO bot_groups (chat_id, chat_name, added_by, added_at) 
-            VALUES (?, ?, ?, ?)
-        """, (chat_id, chat_name, added_by, datetime.now().isoformat()))
-        await conn.commit()
-        return True
-    return await execute_db(_register)
+    existing = await execute_db("SELECT chat_id FROM bot_groups WHERE chat_id=?", (chat_id,))
+    if existing:
+        return False
+    await execute_db("INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at) VALUES (?, ?, ?, ?)", (chat_id, chat_name, added_by, datetime.now().isoformat()))
+    return True
 
-# ✅ دالة جلب المجموعات (للمالكين والمشرفين فقط)
 async def db_get_user_groups(user_id: int):
-    """جلب المجموعات التي يكون فيها المستخدم مالكاً أو مشرفاً"""
-    async def _get(conn):
-        cur = await conn.execute("""
-            SELECT DISTINCT 
-                bg.chat_id, 
-                bg.chat_name, 
-                bg.username, 
-                bg.banned,
-                CASE 
-                    WHEN ho.owner_id IS NOT NULL THEN 'owner'
-                    WHEN ha.admin_id IS NOT NULL THEN 'admin'
-                    ELSE 'member'
-                END as role
-            FROM bot_groups bg
-            LEFT JOIN hidden_owners ho ON bg.chat_id = ho.chat_id AND ho.owner_id = ?
-            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
-            WHERE bg.banned = 0
-              AND (ho.owner_id IS NOT NULL OR ha.admin_id IS NOT NULL)
-            ORDER BY bg.chat_name
-        """, (user_id, user_id))
-        return await cur.fetchall()
-    return await execute_db(_get)
+    return await execute_db("SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by=? ORDER BY chat_name", (user_id,))
 
 async def db_get_user_groups_count(user_id: int) -> int:
     rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
@@ -1155,45 +1130,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"• {ch_name}: {count} غير منشور\n"
         await query.edit_message_text(text, parse_mode="MarkdownV2")
     
-    # ✅ دالة مجموعاتي (للمالكين والمشرفين فقط)
     elif data == "groups:my":
         groups = await db_get_user_groups(user_id)
-        
         if not groups:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
                 [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
             ])
-            await query.edit_message_text(
-                "🔒 **أنت لست مالكاً أو مشرفاً في أي مجموعة**\n\n"
-                "📌 لتظهر المجموعة هنا:\n"
-                "• أضف البوت إلى مجموعة\n"
-                "• اجعل البوت مشرفاً\n"
-                "• اكتب `/syncgroup` في المجموعة\n"
-                "• استخدم `/claim` لتسجيل مالك مخفي", 
-                reply_markup=keyboard, 
-                parse_mode="MarkdownV2"
-            )
+            await query.edit_message_text("📭 لا توجد مجموعات مسجلة", reply_markup=keyboard, parse_mode="MarkdownV2")
             return
         
-        text = "👑 **المجموعات التي تديرها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        text = "👥 **مجموعاتي:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         keyboard = []
-        
         for group in groups:
             chat_id = group[0]
             chat_name = group[1] or str(chat_id)
             banned = group[3]
-            role = group[4] if len(group) > 4 else 'member'
-            
-            if role == 'owner':
-                icon = "👑"
-            elif role == 'admin':
-                icon = "🛡️"
-            else:
-                icon = "🔹"
             
             status = "✅" if not banned else "⛔"
-            text += f"{icon} {chat_name}\n"
+            text += f"{status} {chat_name}\n"
             keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
         
         keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
