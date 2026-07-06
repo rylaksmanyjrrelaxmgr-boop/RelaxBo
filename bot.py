@@ -83,3 +83,14 @@ async def run_bot():
     
     print(f"🚀 {BOT_NAME} يعمل الآن!")
     await app.run_polling(drop_pending_updates=True)
+    # أزرار إضافية
+    app.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern="^schedule:menu$"))
+    app.add_handler(CallbackQueryHandler(channel_stats_callback, pattern="^channel_stats$"))
+    app.add_handler(CallbackQueryHandler(publish_all_callback, pattern="^publish_all$"))
+    app.add_handler(CallbackQueryHandler(referral_menu_callback, pattern="^referral:menu$"))
+    app.add_handler(CallbackQueryHandler(reminder_menu_callback, pattern="^reminder:menu$"))
+    app.add_handler(CallbackQueryHandler(translation_menu_callback, pattern="^translation:menu$"))
+    app.add_handler(CallbackQueryHandler(support_menu_callback, pattern="^support:menu$"))
+    app.add_handler(CallbackQueryHandler(developer_callback, pattern="^developer$"))
+    app.add_handler(CallbackQueryHandler(updates_callback, pattern="^updates$"))
+    app.add_handler(CallbackQueryHandler(contests_menu_callback, pattern="^contests_menu$"))

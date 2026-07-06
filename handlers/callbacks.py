@@ -50,6 +50,7 @@ async def my_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     for ch in channels:
         ch_id, ch_tele, ch_name, banned = ch
         keyboard.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"channels:select:{ch_id}")])
+    keyboard.append([InlineKeyboardButton("➕ إضافة قناة", callback_data="channels:add")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
     await query.edit_message_text("📡 **قنواتي**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
 
@@ -82,7 +83,20 @@ async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def my_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("📋 منشوراتي قيد التطوير")
+    user_id = update.effective_user.id
+    active = await db_get_active_channel(user_id)
+    if not active:
+        await query.edit_message_text("⚠️ اختر قناة أولاً")
+        return
+    posts = await db_get_user_posts_for_channel(active, limit=15)
+    if not posts:
+        await query.edit_message_text("📭 لا توجد منشورات")
+        return
+    text = "📋 **منشوراتي:**\n"
+    for post in posts[:10]:
+        text += f"• {post[1][:50]}...\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
 
 async def recycle_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -119,3 +133,10 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
     ])
     await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=keyboard, parse_mode="MarkdownV2")
+
+# ===== دوال مساعدة =====
+async def db_get_user_posts_for_channel(channel_db_id: int, limit: int = 15):
+    async def _get(conn):
+        cur = await conn.execute("SELECT id, text, media_type FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT ?", (channel_db_id, limit))
+        return await cur.fetchall()
+    return await execute_db(_get)
