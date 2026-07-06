@@ -1540,3 +1540,129 @@ if __name__ == "__main__":
         print(f"❌ خطأ: {e}")
         import traceback
         traceback.print_exc()
+
+# ===================== واجهة الويب =====================
+from aiohttp import web
+import json
+import os
+
+async def web_index(request):
+    try:
+        with open("templates/index.html", "r", encoding="utf-8") as f:
+            html = f.read()
+        return web.Response(text=html, content_type="text/html")
+    except:
+        return web.Response(text="<h1>🚀 ريلاكس مانيجر</h1><p>واجهة الويب قيد التطوير</p>", content_type="text/html")
+
+async def api_stats(request):
+    total = await execute_db("SELECT COUNT(*) FROM users")
+    banned = await execute_db("SELECT COUNT(*) FROM users WHERE banned=1")
+    posts = await execute_db("SELECT COUNT(*) FROM posts WHERE published=0")
+    groups = await execute_db("SELECT COUNT(*) FROM bot_groups")
+    channels = await execute_db("SELECT COUNT(*) FROM user_channels")
+    
+    return web.json_response({
+        "total_users": total[0][0] if total else 0,
+        "banned_users": banned[0][0] if banned else 0,
+        "pending_posts": posts[0][0] if posts else 0,
+        "groups": groups[0][0] if groups else 0,
+        "channels": channels[0][0] if channels else 0
+    })
+
+async def api_users(request):
+    users = await execute_db("SELECT user_id, banned FROM users LIMIT 100")
+    result = []
+    for u in users:
+        ch = await execute_db("SELECT COUNT(*) FROM user_channels WHERE user_id=?", (u[0],))
+        result.append({
+            "user_id": u[0],
+            "banned": bool(u[1]),
+            "channels": ch[0][0] if ch else 0,
+            "username": str(u[0])
+        })
+    return web.json_response(result)
+
+async def api_channels(request):
+    channels = await execute_db("SELECT user_id, channel_id, channel_name, banned FROM user_channels LIMIT 100")
+    result = []
+    for ch in channels:
+        result.append({
+            "user_id": ch[0],
+            "channel_id": ch[1],
+            "channel_name": ch[2] or ch[1],
+            "banned": bool(ch[3])
+        })
+    return web.json_response(result)
+
+async def api_groups(request):
+    groups = await execute_db("SELECT chat_id, chat_name, added_by, banned FROM bot_groups LIMIT 100")
+    result = []
+    for g in groups:
+        result.append({
+            "chat_id": g[0],
+            "chat_name": g[1] or str(g[0]),
+            "added_by": g[2],
+            "banned": bool(g[3])
+        })
+    return web.json_response(result)
+
+async def api_posts(request):
+    posts = await execute_db("""
+        SELECT p.text, p.media_type, p.created_at, uc.channel_name 
+        FROM posts p 
+        JOIN user_channels uc ON p.channel_db_id = uc.id 
+        WHERE p.published=0 
+        ORDER BY p.id DESC LIMIT 50
+    """)
+    result = []
+    for p in posts:
+        result.append({
+            "text": p[0] or "",
+            "media_type": p[1] or "text",
+            "created_at": p[2],
+            "channel_name": p[3] or "غير معروف"
+        })
+    return web.json_response(result)
+
+async def api_toggle_ban(request):
+    user_id = int(request.match_info['user_id'])
+    current = await execute_db("SELECT banned FROM users WHERE user_id=?", (user_id,))
+    if current:
+        new_status = 0 if current[0][0] else 1
+        await execute_db("UPDATE users SET banned=? WHERE user_id=?", (new_status, user_id))
+        return web.json_response({"success": True, "message": "تم تغيير الحالة"})
+    return web.json_response({"success": False, "message": "المستخدم غير موجود"}, status=404)
+
+async def api_settings(request):
+    if request.method == "POST":
+        data = await request.json()
+        if "publish_interval" in data:
+            await execute_db("UPDATE settings SET value=? WHERE key='publish_interval'", (str(data['publish_interval']),))
+        return web.json_response({"success": True, "message": "✅ تم حفظ الإعدادات"})
+    
+    interval = await execute_db("SELECT value FROM settings WHERE key='publish_interval'")
+    return web.json_response({
+        "publish_interval": int(interval[0][0]) if interval else 720
+    })
+
+async def start_web_server():
+    app = web.Application()
+    
+    app.router.add_get("/", web_index)
+    app.router.add_get("/index.html", web_index)
+    app.router.add_get("/api/stats", api_stats)
+    app.router.add_get("/api/users", api_users)
+    app.router.add_get("/api/channels", api_channels)
+    app.router.add_get("/api/groups", api_groups)
+    app.router.add_get("/api/posts", api_posts)
+    app.router.add_post("/api/users/{user_id}/toggle-ban", api_toggle_ban)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_post("/api/settings", api_settings)
+    app.router.add_static("/static/", "static/")
+    
+    port = int(os.getenv("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ واجهة الويب: http://0.0.0.0:{port}")
