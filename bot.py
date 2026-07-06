@@ -59,9 +59,7 @@ BANNED_WORDS = []
 BANNED_PATTERNS = []
 
 def load_banned_words_from_file():
-    """تحميل الكلمات المحظورة من ملف نصي"""
     global BANNED_WORDS, BANNED_PATTERNS
-    
     BANNED_WORDS = []
     BANNED_PATTERNS = []
     
@@ -70,7 +68,6 @@ def load_banned_words_from_file():
         with open(BANNED_WORDS_FILE, 'w', encoding='utf-8') as f:
             f.write("""# قائمة الكلمات المحظورة
 # كل كلمة في سطر منفصل
-# ابدأ السطر بـ # للتعليق
 
 بورن
 سكس
@@ -100,23 +97,18 @@ def load_banned_words_from_file():
                             BANNED_PATTERNS.append(re.compile(word))
                         except:
                             pass
-        print(f"✅ تم تحميل {len(BANNED_WORDS)} كلمة محظورة من {BANNED_WORDS_FILE}")
-        print(f"✅ تم تحميل {len(BANNED_PATTERNS)} نمط محظور")
+        print(f"✅ تم تحميل {len(BANNED_WORDS)} كلمة محظورة")
     except Exception as e:
         print(f"❌ فشل تحميل الكلمات المحظورة: {e}")
 
 def contains_banned_word(text: str) -> str:
-    """التحقق من وجود كلمة محظورة في النص"""
     text_lower = text.lower()
-    
     for word in BANNED_WORDS:
         if word in text_lower:
             return word
-    
     for pattern in BANNED_PATTERNS:
         if pattern.search(text_lower):
             return pattern.pattern
-    
     return None
 
 # ===================== قاعدة البيانات =====================
@@ -215,7 +207,6 @@ async def init_db():
                 replied INTEGER DEFAULT 0
             )
         """)
-        # ✅ جدول الكلمات المحظورة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS banned_words (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,11 +302,43 @@ async def db_get_publish_interval():
     return int(rows[0][0]) if rows else 720
 
 async def db_register_group(chat_id: int, chat_name: str, added_by: int):
-    existing = await execute_db("SELECT chat_id FROM bot_groups WHERE chat_id=?", (chat_id,))
-    if existing:
-        return False
-    await execute_db("INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at) VALUES (?, ?, ?, ?)", (chat_id, chat_name, added_by, datetime.now().isoformat()))
-    return True
+    async def _register(conn):
+        await conn.execute("""
+            INSERT OR REPLACE INTO bot_groups (chat_id, chat_name, added_by, added_at) 
+            VALUES (?, ?, ?, ?)
+        """, (chat_id, chat_name, added_by, datetime.now().isoformat()))
+        await conn.commit()
+        return True
+    return await execute_db(_register)
+
+# ✅ دالة جلب المجموعات (للمالكين والمشرفين فقط)
+async def db_get_user_groups(user_id: int):
+    """جلب المجموعات التي يكون فيها المستخدم مالكاً أو مشرفاً"""
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT DISTINCT 
+                bg.chat_id, 
+                bg.chat_name, 
+                bg.username, 
+                bg.banned,
+                CASE 
+                    WHEN ho.owner_id IS NOT NULL THEN 'owner'
+                    WHEN ha.admin_id IS NOT NULL THEN 'admin'
+                    ELSE 'member'
+                END as role
+            FROM bot_groups bg
+            LEFT JOIN hidden_owners ho ON bg.chat_id = ho.chat_id AND ho.owner_id = ?
+            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
+            WHERE bg.banned = 0
+              AND (ho.owner_id IS NOT NULL OR ha.admin_id IS NOT NULL)
+            ORDER BY bg.chat_name
+        """, (user_id, user_id))
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+async def db_get_user_groups_count(user_id: int) -> int:
+    rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
+    return rows[0][0] if rows else 0
 
 async def db_get_channel_info(channel_db_id: int):
     rows = await execute_db("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
@@ -665,11 +688,25 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def syncgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
+    
     if chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
         return
+    
     await db_register_group(chat.id, chat.title, user.id)
-    await update.message.reply_text(f"✅ تم تفعيل المجموعة: {chat.title}")
+    
+    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat.id,))
+    if not owners:
+        await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat.id, user.id))
+    
+    await update.message.reply_text(
+        f"✅ **تم تفعيل المجموعة!**\n\n"
+        f"📌 الاسم: {chat.title}\n"
+        f"🆔 المعرف: `{chat.id}`\n"
+        f"👤 المضافة بواسطة: `{user.id}`\n\n"
+        f"🔹 الآن يمكنك إدارة المجموعة من الخاص\n"
+        f"🔹 اضغط على **👥 مجموعاتي** في القائمة الرئيسية"
+    )
 
 async def lock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1118,6 +1155,178 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"• {ch_name}: {count} غير منشور\n"
         await query.edit_message_text(text, parse_mode="MarkdownV2")
     
+    # ✅ دالة مجموعاتي (للمالكين والمشرفين فقط)
+    elif data == "groups:my":
+        groups = await db_get_user_groups(user_id)
+        
+        if not groups:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+            ])
+            await query.edit_message_text(
+                "🔒 **أنت لست مالكاً أو مشرفاً في أي مجموعة**\n\n"
+                "📌 لتظهر المجموعة هنا:\n"
+                "• أضف البوت إلى مجموعة\n"
+                "• اجعل البوت مشرفاً\n"
+                "• اكتب `/syncgroup` في المجموعة\n"
+                "• استخدم `/claim` لتسجيل مالك مخفي", 
+                reply_markup=keyboard, 
+                parse_mode="MarkdownV2"
+            )
+            return
+        
+        text = "👑 **المجموعات التي تديرها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        keyboard = []
+        
+        for group in groups:
+            chat_id = group[0]
+            chat_name = group[1] or str(chat_id)
+            banned = group[3]
+            role = group[4] if len(group) > 4 else 'member'
+            
+            if role == 'owner':
+                icon = "👑"
+            elif role == 'admin':
+                icon = "🛡️"
+            else:
+                icon = "🔹"
+            
+            status = "✅" if not banned else "⛔"
+            text += f"{icon} {chat_name}\n"
+            keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
+        
+        keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "help":
+        await query.edit_message_text(get_text(user_id, "help_text"), parse_mode="MarkdownV2")
+    
+    elif data == "language":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"), InlineKeyboardButton("English 🇬🇧", callback_data="lang_en")],
+        ])
+        await query.edit_message_text("🌐 اختر اللغة:", reply_markup=keyboard)
+    
+    elif data.startswith("lang_"):
+        lang = data.split("_")[1]
+        await db_set_user_language(user_id, lang)
+        user_language[user_id] = lang
+        keyboard = await get_main_keyboard(user_id)
+        await query.edit_message_text(f"✅ تم تغيير اللغة إلى {'العربية' if lang == 'ar' else 'English'}", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "trial":
+        await db_activate_subscription(user_id, 30)
+        await query.edit_message_text("🎁 تم تفعيل التجربة المجانية لمدة 30 يوم!")
+    
+    elif data == "subscribe":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⭐ 1 يوم - 5 نجوم", callback_data="buy:1:5")],
+            [InlineKeyboardButton("⭐ 30 يوم - 50 نجمة", callback_data="buy:30:50")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
+        ])
+        await query.edit_message_text("💎 **اختر الباقة:**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data.startswith("buy:"):
+        parts = data.split(":")
+        days = int(parts[1])
+        await db_activate_subscription(user_id, days)
+        await query.edit_message_text(f"✅ تم تفعيل اشتراكك لمدة {days} يوم!")
+    
+    elif data == "developer":
+        await query.edit_message_text("👨‍💻 **المطور:** @RelaxMgr\n📦 **الإصدار:** 19.0.8", parse_mode="MarkdownV2")
+    
+    elif data == "support":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 كتابة تذكرة", callback_data="ticket")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("📞 **مركز الدعم**\nاختر الخدمة المطلوبة:", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "admin:panel":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+            return
+        await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=get_admin_keyboard(user_id), parse_mode="MarkdownV2")
+    
+    elif data.startswith("admin:"):
+        await query.edit_message_text("📋 هذه الميزة قيد التطوير", parse_mode="MarkdownV2")
+    
+    elif data == "schedule:menu":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
+            return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🕐 دقائق", callback_data="schedule:minutes"),
+             InlineKeyboardButton("🕒 ساعات", callback_data="schedule:hours")],
+            [InlineKeyboardButton("📆 أيام", callback_data="schedule:days"),
+             InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("⏰ **إعدادات الجدولة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "channel_stats":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
+            return
+        stats = await db_get_channel_stats(active)
+        if not stats:
+            await query.edit_message_text("📭 لا توجد إحصائيات")
+            return
+        text = f"📊 **إحصائيات القناة**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 إجمالي المنشورات: {stats.get('total_posts', 0)}\n✅ المنشورة: {stats.get('published_posts', 0)}\n⏳ غير المنشورة: {stats.get('unpublished_posts', 0)}"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "my_channel_stats":
+        channels = await db_get_channels(user_id)
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات")
+            return
+        text = "📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            ch_id, ch_tele, ch_name, banned = ch
+            count = await db_get_unpublished_count(ch_id)
+            text += f"• {ch_name}: {count} غير منشور\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "top":
+        await query.edit_message_text("🏆 **أفضل 10**\nقيد التطوير...")
+    
+    elif data == "schedule_post":
+        context.user_data["state"] = "WAITING_SCHEDULE_POST"
+        await query.edit_message_text("📝 أرسل المنشور بالصيغة:\n`YYYY-MM-DD HH:MM نص المنشور`")
+    
+    elif data == "publish_all":
+        await query.edit_message_text("📤 **جاري النشر في جميع القنوات...**")
+    
+    elif data == "translation:menu":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 العربية", callback_data="translation:ar"),
+             InlineKeyboardButton("🌐 English", callback_data="translation:en")],
+            [InlineKeyboardButton("🚫 إيقاف الترجمة", callback_data="translation:off")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("🌐 **إعدادات الترجمة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "contests_menu":
+        await query.edit_message_text("🏆 **المسابقات**\nقيد التطوير...")
+    
+    elif data == "referral:menu":
+        await query.edit_message_text("🔗 **الإحالات**\nقيد التطوير...")
+    
+    elif data == "reminder:menu":
+        await query.edit_message_text("⏰ **التذكيرات**\nقيد التطوير...")
+    
+    elif data == "updates":
+        await query.edit_message_text("📢 **التحديثات**\nقيد التطوير...")
+    
+    elif data == "rank":
+        await query.edit_message_text("📊 **رتبتك**\nقيد التطوير...")
+
 # ===================== معالج الرسائل =====================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1231,7 +1440,6 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             await update.message.delete()
             await update.message.reply_text(f"🚫 **كلمة محظورة!**\nالكلمة: `{banned_word}`\n@{user.username or str(user.id)} يرجى احترام قوانين المجموعة.")
-            # تطبيق عقوبة تلقائية
             security_settings = await db_get_security_settings(chat.id)
             await apply_penalty(context.bot, chat.id, user.id, security_settings)
             return
@@ -1500,7 +1708,6 @@ async def start_web_server():
 async def run_bot():
     print(f"🚀 {BOT_NAME} جاري التشغيل...")
     
-    # تحميل الكلمات المحظورة من الملف
     load_banned_words_from_file()
     
     await init_db()
@@ -1600,71 +1807,3 @@ if __name__ == "__main__":
         print(f"❌ خطأ: {e}")
         import traceback
         traceback.print_exc()
-async def db_get_user_groups(user_id: int):
-    """جلب المجموعات التي يكون فيها المستخدم مالكاً أو مشرفاً"""
-    async def _get(conn):
-        cur = await conn.execute("""
-            SELECT DISTINCT 
-                bg.chat_id, 
-                bg.chat_name, 
-                bg.username, 
-                bg.banned,
-                CASE 
-                    WHEN ho.owner_id IS NOT NULL THEN 'owner'
-                    WHEN ha.admin_id IS NOT NULL THEN 'admin'
-                    ELSE 'member'
-                END as role
-            FROM bot_groups bg
-            LEFT JOIN hidden_owners ho ON bg.chat_id = ho.chat_id AND ho.owner_id = ?
-            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
-            WHERE bg.banned = 0
-              AND (ho.owner_id IS NOT NULL OR ha.admin_id IS NOT NULL)
-            ORDER BY bg.chat_name
-        """, (user_id, user_id))
-        return await cur.fetchall()
-    return await execute_db(_get)
-
-elif data == "groups:my":
-    groups = await db_get_user_groups(user_id)
-    
-    if not groups:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-        ])
-        await query.edit_message_text(
-            "🔒 **أنت لست مالكاً أو مشرفاً في أي مجموعة**\n\n"
-            "📌 لتظهر المجموعة هنا:\n"
-            "• أضف البوت إلى مجموعة\n"
-            "• اجعل البوت مشرفاً\n"
-            "• اكتب `/syncgroup` في المجموعة\n"
-            "• استخدم `/claim` لتسجيل مالك مخفي", 
-            reply_markup=keyboard, 
-            parse_mode="MarkdownV2"
-        )
-        return
-    
-    text = "👑 **المجموعات التي تديرها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    keyboard = []
-    
-    for group in groups:
-        chat_id = group[0]
-        chat_name = group[1] or str(chat_id)
-        banned = group[3]
-        role = group[4] if len(group) > 4 else 'member'
-        
-        if role == 'owner':
-            icon = "👑"
-        elif role == 'admin':
-            icon = "🛡️"
-        else:
-            icon = "🔹"
-        
-        status = "✅" if not banned else "⛔"
-        text += f"{icon} {chat_name}\n"
-        keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
-    
-    keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
