@@ -223,6 +223,13 @@ async def init_db():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_group_admins (
+                chat_id INTEGER,
+                user_id INTEGER,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', '720')")
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
         await conn.commit()
@@ -308,8 +315,35 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int):
     await execute_db("INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at) VALUES (?, ?, ?, ?)", (chat_id, chat_name, added_by, datetime.now().isoformat()))
     return True
 
+# ===================== دالة جلب المجموعات للمشرفين (جميع الأنواع) =====================
 async def db_get_user_groups(user_id: int):
-    return await execute_db("SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by=? ORDER BY chat_name", (user_id,))
+    """جلب المجموعات التي يكون فيها المستخدم مشرفاً (تيليجرام عادي أو مخفي)"""
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT DISTINCT 
+                bg.chat_id, 
+                bg.chat_name, 
+                bg.username, 
+                bg.banned,
+                CASE 
+                    WHEN ho.owner_id IS NOT NULL THEN '👑 مالك مخفي'
+                    WHEN ha.admin_id IS NOT NULL THEN '🛡️ مشرف مخفي'
+                    WHEN bg.chat_id IN (SELECT chat_id FROM bot_group_admins WHERE user_id = ?) THEN '⭐ مشرف تيليجرام'
+                    ELSE '👤 عضو عادي'
+                END as role
+            FROM bot_groups bg
+            LEFT JOIN hidden_owners ho ON bg.chat_id = ho.chat_id AND ho.owner_id = ?
+            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
+            WHERE bg.banned = 0
+              AND (
+                  ho.owner_id IS NOT NULL 
+                  OR ha.admin_id IS NOT NULL
+                  OR bg.chat_id IN (SELECT chat_id FROM bot_group_admins WHERE user_id = ?)
+              )
+            ORDER BY bg.chat_name
+        """, (user_id, user_id, user_id, user_id))
+        return await cur.fetchall()
+    return await execute_db(_get)
 
 async def db_get_user_groups_count(user_id: int) -> int:
     rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
@@ -674,13 +708,23 @@ async def syncgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not owners:
         await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat.id, user.id))
     
+    # تسجيل جميع المشرفين
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        for admin in admins:
+            await execute_db("""
+                INSERT OR IGNORE INTO bot_group_admins (chat_id, user_id) 
+                VALUES (?, ?)
+            """, (chat.id, admin.user.id))
+    except:
+        pass
+    
     await update.message.reply_text(
         f"✅ **تم تفعيل المجموعة!**\n\n"
         f"📌 الاسم: {chat.title}\n"
         f"🆔 المعرف: `{chat.id}`\n"
         f"👤 المضافة بواسطة: `{user.id}`\n\n"
-        f"🔹 الآن يمكنك إدارة المجموعة من الخاص\n"
-        f"🔹 اضغط على **👥 مجموعاتي** في القائمة الرئيسية"
+        f"🔹 الآن جميع المشرفين يشوفون المجموعة في الخاص"
     )
 
 async def lock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1132,23 +1176,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "groups:my":
         groups = await db_get_user_groups(user_id)
+        
         if not groups:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
                 [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
             ])
-            await query.edit_message_text("📭 لا توجد مجموعات مسجلة", reply_markup=keyboard, parse_mode="MarkdownV2")
+            await query.edit_message_text(
+                "🔒 **أنت لست مشرفاً في أي مجموعة**\n\n"
+                "📌 لتظهر المجموعة هنا:\n"
+                "• أضف البوت إلى مجموعة\n"
+                "• اجعل البوت مشرفاً\n"
+                "• اكتب `/syncgroup` في المجموعة", 
+                reply_markup=keyboard, 
+                parse_mode="MarkdownV2"
+            )
             return
         
-        text = "👥 **مجموعاتي:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        text = "👑 **المجموعات التي تشرف عليها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         keyboard = []
+        
         for group in groups:
             chat_id = group[0]
             chat_name = group[1] or str(chat_id)
             banned = group[3]
+            role = group[4] if len(group) > 4 else '⭐ مشرف تيليجرام'
             
             status = "✅" if not banned else "⛔"
-            text += f"{status} {chat_name}\n"
+            text += f"{role} {chat_name}\n"
             keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
         
         keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
@@ -1206,8 +1261,73 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=get_admin_keyboard(user_id), parse_mode="MarkdownV2")
     
-    elif data.startswith("admin:"):
-        await query.edit_message_text("📋 هذه الميزة قيد التطوير", parse_mode="MarkdownV2")
+    # ===================== إصلاح أزرار الأدمن =====================
+    elif data == "admin:users":
+        users = await execute_db("SELECT user_id, banned FROM users LIMIT 50")
+        if not users:
+            await query.edit_message_text("📭 لا يوجد مستخدمين")
+            return
+        text = "👥 **المستخدمين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for u in users:
+            status = "🚫" if u[1] else "✅"
+            text += f"{status} `{u[0]}`\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_users":
+        users = await execute_db("SELECT user_id FROM users WHERE banned=1 LIMIT 50")
+        if not users:
+            await query.edit_message_text("📭 لا يوجد مستخدمين محظورين")
+            return
+        text = "🚫 **المستخدمين المحظورين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for u in users:
+            text += f"• `{u[0]}`\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:all_channels":
+        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels LIMIT 50")
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات")
+            return
+        text = "📡 **قنوات المستخدمين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            text += f"• {ch[2] or ch[1]} (المستخدم: `{ch[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_channels":
+        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels WHERE banned=1 LIMIT 50")
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات محظورة")
+            return
+        text = "⛔ **قنوات محظورة:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            text += f"• {ch[2] or ch[1]} (المستخدم: `{ch[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups LIMIT 50")
+        if not groups:
+            await query.edit_message_text("📭 لا توجد مجموعات")
+            return
+        text = "📊 **المجموعات:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for g in groups:
+            text += f"• {g[1] or g[0]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups WHERE banned=1 LIMIT 50")
+        if not groups:
+            await query.edit_message_text("📭 لا توجد مجموعات محظورة")
+            return
+        text = "🚷 **مجموعات محظورة:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for g in groups:
+            text += f"• {g[1] or g[0]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
     elif data == "schedule:menu":
         active = await db_get_active_channel(user_id)
