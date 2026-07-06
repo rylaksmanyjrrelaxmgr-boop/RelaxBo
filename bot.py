@@ -1292,8 +1292,8 @@ async def start_web_server():
     except Exception as e:
         print(f"⚠️ فشل خادم الويب: {e}")
 
-# ===================== 17. التشغيل الرئيسي =====================
-async def main():
+# ===================== 17. الدالة الرئيسية =====================
+async def run_bot():
     print(f"🚀 {BOT_NAME} جاري التشغيل...")
     
     await init_db()
@@ -1374,9 +1374,10 @@ async def main():
     print(f"✅ {BOT_NAME} يعمل الآن!")
     await app.run_polling(drop_pending_updates=True)
 
+# ===================== 18. التشغيل =====================
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(run_bot())
     except KeyboardInterrupt:
         print("\n🛑 تم إيقاف البوت")
     except Exception as e:
