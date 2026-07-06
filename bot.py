@@ -1716,3 +1716,66 @@ if __name__ == "__main__":
         print(f"❌ خطأ: {e}")
         import traceback
         traceback.print_exc()
+# ===================== معالج المجموعات والردود =====================
+async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat.type not in ["group", "supergroup"]:
+        return
+    
+    if user.is_bot:
+        return
+    
+    text = update.message.text or ""
+    text_lower = text.lower()
+    
+    # فحص الكلمات المحظورة
+    banned_word = contains_banned_word(text)
+    if banned_word:
+        try:
+            await update.message.delete()
+            await update.message.reply_text(f"🚫 **كلمة محظورة!**\nالكلمة: `{banned_word}`\n@{user.username or str(user.id)} يرجى احترام قوانين المجموعة.")
+            security_settings = await db_get_security_settings(chat.id)
+            await apply_penalty(context.bot, chat.id, user.id, security_settings)
+            return
+        except Exception as e:
+            print(f"⚠️ فشل حذف الرسالة: {e}")
+    
+    # الردود التلقائية
+    reply = await db_get_reply(text_lower)
+    if reply:
+        await update.message.reply_text(reply)
+        return
+    
+    replies = {
+        "مرحباً": "أهلاً وسهلاً بك 🤍",
+        "السلام عليكم": "وعليكم السلام ورحمة الله 🌹",
+        "كيف حالك": "الحمد لله بخير، وأنت؟ 🙏",
+        "شكراً": "العفو 🤍",
+        "حبيبي": "حبيبي نورت 🌸",
+        "ماشاء الله": "تبارك الله 🌸",
+        "الحمد لله": "الحمد لله دائماً وأبداً 🌸",
+        "سبحان الله": "سبحان الله وبحمده 🌸",
+        "الله أكبر": "الله أكبر 🌸",
+        "استغفر الله": "اللهم اغفر لنا 🌸",
+        "جزاك الله خيراً": "وإياك 🌸",
+        "الله يجزيك الخير": "وإياك 🤍",
+        "تعبان": "لا تستسلم، أنت أقوى مما تظن 💪",
+        "من أنت": "أنا ريلاكس مانيجر، بوت متكامل 🤖",
+        "نكتة": "مرة وحدة قالت للثانية... خلاص ما في نكتة 😂",
+        "صباح الخير": "صباح النور ☀️",
+        "مساء الخير": "مساء النور 🌙",
+        "بالتوفيق": "الله يوفقك 🌸",
+        "ممتاز": "شكراً 🌸",
+        "جميل": "تسلم 🌸",
+        "يعطيك العافية": "الله يعافيك 🌸",
+        "مع السلامة": "مع السلامة، تشرفنا بك 🌸",
+        "أهلاً": "أهلاً وسهلاً 🌸",
+        "هلا": "هلا وغلا 🌸",
+    }
+    
+    for word, reply in replies.items():
+        if word in text_lower:
+            await update.message.reply_text(reply)
+            break
