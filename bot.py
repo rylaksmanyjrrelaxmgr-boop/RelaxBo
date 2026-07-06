@@ -415,64 +415,6 @@ async def load_user_languages():
         user_language[user_id] = lang
 
 # ===================== لوحة المفاتيح الرئيسية (مرتبة) =====================
-async def get_main_keyboard(user_id: int):
-    channels = await db_get_channels(user_id)
-    active = await db_get_active_channel(user_id)
-    unpublished = await db_get_unpublished_count(active) if active else 0
-    
-    keyboard = [
-        # ===== الصف 1: مجموعاتي + إضافة قناة =====
-        [
-            InlineKeyboardButton("👥 مجموعاتي", callback_data="groups:my"),
-            InlineKeyboardButton("➕ إضافة قناة", callback_data="channels:add")
-        ],
-        # ===== الصف 2: قنواتي + الإعدادات =====
-        [
-            InlineKeyboardButton("📡 قنواتي", callback_data="channels:my"),
-            InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings:menu")
-        ],
-    ]
-    
-    if channels:
-        # ===== الصف 3: إضافة منشورات + نشر =====
-        keyboard.append([
-            InlineKeyboardButton("📥 إضافة 15 منشور", callback_data="posts:add_15"),
-            InlineKeyboardButton("📤 نشر واحد", callback_data="posts:publish_one")
-        ])
-        # ===== الصف 4: منشوراتي + إعادة تدوير =====
-        keyboard.append([
-            InlineKeyboardButton("📋 منشوراتي", callback_data="posts:my"),
-            InlineKeyboardButton("♻️ إعادة تدوير", callback_data="posts:recycle")
-        ])
-        # ===== الصف 5: إحصائياتي =====
-        keyboard.append([
-            InlineKeyboardButton(f"📊 إحصائياتي ({unpublished})", callback_data="stats:pending"),
-            InlineKeyboardButton("📈 إحصائيات كاملة", callback_data="stats:full")
-        ])
-    
-    # ===== الصف 6: مساعدة + لغة =====
-    keyboard.append([
-        InlineKeyboardButton("❓ المساعدة", callback_data="help"),
-        InlineKeyboardButton("🌐 اللغة", callback_data="language")
-    ])
-    # ===== الصف 7: تجربة + اشتراك =====
-    keyboard.append([
-        InlineKeyboardButton("🎁 تجربة مجانية", callback_data="trial"),
-        InlineKeyboardButton("💎 اشتراك", callback_data="subscribe")
-    ])
-    # ===== الصف 8: المطور + الدعم =====
-    keyboard.append([
-        InlineKeyboardButton("👨‍💻 المطور", callback_data="developer"),
-        InlineKeyboardButton("📞 الدعم", callback_data="support")
-    ])
-    
-    if user_id == MAIN_ADMIN_ID or user_id == PRIMARY_OWNER_ID:
-        # ===== الصف 9: لوحة الأدمن =====
-        keyboard.append([
-            InlineKeyboardButton("👑 لوحة الأدمن", callback_data="admin:panel")
-        ])
-    
-    return InlineKeyboardMarkup(keyboard)
 
 # ===================== لوحة الأدمن (مرتبة) =====================
 def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
