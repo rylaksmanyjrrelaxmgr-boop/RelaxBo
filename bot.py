@@ -315,9 +315,8 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int):
     await execute_db("INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at) VALUES (?, ?, ?, ?)", (chat_id, chat_name, added_by, datetime.now().isoformat()))
     return True
 
-# ===================== دالة جلب المجموعات للمشرفين (جميع الأنواع) =====================
+# ===================== دالة جلب المجموعات للمشرفين =====================
 async def db_get_user_groups(user_id: int):
-    """جلب المجموعات التي يكون فيها المستخدم مشرفاً (تيليجرام عادي أو مخفي)"""
     async def _get(conn):
         cur = await conn.execute("""
             SELECT DISTINCT 
@@ -708,7 +707,6 @@ async def syncgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not owners:
         await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat.id, user.id))
     
-    # تسجيل جميع المشرفين
     try:
         admins = await context.bot.get_chat_administrators(chat.id)
         for admin in admins:
@@ -1174,162 +1172,233 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"• {ch_name}: {count} غير منشور\n"
         await query.edit_message_text(text, parse_mode="MarkdownV2")
     
-# ===================== معالج الرسائل =====================
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text or ""
-    state = context.user_data.get("state")
+    # ===================== زر مجموعاتي (يعمل) =====================
+    elif data == "groups:my":
+        groups = await db_get_user_groups(user_id)
+        
+        if not groups:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+            ])
+            await query.edit_message_text(
+                "🔒 **أنت لست مشرفاً في أي مجموعة**\n\n"
+                "📌 لتظهر المجموعة هنا:\n"
+                "• أضف البوت إلى مجموعة\n"
+                "• اجعل البوت مشرفاً\n"
+                "• اكتب `/syncgroup` في المجموعة", 
+                reply_markup=keyboard, 
+                parse_mode="MarkdownV2"
+            )
+            return
+        
+        text = "👑 **المجموعات التي تشرف عليها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        keyboard = []
+        
+        for group in groups:
+            chat_id = group[0]
+            chat_name = group[1] or str(chat_id)
+            banned = group[3]
+            role = group[4] if len(group) > 4 else '⭐ مشرف تيليجرام'
+            
+            status = "✅" if not banned else "⛔"
+            text += f"{role} {chat_name}\n"
+            keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
+        
+        keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    if context.user_data.get("support_mode"):
-        ticket_num = await db_get_next_ticket_number()
-        username = update.effective_user.full_name or str(user_id)
-        await db_save_ticket(user_id, username, text, ticket_num)
-        await execute_db("UPDATE settings SET value=? WHERE key='last_ticket_number'", (str(ticket_num + 1),))
-        await update.message.reply_text(f"✅ تم استلام رسالتك! رقم التذكرة: #{ticket_num}\nسيتم الرد عليك قريباً.")
-        context.user_data.pop("support_mode", None)
-        await context.bot.send_message(chat_id=MAIN_ADMIN_ID, text=f"📬 **تذكرة جديدة**\n👤 {username}\n🆔 {user_id}\n📋 #{ticket_num}\n📝 {text[:200]}")
-        return
+    elif data == "help":
+        await query.edit_message_text(get_text(user_id, "help_text"), parse_mode="MarkdownV2")
     
-    if text == "/cancel":
-        context.user_data.pop("state", None)
-        context.user_data.pop("session_posts", None)
-        context.user_data.pop("support_mode", None)
-        await update.message.reply_text(get_text(user_id, "cancelled"))
+    elif data == "language":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"), InlineKeyboardButton("English 🇬🇧", callback_data="lang_en")],
+        ])
+        await query.edit_message_text("🌐 اختر اللغة:", reply_markup=keyboard)
+    
+    elif data.startswith("lang_"):
+        lang = data.split("_")[1]
+        await db_set_user_language(user_id, lang)
+        user_language[user_id] = lang
         keyboard = await get_main_keyboard(user_id)
-        await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
-        return
+        await query.edit_message_text(f"✅ تم تغيير اللغة إلى {'العربية' if lang == 'ar' else 'English'}", reply_markup=keyboard, parse_mode="MarkdownV2")
     
-    if state == "WAITING_CHANNEL_ID":
-        channel_id = text.strip()
-        if not channel_id.startswith("@") and not channel_id.startswith("-100"):
-            await update.message.reply_text("❌ معرف قناة غير صالح!\nاستخدم @username أو -100123456")
+    elif data == "trial":
+        await db_activate_subscription(user_id, 30)
+        await query.edit_message_text("🎁 تم تفعيل التجربة المجانية لمدة 30 يوم!")
+    
+    elif data == "subscribe":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⭐ 1 يوم - 5 نجوم", callback_data="buy:1:5")],
+            [InlineKeyboardButton("⭐ 30 يوم - 50 نجمة", callback_data="buy:30:50")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
+        ])
+        await query.edit_message_text("💎 **اختر الباقة:**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data.startswith("buy:"):
+        parts = data.split(":")
+        days = int(parts[1])
+        await db_activate_subscription(user_id, days)
+        await query.edit_message_text(f"✅ تم تفعيل اشتراكك لمدة {days} يوم!")
+    
+    elif data == "developer":
+        await query.edit_message_text("👨‍💻 **المطور:** @RelaxMgr\n📦 **الإصدار:** 19.0.8", parse_mode="MarkdownV2")
+    
+    elif data == "support":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 كتابة تذكرة", callback_data="ticket")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("📞 **مركز الدعم**\nاختر الخدمة المطلوبة:", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "admin:panel":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
             return
-        new_id = await db_add_channel(user_id, channel_id, channel_id)
-        if new_id:
-            await db_set_active_channel(user_id, new_id)
-            await update.message.reply_text(get_text(user_id, "channel_added"))
-        else:
-            await update.message.reply_text("⚠️ القناة موجودة مسبقاً")
-        context.user_data.pop("state", None)
-        keyboard = await get_main_keyboard(user_id)
-        await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
-        return
+        await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=get_admin_keyboard(user_id), parse_mode="MarkdownV2")
     
-    if state == "ADDING_POSTS":
-        posts = context.user_data.get("session_posts", [])
-        media_type = "text"
-        media_file_id = None
-        text_content = text
-        
-        if update.message.photo:
-            media_type = "photo"
-            media_file_id = update.message.photo[-1].file_id
-            text_content = update.message.caption or ""
-        elif update.message.video:
-            media_type = "video"
-            media_file_id = update.message.video.file_id
-            text_content = update.message.caption or ""
-        elif update.message.document:
-            media_type = "document"
-            media_file_id = update.message.document.file_id
-            text_content = update.message.caption or ""
-        
-        posts.append((text_content, media_type, media_file_id))
-        context.user_data["session_posts"] = posts
-        
-        if len(posts) >= 15:
-            active = await db_get_active_channel(user_id)
-            if active:
-                saved = await db_save_posts(active, posts)
-                await update.message.reply_text(f"✅ تم حفظ {saved} منشور")
-            context.user_data.pop("state", None)
-            context.user_data.pop("session_posts", None)
-            keyboard = await get_main_keyboard(user_id)
-            await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
-        else:
-            await update.message.reply_text(f"📥 {len(posts)}/15")
-    
-    elif state == "WAITING_SCHEDULE_POST":
-        parts = text.split(maxsplit=2)
-        if len(parts) < 3:
-            await update.message.reply_text("❌ الصيغة غير صحيحة!\nاستخدم: `YYYY-MM-DD HH:MM نص المنشور`")
+    elif data == "admin:users":
+        users = await execute_db("SELECT user_id, banned FROM users LIMIT 50")
+        if not users:
+            await query.edit_message_text("📭 لا يوجد مستخدمين")
             return
-        try:
-            date_str = parts[0]
-            time_str = parts[1]
-            post_text = parts[2]
-            publish_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            if publish_time < datetime.now():
-                await update.message.reply_text("❌ الوقت يجب أن يكون في المستقبل!")
-                return
-            await update.message.reply_text(f"✅ تم جدولة المنشور في {date_str} {time_str}")
-            context.user_data.pop("state", None)
-        except ValueError:
-            await update.message.reply_text("❌ التاريخ أو الوقت غير صحيح!")
-
-# ===================== معالج المجموعات والردود =====================
-async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
+        text = "👥 **المستخدمين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for u in users:
+            status = "🚫" if u[1] else "✅"
+            text += f"{status} `{u[0]}`\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    if chat.type not in ["group", "supergroup"]:
-        return
-    
-    if user.is_bot:
-        return
-    
-    text = update.message.text or ""
-    text_lower = text.lower()
-    
-    # ===== فحص الكلمات المحظورة =====
-    banned_word = contains_banned_word(text)
-    if banned_word:
-        try:
-            await update.message.delete()
-            await update.message.reply_text(f"🚫 **كلمة محظورة!**\nالكلمة: `{banned_word}`\n@{user.username or str(user.id)} يرجى احترام قوانين المجموعة.")
-            security_settings = await db_get_security_settings(chat.id)
-            await apply_penalty(context.bot, chat.id, user.id, security_settings)
+    elif data == "admin:banned_users":
+        users = await execute_db("SELECT user_id FROM users WHERE banned=1 LIMIT 50")
+        if not users:
+            await query.edit_message_text("📭 لا يوجد مستخدمين محظورين")
             return
-        except Exception as e:
-            print(f"⚠️ فشل حذف الرسالة: {e}")
+        text = "🚫 **المستخدمين المحظورين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for u in users:
+            text += f"• `{u[0]}`\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    # ===== الردود التلقائية =====
-    reply = await db_get_reply(text_lower)
-    if reply:
-        await update.message.reply_text(reply)
-        return
+    elif data == "admin:all_channels":
+        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels LIMIT 50")
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات")
+            return
+        text = "📡 **قنوات المستخدمين:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            text += f"• {ch[2] or ch[1]} (المستخدم: `{ch[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    replies = {
-        "مرحباً": "أهلاً وسهلاً بك 🤍",
-        "السلام عليكم": "وعليكم السلام ورحمة الله 🌹",
-        "كيف حالك": "الحمد لله بخير، وأنت؟ 🙏",
-        "شكراً": "العفو 🤍",
-        "حبيبي": "حبيبي نورت 🌸",
-        "ماشاء الله": "تبارك الله 🌸",
-        "الحمد لله": "الحمد لله دائماً وأبداً 🌸",
-        "سبحان الله": "سبحان الله وبحمده 🌸",
-        "الله أكبر": "الله أكبر 🌸",
-        "استغفر الله": "اللهم اغفر لنا 🌸",
-        "جزاك الله خيراً": "وإياك 🌸",
-        "الله يجزيك الخير": "وإياك 🤍",
-        "تعبان": "لا تستسلم، أنت أقوى مما تظن 💪",
-        "من أنت": "أنا ريلاكس مانيجر، بوت متكامل 🤖",
-        "نكتة": "مرة وحدة قالت للثانية... خلاص ما في نكتة 😂",
-        "صباح الخير": "صباح النور ☀️",
-        "مساء الخير": "مساء النور 🌙",
-        "بالتوفيق": "الله يوفقك 🌸",
-        "ممتاز": "شكراً 🌸",
-        "جميل": "تسلم 🌸",
-        "يعطيك العافية": "الله يعافيك 🌸",
-        "مع السلامة": "مع السلامة، تشرفنا بك 🌸",
-        "أهلاً": "أهلاً وسهلاً 🌸",
-        "هلا": "هلا وغلا 🌸",
-    }
+    elif data == "admin:banned_channels":
+        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels WHERE banned=1 LIMIT 50")
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات محظورة")
+            return
+        text = "⛔ **قنوات محظورة:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            text += f"• {ch[2] or ch[1]} (المستخدم: `{ch[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    for word, reply in replies.items():
-        if word in text_lower:
-            await update.message.reply_text(reply)
-            break
+    elif data == "admin:groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups LIMIT 50")
+        if not groups:
+            await query.edit_message_text("📭 لا توجد مجموعات")
+            return
+        text = "📊 **المجموعات:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for g in groups:
+            text += f"• {g[1] or g[0]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups WHERE banned=1 LIMIT 50")
+        if not groups:
+            await query.edit_message_text("📭 لا توجد مجموعات محظورة")
+            return
+        text = "🚷 **مجموعات محظورة:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for g in groups:
+            text += f"• {g[1] or g[0]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "schedule:menu":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
+            return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🕐 دقائق", callback_data="schedule:minutes"),
+             InlineKeyboardButton("🕒 ساعات", callback_data="schedule:hours")],
+            [InlineKeyboardButton("📆 أيام", callback_data="schedule:days"),
+             InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("⏰ **إعدادات الجدولة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "channel_stats":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
+            return
+        stats = await db_get_channel_stats(active)
+        if not stats:
+            await query.edit_message_text("📭 لا توجد إحصائيات")
+            return
+        text = f"📊 **إحصائيات القناة**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 إجمالي المنشورات: {stats.get('total_posts', 0)}\n✅ المنشورة: {stats.get('published_posts', 0)}\n⏳ غير المنشورة: {stats.get('unpublished_posts', 0)}"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "my_channel_stats":
+        channels = await db_get_channels(user_id)
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات")
+            return
+        text = "📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ch in channels:
+            ch_id, ch_tele, ch_name, banned = ch
+            count = await db_get_unpublished_count(ch_id)
+            text += f"• {ch_name}: {count} غير منشور\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "top":
+        await query.edit_message_text("🏆 **أفضل 10**\nقيد التطوير...")
+    
+    elif data == "schedule_post":
+        context.user_data["state"] = "WAITING_SCHEDULE_POST"
+        await query.edit_message_text("📝 أرسل المنشور بالصيغة:\n`YYYY-MM-DD HH:MM نص المنشور`")
+    
+    elif data == "publish_all":
+        await query.edit_message_text("📤 **جاري النشر في جميع القنوات...**")
+    
+    elif data == "translation:menu":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 العربية", callback_data="translation:ar"),
+             InlineKeyboardButton("🌐 English", callback_data="translation:en")],
+            [InlineKeyboardButton("🚫 إيقاف الترجمة", callback_data="translation:off")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("🌐 **إعدادات الترجمة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "contests_menu":
+        await query.edit_message_text("🏆 **المسابقات**\nقيد التطوير...")
+    
+    elif data == "referral:menu":
+        await query.edit_message_text("🔗 **الإحالات**\nقيد التطوير...")
+    
+    elif data == "reminder:menu":
+        await query.edit_message_text("⏰ **التذكيرات**\nقيد التطوير...")
+    
+    elif data == "updates":
+        await query.edit_message_text("📢 **التحديثات**\nقيد التطوير...")
+    
+    elif data == "rank":
+        await query.edit_message_text("📊 **رتبتك**\nقيد التطوير...")
 
 # ===================== دوال إضافية =====================
 async def db_get_channel_stats(channel_db_id: int):
@@ -1562,10 +1631,8 @@ async def run_bot():
     
     app = Application.builder().token(TOKEN).build()
     
-    # ===== التسجيل التلقائي =====
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, auto_register), group=1)
     
-    # ===== أوامر المالكين والمشرفين المخفيين =====
     app.add_handler(CommandHandler("claim", claim_handler))
     app.add_handler(CommandHandler("owners", owners_handler))
     app.add_handler(CommandHandler("addowner", addowner_handler))
@@ -1578,7 +1645,6 @@ async def run_bot():
     app.add_handler(CommandHandler("setadmin", setadmin_handler))
     app.add_handler(CommandHandler("gstats", gstats_handler))
     
-    # ===== الأوامر الأساسية =====
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("language", language_command))
@@ -1598,14 +1664,11 @@ async def run_bot():
     app.add_handler(CommandHandler("ticket", ticket_command))
     app.add_handler(CommandHandler("support_reply", support_reply_command))
     
-    # ===== الأزرار =====
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    # ===== الرسائل =====
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, group_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler))
     
-    # ===== أوامر القائمة =====
     commands = [
         BotCommand("start", "بدء البوت"),
         BotCommand("help", "المساعدة"),
@@ -1631,7 +1694,6 @@ async def run_bot():
     ]
     await app.bot.set_my_commands(commands)
     
-    # ===== المهام الخلفية =====
     asyncio.create_task(auto_publish_loop(app))
     asyncio.create_task(start_web_server())
     
@@ -1654,343 +1716,3 @@ if __name__ == "__main__":
         print(f"❌ خطأ: {e}")
         import traceback
         traceback.print_exc()
-# 1. 🏆 أفضل 10
-elif data == "top":
-    top_users = await get_top_users(10)
-    if not top_users:
-        await query.edit_message_text("📭 لا توجد نقاط مسجلة")
-        return
-    text = "🏆 **أفضل 10 مستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    for idx, (uid, points, level) in enumerate(top_users, 1):
-        try:
-            user = await context.bot.get_chat(uid)
-            name = user.first_name or str(uid)
-        except:
-            name = str(uid)
-        text += f"{idx}. {name} → المستوى {level} ({points} نقطة)\n"
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 2. 🏆 المسابقات
-elif data == "contests_menu":
-    contests = await db_get_active_contests()
-    if not contests:
-        await query.edit_message_text("📭 لا توجد مسابقات نشطة حالياً")
-        return
-    text = "🏆 **المسابقات النشطة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    keyboard = []
-    for contest in contests:
-        cid, title, prize, end_date = contest
-        text += f"📌 {title}\n🎁 {prize}\n📅 ينتهي: {end_date[:16]}\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        keyboard.append([InlineKeyboardButton(f"📝 شارك في {title[:20]}", callback_data=f"contest_join:{cid}")])
-    keyboard.append([InlineKeyboardButton("🏆 الفائزون", callback_data="contest_winners")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 3. 🔗 الإحالات
-elif data == "referral:menu":
-    referral_code = await db_get_referral_code(user_id)
-    if not referral_code:
-        referral_code = await db_generate_referral_code(user_id)
-    stats = await db_get_referral_stats(user_id)
-    text = f"🔗 **الإحالات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 رابطك:\n`https://t.me/{BOT_USERNAME}?start=ref_{referral_code}`\n\n👥 عدد المحالين: {stats['total_referrals']}\n🎁 المكافآت المتاحة: {stats['available_days']} يوم"
-    keyboard = [
-        [InlineKeyboardButton("📋 نسخ الرابط", callback_data=f"referral_copy:{referral_code}")],
-        [InlineKeyboardButton("🎁 صرف المكافآت", callback_data="referral_claim")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 4. ⏰ التذكيرات
-elif data == "reminder:menu":
-    settings = await db_get_user_reminder_settings(user_id)
-    status_sub = "🟢 مفعل" if settings['subscription_reminder'] else "🔴 معطل"
-    status_daily = "🟢 مفعل" if settings['daily_stats_reminder'] else "🔴 معطل"
-    status_weekly = "🟢 مفعل" if settings['weekly_report'] else "🔴 معطل"
-    text = f"⏰ **التذكيرات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تذكير الاشتراك: {status_sub}\n📊 التقرير اليومي: {status_daily}\n📈 التقرير الأسبوعي: {status_weekly}\n⏰ التذكير قبل: {settings['reminder_days_before']} أيام"
-    keyboard = [
-        [InlineKeyboardButton("🔔 تذكير الاشتراك", callback_data="reminder_toggle_sub"), InlineKeyboardButton("📊 يومي", callback_data="reminder_toggle_daily")],
-        [InlineKeyboardButton("📈 أسبوعي", callback_data="reminder_toggle_weekly"), InlineKeyboardButton("⏰ عدد الأيام", callback_data="reminder_set_days")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 5. 📢 التحديثات
-elif data == "updates":
-    channel = await db_get_updates_channel()
-    if channel:
-        text = f"📢 **قناة التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 @{channel}\n\nتابع القناة لمعرفة آخر التحديثات"
-        keyboard = [[InlineKeyboardButton("📢 افتح القناة", url=f"https://t.me/{channel}")], [InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
-    else:
-        text = "📢 **لم يتم تعيين قناة التحديثات**"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 6. 📊 رتبتي
-elif data == "rank":
-    level_data = await db_get_user_level(user_id)
-    text = f"📊 **رتبتك**\n━━━━━━━━━━━━━━━━━━━━━━\n⭐ المستوى: {level_data['level']}\n📈 النقاط: {level_data['points']}\n📌 التالي: {LEVEL_REQUIREMENTS.get(level_data['level'] + 1, level_data['points'])} نقطة"
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 7. 📝 جدولة منشور
-elif data == "schedule_post":
-    context.user_data["state"] = "WAITING_SCHEDULE_POST"
-    await query.edit_message_text("📝 أرسل المنشور بالصيغة:\n`YYYY-MM-DD HH:MM نص المنشور`")
-
-# 8. 📤 نشر الكل
-elif data == "publish_all":
-    await query.edit_message_text("📤 جاري النشر في جميع القنوات...")
-    channels = await db_get_channels(user_id)
-    if not channels:
-        await query.edit_message_text("📭 لا توجد قنوات")
-        return
-    success = 0
-    fail = 0
-    for ch in channels:
-        ch_db_id, ch_tele_id, ch_name, banned = ch
-        if banned:
-            continue
-        post = await db_get_next_post(ch_db_id)
-        if not post:
-            continue
-        try:
-            if post["media_type"] == "photo":
-                await context.bot.send_photo(ch_tele_id, post["media_file_id"], caption=post["text"])
-            elif post["media_type"] == "video":
-                await context.bot.send_video(ch_tele_id, post["media_file_id"], caption=post["text"])
-            else:
-                await context.bot.send_message(ch_tele_id, post["text"])
-            await db_mark_published(post["id"])
-            success += 1
-        except:
-            fail += 1
-        await asyncio.sleep(0.5)
-    await query.edit_message_text(f"📤 **نتيجة النشر**\n✅ نجح: {success}\n❌ فشل: {fail}")
-
-# 9. 🏆 إنشاء مسابقة (لوحة الأدمن)
-elif data == "admin:create_contest":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    context.user_data["state"] = "WAITING_CONTEST_TITLE"
-    await query.edit_message_text("📝 أرسل **عنوان** المسابقة:")
-
-# 10. 🏅 إعلان فائز (لوحة الأدمن)
-elif data == "admin:declare_winner":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    await query.edit_message_text("📝 /declare_winner معرف_المسابقة معرف_المستخدم\nمثال: `/declare_winner 5 123456789`")
-
-# 11. 💾 نسخة احتياطية (لوحة الأدمن)
-elif data == "admin:backup":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    await create_backup()
-    await query.edit_message_text("✅ تم إنشاء نسخة احتياطية مشفرة")
-
-# 12. 🔄 استعادة (لوحة الأدمن)
-elif data == "admin:restore_backup":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    backups = await list_backups()
-    if not backups:
-        await query.edit_message_text("📭 لا توجد نسخ احتياطية")
-        return
-    keyboard = []
-    for b in backups[:10]:
-        keyboard.append([InlineKeyboardButton(b.name, callback_data=f"admin:restore_backup_select:{b.name}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")])
-    await query.edit_message_text("💾 اختر النسخة للاستعادة:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# 13. 📢 تحديثات (لوحة الأدمن)
-elif data == "admin:updates":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    await query.edit_message_text("📢 أرسل نص التحديث لنشره في قناة التحديثات")
-    context.user_data["state"] = "WAITING_UPDATE_TEXT"
-
-# 14. 📨 إرسال رسالة (لوحة الأدمن)
-elif data == "admin:broadcast":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    await query.edit_message_text("📨 أرسل النص للإرسال لجميع المستخدمين")
-    context.user_data["state"] = "WAITING_BROADCAST"
-
-# 15. 📋 تذاكر (لوحة الأدمن)
-elif data == "admin:support_tickets":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    tickets = await db_get_all_tickets(10)
-    if not tickets:
-        await query.edit_message_text("📭 لا توجد تذاكر")
-        return
-    text = "📋 **تذاكر الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    for t in tickets:
-        text += f"#{t[4]} | {t[2]} | {t[5]} | {t[6][:16]}\n📝 {t[3][:50]}\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 16. 📁 صلاحيات (لوحة الأدمن)
-elif data == "admin:manage_sendcode":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    allowed = await db_get_allowed_sendcode_user()
-    text = f"📁 **صلاحية /sendcode**\nالمستخدم الحالي: {allowed if allowed else 'لا يوجد'}"
-    keyboard = [
-        [InlineKeyboardButton("➕ تعيين مستخدم", callback_data="admin:set_sendcode_user")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 17. 👑 + مشرف (لوحة الأدمن)
-elif data == "admin:add_admin":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    context.user_data["state"] = "WAITING_ADMIN_ID_ADD"
-    await query.edit_message_text("👑 أرسل معرف المستخدم لإضافته كمشرف:")
-
-# 18. 🗑️ - مشرف (لوحة الأدمن)
-elif data == "admin:remove_admin":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    context.user_data["state"] = "WAITING_ADMIN_ID_REMOVE"
-    await query.edit_message_text("🗑️ أرسل معرف المستخدم لإزالته من المشرفين:")
-
-# 19. 💬 ردود (لوحة الأدمن)
-elif data == "admin:replies":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    replies = await db_get_all_replies()
-    if not replies:
-        text = "📭 لا توجد ردود"
-    else:
-        text = "💬 **الردود التلقائية**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for kw, rep in replies[:20]:
-            text += f"• {kw} → {rep[:30]}{'...' if len(rep) > 30 else ''}\n"
-    keyboard = [
-        [InlineKeyboardButton("➕ إضافة رد", callback_data="admin:add_reply")],
-        [InlineKeyboardButton("🗑️ حذف رد", callback_data="admin:del_reply")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# 20. 🚫 كلمات محظورة (عامة) (لوحة الأدمن)
-elif data == "admin:banned_words":
-    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
-        return
-    words = await db_get_banned_words(-1)
-    if not words:
-        text = "📭 لا توجد كلمات محظورة عامة"
-    else:
-        text = "🚫 **الكلمات المحظورة عامة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for w in words[:20]:
-            text += f"• {w[0]}\n"
-    keyboard = [
-        [InlineKeyboardButton("➕ إضافة كلمة", callback_data="admin:add_banned_word")],
-        [InlineKeyboardButton("🗑️ حذف كلمة", callback_data="admin:remove_banned_word")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-# ===================== دوال مساعدة =====================
-async def get_top_users(limit=10):
-    rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
-    return rows if rows else []
-
-async def db_get_active_contests():
-    rows = await execute_db("SELECT id, title, prize, end_date FROM contests WHERE status='active' ORDER BY end_date LIMIT 10")
-    return rows if rows else []
-
-async def db_get_referral_code(user_id):
-    rows = await execute_db("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
-    return rows[0][0] if rows else None
-
-async def db_generate_referral_code(user_id):
-    code = hashlib.md5(f"{user_id}{time.time()}".encode()).hexdigest()[:8]
-    await execute_db("UPDATE users SET referral_code=? WHERE user_id=?", (code, user_id))
-    return code
-
-async def db_get_referral_stats(user_id):
-    total = await execute_db("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
-    rewards = await execute_db("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
-    total_days = rewards[0][0] if rewards else 0
-    claimed = rewards[0][1] if rewards else 0
-    return {
-        "total_referrals": total[0][0] if total else 0,
-        "available_days": total_days - claimed
-    }
-
-async def db_get_user_reminder_settings(user_id):
-    rows = await execute_db("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before FROM user_reminder_settings WHERE user_id=?", (user_id,))
-    if rows:
-        return {"subscription_reminder": rows[0][0], "daily_stats_reminder": rows[0][1], "weekly_report": rows[0][2], "reminder_days_before": rows[0][3] if rows[0][3] else 3}
-    await execute_db("INSERT INTO user_reminder_settings (user_id) VALUES (?)", (user_id,))
-    return {"subscription_reminder": 1, "daily_stats_reminder": 0, "weekly_report": 1, "reminder_days_before": 3}
-
-async def create_backup():
-    import shutil
-    backup_file = BACKUP_DIR / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-    shutil.copy2(DB_PATH, backup_file)
-    return backup_file
-
-async def list_backups():
-    return sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
-
-async def db_get_allowed_sendcode_user():
-    rows = await execute_db("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
-    return rows[0][0] if rows else None
-
-async def db_get_updates_channel():
-    rows = await execute_db("SELECT value FROM settings WHERE key='updates_channel'")
-    return rows[0][0] if rows else None
-# ===================== إصلاح زر مجموعاتي (داخل دالة button_callback) =====================
-# تأكد من أن هذا الكود داخل async def button_callback()
-
-elif data == "groups:my":
-    groups = await db_get_user_groups(user_id)
-    
-    if not groups:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-        ])
-        await query.edit_message_text(
-            "🔒 **أنت لست مشرفاً في أي مجموعة**\n\n"
-            "📌 لتظهر المجموعة هنا:\n"
-            "• أضف البوت إلى مجموعة\n"
-            "• اجعل البوت مشرفاً\n"
-            "• اكتب `/syncgroup` في المجموعة", 
-            reply_markup=keyboard, 
-            parse_mode="MarkdownV2"
-        )
-        return
-    
-    text = "👑 **المجموعات التي تشرف عليها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    keyboard = []
-    
-    for group in groups:
-        chat_id = group[0]
-        chat_name = group[1] or str(chat_id)
-        banned = group[3]
-        role = group[4] if len(group) > 4 else '⭐ مشرف تيليجرام'
-        
-        status = "✅" if not banned else "⛔"
-        text += f"{role} {chat_name}\n"
-        keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
-    
-    keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
