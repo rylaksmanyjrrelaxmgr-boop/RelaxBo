@@ -53,6 +53,72 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "Reelaaaxbot")
 DB_PATH = Path("data/bot_data.db")
 DB_PATH.parent.mkdir(exist_ok=True)
 
+# ===================== ملف الكلمات المحظورة =====================
+BANNED_WORDS_FILE = Path("banned_words.txt")
+BANNED_WORDS = []
+BANNED_PATTERNS = []
+
+def load_banned_words_from_file():
+    """تحميل الكلمات المحظورة من ملف نصي"""
+    global BANNED_WORDS, BANNED_PATTERNS
+    
+    BANNED_WORDS = []
+    BANNED_PATTERNS = []
+    
+    if not BANNED_WORDS_FILE.exists():
+        print(f"⚠️ ملف {BANNED_WORDS_FILE} غير موجود، سيتم إنشاؤه")
+        with open(BANNED_WORDS_FILE, 'w', encoding='utf-8') as f:
+            f.write("""# قائمة الكلمات المحظورة
+# كل كلمة في سطر منفصل
+# ابدأ السطر بـ # للتعليق
+
+بورن
+سكس
+جنس
+عري
+خمر
+خمور
+مخدرات
+حشيش
+كحول
+دعارة
+""")
+        print(f"✅ تم إنشاء ملف {BANNED_WORDS_FILE}")
+        return
+    
+    try:
+        with open(BANNED_WORDS_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                word = line.lower()
+                if len(word) >= 2:
+                    BANNED_WORDS.append(word)
+                    if '*' in word or '?' in word or '+' in word:
+                        try:
+                            BANNED_PATTERNS.append(re.compile(word))
+                        except:
+                            pass
+        print(f"✅ تم تحميل {len(BANNED_WORDS)} كلمة محظورة من {BANNED_WORDS_FILE}")
+        print(f"✅ تم تحميل {len(BANNED_PATTERNS)} نمط محظور")
+    except Exception as e:
+        print(f"❌ فشل تحميل الكلمات المحظورة: {e}")
+
+def contains_banned_word(text: str) -> str:
+    """التحقق من وجود كلمة محظورة في النص"""
+    text_lower = text.lower()
+    
+    for word in BANNED_WORDS:
+        if word in text_lower:
+            return word
+    
+    for pattern in BANNED_PATTERNS:
+        if pattern.search(text_lower):
+            return pattern.pattern
+    
+    return None
+
 # ===================== قاعدة البيانات =====================
 async def init_db():
     async with aiosqlite.connect(str(DB_PATH)) as conn:
@@ -149,7 +215,17 @@ async def init_db():
                 replied INTEGER DEFAULT 0
             )
         """)
-        # ✅ الجدول المفقود
+        # ✅ جدول الكلمات المحظورة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT NOT NULL,
+                chat_id INTEGER DEFAULT -1,
+                added_by INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(word, chat_id)
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_admins (
                 user_id INTEGER PRIMARY KEY,
@@ -539,7 +615,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db_register_user(user_id)
     user_language[user_id] = await db_get_user_language(user_id)
     
-    # ===== جلب الإحصائيات =====
     channels = await db_get_channels(user_id)
     active = await db_get_active_channel(user_id)
     unpublished = await db_get_unpublished_count(active) if active else 0
@@ -547,20 +622,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_sub = await db_has_active_subscription(user_id)
     auto_status = await db_auto_status(user_id)
     
-    # ===== عرض القناة النشطة =====
     if active:
         ch_info = await db_get_channel_info(active)
         channel_display = ch_info[1] if ch_info else "غير معروف"
     else:
         channel_display = "لا توجد قنوات"
     
-    # ===== عرض الاشتراك =====
     sub_text = "✅ مفعل" if has_sub else "❌ غير مفعل"
-    
-    # ===== عرض النشر التلقائي =====
     auto_text = "✅ مفعل" if auto_status else "❌ معطل"
     
-    # ===== إنشاء النص =====
     text = f"""🌿 **ريلاكس مانيجر**
 ━━━━━━━━━━━━━━━━━━━━━━
 👤 المعرف: `{user_id}`
@@ -1119,7 +1189,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("admin:"):
         await query.edit_message_text("📋 هذه الميزة قيد التطوير", parse_mode="MarkdownV2")
     
-    # ===== أزرار إضافية =====
     elif data == "schedule:menu":
         active = await db_get_active_channel(user_id)
         if not active:
@@ -1300,6 +1369,20 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text or ""
     text_lower = text.lower()
     
+    # ===== فحص الكلمات المحظورة =====
+    banned_word = contains_banned_word(text)
+    if banned_word:
+        try:
+            await update.message.delete()
+            await update.message.reply_text(f"🚫 **كلمة محظورة!**\nالكلمة: `{banned_word}`\n@{user.username or str(user.id)} يرجى احترام قوانين المجموعة.")
+            # تطبيق عقوبة تلقائية
+            security_settings = await db_get_security_settings(chat.id)
+            await apply_penalty(context.bot, chat.id, user.id, security_settings)
+            return
+        except Exception as e:
+            print(f"⚠️ فشل حذف الرسالة: {e}")
+    
+    # ===== الردود التلقائية =====
     reply = await db_get_reply(text_lower)
     if reply:
         await update.message.reply_text(reply)
@@ -1336,6 +1419,43 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if word in text_lower:
             await update.message.reply_text(reply)
             break
+
+# ===================== دوال إضافية =====================
+async def db_get_channel_stats(channel_db_id: int):
+    total = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
+    published = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=1", (channel_db_id,))
+    unpublished = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
+    return {
+        "total_posts": total[0][0] if total else 0,
+        "published_posts": published[0][0] if published else 0,
+        "unpublished_posts": unpublished[0][0] if unpublished else 0
+    }
+
+async def db_get_security_settings(chat_id: int):
+    return {"auto_penalty": "kick", "auto_mute_duration": 60}
+
+async def apply_penalty(bot, chat_id, user_id, settings):
+    penalty = settings.get('auto_penalty', 'none')
+    if penalty == 'none':
+        return
+    if penalty == 'kick':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'ban':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'mute':
+        try:
+            duration = settings.get('auto_mute_duration', 60)
+            until_date = datetime.now() + timedelta(minutes=duration)
+            await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until_date)
+        except:
+            pass
 
 # ===================== التسجيل التلقائي =====================
 async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1393,17 +1513,6 @@ async def auto_publish_loop(app):
         except Exception as e:
             print(f"❌ خطأ في النشر التلقائي: {e}")
             await asyncio.sleep(60)
-
-# ===================== دوال إضافية =====================
-async def db_get_channel_stats(channel_db_id: int):
-    total = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
-    published = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=1", (channel_db_id,))
-    unpublished = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
-    return {
-        "total_posts": total[0][0] if total else 0,
-        "published_posts": published[0][0] if published else 0,
-        "unpublished_posts": unpublished[0][0] if unpublished else 0
-    }
 
 # ===================== واجهة الويب =====================
 from aiohttp import web
@@ -1534,6 +1643,9 @@ async def start_web_server():
 # ===================== التشغيل الرئيسي =====================
 async def run_bot():
     print(f"🚀 {BOT_NAME} جاري التشغيل...")
+    
+    # تحميل الكلمات المحظورة من الملف
+    load_banned_words_from_file()
     
     await init_db()
     await load_user_languages()
