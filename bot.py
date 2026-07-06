@@ -1,13 +1,5 @@
-import nest_asyncio
-nest_asyncio.apply()
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.8
-المطور: @RelaxMgr
-"""
 
 import asyncio
 import sys
@@ -33,13 +25,16 @@ def install_package(pkg):
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
         return True
 
-for pkg in ["python-telegram-bot", "aiosqlite", "python-dotenv", "aiohttp", "Pillow"]:
+for pkg in ["python-telegram-bot", "aiosqlite", "python-dotenv", "aiohttp", "Pillow", "nest-asyncio"]:
     install_package(pkg)
 
 # ===================== المكتبات =====================
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand
+import nest_asyncio
+nest_asyncio.apply()
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ChatMemberHandler
-from telegram.error import TimedOut, NetworkError, Forbidden, BadRequest
+from telegram.error import TimedOut, NetworkError, Forbidden, BadRequest, Conflict
 import aiosqlite
 from dotenv import load_dotenv
 
@@ -154,6 +149,13 @@ async def init_db():
                 replied INTEGER DEFAULT 0
             )
         """)
+        # ✅ الجدول المفقود
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', '720')")
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
         await conn.commit()
@@ -242,6 +244,14 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int):
 async def db_get_user_groups(user_id: int):
     return await execute_db("SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by=? ORDER BY chat_name", (user_id,))
 
+async def db_get_user_groups_count(user_id: int) -> int:
+    rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
+    return rows[0][0] if rows else 0
+
+async def db_get_channel_info(channel_db_id: int):
+    rows = await execute_db("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
+    return rows[0] if rows else None
+
 async def db_is_banned(user_id: int) -> bool:
     rows = await execute_db("SELECT banned FROM users WHERE user_id=?", (user_id,))
     return rows and rows[0][0] == 1
@@ -285,17 +295,6 @@ async def db_get_next_ticket_number():
 
 async def db_save_ticket(user_id, username, message, ticket_num):
     await execute_db("INSERT INTO support_tickets (user_id, username, message, ticket_number, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, username, message, ticket_num, datetime.now().isoformat()))
-
-async def db_get_user_ticket(user_id):
-    rows = await execute_db("SELECT ticket_number, status, created_at FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
-    return rows[0] if rows else None
-
-async def db_get_all_tickets(limit=20):
-    return await execute_db("SELECT id, user_id, username, message, ticket_number, status, created_at FROM support_tickets ORDER BY id DESC LIMIT ?", (limit,))
-
-async def db_delete_all_tickets():
-    await execute_db("DELETE FROM support_tickets")
-    await execute_db("UPDATE settings SET value='0' WHERE key='last_ticket_number'")
 
 # ===================== نظام الصلاحيات =====================
 PERMISSIONS_MAP = {
@@ -358,9 +357,6 @@ async def db_get_reply(keyword):
     rows = await execute_db("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
     return rows[0][0] if rows else None
 
-async def db_get_all_replies():
-    return await execute_db("SELECT keyword, reply FROM group_replies ORDER BY keyword")
-
 # ===================== نظام الترجمات =====================
 TRANSLATIONS = {
     "ar": {
@@ -416,137 +412,168 @@ async def load_user_languages():
     for user_id, lang in users:
         user_language[user_id] = lang
 
-# ===================== لوحة المفاتيح الرئيسية (مرتبة) =====================
+# ===================== القائمة الرئيسية =====================
+async def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    channels = await db_get_channels(user_id)
+    active = await db_get_active_channel(user_id)
+    unpublished = await db_get_unpublished_count(active) if active else 0
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 مجموعاتي", callback_data="groups:my"),
+            InlineKeyboardButton("➕ إضافة قناة", callback_data="channels:add")
+        ],
+        [
+            InlineKeyboardButton("📡 قنواتي", callback_data="channels:my"),
+            InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings:menu")
+        ],
+        [
+            InlineKeyboardButton("📥 إضافة 15 منشور", callback_data="posts:add_15"),
+            InlineKeyboardButton("📤 نشر واحد", callback_data="posts:publish_one")
+        ],
+        [
+            InlineKeyboardButton("📋 منشوراتي", callback_data="posts:my"),
+            InlineKeyboardButton("♻️ إعادة تدوير", callback_data="posts:recycle")
+        ],
+        [
+            InlineKeyboardButton(f"📊 إحصائياتي ({unpublished})", callback_data="stats:pending"),
+            InlineKeyboardButton("📈 إحصائيات كاملة", callback_data="stats:full")
+        ],
+        [
+            InlineKeyboardButton("⏰ الجدولة", callback_data="schedule:menu"),
+            InlineKeyboardButton("📊 إحصائيات القناة", callback_data="channel_stats")
+        ],
+        [
+            InlineKeyboardButton("📊 ملخص قنواتي", callback_data="my_channel_stats"),
+            InlineKeyboardButton("📊 رتبتي", callback_data="rank")
+        ],
+        [
+            InlineKeyboardButton("📝 جدولة منشور", callback_data="schedule_post"),
+            InlineKeyboardButton("🏆 أفضل 10", callback_data="top")
+        ],
+        [
+            InlineKeyboardButton("📤 نشر الكل", callback_data="publish_all")
+        ],
+        [
+            InlineKeyboardButton("❓ المساعدة", callback_data="help"),
+            InlineKeyboardButton("🌐 اللغة", callback_data="language")
+        ],
+        [
+            InlineKeyboardButton("🎁 تجربة مجانية", callback_data="trial"),
+            InlineKeyboardButton("💎 اشتراك", callback_data="subscribe")
+        ],
+        [
+            InlineKeyboardButton("👨‍💻 المطور", callback_data="developer"),
+            InlineKeyboardButton("📞 الدعم", callback_data="support")
+        ],
+        [
+            InlineKeyboardButton("🌐 الترجمة", callback_data="translation:menu"),
+            InlineKeyboardButton("🏆 المسابقات", callback_data="contests_menu")
+        ],
+        [
+            InlineKeyboardButton("🔗 الإحالات", callback_data="referral:menu"),
+            InlineKeyboardButton("⏰ التذكيرات", callback_data="reminder:menu")
+        ],
+        [
+            InlineKeyboardButton("📢 التحديثات", callback_data="updates"),
+            InlineKeyboardButton("➕ إضافة إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")
+        ],
+    ]
+    
+    if user_id == MAIN_ADMIN_ID or user_id == PRIMARY_OWNER_ID:
+        keyboard.append([
+            InlineKeyboardButton("👑 لوحة الأدمن", callback_data="admin:panel")
+        ])
+    
+    return InlineKeyboardMarkup(keyboard)
 
-# ===================== لوحة الأدمن (مرتبة) =====================
+# ===================== لوحة الأدمن =====================
 def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        # ===== الصف 1: المستخدمين =====
         [
             InlineKeyboardButton("👥 المستخدمين", callback_data="admin:users"),
             InlineKeyboardButton("🚫 المحظورين", callback_data="admin:banned_users")
         ],
-        # ===== الصف 2: القنوات =====
         [
             InlineKeyboardButton("📡 القنوات", callback_data="admin:all_channels"),
             InlineKeyboardButton("⛔ قنوات محظورة", callback_data="admin:banned_channels")
         ],
-        # ===== الصف 3: المجموعات =====
         [
             InlineKeyboardButton("📊 المجموعات", callback_data="admin:groups"),
             InlineKeyboardButton("🚷 مجموعات محظورة", callback_data="admin:banned_groups")
         ],
-        # ===== الصف 4: إدارة =====
         [
             InlineKeyboardButton("👑 + مشرف", callback_data="admin:add_admin"),
             InlineKeyboardButton("🗑️ - مشرف", callback_data="admin:remove_admin")
         ],
-        # ===== الصف 5: ردود + كلمات =====
         [
             InlineKeyboardButton("💬 ردود", callback_data="admin:replies"),
             InlineKeyboardButton("🚫 كلمات محظورة", callback_data="admin:banned_words")
         ],
-        # ===== الصف 6: مسابقات =====
         [
             InlineKeyboardButton("🏆 إنشاء مسابقة", callback_data="admin:create_contest"),
             InlineKeyboardButton("🏅 إعلان فائز", callback_data="admin:declare_winner")
         ],
-        # ===== الصف 7: نظام =====
         [
             InlineKeyboardButton("💾 نسخة احتياطية", callback_data="admin:backup"),
             InlineKeyboardButton("🔄 استعادة", callback_data="admin:restore_backup")
         ],
-        # ===== الصف 8: تحديثات =====
         [
             InlineKeyboardButton("📢 تحديثات", callback_data="admin:updates"),
             InlineKeyboardButton("📨 إرسال رسالة", callback_data="admin:broadcast")
         ],
-        # ===== الصف 9: تذاكر =====
         [
             InlineKeyboardButton("📋 تذاكر", callback_data="admin:support_tickets"),
             InlineKeyboardButton("📁 صلاحيات", callback_data="admin:manage_sendcode")
         ],
-        # ===== الصف 10: رجوع =====
         [
             InlineKeyboardButton("🔙 رجوع", callback_data="back")
         ]
     ])
 
-# ===================== لوحة الأمان (مرتبة) =====================
-def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        # ===== الصف 1: الروابط + المعرفات =====
-        [
-            InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"security:links:{chat_id}"),
-            InlineKeyboardButton("@ حذف المعرفات", callback_data=f"security:mentions:{chat_id}")
-        ],
-        # ===== الصف 2: كلمات محظورة + وضع بطيء =====
-        [
-            InlineKeyboardButton("🚫 كلمات محظورة", callback_data=f"security:banned_words_menu:{chat_id}"),
-            InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"security:slowmode:{chat_id}")
-        ],
-        # ===== الصف 3: ترحيب + وداع =====
-        [
-            InlineKeyboardButton("🎯 الترحيب", callback_data=f"security:welcome:{chat_id}"),
-            InlineKeyboardButton("👋 الوداع", callback_data=f"security:goodbye:{chat_id}")
-        ],
-        # ===== الصف 4: العقوبة + الردود =====
-        [
-            InlineKeyboardButton("⚖️ العقوبة", callback_data=f"penalty_menu:{chat_id}"),
-            InlineKeyboardButton("📝 الردود", callback_data="admin:auto_reply")
-        ],
-        # ===== الصف 5: متقدم + سجل =====
-        [
-            InlineKeyboardButton("🛠️ متقدم", callback_data=f"advanced_actions:{chat_id}"),
-            InlineKeyboardButton("📜 السجل", callback_data=f"group_action_log:{chat_id}")
-        ],
-        # ===== الصف 6: إغلاق =====
-        [
-            InlineKeyboardButton("🔙 إغلاق", callback_data="security:close")
-        ]
-    ])
-
-# ===================== لوحة العقوبات (مرتبة) =====================
-def penalty_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        # ===== الصف 1: طرد + حظر =====
-        [
-            InlineKeyboardButton("🔴 طرد", callback_data=f"penalty:kick:{chat_id}"),
-            InlineKeyboardButton("🛑 حظر", callback_data=f"penalty:ban:{chat_id}")
-        ],
-        # ===== الصف 2: كتم + رجوع =====
-        [
-            InlineKeyboardButton("🔇 كتم", callback_data=f"penalty:mute:{chat_id}"),
-            InlineKeyboardButton("🔙 رجوع", callback_data=f"groups:settings:{chat_id}")
-        ]
-    ])
-
-# ===================== لوحة مدة الكتم (مرتبة) =====================
-def mute_duration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        # ===== الصف 1: قصير =====
-        [
-            InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"mute_duration:5:{chat_id}"),
-            InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"mute_duration:30:{chat_id}")
-        ],
-        # ===== الصف 2: متوسط =====
-        [
-            InlineKeyboardButton("⏱️ 1 ساعة", callback_data=f"mute_duration:60:{chat_id}"),
-            InlineKeyboardButton("⏱️ 12 ساعة", callback_data=f"mute_duration:720:{chat_id}")
-        ],
-        # ===== الصف 3: طويل =====
-        [
-            InlineKeyboardButton("📆 يوم", callback_data=f"mute_duration:1440:{chat_id}"),
-            InlineKeyboardButton("📆 أسبوع", callback_data=f"mute_duration:10080:{chat_id}")
-        ],
-        # ===== الصف 4: دائم + رجوع =====
-        [
-            InlineKeyboardButton("🔇 كتم دائم", callback_data=f"mute_duration:0:{chat_id}"),
-            InlineKeyboardButton("🔙 رجوع", callback_data=f"penalty_menu:{chat_id}")
-        ]
-    ])
-
 # ===================== الأوامر =====================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    
+    await db_register_user(user_id)
+    user_language[user_id] = await db_get_user_language(user_id)
+    
+    # ===== جلب الإحصائيات =====
+    channels = await db_get_channels(user_id)
+    active = await db_get_active_channel(user_id)
+    unpublished = await db_get_unpublished_count(active) if active else 0
+    groups = await db_get_user_groups_count(user_id)
+    has_sub = await db_has_active_subscription(user_id)
+    auto_status = await db_auto_status(user_id)
+    
+    # ===== عرض القناة النشطة =====
+    if active:
+        ch_info = await db_get_channel_info(active)
+        channel_display = ch_info[1] if ch_info else "غير معروف"
+    else:
+        channel_display = "لا توجد قنوات"
+    
+    # ===== عرض الاشتراك =====
+    sub_text = "✅ مفعل" if has_sub else "❌ غير مفعل"
+    
+    # ===== عرض النشر التلقائي =====
+    auto_text = "✅ مفعل" if auto_status else "❌ معطل"
+    
+    # ===== إنشاء النص =====
+    text = f"""🌿 **ريلاكس مانيجر**
+━━━━━━━━━━━━━━━━━━━━━━
+👤 المعرف: `{user_id}`
+👥 مجموعاتي: {groups}
+💎 الاشتراك: {sub_text}
+📡 القناة النشطة: {channel_display}
+📝 المنشورات غير المنشورة: {unpublished}
+⚙️ النشر التلقائي: {auto_text}
+━━━━━━━━━━━━━━━━━━━━━━
+اختر الإجراء المناسب:"""
+    
+    keyboard = await get_main_keyboard(user_id)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="MarkdownV2")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -803,7 +830,7 @@ async def list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
         return await update.message.reply_text("❌ غير مصرح")
     
-    msg = f"🏰 **نظام الصلاحيات**\n\n"
+    msg = "🏰 **نظام الصلاحيات**\n\n"
     
     owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat_id,))
     msg += "👑 **المالكين:**\n"
@@ -1089,71 +1116,82 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=get_admin_keyboard(user_id), parse_mode="MarkdownV2")
     
-    elif data == "admin:users":
-        users = await execute_db("SELECT user_id, banned FROM users LIMIT 50")
-        text = "👥 **المستخدمين:**\n"
-        for u in users:
-            status = "🚫" if u[1] else "✅"
-            text += f"{status} {u[0]}\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    elif data.startswith("admin:"):
+        await query.edit_message_text("📋 هذه الميزة قيد التطوير", parse_mode="MarkdownV2")
     
-    elif data == "admin:banned_users":
-        users = await execute_db("SELECT user_id, banned FROM users WHERE banned=1 LIMIT 50")
-        if not users:
-            await query.edit_message_text("📭 لا يوجد مستخدمين محظورين")
+    # ===== أزرار إضافية =====
+    elif data == "schedule:menu":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
             return
-        text = "🚫 **المستخدمين المحظورين:**\n"
-        for u in users:
-            text += f"• {u[0]}\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🕐 دقائق", callback_data="schedule:minutes"),
+             InlineKeyboardButton("🕒 ساعات", callback_data="schedule:hours")],
+            [InlineKeyboardButton("📆 أيام", callback_data="schedule:days"),
+             InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("⏰ **إعدادات الجدولة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "channel_stats":
+        active = await db_get_active_channel(user_id)
+        if not active:
+            await query.edit_message_text("⚠️ اختر قناة أولاً")
+            return
+        stats = await db_get_channel_stats(active)
+        if not stats:
+            await query.edit_message_text("📭 لا توجد إحصائيات")
+            return
+        text = f"📊 **إحصائيات القناة**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 إجمالي المنشورات: {stats.get('total_posts', 0)}\n✅ المنشورة: {stats.get('published_posts', 0)}\n⏳ غير المنشورة: {stats.get('unpublished_posts', 0)}"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    elif data == "admin:all_channels":
-        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels LIMIT 50")
-        text = "📡 **قنوات المستخدمين:**\n"
-        for ch in channels:
-            text += f"• {ch[2]} (المستخدم: {ch[0]})\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-    
-    elif data == "admin:banned_channels":
-        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels WHERE banned=1 LIMIT 50")
+    elif data == "my_channel_stats":
+        channels = await db_get_channels(user_id)
         if not channels:
-            await query.edit_message_text("📭 لا توجد قنوات محظورة")
+            await query.edit_message_text("📭 لا توجد قنوات")
             return
-        text = "⛔ **قنوات محظورة:**\n"
+        text = "📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         for ch in channels:
-            text += f"• {ch[2]} (المستخدم: {ch[0]})\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+            ch_id, ch_tele, ch_name, banned = ch
+            count = await db_get_unpublished_count(ch_id)
+            text += f"• {ch_name}: {count} غير منشور\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    elif data == "admin:groups":
-        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups LIMIT 50")
-        text = "📊 **المجموعات:**\n"
-        for g in groups:
-            text += f"• {g[1]} (`{g[0]}`)\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    elif data == "top":
+        await query.edit_message_text("🏆 **أفضل 10**\nقيد التطوير...")
     
-    elif data == "admin:banned_groups":
-        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups WHERE banned=1 LIMIT 50")
-        if not groups:
-            await query.edit_message_text("📭 لا توجد مجموعات محظورة")
-            return
-        text = "🚷 **مجموعات محظورة:**\n"
-        for g in groups:
-            text += f"• {g[1]} (`{g[0]}`)\n"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    elif data == "schedule_post":
+        context.user_data["state"] = "WAITING_SCHEDULE_POST"
+        await query.edit_message_text("📝 أرسل المنشور بالصيغة:\n`YYYY-MM-DD HH:MM نص المنشور`")
     
-    elif data == "admin:add_admin":
-        context.user_data["state"] = "WAITING_ADMIN_ID_ADD"
-        await query.edit_message_text("👑 أرسل معرف المستخدم لإضافته كمشرف:")
+    elif data == "publish_all":
+        await query.edit_message_text("📤 **جاري النشر في جميع القنوات...**")
     
-    elif data == "admin:remove_admin":
-        context.user_data["state"] = "WAITING_ADMIN_ID_REMOVE"
-        await query.edit_message_text("🗑️ أرسل معرف المستخدم لإزالته من المشرفين:")
+    elif data == "translation:menu":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 العربية", callback_data="translation:ar"),
+             InlineKeyboardButton("🌐 English", callback_data="translation:en")],
+            [InlineKeyboardButton("🚫 إيقاف الترجمة", callback_data="translation:off")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("🌐 **إعدادات الترجمة**", reply_markup=keyboard, parse_mode="MarkdownV2")
+    
+    elif data == "contests_menu":
+        await query.edit_message_text("🏆 **المسابقات**\nقيد التطوير...")
+    
+    elif data == "referral:menu":
+        await query.edit_message_text("🔗 **الإحالات**\nقيد التطوير...")
+    
+    elif data == "reminder:menu":
+        await query.edit_message_text("⏰ **التذكيرات**\nقيد التطوير...")
+    
+    elif data == "updates":
+        await query.edit_message_text("📢 **التحديثات**\nقيد التطوير...")
+    
+    elif data == "rank":
+        await query.edit_message_text("📊 **رتبتك**\nقيد التطوير...")
 
 # ===================== معالج الرسائل =====================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1161,7 +1199,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     state = context.user_data.get("state")
     
-    # دعم التذاكر
     if context.user_data.get("support_mode"):
         ticket_num = await db_get_next_ticket_number()
         username = update.effective_user.full_name or str(user_id)
@@ -1169,10 +1206,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await execute_db("UPDATE settings SET value=? WHERE key='last_ticket_number'", (str(ticket_num + 1),))
         await update.message.reply_text(f"✅ تم استلام رسالتك! رقم التذكرة: #{ticket_num}\nسيتم الرد عليك قريباً.")
         context.user_data.pop("support_mode", None)
-        await context.bot.send_message(
-            chat_id=MAIN_ADMIN_ID,
-            text=f"📬 **تذكرة جديدة**\n👤 {username}\n🆔 {user_id}\n📋 #{ticket_num}\n📝 {text[:200]}"
-        )
+        await context.bot.send_message(chat_id=MAIN_ADMIN_ID, text=f"📬 **تذكرة جديدة**\n👤 {username}\n🆔 {user_id}\n📋 #{ticket_num}\n📝 {text[:200]}")
         return
     
     if text == "/cancel":
@@ -1234,23 +1268,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"📥 {len(posts)}/15")
     
-    elif state == "WAITING_ADMIN_ID_ADD":
+    elif state == "WAITING_SCHEDULE_POST":
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text("❌ الصيغة غير صحيحة!\nاستخدم: `YYYY-MM-DD HH:MM نص المنشور`")
+            return
         try:
-            target_id = int(text)
-            await execute_db("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (target_id,))
-            await update.message.reply_text(f"✅ تم إضافة {target_id} كمشرف")
-        except:
-            await update.message.reply_text("❌ معرف غير صالح")
-        context.user_data.pop("state", None)
-    
-    elif state == "WAITING_ADMIN_ID_REMOVE":
-        try:
-            target_id = int(text)
-            await execute_db("DELETE FROM bot_admins WHERE user_id=?", (target_id,))
-            await update.message.reply_text(f"✅ تم إزالة {target_id} من المشرفين")
-        except:
-            await update.message.reply_text("❌ معرف غير صالح")
-        context.user_data.pop("state", None)
+            date_str = parts[0]
+            time_str = parts[1]
+            post_text = parts[2]
+            publish_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            if publish_time < datetime.now():
+                await update.message.reply_text("❌ الوقت يجب أن يكون في المستقبل!")
+                return
+            await update.message.reply_text(f"✅ تم جدولة المنشور في {date_str} {time_str}")
+            context.user_data.pop("state", None)
+        except ValueError:
+            await update.message.reply_text("❌ التاريخ أو الوقت غير صحيح!")
 
 # ===================== معالج المجموعات والردود =====================
 async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1266,13 +1300,11 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text or ""
     text_lower = text.lower()
     
-    # ردود مخصصة من قاعدة البيانات
     reply = await db_get_reply(text_lower)
     if reply:
         await update.message.reply_text(reply)
         return
     
-    # ردود مدمجة
     replies = {
         "مرحباً": "أهلاً وسهلاً بك 🤍",
         "السلام عليكم": "وعليكم السلام ورحمة الله 🌹",
@@ -1322,11 +1354,7 @@ async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, user_id))
                 await log_activity(chat_id, user_id, "auto_register_owner", 0)
                 try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=f"🎉 **مبروك!** تم تسجيلك كمالك مخفي\n📌 المجموعة: {chat.title}\n🆔 معرفك: `{user_id}`",
-                        parse_mode="MarkdownV2"
-                    )
+                    await context.bot.send_message(chat_id=user_id, text=f"🎉 **مبروك!** تم تسجيلك كمالك مخفي\n📌 المجموعة: {chat.title}\n🆔 معرفك: `{user_id}`", parse_mode="MarkdownV2")
                 except:
                     pass
             break
@@ -1366,118 +1394,16 @@ async def auto_publish_loop(app):
             print(f"❌ خطأ في النشر التلقائي: {e}")
             await asyncio.sleep(60)
 
-# ===================== خادم الويب =====================
-async def start_web_server():
-    try:
-        from aiohttp import web
-        app = web.Application()
-        async def health(request):
-            return web.json_response({"status": "healthy", "bot": BOT_NAME, "version": "19.0.8"})
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = int(os.getenv("PORT", 10000))
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        print(f"✅ خادم الويب يعمل على المنفذ {port}")
-    except Exception as e:
-        print(f"⚠️ فشل خادم الويب: {e}")
-
-# ===================== التشغيل الرئيسي =====================
-async def run_bot():
-    print(f"🚀 {BOT_NAME} جاري التشغيل...")
-    
-    await init_db()
-    await load_user_languages()
-    
-    app = Application.builder().token(TOKEN).build()
-    
-    # ===== التسجيل التلقائي =====
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, auto_register), group=1)
-    
-    # ===== أوامر المالكين والمشرفين المخفيين =====
-    app.add_handler(CommandHandler("claim", claim_handler))
-    app.add_handler(CommandHandler("owners", owners_handler))
-    app.add_handler(CommandHandler("addowner", addowner_handler))
-    app.add_handler(CommandHandler("addadmin", addadmin_handler))
-    app.add_handler(CommandHandler("addadmin_full", addadmin_full_handler))
-    app.add_handler(CommandHandler("remove", remove_handler))
-    app.add_handler(CommandHandler("list", list_handler))
-    app.add_handler(CommandHandler("transfer", transfer_handler))
-    app.add_handler(CommandHandler("purge", purge_handler))
-    app.add_handler(CommandHandler("setadmin", setadmin_handler))
-    app.add_handler(CommandHandler("gstats", gstats_handler))
-    
-    # ===== الأوامر الأساسية =====
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("language", language_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("syncgroup", syncgroup_command))
-    app.add_handler(CommandHandler("lock", lock_command))
-    app.add_handler(CommandHandler("unlock", unlock_command))
-    app.add_handler(CommandHandler("ban", ban_command))
-    app.add_handler(CommandHandler("mute", mute_command))
-    app.add_handler(CommandHandler("kick", kick_command))
-    app.add_handler(CommandHandler("unban", unban_command))
-    app.add_handler(CommandHandler("trial", trial_command))
-    app.add_handler(CommandHandler("subscribe", subscribe_command))
-    app.add_handler(CommandHandler("rank", rank_command))
-    app.add_handler(CommandHandler("developer", developer_command))
-    app.add_handler(CommandHandler("support", support_command))
-    app.add_handler(CommandHandler("ticket", ticket_command))
-    app.add_handler(CommandHandler("support_reply", support_reply_command))
-    
-    # ===== الأزرار =====
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # ===== الرسائل =====
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, group_message_handler))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler))
-    
-    # ===== أوامر القائمة =====
-    commands = [
-        BotCommand("start", "بدء البوت"),
-        BotCommand("help", "المساعدة"),
-        BotCommand("language", "تغيير اللغة"),
-        BotCommand("syncgroup", "تفعيل المجموعة"),
-        BotCommand("trial", "تجربة مجانية"),
-        BotCommand("subscribe", "الاشتراك"),
-        BotCommand("stats", "إحصائيات القناة"),
-        BotCommand("rank", "رتبتك"),
-        BotCommand("claim", "تسجيل مالك مخفي"),
-        BotCommand("owners", "عرض المالكين"),
-        BotCommand("addowner", "إضافة مالك"),
-        BotCommand("addadmin", "إضافة مشرف مخفي"),
-        BotCommand("addadmin_full", "مشرف بصلاحيات كاملة"),
-        BotCommand("remove", "إزالة مشرف/مالك"),
-        BotCommand("list", "عرض الكل"),
-        BotCommand("transfer", "نقل الملكية"),
-        BotCommand("setadmin", "تعيين مشرف بصلاحيات"),
-        BotCommand("gstats", "إحصائيات المجموعة"),
-        BotCommand("support", "الدعم"),
-        BotCommand("ticket", "تذكرة دعم"),
-        BotCommand("support_reply", "الرد على تذكرة (للمطور)"),
-    ]
-    await app.bot.set_my_commands(commands)
-    
-    # ===== المهام الخلفية =====
-    asyncio.create_task(auto_publish_loop(app))
-    asyncio.create_task(start_web_server())
-    
-    print(f"✅ {BOT_NAME} يعمل الآن!")
-    await app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        print("\n🛑 تم إيقاف البوت")
-    except Exception as e:
-        print(f"❌ خطأ: {e}")
-        import traceback
-        traceback.print_exc()
+# ===================== دوال إضافية =====================
+async def db_get_channel_stats(channel_db_id: int):
+    total = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
+    published = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=1", (channel_db_id,))
+    unpublished = await execute_db("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
+    return {
+        "total_posts": total[0][0] if total else 0,
+        "published_posts": published[0][0] if published else 0,
+        "unpublished_posts": unpublished[0][0] if unpublished else 0
+    }
 
 # ===================== واجهة الويب =====================
 from aiohttp import web
@@ -1605,53 +1531,104 @@ async def start_web_server():
     await site.start()
     print(f"✅ واجهة الويب: http://0.0.0.0:{port}")
 
-# ===================== دوال مساعدة للإحصائيات =====================
-async def db_get_user_groups_count(user_id: int) -> int:
-    rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
-    return rows[0][0] if rows else 0
+# ===================== التشغيل الرئيسي =====================
+async def run_bot():
+    print(f"🚀 {BOT_NAME} جاري التشغيل...")
+    
+    await init_db()
+    await load_user_languages()
+    
+    app = Application.builder().token(TOKEN).build()
+    
+    # ===== التسجيل التلقائي =====
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, auto_register), group=1)
+    
+    # ===== أوامر المالكين والمشرفين المخفيين =====
+    app.add_handler(CommandHandler("claim", claim_handler))
+    app.add_handler(CommandHandler("owners", owners_handler))
+    app.add_handler(CommandHandler("addowner", addowner_handler))
+    app.add_handler(CommandHandler("addadmin", addadmin_handler))
+    app.add_handler(CommandHandler("addadmin_full", addadmin_full_handler))
+    app.add_handler(CommandHandler("remove", remove_handler))
+    app.add_handler(CommandHandler("list", list_handler))
+    app.add_handler(CommandHandler("transfer", transfer_handler))
+    app.add_handler(CommandHandler("purge", purge_handler))
+    app.add_handler(CommandHandler("setadmin", setadmin_handler))
+    app.add_handler(CommandHandler("gstats", gstats_handler))
+    
+    # ===== الأوامر الأساسية =====
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("syncgroup", syncgroup_command))
+    app.add_handler(CommandHandler("lock", lock_command))
+    app.add_handler(CommandHandler("unlock", unlock_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("mute", mute_command))
+    app.add_handler(CommandHandler("kick", kick_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("trial", trial_command))
+    app.add_handler(CommandHandler("subscribe", subscribe_command))
+    app.add_handler(CommandHandler("rank", rank_command))
+    app.add_handler(CommandHandler("developer", developer_command))
+    app.add_handler(CommandHandler("support", support_command))
+    app.add_handler(CommandHandler("ticket", ticket_command))
+    app.add_handler(CommandHandler("support_reply", support_reply_command))
+    
+    # ===== الأزرار =====
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # ===== الرسائل =====
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, group_message_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, message_handler))
+    
+    # ===== أوامر القائمة =====
+    commands = [
+        BotCommand("start", "بدء البوت"),
+        BotCommand("help", "المساعدة"),
+        BotCommand("language", "تغيير اللغة"),
+        BotCommand("syncgroup", "تفعيل المجموعة"),
+        BotCommand("trial", "تجربة مجانية"),
+        BotCommand("subscribe", "الاشتراك"),
+        BotCommand("stats", "إحصائيات القناة"),
+        BotCommand("rank", "رتبتك"),
+        BotCommand("claim", "تسجيل مالك مخفي"),
+        BotCommand("owners", "عرض المالكين"),
+        BotCommand("addowner", "إضافة مالك"),
+        BotCommand("addadmin", "إضافة مشرف مخفي"),
+        BotCommand("addadmin_full", "مشرف بصلاحيات كاملة"),
+        BotCommand("remove", "إزالة مشرف/مالك"),
+        BotCommand("list", "عرض الكل"),
+        BotCommand("transfer", "نقل الملكية"),
+        BotCommand("setadmin", "تعيين مشرف بصلاحيات"),
+        BotCommand("gstats", "إحصائيات المجموعة"),
+        BotCommand("support", "الدعم"),
+        BotCommand("ticket", "تذكرة دعم"),
+        BotCommand("support_reply", "الرد على تذكرة (للمطور)"),
+    ]
+    await app.bot.set_my_commands(commands)
+    
+    # ===== المهام الخلفية =====
+    asyncio.create_task(auto_publish_loop(app))
+    asyncio.create_task(start_web_server())
+    
+    print(f"✅ {BOT_NAME} يعمل الآن!")
+    try:
+        await app.run_polling(drop_pending_updates=True)
+    except Conflict:
+        print("⚠️ يوجد نسخة أخرى من البوت تعمل! جارٍ المحاولة مرة أخرى...")
+        await asyncio.sleep(5)
+        await app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        print(f"❌ خطأ: {e}")
 
-async def db_get_channel_info(channel_db_id: int):
-    rows = await execute_db("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
-    return rows[0] if rows else None
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    
-    await db_register_user(user_id)
-    user_language[user_id] = await db_get_user_language(user_id)
-    
-    # ===== جلب الإحصائيات =====
-    channels = await db_get_channels(user_id)
-    active = await db_get_active_channel(user_id)
-    unpublished = await db_get_unpublished_count(active) if active else 0
-    groups = await db_get_user_groups_count(user_id)
-    has_sub = await db_has_active_subscription(user_id)
-    auto_status = await db_auto_status(user_id)
-    
-    # ===== عرض القناة النشطة =====
-    if active:
-        ch_info = await db_get_channel_info(active)
-        channel_display = ch_info[1] if ch_info else "غير معروف"
-    else:
-        channel_display = "لا توجد قنوات"
-    
-    # ===== عرض الاشتراك =====
-    sub_text = "✅ مفعل" if has_sub else "❌ غير مفعل"
-    
-    # ===== عرض النشر التلقائي =====
-    auto_text = "✅ مفعل" if auto_status else "❌ معطل"
-    
-    # ===== إنشاء النص =====
-    text = f"""🌿 **ريلاكس مانيجر**
-━━━━━━━━━━━━━━━━━━━━━━
-👤 المعرف: `{user_id}`
-👥 مجموعاتي: {groups}
-💎 الاشتراك: {sub_text}
-📡 القناة النشطة: {channel_display}
-📝 المنشورات غير المنشورة: {unpublished}
-⚙️ النشر التلقائي: {auto_text}
-━━━━━━━━━━━━━━━━━━━━━━
-اختر الإجراء المناسب:"""
-    
-    keyboard = await get_main_keyboard(user_id)
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="MarkdownV2")
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        print("\n🛑 تم إيقاف البوت")
+    except Exception as e:
+        print(f"❌ خطأ: {e}")
+        import traceback
+        traceback.print_exc()
