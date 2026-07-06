@@ -2189,11 +2189,6 @@ async def db_get_top_users(limit=10):
 # ===== إضافة حالات WAITING جديدة في message_handler =====
 # أضف داخل async def message_handler:
 
-    elif state == "WAITING_KEYWORD":
-        context.user_data["state"] = "WAITING_REPLY"
-        context.user_data["temp_keyword"] = text.strip().lower()
-        await update.message.reply_text(f"📝 أرسل الرد للكلمة `{text.strip()}`:")
-
     elif state == "WAITING_REPLY":
         keyword = context.user_data.get("temp_keyword", "")
         reply = text.strip()
@@ -2205,111 +2200,6 @@ async def db_get_top_users(limit=10):
         context.user_data.pop("state", None)
         context.user_data.pop("temp_keyword", None)
         await admin_panel_callback(update, context)
-
-    elif state == "WAITING_DELETE_REPLY":
-        keyword = text.strip().lower()
-        await db_del_reply(keyword)
-        await update.message.reply_text(f"✅ تم حذف رد الكلمة `{keyword}`")
-        context.user_data.pop("state", None)
-
-    elif state == "WAITING_BANNED_WORD_ADD":
-        chat_id = context.user_data.get("banned_chat_id")
-        word = text.strip().lower()
-        if len(word) >= 2:
-            await db_add_banned_word(word, chat_id, user_id)
-            await update.message.reply_text(f"✅ تم إضافة كلمة `{word}` إلى الكلمات المحظورة")
-        else:
-            await update.message.reply_text("❌ الكلمة قصيرة جداً (يجب أن تكون حرفين على الأقل)")
-        context.user_data.pop("state", None)
-        context.user_data.pop("banned_chat_id", None)
-
-    elif state == "WAITING_BANNED_WORD_REMOVE":
-        chat_id = context.user_data.get("banned_chat_id")
-        word = text.strip().lower()
-        await db_remove_banned_word(word, chat_id)
-        await update.message.reply_text(f"✅ تم حذف كلمة `{word}` من الكلمات المحظورة")
-        context.user_data.pop("state", None)
-        context.user_data.pop("banned_chat_id", None)
-
-    elif state == "WAITING_SENDCODE_USER":
-        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-            await update.message.reply_text("🔒 غير مصرح")
-            return
-        try:
-            target_id = int(text.strip())
-            await db_set_allowed_sendcode_user(target_id)
-            await update.message.reply_text(f"✅ تم تعيين {target_id} كمستخدم مصرح لـ /sendcode")
-        except ValueError:
-            await update.message.reply_text("❌ معرف غير صالح")
-        context.user_data.pop("state", None)
-
-    elif state == "WAITING_UPDATE_TEXT":
-        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-            await update.message.reply_text("🔒 غير مصرح")
-            return
-        channel = await db_get_updates_channel()
-        if channel:
-            try:
-                await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
-                await update.message.reply_text("✅ تم نشر التحديث")
-            except Exception as e:
-                await update.message.reply_text(f"❌ فشل النشر: {e}")
-        else:
-            await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات")
-        context.user_data.pop("state", None)
-
-    elif state == "WAITING_BROADCAST":
-        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
-            await update.message.reply_text("🔒 غير مصرح")
-            return
-        users = await execute_db("SELECT user_id FROM users WHERE banned=0")
-        sent = 0
-        failed = 0
-        for (uid,) in users:
-            try:
-                await context.bot.send_message(chat_id=uid, text=text)
-                sent += 1
-            except:
-                failed += 1
-            await asyncio.sleep(0.1)
-        await update.message.reply_text(f"✅ تم الإرسال إلى {sent} مستخدم\n❌ فشل الإرسال إلى {failed} مستخدم")
-        context.user_data.pop("state", None)
-
-    elif state == "WAITING_CONTEST_TITLE":
-        context.user_data["contest_title"] = text.strip()
-        context.user_data["state"] = "WAITING_CONTEST_DESCRIPTION"
-        await update.message.reply_text("📝 أرسل **وصف** المسابقة:")
-
-    elif state == "WAITING_CONTEST_DESCRIPTION":
-        context.user_data["contest_description"] = text.strip()
-        context.user_data["state"] = "WAITING_CONTEST_PRIZE"
-        await update.message.reply_text("🎁 أرسل **الجائزة** (مثال: 100 نقطة، اشتراك شهر):")
-
-    elif state == "WAITING_CONTEST_PRIZE":
-        context.user_data["contest_prize"] = text.strip()
-        context.user_data["state"] = "WAITING_CONTEST_END_DATE"
-        await update.message.reply_text("📅 أرسل **تاريخ الانتهاء** (بتوقيت مكة) بالصيغة:\n`YYYY-MM-DD HH:MM`\nمثال: `2025-07-01 23:59`")
-
-    elif state == "WAITING_CONTEST_END_DATE":
-        try:
-            end_date = datetime.strptime(text.strip(), "%Y-%m-%d %H:%M")
-            if end_date <= datetime.now():
-                await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
-                return
-            title = context.user_data.get("contest_title", "بدون عنوان")
-            description = context.user_data.get("contest_description", "")
-            prize = context.user_data.get("contest_prize", "")
-            contest_id = await db_create_contest(user_id, title, description, prize, end_date)
-            if contest_id:
-                await update.message.reply_text(f"✅ **تم إنشاء المسابقة بنجاح!**\n\n📌 العنوان: {title}\n🎁 الجائزة: {prize}\n📅 تنتهي: {text.strip()}\n🆔 معرف المسابقة: `{contest_id}`")
-            else:
-                await update.message.reply_text("❌ فشل إنشاء المسابقة")
-        except ValueError:
-            await update.message.reply_text("❌ صيغة غير صحيحة! استخدم `YYYY-MM-DD HH:MM`")
-        context.user_data.pop("state", None)
-        context.user_data.pop("contest_title", None)
-        context.user_data.pop("contest_description", None)
-        context.user_data.pop("contest_prize", None)
 
     # ===================== أزرار الأدمن الإضافية (داخل button_callback) =====================
     elif data == "admin:add_reply":
@@ -2460,3 +2350,125 @@ async def db_get_top_users(limit=10):
             return
         backup_name = data.split(":")[2]
         await query.edit_message_text(f"🔄 جاري استعادة النسخة: {backup_name}...")
+
+# ===== إضافة حالات WAITING داخل message_handler =====
+    elif state == "WAITING_KEYWORD":
+        context.user_data["state"] = "WAITING_REPLY"
+        context.user_data["temp_keyword"] = text.strip().lower()
+        await update.message.reply_text(f"📝 أرسل الرد للكلمة `{text.strip()}`:")
+
+    elif state == "WAITING_REPLY":
+        keyword = context.user_data.get("temp_keyword", "")
+        reply = text.strip()
+        if keyword and reply:
+            await db_add_reply(keyword, reply)
+            await update.message.reply_text(f"✅ تم إضافة رد للكلمة `{keyword}`")
+        else:
+            await update.message.reply_text("❌ حدث خطأ")
+        context.user_data.pop("state", None)
+        context.user_data.pop("temp_keyword", None)
+
+    elif state == "WAITING_DELETE_REPLY":
+        keyword = text.strip().lower()
+        await db_del_reply(keyword)
+        await update.message.reply_text(f"✅ تم حذف رد الكلمة `{keyword}`")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_BANNED_WORD_ADD":
+        chat_id = context.user_data.get("banned_chat_id")
+        word = text.strip().lower()
+        if len(word) >= 2:
+            await db_add_banned_word(word, chat_id, user_id)
+            await update.message.reply_text(f"✅ تم إضافة كلمة `{word}` إلى الكلمات المحظورة")
+        else:
+            await update.message.reply_text("❌ الكلمة قصيرة جداً (يجب أن تكون حرفين على الأقل)")
+        context.user_data.pop("state", None)
+        context.user_data.pop("banned_chat_id", None)
+
+    elif state == "WAITING_BANNED_WORD_REMOVE":
+        chat_id = context.user_data.get("banned_chat_id")
+        word = text.strip().lower()
+        await db_remove_banned_word(word, chat_id)
+        await update.message.reply_text(f"✅ تم حذف كلمة `{word}` من الكلمات المحظورة")
+        context.user_data.pop("state", None)
+        context.user_data.pop("banned_chat_id", None)
+
+    elif state == "WAITING_SENDCODE_USER":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        try:
+            target_id = int(text.strip())
+            await execute_db("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (target_id,))
+            await update.message.reply_text(f"✅ تم تعيين {target_id} كمستخدم مصرح لـ /sendcode")
+        except ValueError:
+            await update.message.reply_text("❌ معرف غير صالح")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_UPDATE_TEXT":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        channel = await db_get_updates_channel()
+        if channel:
+            try:
+                await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
+                await update.message.reply_text("✅ تم نشر التحديث")
+            except Exception as e:
+                await update.message.reply_text(f"❌ فشل النشر: {e}")
+        else:
+            await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_BROADCAST":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        users = await execute_db("SELECT user_id FROM users WHERE banned=0")
+        sent = 0
+        failed = 0
+        for (uid,) in users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                sent += 1
+            except:
+                failed += 1
+            await asyncio.sleep(0.1)
+        await update.message.reply_text(f"✅ تم الإرسال إلى {sent} مستخدم\n❌ فشل الإرسال إلى {failed} مستخدم")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_CONTEST_TITLE":
+        context.user_data["contest_title"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_DESCRIPTION"
+        await update.message.reply_text("📝 أرسل **وصف** المسابقة:")
+
+    elif state == "WAITING_CONTEST_DESCRIPTION":
+        context.user_data["contest_description"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_PRIZE"
+        await update.message.reply_text("🎁 أرسل **الجائزة** (مثال: 100 نقطة، اشتراك شهر):")
+
+    elif state == "WAITING_CONTEST_PRIZE":
+        context.user_data["contest_prize"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_END_DATE"
+        await update.message.reply_text("📅 أرسل **تاريخ الانتهاء** (بتوقيت مكة) بالصيغة:\n`YYYY-MM-DD HH:MM`\nمثال: `2025-07-01 23:59`")
+
+    elif state == "WAITING_CONTEST_END_DATE":
+        try:
+            end_date = datetime.strptime(text.strip(), "%Y-%m-%d %H:%M")
+            if end_date <= datetime.now():
+                await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
+                return
+            title = context.user_data.get("contest_title", "بدون عنوان")
+            description = context.user_data.get("contest_description", "")
+            prize = context.user_data.get("contest_prize", "")
+            contest_id = await db_create_contest(user_id, title, description, prize, end_date)
+            if contest_id:
+                await update.message.reply_text(f"✅ **تم إنشاء المسابقة بنجاح!**\n\n📌 العنوان: {title}\n🎁 الجائزة: {prize}\n📅 تنتهي: {text.strip()}\n🆔 معرف المسابقة: `{contest_id}`")
+            else:
+                await update.message.reply_text("❌ فشل إنشاء المسابقة")
+        except ValueError:
+            await update.message.reply_text("❌ صيغة غير صحيحة! استخدم `YYYY-MM-DD HH:MM`")
+        context.user_data.pop("state", None)
+        context.user_data.pop("contest_title", None)
+        context.user_data.pop("contest_description", None)
+        context.user_data.pop("contest_prize", None)
