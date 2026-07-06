@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-ريلاكس مانيجر - أقوى نظام متكامل للبوتات
+ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
 الإصدار: 19.0.8
+المطور: @RelaxMgr
 """
 
 import asyncio
@@ -30,7 +31,7 @@ def install_package(pkg):
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
         return True
 
-for pkg in ["python-telegram-bot", "aiosqlite", "python-dotenv", "aiohttp"]:
+for pkg in ["python-telegram-bot", "aiosqlite", "python-dotenv", "aiohttp", "Pillow"]:
     install_package(pkg)
 
 # ===================== المكتبات =====================
@@ -133,11 +134,29 @@ async def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_replies (
+                keyword TEXT PRIMARY KEY,
+                reply TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                message TEXT,
+                ticket_number INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP,
+                replied INTEGER DEFAULT 0
+            )
+        """)
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', '720')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
         await conn.commit()
     print("✅ قاعدة البيانات جاهزة")
 
-# ===================== دوال قاعدة البيانات =====================
 async def execute_db(query, params=()):
     async with aiosqlite.connect(str(DB_PATH)) as conn:
         cur = await conn.execute(query, params)
@@ -146,6 +165,7 @@ async def execute_db(query, params=()):
         await conn.commit()
         return cur.lastrowid
 
+# ===================== دوال المستخدمين =====================
 async def db_register_user(user_id: int) -> bool:
     users = await execute_db("SELECT user_id FROM users WHERE user_id=?", (user_id,))
     if users:
@@ -256,29 +276,35 @@ async def db_get_user_language(user_id: int) -> str:
 async def db_set_user_language(user_id: int, lang: str):
     await execute_db("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
 
-# ===================== 1. نظام الصلاحيات الموسع =====================
+# ===================== نظام التذاكر =====================
+async def db_get_next_ticket_number():
+    rows = await execute_db("SELECT value FROM settings WHERE key='last_ticket_number'")
+    return int(rows[0][0]) if rows else 0
+
+async def db_save_ticket(user_id, username, message, ticket_num):
+    await execute_db("INSERT INTO support_tickets (user_id, username, message, ticket_number, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, username, message, ticket_num, datetime.now().isoformat()))
+
+async def db_get_user_ticket(user_id):
+    rows = await execute_db("SELECT ticket_number, status, created_at FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
+    return rows[0] if rows else None
+
+async def db_get_all_tickets(limit=20):
+    return await execute_db("SELECT id, user_id, username, message, ticket_number, status, created_at FROM support_tickets ORDER BY id DESC LIMIT ?", (limit,))
+
+async def db_delete_all_tickets():
+    await execute_db("DELETE FROM support_tickets")
+    await execute_db("UPDATE settings SET value='0' WHERE key='last_ticket_number'")
+
+# ===================== نظام الصلاحيات =====================
 PERMISSIONS_MAP = {
-    "full": [
-        "manage_owners", "manage_admins", "manage_messages",
-        "ban_users", "mute_users", "pin_messages",
-        "change_info", "delete_messages", "invite_users",
-        "promote_admins", "view_activity", "transfer_ownership"
-    ],
-    "senior": [
-        "manage_messages", "ban_users", "mute_users",
-        "pin_messages", "delete_messages", "invite_users",
-        "view_activity"
-    ],
-    "junior": [
-        "manage_messages", "delete_messages", "mute_users"
-    ],
-    "limited": [
-        "delete_messages"
-    ]
+    "full": ["manage_owners", "manage_admins", "manage_messages", "ban_users", "mute_users", "pin_messages", "change_info", "delete_messages", "invite_users", "promote_admins", "view_activity", "transfer_ownership"],
+    "senior": ["manage_messages", "ban_users", "mute_users", "pin_messages", "delete_messages", "invite_users", "view_activity"],
+    "junior": ["manage_messages", "delete_messages", "mute_users"],
+    "limited": ["delete_messages"]
 }
 
 async def check_permission(bot, chat_id: int, user_id: int, action: str = "manage") -> bool:
-    if user_id == PRIMARY_OWNER_ID:
+    if user_id == PRIMARY_OWNER_ID or user_id == MAIN_ADMIN_ID:
         return True
     rows = await execute_db("SELECT 1 FROM hidden_owners WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
     if rows:
@@ -301,10 +327,7 @@ async def check_permission(bot, chat_id: int, user_id: int, action: str = "manag
 
 async def log_activity(chat_id: int, user_id: int, action: str, target_id: int):
     try:
-        await execute_db(
-            "INSERT INTO activity_log (chat_id, user_id, action, target_id) VALUES (?, ?, ?, ?)",
-            (chat_id, user_id, action, target_id)
-        )
+        await execute_db("INSERT INTO activity_log (chat_id, user_id, action, target_id) VALUES (?, ?, ?, ?)", (chat_id, user_id, action, target_id))
     except:
         pass
 
@@ -322,346 +345,21 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return None
     return None
 
-# ===================== 2. نظام الحماية المتقدم =====================
-async def anti_spam_check(chat_id, user_id):
-    count = await execute_db(
-        "SELECT COUNT(*) FROM activity_log WHERE chat_id=? AND user_id=? AND timestamp > datetime('now', '-10 seconds')",
-        (chat_id, user_id)
-    )
-    if count and count[0][0] > 5:
-        return False
-    return True
+# ===================== نظام الردود =====================
+async def db_add_reply(keyword, reply):
+    await execute_db("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?, ?)", (keyword.lower(), reply))
 
-async def rate_limit_check(user_id, action):
-    count = await execute_db(
-        "SELECT COUNT(*) FROM activity_log WHERE user_id=? AND action=? AND timestamp > datetime('now', '-1 minute')",
-        (user_id, action)
-    )
-    return count and count[0][0] < 10
+async def db_del_reply(keyword):
+    await execute_db("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
 
-# ===================== 3. نظام النسخ الاحتياطي =====================
-async def backup_permissions(chat_id):
-    owners = await execute_db("SELECT * FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    admins = await execute_db("SELECT * FROM hidden_admins WHERE chat_id=?", (chat_id,))
-    backup = {"chat_id": chat_id, "owners": owners, "admins": admins, "timestamp": datetime.now().isoformat()}
-    await execute_db("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"backup_{chat_id}", json.dumps(backup)))
-    return backup
+async def db_get_reply(keyword):
+    rows = await execute_db("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
+    return rows[0][0] if rows else None
 
-async def restore_permissions(chat_id):
-    rows = await execute_db("SELECT value FROM settings WHERE key=?", (f"backup_{chat_id}",))
-    if not rows:
-        return False
-    backup = json.loads(rows[0][0])
-    await execute_db("DELETE FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    await execute_db("DELETE FROM hidden_admins WHERE chat_id=?", (chat_id,))
-    for owner in backup["owners"]:
-        await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, owner[1]))
-    for admin in backup["admins"]:
-        await execute_db("INSERT INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, ?)", (chat_id, admin[1], admin[2], admin[3]))
-    return True
+async def db_get_all_replies():
+    return await execute_db("SELECT keyword, reply FROM group_replies ORDER BY keyword")
 
-# ===================== 4. نظام الإحصائيات المتقدم =====================
-async def get_group_stats(chat_id):
-    total_owners = await execute_db("SELECT COUNT(*) FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    total_admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=?", (chat_id,))
-    full_admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=? AND permissions='full'", (chat_id,))
-    senior_admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=? AND permissions='senior'", (chat_id,))
-    junior_admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=? AND permissions='junior'", (chat_id,))
-    limited_admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=? AND permissions='limited'", (chat_id,))
-    recent_activity = await execute_db("SELECT COUNT(*) FROM activity_log WHERE chat_id=? AND timestamp > datetime('now', '-24 hours')", (chat_id,))
-    
-    return {
-        "owners": total_owners[0][0] if total_owners else 0,
-        "admins": total_admins[0][0] if total_admins else 0,
-        "full": full_admins[0][0] if full_admins else 0,
-        "senior": senior_admins[0][0] if senior_admins else 0,
-        "junior": junior_admins[0][0] if junior_admins else 0,
-        "limited": limited_admins[0][0] if limited_admins else 0,
-        "activity_24h": recent_activity[0][0] if recent_activity else 0
-    }
-
-# ===================== 5. أوامر متقدمة =====================
-async def setadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    args = context.args
-    if len(args) < 2:
-        return await update.message.reply_text(
-            "📝 **الاستخدام:** `/setadmin @user [full/senior/junior/limited]`",
-            parse_mode="MarkdownV2"
-        )
-    
-    try:
-        target = args[0].replace("@", "")
-        level = args[1].lower()
-        if level not in PERMISSIONS_MAP:
-            return await update.message.reply_text("❌ مستوى صلاحية غير صالح!")
-        
-        target_user = await context.bot.get_chat(f"@{target}")
-        await execute_db(
-            "INSERT OR REPLACE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, ?)",
-            (chat_id, target_user.id, user_id, level)
-        )
-        await log_activity(chat_id, user_id, f"set_admin_{level}", target_user.id)
-        await update.message.reply_text(f"✅ تم تعيين @{target} كمشرف {level}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}")
-
-async def gstats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        return await update.message.reply_text("⚠️ للمجموعات فقط")
-    
-    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    stats = await get_group_stats(chat_id)
-    
-    msg = f"📊 **إحصائيات المجموعة**\n\n"
-    msg += f"👑 المالكين: {stats['owners']}\n"
-    msg += f"🛡️ المشرفين: {stats['admins']}\n"
-    msg += f"  ⭐ كامل: {stats['full']}\n"
-    msg += f"  🔶 كبير: {stats['senior']}\n"
-    msg += f"  🔹 صغير: {stats['junior']}\n"
-    msg += f"  ▪️ محدود: {stats['limited']}\n"
-    msg += f"📋 نشاط 24 ساعة: {stats['activity_24h']}\n"
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 عرض النشاط", callback_data=f"activity:{chat_id}"),
-         InlineKeyboardButton("💾 نسخ احتياطي", callback_data=f"backup:{chat_id}")],
-        [InlineKeyboardButton("🔄 استعادة", callback_data=f"restore:{chat_id}"),
-         InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ])
-    await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="MarkdownV2")
-
-# ===================== 6. أوامر المالكين الأساسية =====================
-async def claim_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    chat = update.effective_chat
-    
-    if chat.type not in ['group', 'supergroup']:
-        return await update.message.reply_text("⚠️ للمجموعات فقط")
-    
-    if await check_permission(context.bot, chat_id, user_id, "manage_owners"):
-        await execute_db(
-            "INSERT OR IGNORE INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)",
-            (chat_id, user_id)
-        )
-        await update.message.reply_text("✅ تم تسجيلك كمالك مخفي")
-    else:
-        await update.message.reply_text("❌ غير مصرح")
-
-async def owners_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    msg = "👑 **المالكين:**\n"
-    for o in owners:
-        try:
-            u = await context.bot.get_chat(o[0])
-            msg += f"• [{u.first_name}](tg://user?id={o[0]}) - `{o[0]}`\n"
-        except:
-            msg += f"• `{o[0]}`\n"
-    await update.message.reply_text(msg, parse_mode="MarkdownV2")
-
-async def addowner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_owners"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    target = await get_target(update, context)
-    if not target:
-        return await update.message.reply_text("📝 /addowner @user")
-    
-    await execute_db("INSERT OR IGNORE INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, target.id))
-    await log_activity(chat_id, user_id, "add_owner", target.id)
-    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمالك", parse_mode="MarkdownV2")
-
-async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    target = await get_target(update, context)
-    if not target:
-        return await update.message.reply_text("📝 /addadmin @user")
-    
-    await execute_db(
-        "INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, 'limited')",
-        (chat_id, target.id, user_id)
-    )
-    await log_activity(chat_id, user_id, "add_admin_limited", target.id)
-    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمشرف مخفي (صلاحيات محدودة)", parse_mode="MarkdownV2")
-
-async def addadmin_full_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    target = await get_target(update, context)
-    if not target:
-        return await update.message.reply_text("📝 /addadmin_full @user")
-    
-    await execute_db(
-        "INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, 'full')",
-        (chat_id, target.id, user_id)
-    )
-    await log_activity(chat_id, user_id, "add_admin_full", target.id)
-    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمشرف مخفي (صلاحيات كاملة)", parse_mode="MarkdownV2")
-
-async def remove_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    target = await get_target(update, context)
-    if not target:
-        return await update.message.reply_text("📝 /remove @user")
-    
-    await execute_db("DELETE FROM hidden_owners WHERE chat_id=? AND owner_id=?", (chat_id, target.id))
-    await execute_db("DELETE FROM hidden_admins WHERE chat_id=? AND admin_id=?", (chat_id, target.id))
-    await log_activity(chat_id, user_id, "remove", target.id)
-    await update.message.reply_text(f"✅ تم إزالة [{target.first_name}](tg://user?id={target.id})", parse_mode="MarkdownV2")
-
-async def list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    msg = f"🏰 **نظام الصلاحيات**\n\n"
-    
-    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    msg += "👑 **المالكين:**\n"
-    for o in owners:
-        try:
-            u = await context.bot.get_chat(o[0])
-            msg += f"• [{u.first_name}](tg://user?id={o[0]})\n"
-        except:
-            msg += f"• `{o[0]}`\n"
-    
-    admins = await execute_db("SELECT admin_id, permissions FROM hidden_admins WHERE chat_id=? ORDER BY permissions DESC", (chat_id,))
-    msg += "\n🛡️ **المشرفين المخفيين:**\n"
-    if admins:
-        for a in admins:
-            badge = "⭐" if a[1] == 'full' else "🔶" if a[1] == 'senior' else "🔹" if a[1] == 'junior' else "▪️"
-            try:
-                u = await context.bot.get_chat(a[0])
-                msg += f"{badge} [{u.first_name}](tg://user?id={a[0]})\n"
-            except:
-                msg += f"{badge} `{a[0]}`\n"
-    else:
-        msg += "• لا يوجد\n"
-    
-    msg += f"\n🔑 **المالك الأعلى:** `{PRIMARY_OWNER_ID}`"
-    await update.message.reply_text(msg, parse_mode="MarkdownV2")
-
-async def transfer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
-    if user_id != PRIMARY_OWNER_ID and not owners:
-        return await update.message.reply_text("❌ غير مصرح")
-    
-    target = await get_target(update, context)
-    if not target:
-        return await update.message.reply_text("📝 /transfer @user")
-    
-    await execute_db("DELETE FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, target.id))
-    await log_activity(chat_id, user_id, "transfer_ownership", target.id)
-    await update.message.reply_text(f"✅ تم نقل الملكية إلى [{target.first_name}](tg://user?id={target.id})", parse_mode="MarkdownV2")
-
-async def purge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if user_id != PRIMARY_OWNER_ID:
-        return await update.message.reply_text("❌ فقط المالك الأعلى")
-    
-    await execute_db("DELETE FROM hidden_owners WHERE chat_id=?", (chat_id,))
-    await execute_db("DELETE FROM hidden_admins WHERE chat_id=?", (chat_id,))
-    await execute_db("DELETE FROM activity_log WHERE chat_id=?", (chat_id,))
-    await update.message.reply_text("✅ تم مسح جميع الصلاحيات")
-
-# ===================== 7. معالجات الأزرار المتقدمة =====================
-async def activity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    chat_id = int(query.data.split(":")[1])
-    
-    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
-        return await query.edit_message_text("❌ غير مصرح")
-    
-    logs = await execute_db(
-        "SELECT user_id, action, target_id, timestamp FROM activity_log WHERE chat_id=? ORDER BY timestamp DESC LIMIT 20",
-        (chat_id,)
-    )
-    
-    if not logs:
-        return await query.edit_message_text("📭 لا يوجد نشاط")
-    
-    msg = "📋 **آخر النشاطات:**\n\n"
-    for log in logs:
-        try:
-            u = await context.bot.get_chat(log[0])
-            user_name = u.first_name
-        except:
-            user_name = log[0]
-        msg += f"• {user_name} - {log[1]} - {log[3][:16]}\n"
-    
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data=f"stats_back:{chat_id}")]]
-    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-
-async def backup_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    chat_id = int(query.data.split(":")[1])
-    
-    if not await check_permission(context.bot, chat_id, user_id, "manage_owners"):
-        return await query.edit_message_text("❌ غير مصرح")
-    
-    await backup_permissions(chat_id)
-    await query.edit_message_text("✅ تم عمل نسخ احتياطي للصلاحيات")
-
-async def restore_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    chat_id = int(query.data.split(":")[1])
-    
-    if user_id != PRIMARY_OWNER_ID:
-        return await query.edit_message_text("❌ فقط المالك الأعلى")
-    
-    if await restore_permissions(chat_id):
-        await query.edit_message_text("✅ تم استعادة الصلاحيات")
-    else:
-        await query.edit_message_text("❌ لا يوجد نسخ احتياطي")
-
-# ===================== 8. الترجمة =====================
+# ===================== نظام الترجمات =====================
 TRANSLATIONS = {
     "ar": {
         "welcome": "🌿 **مرحباً بك في ريلاكس مانيجر**\nاختر الإجراء المناسب:",
@@ -681,7 +379,7 @@ TRANSLATIONS = {
         "recycled": "♻️ تم إعادة التدوير",
         "auto_on": "✅ النشر التلقائي مفعل",
         "auto_off": "❌ النشر التلقائي معطل",
-        "help_text": "❓ **المساعدة**\n/start - القائمة الرئيسية\n/help - هذه المساعدة\n/language - تغيير اللغة\n/stats - إحصائيات القناة\n/rank - رتبتك\n/claim - تسجيل مالك مخفي\n/owners - عرض المالكين\n/addowner @user - إضافة مالك\n/addadmin @user - إضافة مشرف مخفي\n/addadmin_full @user - مشرف بصلاحيات كاملة\n/remove @user - إزالة مشرف/مالك\n/list - عرض الكل\n/transfer @user - نقل الملكية\n/purge - حذف جميع الصلاحيات\n/setadmin @user [full/senior/junior/limited] - تعيين مشرف بصلاحيات\n/gstats - إحصائيات المجموعة",
+        "help_text": "❓ **المساعدة**\n/start - القائمة الرئيسية\n/help - هذه المساعدة\n/language - تغيير اللغة\n/stats - إحصائيات القناة\n/rank - رتبتك\n/claim - تسجيل مالك مخفي\n/owners - عرض المالكين\n/addowner @user - إضافة مالك\n/addadmin @user - إضافة مشرف مخفي\n/addadmin_full @user - مشرف بصلاحيات كاملة\n/remove @user - إزالة مشرف/مالك\n/list - عرض الكل\n/transfer @user - نقل الملكية\n/purge - حذف جميع الصلاحيات\n/setadmin @user [full/senior/junior/limited] - تعيين مشرف بصلاحيات\n/gstats - إحصائيات المجموعة\n/support - الدعم\n/ticket - تذكرة دعم",
     },
     "en": {
         "welcome": "🌿 **Welcome to Relax Manager**\nChoose an action:",
@@ -701,7 +399,7 @@ TRANSLATIONS = {
         "recycled": "♻️ Recycled",
         "auto_on": "✅ Auto publish enabled",
         "auto_off": "❌ Auto publish disabled",
-        "help_text": "❓ **Help**\n/start - Main menu\n/help - This help\n/language - Change language\n/stats - Channel stats\n/rank - Your rank\n/claim - Register hidden owner\n/owners - List owners\n/addowner @user - Add owner\n/addadmin @user - Add hidden admin\n/addadmin_full @user - Admin with full permissions\n/remove @user - Remove admin/owner\n/list - List all\n/transfer @user - Transfer ownership\n/purge - Delete all permissions\n/setadmin @user [full/senior/junior/limited] - Set admin with permissions\n/gstats - Group statistics",
+        "help_text": "❓ **Help**\n/start - Main menu\n/help - This help\n/language - Change language\n/stats - Channel stats\n/rank - Your rank\n/claim - Register hidden owner\n/owners - List owners\n/addowner @user - Add owner\n/addadmin @user - Add hidden admin\n/addadmin_full @user - Admin with full permissions\n/remove @user - Remove admin/owner\n/list - List all\n/transfer @user - Transfer ownership\n/purge - Delete all permissions\n/setadmin @user [full/senior/junior/limited] - Set admin with permissions\n/gstats - Group statistics\n/support - Support\n/ticket - Support ticket",
     }
 }
 
@@ -716,54 +414,195 @@ async def load_user_languages():
     for user_id, lang in users:
         user_language[user_id] = lang
 
-# ===================== 9. لوحة المفاتيح الأساسية =====================
+# ===================== لوحة المفاتيح الرئيسية (مرتبة) =====================
 async def get_main_keyboard(user_id: int):
     channels = await db_get_channels(user_id)
     active = await db_get_active_channel(user_id)
     unpublished = await db_get_unpublished_count(active) if active else 0
     
     keyboard = [
-        [InlineKeyboardButton("👥 مجموعاتي", callback_data="groups:my"),
-         InlineKeyboardButton("➕ إضافة قناة", callback_data="channels:add")],
-        [InlineKeyboardButton("📡 قنواتي", callback_data="channels:my"),
-         InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings:menu")],
+        # ===== الصف 1: مجموعاتي + إضافة قناة =====
+        [
+            InlineKeyboardButton("👥 مجموعاتي", callback_data="groups:my"),
+            InlineKeyboardButton("➕ إضافة قناة", callback_data="channels:add")
+        ],
+        # ===== الصف 2: قنواتي + الإعدادات =====
+        [
+            InlineKeyboardButton("📡 قنواتي", callback_data="channels:my"),
+            InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings:menu")
+        ],
     ]
     
     if channels:
+        # ===== الصف 3: إضافة منشورات + نشر =====
         keyboard.append([
             InlineKeyboardButton("📥 إضافة 15 منشور", callback_data="posts:add_15"),
             InlineKeyboardButton("📤 نشر واحد", callback_data="posts:publish_one")
         ])
+        # ===== الصف 4: منشوراتي + إعادة تدوير =====
         keyboard.append([
             InlineKeyboardButton("📋 منشوراتي", callback_data="posts:my"),
             InlineKeyboardButton("♻️ إعادة تدوير", callback_data="posts:recycle")
         ])
+        # ===== الصف 5: إحصائياتي =====
         keyboard.append([
             InlineKeyboardButton(f"📊 إحصائياتي ({unpublished})", callback_data="stats:pending"),
             InlineKeyboardButton("📈 إحصائيات كاملة", callback_data="stats:full")
         ])
     
+    # ===== الصف 6: مساعدة + لغة =====
     keyboard.append([
         InlineKeyboardButton("❓ المساعدة", callback_data="help"),
         InlineKeyboardButton("🌐 اللغة", callback_data="language")
     ])
+    # ===== الصف 7: تجربة + اشتراك =====
     keyboard.append([
         InlineKeyboardButton("🎁 تجربة مجانية", callback_data="trial"),
         InlineKeyboardButton("💎 اشتراك", callback_data="subscribe")
     ])
+    # ===== الصف 8: المطور + الدعم =====
     keyboard.append([
         InlineKeyboardButton("👨‍💻 المطور", callback_data="developer"),
         InlineKeyboardButton("📞 الدعم", callback_data="support")
     ])
     
     if user_id == MAIN_ADMIN_ID or user_id == PRIMARY_OWNER_ID:
+        # ===== الصف 9: لوحة الأدمن =====
         keyboard.append([
             InlineKeyboardButton("👑 لوحة الأدمن", callback_data="admin:panel")
         ])
     
     return InlineKeyboardMarkup(keyboard)
 
-# ===================== 10. الأوامر الأساسية =====================
+# ===================== لوحة الأدمن (مرتبة) =====================
+def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        # ===== الصف 1: المستخدمين =====
+        [
+            InlineKeyboardButton("👥 المستخدمين", callback_data="admin:users"),
+            InlineKeyboardButton("🚫 المحظورين", callback_data="admin:banned_users")
+        ],
+        # ===== الصف 2: القنوات =====
+        [
+            InlineKeyboardButton("📡 القنوات", callback_data="admin:all_channels"),
+            InlineKeyboardButton("⛔ قنوات محظورة", callback_data="admin:banned_channels")
+        ],
+        # ===== الصف 3: المجموعات =====
+        [
+            InlineKeyboardButton("📊 المجموعات", callback_data="admin:groups"),
+            InlineKeyboardButton("🚷 مجموعات محظورة", callback_data="admin:banned_groups")
+        ],
+        # ===== الصف 4: إدارة =====
+        [
+            InlineKeyboardButton("👑 + مشرف", callback_data="admin:add_admin"),
+            InlineKeyboardButton("🗑️ - مشرف", callback_data="admin:remove_admin")
+        ],
+        # ===== الصف 5: ردود + كلمات =====
+        [
+            InlineKeyboardButton("💬 ردود", callback_data="admin:replies"),
+            InlineKeyboardButton("🚫 كلمات محظورة", callback_data="admin:banned_words")
+        ],
+        # ===== الصف 6: مسابقات =====
+        [
+            InlineKeyboardButton("🏆 إنشاء مسابقة", callback_data="admin:create_contest"),
+            InlineKeyboardButton("🏅 إعلان فائز", callback_data="admin:declare_winner")
+        ],
+        # ===== الصف 7: نظام =====
+        [
+            InlineKeyboardButton("💾 نسخة احتياطية", callback_data="admin:backup"),
+            InlineKeyboardButton("🔄 استعادة", callback_data="admin:restore_backup")
+        ],
+        # ===== الصف 8: تحديثات =====
+        [
+            InlineKeyboardButton("📢 تحديثات", callback_data="admin:updates"),
+            InlineKeyboardButton("📨 إرسال رسالة", callback_data="admin:broadcast")
+        ],
+        # ===== الصف 9: تذاكر =====
+        [
+            InlineKeyboardButton("📋 تذاكر", callback_data="admin:support_tickets"),
+            InlineKeyboardButton("📁 صلاحيات", callback_data="admin:manage_sendcode")
+        ],
+        # ===== الصف 10: رجوع =====
+        [
+            InlineKeyboardButton("🔙 رجوع", callback_data="back")
+        ]
+    ])
+
+# ===================== لوحة الأمان (مرتبة) =====================
+def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        # ===== الصف 1: الروابط + المعرفات =====
+        [
+            InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"security:links:{chat_id}"),
+            InlineKeyboardButton("@ حذف المعرفات", callback_data=f"security:mentions:{chat_id}")
+        ],
+        # ===== الصف 2: كلمات محظورة + وضع بطيء =====
+        [
+            InlineKeyboardButton("🚫 كلمات محظورة", callback_data=f"security:banned_words_menu:{chat_id}"),
+            InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"security:slowmode:{chat_id}")
+        ],
+        # ===== الصف 3: ترحيب + وداع =====
+        [
+            InlineKeyboardButton("🎯 الترحيب", callback_data=f"security:welcome:{chat_id}"),
+            InlineKeyboardButton("👋 الوداع", callback_data=f"security:goodbye:{chat_id}")
+        ],
+        # ===== الصف 4: العقوبة + الردود =====
+        [
+            InlineKeyboardButton("⚖️ العقوبة", callback_data=f"penalty_menu:{chat_id}"),
+            InlineKeyboardButton("📝 الردود", callback_data="admin:auto_reply")
+        ],
+        # ===== الصف 5: متقدم + سجل =====
+        [
+            InlineKeyboardButton("🛠️ متقدم", callback_data=f"advanced_actions:{chat_id}"),
+            InlineKeyboardButton("📜 السجل", callback_data=f"group_action_log:{chat_id}")
+        ],
+        # ===== الصف 6: إغلاق =====
+        [
+            InlineKeyboardButton("🔙 إغلاق", callback_data="security:close")
+        ]
+    ])
+
+# ===================== لوحة العقوبات (مرتبة) =====================
+def penalty_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        # ===== الصف 1: طرد + حظر =====
+        [
+            InlineKeyboardButton("🔴 طرد", callback_data=f"penalty:kick:{chat_id}"),
+            InlineKeyboardButton("🛑 حظر", callback_data=f"penalty:ban:{chat_id}")
+        ],
+        # ===== الصف 2: كتم + رجوع =====
+        [
+            InlineKeyboardButton("🔇 كتم", callback_data=f"penalty:mute:{chat_id}"),
+            InlineKeyboardButton("🔙 رجوع", callback_data=f"groups:settings:{chat_id}")
+        ]
+    ])
+
+# ===================== لوحة مدة الكتم (مرتبة) =====================
+def mute_duration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        # ===== الصف 1: قصير =====
+        [
+            InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"mute_duration:5:{chat_id}"),
+            InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"mute_duration:30:{chat_id}")
+        ],
+        # ===== الصف 2: متوسط =====
+        [
+            InlineKeyboardButton("⏱️ 1 ساعة", callback_data=f"mute_duration:60:{chat_id}"),
+            InlineKeyboardButton("⏱️ 12 ساعة", callback_data=f"mute_duration:720:{chat_id}")
+        ],
+        # ===== الصف 3: طويل =====
+        [
+            InlineKeyboardButton("📆 يوم", callback_data=f"mute_duration:1440:{chat_id}"),
+            InlineKeyboardButton("📆 أسبوع", callback_data=f"mute_duration:10080:{chat_id}")
+        ],
+        # ===== الصف 4: دائم + رجوع =====
+        [
+            InlineKeyboardButton("🔇 كتم دائم", callback_data=f"mute_duration:0:{chat_id}"),
+            InlineKeyboardButton("🔙 رجوع", callback_data=f"penalty_menu:{chat_id}")
+        ]
+    ])
+
+# ===================== الأوامر =====================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db_register_user(user.id)
@@ -792,7 +631,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ch in channels:
         ch_id, ch_tele, ch_name, banned = ch
         status = "⛔" if banned else "✅"
-        text += f"{status} {ch_name}\n"
+        text += f"{status} {ch_name} (`{ch_tele}`)\n"
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 async def syncgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -900,9 +739,234 @@ async def developer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👨‍💻 **المطور:** @RelaxMgr\n📦 **الإصدار:** 19.0.8\n🤖 **البوت:** ريلاكس مانيجر", parse_mode="MarkdownV2")
 
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📞 **للتواصل:**\n• المطور: @RelaxMgr\n• البوت: @Reelaaaxbot", parse_mode="MarkdownV2")
+    user_id = update.effective_user.id
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 كتابة تذكرة", callback_data="ticket")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+    ])
+    await update.message.reply_text("📞 **مركز الدعم**\nاختر الخدمة المطلوبة:", reply_markup=keyboard, parse_mode="MarkdownV2")
 
-# ===================== 11. معالجات الأزرار =====================
+async def ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    context.user_data["support_mode"] = True
+    await update.message.reply_text("📝 **اكتب رسالتك** (سيتم إرسالها كتذكرة دعم)\nأرسل /cancel للإلغاء")
+
+async def support_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await update.message.reply_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("📝 الاستخدام: /support_reply user_id نص الرد")
+        return
+    try:
+        target_user_id = int(args[0])
+        reply_text = " ".join(args[1:])
+        await context.bot.send_message(chat_id=target_user_id, text=f"📬 **رد على تذكرتك:**\n━━━━━━━━━━━━━━━━━━━━━━\n{reply_text}", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"✅ تم إرسال الرد إلى المستخدم {target_user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ فشل الإرسال: {e}")
+
+# ===================== أوامر المالكين والمشرفين =====================
+async def claim_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    chat = update.effective_chat
+    
+    if chat.type not in ['group', 'supergroup']:
+        return await update.message.reply_text("⚠️ للمجموعات فقط")
+    
+    await execute_db("INSERT OR IGNORE INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, user_id))
+    await update.message.reply_text("✅ تم تسجيلك كمالك مخفي")
+
+async def owners_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat_id,))
+    msg = "👑 **المالكين:**\n"
+    for o in owners:
+        try:
+            u = await context.bot.get_chat(o[0])
+            msg += f"• [{u.first_name}](tg://user?id={o[0]}) - `{o[0]}`\n"
+        except:
+            msg += f"• `{o[0]}`\n"
+    await update.message.reply_text(msg, parse_mode="MarkdownV2")
+
+async def addowner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "manage_owners"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    target = await get_target(update, context)
+    if not target:
+        return await update.message.reply_text("📝 /addowner @user")
+    
+    await execute_db("INSERT OR IGNORE INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, target.id))
+    await log_activity(chat_id, user_id, "add_owner", target.id)
+    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمالك", parse_mode="MarkdownV2")
+
+async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    target = await get_target(update, context)
+    if not target:
+        return await update.message.reply_text("📝 /addadmin @user")
+    
+    await execute_db("INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, 'limited')", (chat_id, target.id, user_id))
+    await log_activity(chat_id, user_id, "add_admin_limited", target.id)
+    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمشرف مخفي (صلاحيات محدودة)", parse_mode="MarkdownV2")
+
+async def addadmin_full_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    target = await get_target(update, context)
+    if not target:
+        return await update.message.reply_text("📝 /addadmin_full @user")
+    
+    await execute_db("INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, 'full')", (chat_id, target.id, user_id))
+    await log_activity(chat_id, user_id, "add_admin_full", target.id)
+    await update.message.reply_text(f"✅ تم إضافة [{target.first_name}](tg://user?id={target.id}) كمشرف مخفي (صلاحيات كاملة)", parse_mode="MarkdownV2")
+
+async def remove_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    target = await get_target(update, context)
+    if not target:
+        return await update.message.reply_text("📝 /remove @user")
+    
+    await execute_db("DELETE FROM hidden_owners WHERE chat_id=? AND owner_id=?", (chat_id, target.id))
+    await execute_db("DELETE FROM hidden_admins WHERE chat_id=? AND admin_id=?", (chat_id, target.id))
+    await log_activity(chat_id, user_id, "remove", target.id)
+    await update.message.reply_text(f"✅ تم إزالة [{target.first_name}](tg://user?id={target.id})", parse_mode="MarkdownV2")
+
+async def list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    msg = f"🏰 **نظام الصلاحيات**\n\n"
+    
+    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=?", (chat_id,))
+    msg += "👑 **المالكين:**\n"
+    for o in owners:
+        try:
+            u = await context.bot.get_chat(o[0])
+            msg += f"• [{u.first_name}](tg://user?id={o[0]})\n"
+        except:
+            msg += f"• `{o[0]}`\n"
+    
+    admins = await execute_db("SELECT admin_id, permissions FROM hidden_admins WHERE chat_id=? ORDER BY permissions DESC", (chat_id,))
+    msg += "\n🛡️ **المشرفين المخفيين:**\n"
+    if admins:
+        for a in admins:
+            badge = "⭐" if a[1] == 'full' else "🔶" if a[1] == 'senior' else "🔹" if a[1] == 'junior' else "▪️"
+            try:
+                u = await context.bot.get_chat(a[0])
+                msg += f"{badge} [{u.first_name}](tg://user?id={a[0]})\n"
+            except:
+                msg += f"{badge} `{a[0]}`\n"
+    else:
+        msg += "• لا يوجد\n"
+    
+    msg += f"\n🔑 **المالك الأعلى:** `{PRIMARY_OWNER_ID}`"
+    await update.message.reply_text(msg, parse_mode="MarkdownV2")
+
+async def transfer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    owners = await execute_db("SELECT owner_id FROM hidden_owners WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
+    if user_id != PRIMARY_OWNER_ID and not owners:
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    target = await get_target(update, context)
+    if not target:
+        return await update.message.reply_text("📝 /transfer @user")
+    
+    await execute_db("DELETE FROM hidden_owners WHERE chat_id=?", (chat_id,))
+    await execute_db("INSERT INTO hidden_owners (chat_id, owner_id) VALUES (?, ?)", (chat_id, target.id))
+    await log_activity(chat_id, user_id, "transfer_ownership", target.id)
+    await update.message.reply_text(f"✅ تم نقل الملكية إلى [{target.first_name}](tg://user?id={target.id})", parse_mode="MarkdownV2")
+
+async def purge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if user_id != PRIMARY_OWNER_ID:
+        return await update.message.reply_text("❌ فقط المالك الأعلى")
+    
+    await execute_db("DELETE FROM hidden_owners WHERE chat_id=?", (chat_id,))
+    await execute_db("DELETE FROM hidden_admins WHERE chat_id=?", (chat_id,))
+    await execute_db("DELETE FROM activity_log WHERE chat_id=?", (chat_id,))
+    await update.message.reply_text("✅ تم مسح جميع الصلاحيات")
+
+async def setadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    args = context.args
+    if len(args) < 2:
+        return await update.message.reply_text("📝 **الاستخدام:** `/setadmin @user [full/senior/junior/limited]`", parse_mode="MarkdownV2")
+    
+    try:
+        target = args[0].replace("@", "")
+        level = args[1].lower()
+        if level not in PERMISSIONS_MAP:
+            return await update.message.reply_text("❌ مستوى صلاحية غير صالح!")
+        
+        target_user = await context.bot.get_chat(f"@{target}")
+        await execute_db("INSERT OR REPLACE INTO hidden_admins (chat_id, admin_id, added_by, permissions) VALUES (?, ?, ?, ?)", (chat_id, target_user.id, user_id, level))
+        await log_activity(chat_id, user_id, f"set_admin_{level}", target_user.id)
+        await update.message.reply_text(f"✅ تم تعيين @{target} كمشرف {level}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+async def gstats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return await update.message.reply_text("⚠️ للمجموعات فقط")
+    
+    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
+        return await update.message.reply_text("❌ غير مصرح")
+    
+    owners = await execute_db("SELECT COUNT(*) FROM hidden_owners WHERE chat_id=?", (chat_id,))
+    admins = await execute_db("SELECT COUNT(*) FROM hidden_admins WHERE chat_id=?", (chat_id,))
+    activity = await execute_db("SELECT COUNT(*) FROM activity_log WHERE chat_id=? AND timestamp > datetime('now', '-24 hours')", (chat_id,))
+    
+    msg = f"📊 **إحصائيات المجموعة**\n\n"
+    msg += f"👑 المالكين: {owners[0][0] if owners else 0}\n"
+    msg += f"🛡️ المشرفين: {admins[0][0] if admins else 0}\n"
+    msg += f"📋 نشاط 24 ساعة: {activity[0][0] if activity else 0}\n"
+    
+    await update.message.reply_text(msg, parse_mode="MarkdownV2")
+
+# ===================== معالجات الأزرار =====================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -913,18 +977,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = await get_main_keyboard(user_id)
         await query.edit_message_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
     
-    elif data.startswith("activity:"):
-        await activity_handler(update, context)
-    
-    elif data.startswith("backup:"):
-        await backup_handler(update, context)
-    
-    elif data.startswith("restore:"):
-        await restore_handler(update, context)
-    
-    elif data.startswith("stats_back:"):
-        chat_id = int(data.split(":")[1])
-        await gstats_handler(update, context)
+    elif data == "ticket":
+        context.user_data["support_mode"] = True
+        await query.edit_message_text("📝 **اكتب رسالتك** (سيتم إرسالها كتذكرة دعم)\nأرسل /cancel للإلغاء")
     
     elif data == "channels:my":
         channels = await db_get_channels(user_id)
@@ -1084,18 +1139,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👨‍💻 **المطور:** @RelaxMgr\n📦 **الإصدار:** 19.0.8", parse_mode="MarkdownV2")
     
     elif data == "support":
-        await query.edit_message_text("📞 **للتواصل:**\n• المطور: @RelaxMgr\n• البوت: @Reelaaaxbot", parse_mode="MarkdownV2")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 كتابة تذكرة", callback_data="ticket")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text("📞 **مركز الدعم**\nاختر الخدمة المطلوبة:", reply_markup=keyboard, parse_mode="MarkdownV2")
     
     elif data == "admin:panel":
         if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
             await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
             return
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 المستخدمين", callback_data="admin:users")],
-            [InlineKeyboardButton("📡 القنوات", callback_data="admin:channels")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-        ])
-        await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=keyboard, parse_mode="MarkdownV2")
+        await query.edit_message_text("👑 **لوحة الأدمن**", reply_markup=get_admin_keyboard(user_id), parse_mode="MarkdownV2")
     
     elif data == "admin:users":
         users = await execute_db("SELECT user_id, banned FROM users LIMIT 50")
@@ -1103,24 +1157,90 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for u in users:
             status = "🚫" if u[1] else "✅"
             text += f"{status} {u[0]}\n"
-        await query.edit_message_text(text, parse_mode="MarkdownV2")
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
     
-    elif data == "admin:channels":
+    elif data == "admin:banned_users":
+        users = await execute_db("SELECT user_id, banned FROM users WHERE banned=1 LIMIT 50")
+        if not users:
+            await query.edit_message_text("📭 لا يوجد مستخدمين محظورين")
+            return
+        text = "🚫 **المستخدمين المحظورين:**\n"
+        for u in users:
+            text += f"• {u[0]}\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:all_channels":
         channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels LIMIT 50")
         text = "📡 **قنوات المستخدمين:**\n"
         for ch in channels:
             text += f"• {ch[2]} (المستخدم: {ch[0]})\n"
-        await query.edit_message_text(text, parse_mode="MarkdownV2")
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_channels":
+        channels = await execute_db("SELECT user_id, channel_id, channel_name FROM user_channels WHERE banned=1 LIMIT 50")
+        if not channels:
+            await query.edit_message_text("📭 لا توجد قنوات محظورة")
+            return
+        text = "⛔ **قنوات محظورة:**\n"
+        for ch in channels:
+            text += f"• {ch[2]} (المستخدم: {ch[0]})\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups LIMIT 50")
+        text = "📊 **المجموعات:**\n"
+        for g in groups:
+            text += f"• {g[1]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:banned_groups":
+        groups = await execute_db("SELECT chat_id, chat_name FROM bot_groups WHERE banned=1 LIMIT 50")
+        if not groups:
+            await query.edit_message_text("📭 لا توجد مجموعات محظورة")
+            return
+        text = "🚷 **مجموعات محظورة:**\n"
+        for g in groups:
+            text += f"• {g[1]} (`{g[0]}`)\n"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+    
+    elif data == "admin:add_admin":
+        context.user_data["state"] = "WAITING_ADMIN_ID_ADD"
+        await query.edit_message_text("👑 أرسل معرف المستخدم لإضافته كمشرف:")
+    
+    elif data == "admin:remove_admin":
+        context.user_data["state"] = "WAITING_ADMIN_ID_REMOVE"
+        await query.edit_message_text("🗑️ أرسل معرف المستخدم لإزالته من المشرفين:")
 
-# ===================== 12. معالج الرسائل =====================
+# ===================== معالج الرسائل =====================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
     state = context.user_data.get("state")
     
+    # دعم التذاكر
+    if context.user_data.get("support_mode"):
+        ticket_num = await db_get_next_ticket_number()
+        username = update.effective_user.full_name or str(user_id)
+        await db_save_ticket(user_id, username, text, ticket_num)
+        await execute_db("UPDATE settings SET value=? WHERE key='last_ticket_number'", (str(ticket_num + 1),))
+        await update.message.reply_text(f"✅ تم استلام رسالتك! رقم التذكرة: #{ticket_num}\nسيتم الرد عليك قريباً.")
+        context.user_data.pop("support_mode", None)
+        await context.bot.send_message(
+            chat_id=MAIN_ADMIN_ID,
+            text=f"📬 **تذكرة جديدة**\n👤 {username}\n🆔 {user_id}\n📋 #{ticket_num}\n📝 {text[:200]}"
+        )
+        return
+    
     if text == "/cancel":
         context.user_data.pop("state", None)
         context.user_data.pop("session_posts", None)
+        context.user_data.pop("support_mode", None)
         await update.message.reply_text(get_text(user_id, "cancelled"))
         keyboard = await get_main_keyboard(user_id)
         await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
@@ -1175,8 +1295,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
         else:
             await update.message.reply_text(f"📥 {len(posts)}/15")
+    
+    elif state == "WAITING_ADMIN_ID_ADD":
+        try:
+            target_id = int(text)
+            await execute_db("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (target_id,))
+            await update.message.reply_text(f"✅ تم إضافة {target_id} كمشرف")
+        except:
+            await update.message.reply_text("❌ معرف غير صالح")
+        context.user_data.pop("state", None)
+    
+    elif state == "WAITING_ADMIN_ID_REMOVE":
+        try:
+            target_id = int(text)
+            await execute_db("DELETE FROM bot_admins WHERE user_id=?", (target_id,))
+            await update.message.reply_text(f"✅ تم إزالة {target_id} من المشرفين")
+        except:
+            await update.message.reply_text("❌ معرف غير صالح")
+        context.user_data.pop("state", None)
 
-# ===================== 13. معالج المجموعات =====================
+# ===================== معالج المجموعات والردود =====================
 async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -1190,6 +1328,13 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text or ""
     text_lower = text.lower()
     
+    # ردود مخصصة من قاعدة البيانات
+    reply = await db_get_reply(text_lower)
+    if reply:
+        await update.message.reply_text(reply)
+        return
+    
+    # ردود مدمجة
     replies = {
         "مرحباً": "أهلاً وسهلاً بك 🤍",
         "السلام عليكم": "وعليكم السلام ورحمة الله 🌹",
@@ -1206,6 +1351,15 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "تعبان": "لا تستسلم، أنت أقوى مما تظن 💪",
         "من أنت": "أنا ريلاكس مانيجر، بوت متكامل 🤖",
         "نكتة": "مرة وحدة قالت للثانية... خلاص ما في نكتة 😂",
+        "صباح الخير": "صباح النور ☀️",
+        "مساء الخير": "مساء النور 🌙",
+        "بالتوفيق": "الله يوفقك 🌸",
+        "ممتاز": "شكراً 🌸",
+        "جميل": "تسلم 🌸",
+        "يعطيك العافية": "الله يعافيك 🌸",
+        "مع السلامة": "مع السلامة، تشرفنا بك 🌸",
+        "أهلاً": "أهلاً وسهلاً 🌸",
+        "هلا": "هلا وغلا 🌸",
     }
     
     for word, reply in replies.items():
@@ -1213,7 +1367,7 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(reply)
             break
 
-# ===================== 14. التسجيل التلقائي =====================
+# ===================== التسجيل التلقائي =====================
 async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -1239,7 +1393,7 @@ async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             break
 
-# ===================== 15. النشر التلقائي =====================
+# ===================== النشر التلقائي =====================
 async def auto_publish_loop(app):
     await asyncio.sleep(10)
     while True:
@@ -1274,7 +1428,7 @@ async def auto_publish_loop(app):
             print(f"❌ خطأ في النشر التلقائي: {e}")
             await asyncio.sleep(60)
 
-# ===================== 16. خادم الويب =====================
+# ===================== خادم الويب =====================
 async def start_web_server():
     try:
         from aiohttp import web
@@ -1292,7 +1446,7 @@ async def start_web_server():
     except Exception as e:
         print(f"⚠️ فشل خادم الويب: {e}")
 
-# ===================== 17. الدالة الرئيسية =====================
+# ===================== التشغيل الرئيسي =====================
 async def run_bot():
     print(f"🚀 {BOT_NAME} جاري التشغيل...")
     
@@ -1314,8 +1468,6 @@ async def run_bot():
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(CommandHandler("transfer", transfer_handler))
     app.add_handler(CommandHandler("purge", purge_handler))
-    
-    # ===== الأوامر المتقدمة =====
     app.add_handler(CommandHandler("setadmin", setadmin_handler))
     app.add_handler(CommandHandler("gstats", gstats_handler))
     
@@ -1336,6 +1488,8 @@ async def run_bot():
     app.add_handler(CommandHandler("rank", rank_command))
     app.add_handler(CommandHandler("developer", developer_command))
     app.add_handler(CommandHandler("support", support_command))
+    app.add_handler(CommandHandler("ticket", ticket_command))
+    app.add_handler(CommandHandler("support_reply", support_reply_command))
     
     # ===== الأزرار =====
     app.add_handler(CallbackQueryHandler(button_callback))
@@ -1364,6 +1518,9 @@ async def run_bot():
         BotCommand("transfer", "نقل الملكية"),
         BotCommand("setadmin", "تعيين مشرف بصلاحيات"),
         BotCommand("gstats", "إحصائيات المجموعة"),
+        BotCommand("support", "الدعم"),
+        BotCommand("ticket", "تذكرة دعم"),
+        BotCommand("support_reply", "الرد على تذكرة (للمطور)"),
     ]
     await app.bot.set_my_commands(commands)
     
@@ -1374,7 +1531,6 @@ async def run_bot():
     print(f"✅ {BOT_NAME} يعمل الآن!")
     await app.run_polling(drop_pending_updates=True)
 
-# ===================== 18. التشغيل =====================
 if __name__ == "__main__":
     try:
         asyncio.run(run_bot())
