@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import nest_asyncio
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram import BotCommand
 from telegram.request import HTTPXRequest
@@ -15,6 +16,7 @@ from services.scheduler import auto_publish_loop
 from services.web_server import start_web_server
 from utils.logger import setup_logger
 
+nest_asyncio.apply()
 logger = setup_logger()
 
 async def run_bot():
