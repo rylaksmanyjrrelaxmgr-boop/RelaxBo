@@ -5,7 +5,7 @@
 ============================================================
 ريلاكس مانيجر + نظام المجموعات المتكامل
 ============================================================
-الإصدار: 19.0.9 - الكود الكامل والمكتمل
+الإصدار: 19.0.9 - الكود الكامل في ملف واحد
 ============================================================
 """
 
@@ -20,8 +20,8 @@ import re
 import hashlib
 import secrets
 import base64
+import io
 import tempfile
-import shutil
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
@@ -53,6 +53,7 @@ packages = [
 for pkg in packages:
     install_package(pkg)
 
+# ===================== استيراد المكتبات =====================
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -64,7 +65,7 @@ import aiosqlite
 import aiohttp
 from cryptography.fernet import Fernet
 
-# ===================== الإعدادات =====================
+# ===================== الإعدادات من متغيرات البيئة =====================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     print("❌ BOT_TOKEN غير موجود!")
@@ -79,11 +80,13 @@ BOT_NAME = os.getenv("BOT_NAME", "ريلاكس مانيجر")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Reelaaaxbot")
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
+# إعدادات NSFW
 NSFW_ENABLED = os.getenv("NSFW_ENABLED", "True").lower() in ["true", "1", "yes", "on"]
 NSFW_THRESHOLD = float(os.getenv("NSFW_THRESHOLD", "0.7"))
 SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "")
 SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "")
 
+# إعدادات أخرى
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 20 * 1024 * 1024))
 MAX_UNPUBLISHED_POSTS = int(os.getenv('MAX_UNPUBLISHED_POSTS', 1000))
 MAX_POSTS_PER_SESSION = int(os.getenv('MAX_POSTS_PER_SESSION', 50))
@@ -114,7 +117,7 @@ def utc_now_iso():
 def mecca_now_iso():
     return mecca_now().isoformat()
 
-# ===================== قاعدة البيانات =====================
+# ===================== دوال قاعدة البيانات =====================
 _conn = None
 
 async def get_db():
@@ -123,79 +126,161 @@ async def get_db():
         _conn = await aiosqlite.connect(DB_PATH)
         _conn.row_factory = aiosqlite.Row
         await _conn.executescript("""
+            -- ========== جداول المستخدمين ==========
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY, auto_publish INTEGER DEFAULT 1,
-                banned INTEGER DEFAULT 0, trial_used INTEGER DEFAULT 0,
-                subscription_end TEXT DEFAULT NULL, referral_code TEXT DEFAULT NULL,
-                active_channel INTEGER DEFAULT NULL, auto_recycle INTEGER DEFAULT 1,
-                language TEXT DEFAULT 'ar', points INTEGER DEFAULT 0, level INTEGER DEFAULT 1
+                user_id INTEGER PRIMARY KEY,
+                auto_publish INTEGER DEFAULT 1,
+                banned INTEGER DEFAULT 0,
+                trial_used INTEGER DEFAULT 0,
+                subscription_end TEXT DEFAULT NULL,
+                referral_code TEXT DEFAULT NULL,
+                active_channel INTEGER DEFAULT NULL,
+                auto_recycle INTEGER DEFAULT 1,
+                language TEXT DEFAULT 'ar',
+                points INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1
             );
+            
+            -- ========== جداول القنوات ==========
             CREATE TABLE IF NOT EXISTS user_channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-                channel_id TEXT, channel_name TEXT, created_at TIMESTAMP, banned INTEGER DEFAULT 0
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                channel_id TEXT,
+                channel_name TEXT,
+                created_at TIMESTAMP,
+                banned INTEGER DEFAULT 0
             );
+            
+            -- ========== جداول المنشورات ==========
             CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER,
-                text TEXT, media_type TEXT DEFAULT 'text', media_file_id TEXT,
-                published INTEGER DEFAULT 0, fail_count INTEGER DEFAULT 0,
-                views_count INTEGER DEFAULT 0, last_view_time TIMESTAMP, created_at TIMESTAMP
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_db_id INTEGER,
+                text TEXT,
+                media_type TEXT DEFAULT 'text',
+                media_file_id TEXT,
+                published INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                views_count INTEGER DEFAULT 0,
+                last_view_time TIMESTAMP,
+                created_at TIMESTAMP
             );
+            
+            -- ========== جداول الجدولة ==========
             CREATE TABLE IF NOT EXISTS schedule (
-                channel_db_id INTEGER PRIMARY KEY, schedule_type TEXT DEFAULT 'interval_minutes',
-                interval_minutes INTEGER DEFAULT 12, interval_hours INTEGER DEFAULT 0,
-                interval_days INTEGER DEFAULT 0, days_of_week TEXT DEFAULT '',
-                specific_dates TEXT DEFAULT '', publish_time TEXT DEFAULT '00:00',
-                cron_expression TEXT DEFAULT NULL, next_publish_date TEXT
+                channel_db_id INTEGER PRIMARY KEY,
+                schedule_type TEXT DEFAULT 'interval_minutes',
+                interval_minutes INTEGER DEFAULT 12,
+                interval_hours INTEGER DEFAULT 0,
+                interval_days INTEGER DEFAULT 0,
+                days_of_week TEXT DEFAULT '',
+                specific_dates TEXT DEFAULT '',
+                publish_time TEXT DEFAULT '00:00',
+                cron_expression TEXT DEFAULT NULL,
+                next_publish_date TEXT
             );
+            
             CREATE TABLE IF NOT EXISTS last_publish (
-                channel_db_id INTEGER PRIMARY KEY, last_publish_time TIMESTAMP
+                channel_db_id INTEGER PRIMARY KEY,
+                last_publish_time TIMESTAMP
             );
-            CREATE TABLE IF NOT EXISTS bot_groups (
-                chat_id INTEGER PRIMARY KEY, chat_name TEXT,
-                added_by INTEGER, added_at TEXT
-            );
+            
+            -- ========== جداول المجموعات ==========
             CREATE TABLE IF NOT EXISTS owners (
-                chat_id INTEGER, user_id INTEGER, PRIMARY KEY(chat_id, user_id)
+                chat_id INTEGER,
+                user_id INTEGER,
+                PRIMARY KEY(chat_id, user_id)
             );
+            
             CREATE TABLE IF NOT EXISTS admins (
-                chat_id INTEGER, user_id INTEGER, PRIMARY KEY(chat_id, user_id)
+                chat_id INTEGER,
+                user_id INTEGER,
+                PRIMARY KEY(chat_id, user_id)
             );
+            
             CREATE TABLE IF NOT EXISTS group_settings (
-                chat_id INTEGER PRIMARY KEY, lock_links INTEGER DEFAULT 0,
-                lock_mentions INTEGER DEFAULT 0, slow_mode INTEGER DEFAULT 0,
-                welcome_msg TEXT, goodbye_msg TEXT
+                chat_id INTEGER PRIMARY KEY,
+                lock_links INTEGER DEFAULT 0,
+                lock_mentions INTEGER DEFAULT 0,
+                slow_mode INTEGER DEFAULT 0,
+                welcome_msg TEXT,
+                goodbye_msg TEXT
             );
+            
             CREATE TABLE IF NOT EXISTS moderation_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
-                admin_id INTEGER, target_id INTEGER, action TEXT,
-                reason TEXT, timestamp TEXT
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                admin_id INTEGER,
+                target_id INTEGER,
+                action TEXT,
+                reason TEXT,
+                timestamp TEXT
             );
+            
+            -- ========== جداول الردود والكلمات المحظورة ==========
             CREATE TABLE IF NOT EXISTS replies (
-                keyword TEXT PRIMARY KEY, reply TEXT
+                keyword TEXT PRIMARY KEY,
+                reply TEXT
             );
+            
             CREATE TABLE IF NOT EXISTS banned_words (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, word TEXT,
-                chat_id INTEGER DEFAULT -1, UNIQUE(word, chat_id)
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT,
+                chat_id INTEGER DEFAULT -1,
+                UNIQUE(word, chat_id)
             );
+            
+            -- ========== جداول المستخدمين المؤقتة ==========
             CREATE TABLE IF NOT EXISTS user_messages (
-                user_id INTEGER, chat_id INTEGER,
-                message_time TEXT, PRIMARY KEY(user_id, chat_id)
+                user_id INTEGER,
+                chat_id INTEGER,
+                message_time TEXT,
+                PRIMARY KEY(user_id, chat_id)
             );
+            
+            -- ========== جداول الإعدادات ==========
             CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY, value TEXT
+                key TEXT PRIMARY KEY,
+                value TEXT
             );
+            
+            -- ========== جداول الدعم ==========
             CREATE TABLE IF NOT EXISTS support_tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-                username TEXT, message TEXT, ticket_number INTEGER,
-                status TEXT DEFAULT 'pending', created_at TIMESTAMP, replied INTEGER DEFAULT 0
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                message TEXT,
+                ticket_number INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP,
+                replied INTEGER DEFAULT 0
             );
+            
+            -- ========== جداول الترجمة ==========
             CREATE TABLE IF NOT EXISTS user_translation (
-                user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'off'
+                user_id INTEGER PRIMARY KEY,
+                lang TEXT DEFAULT 'off'
             );
-            INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', '720');
-            INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0');
+            
+            -- ========== جداول النسخ الاحتياطي ==========
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER PRIMARY KEY
+            );
+            
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id INTEGER PRIMARY KEY,
+                chat_name TEXT,
+                added_by INTEGER,
+                added_at TEXT
+            );
         """)
         await _conn.commit()
+        
+        # إدراج البيانات الافتراضية
+        await _conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
+        await _conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
+        await _conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (MAIN_ADMIN_ID,))
+        await _conn.commit()
+    
     return _conn
 
 async def db_execute(query: str, *params):
@@ -214,7 +299,122 @@ async def db_fetch_one(query: str, *params):
     cursor = await conn.execute(query, params)
     return await cursor.fetchone()
 
-# ===================== دوال القنوات =====================
+# ============================================================
+# نظام المجموعات - دوال الصلاحيات
+# ============================================================
+
+_perm_cache = {}
+_PERM_TTL = 300
+
+async def check_perm(bot, chat_id: int, user_id: int) -> bool:
+    key = f"{chat_id}_{user_id}"
+    now = time.time()
+    
+    if key in _perm_cache:
+        cached_time, cached_result = _perm_cache[key]
+        if now - cached_time < _PERM_TTL:
+            return cached_result
+    
+    result = False
+    
+    if user_id == MAIN_ADMIN_ID:
+        result = True
+    elif await db_fetch_one("SELECT 1 FROM owners WHERE chat_id=? AND user_id=?", chat_id, user_id):
+        result = True
+    elif await db_fetch_one("SELECT 1 FROM admins WHERE chat_id=? AND user_id=?", chat_id, user_id):
+        result = True
+    else:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            if member.status in ['creator', 'administrator']:
+                result = True
+        except:
+            pass
+    
+    _perm_cache[key] = (now, result)
+    return result
+
+def has_links(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r'https?://\S+', text))
+
+def has_mentions(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r'@\w+', text))
+
+async def auto_penalty(bot, chat_id: int, user_id: int):
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        await bot.unban_chat_member(chat_id, user_id)
+    except:
+        pass
+
+# ============================================================
+# نظام NSFW
+# ============================================================
+
+NSFW_CACHE = {}
+NSFW_CACHE_TTL = 300
+
+async def check_nsfw_image(image_bytes: bytes) -> dict:
+    try:
+        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+            return {"nsfw": False, "score": 0, "error": "API غير مفعل"}
+
+        from PIL import Image
+        
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail((800, 800))
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=80)
+        compressed = buffer.getvalue()
+
+        image_b64 = base64.b64encode(compressed).decode('utf-8')
+
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.sightengine.com/1.0/check.json"
+            params = {
+                "models": "nudity-2.0,wad",
+                "api_user": SIGHTENGINE_API_USER,
+                "api_secret": SIGHTENGINE_API_SECRET,
+                "image": image_b64
+            }
+
+            async with session.get(url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return {"nsfw": False, "score": 0, "error": f"فشل الاتصال ({resp.status})"}
+
+                data = await resp.json()
+                nsfw_score = data.get("nudity", {}).get("safe", 1)
+                nsfw_score = 1 - nsfw_score
+                wad = max(data.get("weapon", 0) or 0, data.get("drugs", 0) or 0, data.get("alcohol", 0) or 0)
+
+                return {
+                    "nsfw": nsfw_score > NSFW_THRESHOLD or wad > NSFW_THRESHOLD,
+                    "nsfw_score": round(nsfw_score, 2),
+                    "wad_score": round(wad, 2)
+                }
+
+    except Exception as e:
+        return {"nsfw": False, "score": 0, "error": str(e)}
+
+async def check_nsfw_cached(image_bytes: bytes) -> dict:
+    cache_key = hashlib.md5(image_bytes).hexdigest()
+    if cache_key in NSFW_CACHE:
+        cached_data, cached_time = NSFW_CACHE[cache_key]
+        if time.time() - cached_time < NSFW_CACHE_TTL:
+            return cached_data
+    
+    result = await check_nsfw_image(image_bytes)
+    NSFW_CACHE[cache_key] = (result, time.time())
+    return result
+
+# ============================================================
+# دوال القنوات
+# ============================================================
+
 async def db_save_posts(channel_db_id: int, posts: list) -> int:
     conn = await get_db()
     saved = 0
@@ -297,118 +497,10 @@ async def db_get_user_channels_count(user_id: int) -> int:
     row = await db_fetch_one("SELECT COUNT(*) FROM user_channels WHERE user_id=?", user_id)
     return row[0] if row else 0
 
-async def db_get_user_groups_count(user_id: int) -> int:
-    row = await db_fetch_one("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", user_id)
-    return row[0] if row else 0
+# ============================================================
+# دوال المجموعات
+# ============================================================
 
-# ===================== نظام الصلاحيات =====================
-_perm_cache = {}
-_PERM_TTL = 300
-
-async def check_perm(bot, chat_id: int, user_id: int) -> bool:
-    key = f"{chat_id}_{user_id}"
-    now = time.time()
-    
-    if key in _perm_cache:
-        cached_time, cached_result = _perm_cache[key]
-        if now - cached_time < _PERM_TTL:
-            return cached_result
-    
-    result = False
-    
-    if user_id == MAIN_ADMIN_ID:
-        result = True
-    elif await db_fetch_one("SELECT 1 FROM owners WHERE chat_id=? AND user_id=?", chat_id, user_id):
-        result = True
-    elif await db_fetch_one("SELECT 1 FROM admins WHERE chat_id=? AND user_id=?", chat_id, user_id):
-        result = True
-    else:
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            if member.status in ['creator', 'administrator']:
-                result = True
-        except:
-            pass
-    
-    _perm_cache[key] = (now, result)
-    return result
-
-def has_links(text: str) -> bool:
-    if not text:
-        return False
-    return bool(re.search(r'https?://\S+', text))
-
-def has_mentions(text: str) -> bool:
-    if not text:
-        return False
-    return bool(re.search(r'@\w+', text))
-
-async def auto_penalty(bot, chat_id: int, user_id: int):
-    try:
-        await bot.ban_chat_member(chat_id, user_id)
-        await bot.unban_chat_member(chat_id, user_id)
-    except:
-        pass
-
-# ===================== NSFW =====================
-NSFW_CACHE = {}
-NSFW_CACHE_TTL = 300
-
-async def check_nsfw_image(image_bytes: bytes) -> dict:
-    try:
-        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
-            return {"nsfw": False, "score": 0, "error": "API غير مفعل"}
-
-        from PIL import Image
-        import io
-        
-        img = Image.open(io.BytesIO(image_bytes))
-        img.thumbnail((800, 800))
-        buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=80)
-        compressed = buffer.getvalue()
-
-        image_b64 = base64.b64encode(compressed).decode('utf-8')
-
-        async with aiohttp.ClientSession() as session:
-            url = "https://api.sightengine.com/1.0/check.json"
-            params = {
-                "models": "nudity-2.0,wad",
-                "api_user": SIGHTENGINE_API_USER,
-                "api_secret": SIGHTENGINE_API_SECRET,
-                "image": image_b64
-            }
-
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    return {"nsfw": False, "score": 0, "error": f"فشل الاتصال ({resp.status})"}
-
-                data = await resp.json()
-                nsfw_score = data.get("nudity", {}).get("safe", 1)
-                nsfw_score = 1 - nsfw_score
-                wad = max(data.get("weapon", 0) or 0, data.get("drugs", 0) or 0, data.get("alcohol", 0) or 0)
-
-                return {
-                    "nsfw": nsfw_score > NSFW_THRESHOLD or wad > NSFW_THRESHOLD,
-                    "nsfw_score": round(nsfw_score, 2),
-                    "wad_score": round(wad, 2)
-                }
-
-    except Exception as e:
-        return {"nsfw": False, "score": 0, "error": str(e)}
-
-async def check_nsfw_cached(image_bytes: bytes) -> dict:
-    cache_key = hashlib.md5(image_bytes).hexdigest()
-    if cache_key in NSFW_CACHE:
-        cached_data, cached_time = NSFW_CACHE[cache_key]
-        if time.time() - cached_time < NSFW_CACHE_TTL:
-            return cached_data
-    
-    result = await check_nsfw_image(image_bytes)
-    NSFW_CACHE[cache_key] = (result, time.time())
-    return result
-
-# ===================== الكلمات المحظورة كاش =====================
 _banned_cache = {}
 _banned_cache_time = 0
 _BANNED_CACHE_TTL = 60
@@ -429,7 +521,10 @@ async def load_banned_cache():
         _banned_cache[chat_id].append(word)
     _banned_cache_time = now
 
-# ===================== معالج الرسائل الرئيسي =====================
+# ============================================================
+# معالج الرسائل الرئيسي
+# ============================================================
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
         return
@@ -441,40 +536,58 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.is_bot:
         return
     
+    # ===== معالجة الرسائل الخاصة =====
     if chat_type == "private":
         await handle_private_message(update, context)
         return
     
+    # ===== معالجة رسائل المجموعات =====
     if chat_type in ["group", "supergroup"]:
         await handle_group_message(update, context)
         return
     
+    # ===== معالجة رسائل القنوات =====
     if chat_type == "channel":
         await handle_channel_message(update, context)
         return
 
-# ===================== الخاص =====================
+# ============================================================
+# معالج الرسائل الخاصة
+# ============================================================
+
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
     
+    # حالة إضافة المنشورات
     if context.user_data.get('state') == 'ADDING_POSTS':
         await handle_add_posts(update, context)
         return
     
+    # حالة إضافة قناة
+    if context.user_data.get('state') == 'WAITING_CHANNEL_ID':
+        await handle_add_channel(update, context)
+        return
+    
+    # حالة الدعم
     if context.user_data.get('support_mode'):
         await handle_support_message(update, context)
         return
     
+    # ردود ذكية
     if text and not text.startswith('/'):
         await handle_smart_reply(update, context)
 
-# ===================== المجموعات =====================
+# ============================================================
+# معالج رسائل المجموعات
+# ============================================================
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     text = update.message.text or update.message.caption or ""
     
+    # التحقق من صلاحيات البوت
     try:
         bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
         if bot_member.status not in ['administrator', 'creator']:
@@ -482,11 +595,13 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except:
         return
     
+    # جلب إعدادات المجموعة
     settings = await db_fetch_one("SELECT * FROM group_settings WHERE chat_id=?", chat_id)
     lock_links = settings['lock_links'] if settings else 0
     lock_mentions = settings['lock_mentions'] if settings else 0
     slow_mode = settings['slow_mode'] if settings else 0
     
+    # الوضع البطيء
     if slow_mode > 0:
         last_msg = await db_fetch_one(
             "SELECT message_time FROM user_messages WHERE user_id=? AND chat_id=?",
@@ -509,6 +624,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             user_id, chat_id, now.isoformat()
         )
     
+    # فحص الروابط
     if lock_links and has_links(text):
         try:
             await update.message.delete()
@@ -517,6 +633,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await auto_penalty(context.bot, chat_id, user_id)
         return
     
+    # فحص الإشارات
     if lock_mentions and has_mentions(text):
         try:
             await update.message.delete()
@@ -525,6 +642,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await auto_penalty(context.bot, chat_id, user_id)
         return
     
+    # فحص الكلمات المحظورة
     await load_banned_cache()
     words = _banned_cache.get(chat_id, []) + _banned_cache.get(-1, [])
     text_lower = text.lower()
@@ -537,6 +655,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await auto_penalty(context.bot, chat_id, user_id)
             return
     
+    # كشف NSFW للصور
     if NSFW_ENABLED and update.message.photo:
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         if file.file_size <= 5 * 1024 * 1024:
@@ -553,11 +672,13 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             except:
                 pass
     
+    # الردود التلقائية
     reply = await db_fetch_one("SELECT reply FROM replies WHERE keyword=?", text_lower)
     if reply:
         await update.message.reply_text(reply['reply'])
         return
     
+    # ردود مدمجة
     default_replies = {
         "مرحباً": "أهلاً وسهلاً بك 🤍",
         "السلام عليكم": "وعليكم السلام 🌹",
@@ -574,7 +695,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(response)
             break
 
-# ===================== القنوات =====================
+# ============================================================
+# معالج رسائل القنوات
+# ============================================================
+
 async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message = update.message
@@ -584,6 +708,7 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
     
     chat_id = chat.id
     
+    # البحث عن القناة في قاعدة البيانات
     channel = await db_fetch_one(
         "SELECT id FROM user_channels WHERE channel_id=? OR channel_id=?",
         str(chat_id), f"-100{chat_id}"
@@ -594,6 +719,7 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
     
     channel_db_id = channel[0]
     
+    # تسجيل المشاهدات
     post = await db_fetch_one(
         "SELECT id, views_count FROM posts WHERE channel_db_id=? ORDER BY id DESC LIMIT 1",
         (channel_db_id,)
@@ -607,7 +733,32 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
             views, utc_now_iso(), post_id
         )
 
-# ===================== إضافة منشورات =====================
+# ============================================================
+# نظام إضافة القنوات
+# ============================================================
+
+async def handle_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    channel_id = update.message.text.strip()
+    
+    if not channel_id.startswith('@') and not channel_id.startswith('-100'):
+        await update.message.reply_text("❌ معرف قناة غير صالح\nاستخدم @username أو -100123456")
+        return
+    
+    new_id = await db_add_channel(user_id, channel_id, channel_id)
+    if new_id:
+        await db_set_active_channel(user_id, new_id)
+        await update.message.reply_text(f"✅ تم إضافة القناة {channel_id}")
+    else:
+        await update.message.reply_text("⚠️ القناة موجودة مسبقاً")
+    
+    context.user_data.pop('state', None)
+    await start_command(update, context)
+
+# ============================================================
+# نظام إضافة المنشورات
+# ============================================================
+
 async def handle_add_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session_key = f"session_{user_id}"
@@ -665,7 +816,10 @@ async def handle_add_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(f"✅ تم حفظ {saved} منشور")
 
-# ===================== الدعم =====================
+# ============================================================
+# نظام الدعم
+# ============================================================
+
 async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
@@ -673,6 +827,7 @@ async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_T
     if not text:
         return
     
+    # جلب رقم التذكرة
     row = await db_fetch_one("SELECT value FROM settings WHERE key='last_ticket_number'")
     ticket_num = int(row[0]) + 1 if row else 1
     
@@ -700,7 +855,10 @@ async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_T
     
     context.user_data['support_mode'] = False
 
-# ===================== ردود ذكية =====================
+# ============================================================
+# نظام الردود الذكية
+# ============================================================
+
 async def handle_smart_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     text_lower = text.lower()
@@ -724,11 +882,14 @@ async def handle_smart_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(response)
             break
 
-# ===================== أوامر البوت =====================
+# ============================================================
+# أوامر البوت
+# ============================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
+    # تسجيل المستخدم
     await db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", user_id)
     
     keyboard = InlineKeyboardMarkup([
@@ -754,6 +915,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
     await update.message.reply_text(
         f"🤖 **{BOT_NAME}**\n\n"
         f"📌 الإصدار: 19.0.9\n"
@@ -784,7 +947,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/settings - إعدادات المجموعة"
     )
 
-# ===================== أوامر المجموعات =====================
+# ============================================================
+# أوامر المجموعات
+# ============================================================
 
 async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1234,7 +1399,7 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(msg)
 
-async def cmd_group_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("⚠️ للمجموعات فقط")
@@ -1262,7 +1427,9 @@ async def cmd_group_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(msg)
 
-# ===================== الترحيب والوداع =====================
+# ============================================================
+# معالج الأحداث (الترحيب والوداع)
+# ============================================================
 
 async def on_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.new_chat_members:
@@ -1318,7 +1485,9 @@ async def on_member_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-# ===================== تسجيل تلقائي =====================
+# ============================================================
+# التسجيل التلقائي عند إضافة البوت
+# ============================================================
 
 async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.new_chat_members:
@@ -1332,11 +1501,6 @@ async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if member.id == context.bot.id:
             chat_id = chat.id
             user_id = update.effective_user.id
-            
-            await db_execute(
-                "INSERT OR IGNORE INTO bot_groups (chat_id, chat_name, added_by, added_at) VALUES (?, ?, ?, ?)",
-                chat_id, chat.title, user_id, utc_now_iso()
-            )
             
             existing = await db_fetch_one("SELECT 1 FROM owners WHERE chat_id=?", chat_id)
             if not existing:
@@ -1358,7 +1522,9 @@ async def auto_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             break
 
-# ===================== معالج الأزرار =====================
+# ============================================================
+# معالج الأزرار (CallbackQuery)
+# ============================================================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1375,7 +1541,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text = "📡 **قنواتي:**\n\n"
         for ch in channels:
-            text += f"• {ch[2]} ({ch[1]})\n"
+            ch_id = ch[1]
+            ch_name = ch[2] or ch_id
+            text += f"• {ch_name}\n"
         await query.edit_message_text(text)
     
     elif data == "add_channel":
@@ -1447,7 +1615,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text = "📋 **منشوراتي غير المنشورة:**\n\n"
         for p in posts:
-            text += f"• {p[2]}: {p[1][:50]}...\n"
+            p_text = p[1] or "بدون نص"
+            text += f"• {p[2]}: {p_text[:50]}...\n"
         await query.edit_message_text(text)
     
     elif data == "recycle":
@@ -1462,12 +1631,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channels = await db_get_user_channels_count(user_id)
         total = await db_get_user_total_posts(user_id)
         unpublished = await db_get_user_unpublished_posts(user_id)
-        groups = await db_get_user_groups_count(user_id)
         
         await query.edit_message_text(
             f"📊 **إحصائياتي:**\n\n"
             f"📡 القنوات: {channels}\n"
-            f"👥 المجموعات: {groups}\n"
             f"📝 إجمالي المنشورات: {total}\n"
             f"⏳ غير المنشورة: {unpublished}"
         )
@@ -1541,41 +1708,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back":
         await start_command(update, context)
 
-# ===================== معالج النص الخاص =====================
-
-async def private_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text or ""
-    
-    if context.user_data.get('state') == 'WAITING_CHANNEL_ID':
-        channel_id = text.strip()
-        if not channel_id.startswith('@') and not channel_id.startswith('-100'):
-            await update.message.reply_text("❌ معرف قناة غير صالح")
-            return
-        
-        new_id = await db_add_channel(user_id, channel_id, channel_id)
-        if new_id:
-            await db_set_active_channel(user_id, new_id)
-            await update.message.reply_text(f"✅ تم إضافة القناة {channel_id}")
-        else:
-            await update.message.reply_text("⚠️ القناة موجودة مسبقاً")
-        
-        context.user_data.pop('state', None)
-        await start_command(update, context)
-
-# ===================== الدالة الرئيسية =====================
+# ============================================================
+# الدالة الرئيسية
+# ============================================================
 
 async def main():
-    print(f"🚀 تم تشغيل {BOT_NAME}")
+    print("🚀 تشغيل البوت...")
+    print(f"✅ TOKEN موجود: {TOKEN[:10]}...")
+    print(f"✅ MAIN_ADMIN_ID: {MAIN_ADMIN_ID}")
+    print(f"✅ BOT_NAME: {BOT_NAME}")
     print("✅ نظام المجموعات المتكامل مفعل")
     print("✅ ريلاكس مانيجر مفعل")
     
+    # تهيئة قاعدة البيانات
     await get_db()
+    print("✅ قاعدة البيانات جاهزة")
     
+    # إنشاء التطبيق
     app = Application.builder().token(TOKEN).build()
+    print("✅ تم إنشاء التطبيق")
     
+    # ===== معالجات الأوامر =====
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    
+    # أوامر المجموعات
     app.add_handler(CommandHandler("claim", cmd_claim))
     app.add_handler(CommandHandler("addowner", cmd_addowner))
     app.add_handler(CommandHandler("addadmin", cmd_addadmin))
@@ -1595,21 +1752,25 @@ async def main():
     app.add_handler(CommandHandler("remove_reply", cmd_remove_reply))
     app.add_handler(CommandHandler("list_replies", cmd_list_replies))
     app.add_handler(CommandHandler("log", cmd_log))
-    app.add_handler(CommandHandler("settings", cmd_group_settings))
+    app.add_handler(CommandHandler("settings", cmd_settings))
     
+    # ===== معالجات الأحداث =====
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, auto_register))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_member_join))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_member_leave))
     
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_text_handler))
+    # ===== معالج الرسائل الرئيسي =====
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT | filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.CAPTION) &
+        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT | 
+         filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.CAPTION) &
         ~filters.COMMAND,
         message_handler
     ))
     
+    # ===== معالج الأزرار =====
     app.add_handler(CallbackQueryHandler(button_handler))
     
+    # ===== تعيين الأوامر =====
     await app.bot.set_my_commands([
         BotCommand("start", "القائمة الرئيسية"),
         BotCommand("help", "المساعدة"),
@@ -1634,13 +1795,16 @@ async def main():
         BotCommand("log", "عرض سجل الإجراءات"),
         BotCommand("settings", "عرض إعدادات المجموعة")
     ])
+    print("✅ تم تسجيل جميع الأوامر")
     
+    # ===== تشغيل البوت =====
+    print("🚀 بدء تشغيل البوت...")
     try:
         await app.run_polling(drop_pending_updates=True)
     except KeyboardInterrupt:
-        print("🛑 تم إيقاف البوت")
+        print("🛑 تم إيقاف البوت بواسطة المستخدم")
     except Exception as e:
-        print(f"❌ خطأ: {e}")
+        print(f"❌ خطأ في التشغيل: {e}")
 
 if __name__ == "__main__":
     try:
