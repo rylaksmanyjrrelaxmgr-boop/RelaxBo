@@ -1895,3 +1895,276 @@ async def db_get_active_contests():
 async def db_get_top_users(limit=10):
     rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
     return rows if rows else []
+# ===================== الدوال المفقودة بالكامل =====================
+
+# 1. message_handler
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text or ""
+    state = context.user_data.get("state")
+    
+    if context.user_data.get("support_mode"):
+        ticket_num = await db_get_next_ticket_number()
+        username = update.effective_user.full_name or str(user_id)
+        await db_save_ticket(user_id, username, text, ticket_num)
+        await execute_db("UPDATE settings SET value=? WHERE key='last_ticket_number'", (str(ticket_num + 1),))
+        await update.message.reply_text(f"✅ تم استلام رسالتك! رقم التذكرة: #{ticket_num}\nسيتم الرد عليك قريباً.")
+        context.user_data.pop("support_mode", None)
+        await context.bot.send_message(chat_id=MAIN_ADMIN_ID, text=f"📬 **تذكرة جديدة**\n👤 {username}\n🆔 {user_id}\n📋 #{ticket_num}\n📝 {text[:200]}")
+        return
+    
+    if text == "/cancel":
+        context.user_data.pop("state", None)
+        context.user_data.pop("session_posts", None)
+        context.user_data.pop("support_mode", None)
+        await update.message.reply_text(get_text(user_id, "cancelled"))
+        keyboard = await get_main_keyboard(user_id)
+        await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
+        return
+    
+    if state == "WAITING_CHANNEL_ID":
+        channel_id = text.strip()
+        if not channel_id.startswith("@") and not channel_id.startswith("-100"):
+            await update.message.reply_text("❌ معرف قناة غير صالح!\nاستخدم @username أو -100123456")
+            return
+        new_id = await db_add_channel(user_id, channel_id, channel_id)
+        if new_id:
+            await db_set_active_channel(user_id, new_id)
+            await update.message.reply_text(get_text(user_id, "channel_added"))
+        else:
+            await update.message.reply_text("⚠️ القناة موجودة مسبقاً")
+        context.user_data.pop("state", None)
+        keyboard = await get_main_keyboard(user_id)
+        await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
+        return
+    
+    if state == "ADDING_POSTS":
+        posts = context.user_data.get("session_posts", [])
+        media_type = "text"
+        media_file_id = None
+        text_content = text
+        
+        if update.message.photo:
+            media_type = "photo"
+            media_file_id = update.message.photo[-1].file_id
+            text_content = update.message.caption or ""
+        elif update.message.video:
+            media_type = "video"
+            media_file_id = update.message.video.file_id
+            text_content = update.message.caption or ""
+        elif update.message.document:
+            media_type = "document"
+            media_file_id = update.message.document.file_id
+            text_content = update.message.caption or ""
+        
+        posts.append((text_content, media_type, media_file_id))
+        context.user_data["session_posts"] = posts
+        
+        if len(posts) >= 15:
+            active = await db_get_active_channel(user_id)
+            if active:
+                saved = await db_save_posts(active, posts)
+                await update.message.reply_text(f"✅ تم حفظ {saved} منشور")
+            context.user_data.pop("state", None)
+            context.user_data.pop("session_posts", None)
+            keyboard = await get_main_keyboard(user_id)
+            await update.message.reply_text(get_text(user_id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
+        else:
+            await update.message.reply_text(f"📥 {len(posts)}/15")
+    
+    elif state == "WAITING_SCHEDULE_POST":
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text("❌ الصيغة غير صحيحة!\nاستخدم: `YYYY-MM-DD HH:MM نص المنشور`")
+            return
+        try:
+            date_str = parts[0]
+            time_str = parts[1]
+            post_text = parts[2]
+            publish_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            if publish_time < datetime.now():
+                await update.message.reply_text("❌ الوقت يجب أن يكون في المستقبل!")
+                return
+            await update.message.reply_text(f"✅ تم جدولة المنشور في {date_str} {time_str}")
+            context.user_data.pop("state", None)
+        except ValueError:
+            await update.message.reply_text("❌ التاريخ أو الوقت غير صحيح!")
+
+# 2. group_message_handler
+async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat.type not in ["group", "supergroup"]:
+        return
+    
+    if user.is_bot:
+        return
+    
+    text = update.message.text or ""
+    text_lower = text.lower()
+    
+    # فحص الكلمات المحظورة
+    banned_word = contains_banned_word(text)
+    if banned_word:
+        try:
+            await update.message.delete()
+            await update.message.reply_text(f"🚫 **كلمة محظورة!**\nالكلمة: `{banned_word}`\n@{user.username or str(user.id)} يرجى احترام قوانين المجموعة.")
+            security_settings = await db_get_security_settings(chat.id)
+            await apply_penalty(context.bot, chat.id, user.id, security_settings)
+            return
+        except Exception as e:
+            print(f"⚠️ فشل حذف الرسالة: {e}")
+    
+    # الردود التلقائية
+    reply = await db_get_reply(text_lower)
+    if reply:
+        await update.message.reply_text(reply)
+        return
+    
+    replies = {
+        "مرحباً": "أهلاً وسهلاً بك 🤍",
+        "السلام عليكم": "وعليكم السلام ورحمة الله 🌹",
+        "كيف حالك": "الحمد لله بخير، وأنت؟ 🙏",
+        "شكراً": "العفو 🤍",
+        "حبيبي": "حبيبي نورت 🌸",
+        "ماشاء الله": "تبارك الله 🌸",
+        "الحمد لله": "الحمد لله دائماً وأبداً 🌸",
+        "سبحان الله": "سبحان الله وبحمده 🌸",
+        "الله أكبر": "الله أكبر 🌸",
+        "استغفر الله": "اللهم اغفر لنا 🌸",
+        "جزاك الله خيراً": "وإياك 🌸",
+        "الله يجزيك الخير": "وإياك 🤍",
+        "تعبان": "لا تستسلم، أنت أقوى مما تظن 💪",
+        "من أنت": "أنا ريلاكس مانيجر، بوت متكامل 🤖",
+        "نكتة": "مرة وحدة قالت للثانية... خلاص ما في نكتة 😂",
+        "صباح الخير": "صباح النور ☀️",
+        "مساء الخير": "مساء النور 🌙",
+        "بالتوفيق": "الله يوفقك 🌸",
+        "ممتاز": "شكراً 🌸",
+        "جميل": "تسلم 🌸",
+        "يعطيك العافية": "الله يعافيك 🌸",
+        "مع السلامة": "مع السلامة، تشرفنا بك 🌸",
+        "أهلاً": "أهلاً وسهلاً 🌸",
+        "هلا": "هلا وغلا 🌸",
+    }
+    
+    for word, reply in replies.items():
+        if word in text_lower:
+            await update.message.reply_text(reply)
+            break
+
+# 3. db_get_security_settings
+async def db_get_security_settings(chat_id: int):
+    return {"auto_penalty": "kick", "auto_mute_duration": 60}
+
+# 4. apply_penalty
+async def apply_penalty(bot, chat_id, user_id, settings):
+    penalty = settings.get('auto_penalty', 'none')
+    if penalty == 'none':
+        return
+    if penalty == 'kick':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'ban':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'mute':
+        try:
+            duration = settings.get('auto_mute_duration', 60)
+            until_date = datetime.now() + timedelta(minutes=duration)
+            await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until_date)
+        except:
+            pass
+
+# 5. db_get_reply
+async def db_get_reply(keyword):
+    rows = await execute_db("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
+    return rows[0][0] if rows else None
+
+# 6. db_add_reply
+async def db_add_reply(keyword, reply):
+    await execute_db("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?, ?)", (keyword.lower(), reply))
+
+# 7. db_del_reply
+async def db_del_reply(keyword):
+    await execute_db("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
+
+# 8. db_get_all_replies
+async def db_get_all_replies():
+    return await execute_db("SELECT keyword, reply FROM group_replies ORDER BY keyword")
+
+# 9. db_get_banned_words
+async def db_get_banned_words(chat_id: int):
+    return await execute_db("SELECT word FROM banned_words WHERE chat_id=? OR chat_id=-1 ORDER BY word", (chat_id,))
+
+# 10. db_add_banned_word
+async def db_add_banned_word(word: str, chat_id: int, added_by: int):
+    await execute_db("INSERT OR IGNORE INTO banned_words (word, chat_id, added_by) VALUES (?, ?, ?)", (word.lower(), chat_id, added_by))
+
+# 11. db_remove_banned_word
+async def db_remove_banned_word(word: str, chat_id: int):
+    await execute_db("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word.lower(), chat_id))
+
+# 12. db_get_updates_channel
+async def db_get_updates_channel():
+    rows = await execute_db("SELECT value FROM settings WHERE key='updates_channel'")
+    return rows[0][0] if rows else None
+
+# 13. db_get_allowed_sendcode_user
+async def db_get_allowed_sendcode_user():
+    rows = await execute_db("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
+    return rows[0][0] if rows else None
+
+# 14. create_backup
+async def create_backup():
+    import shutil
+    backup_file = BACKUP_DIR / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    shutil.copy2(DB_PATH, backup_file)
+    return backup_file
+
+# 15. list_backups
+async def list_backups():
+    return sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+
+# 16. db_get_user_level
+async def db_get_user_level(user_id: int):
+    rows = await execute_db("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
+    if rows:
+        return {"points": rows[0][0], "level": rows[0][1]}
+    return {"points": 0, "level": 1}
+
+# 17. db_get_referral_code
+async def db_get_referral_code(user_id: int):
+    rows = await execute_db("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
+    return rows[0][0] if rows else None
+
+# 18. db_get_referral_stats
+async def db_get_referral_stats(user_id: int):
+    total = await execute_db("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
+    rewards = await execute_db("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
+    total_days = rewards[0][0] if rewards else 0
+    claimed = rewards[0][1] if rewards else 0
+    return {"total_referrals": total[0][0] if total else 0, "available_days": total_days - claimed}
+
+# 19. db_get_user_reminder_settings
+async def db_get_user_reminder_settings(user_id: int):
+    rows = await execute_db("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before FROM user_reminder_settings WHERE user_id=?", (user_id,))
+    if rows:
+        return {"subscription_reminder": rows[0][0], "daily_stats_reminder": rows[0][1], "weekly_report": rows[0][2], "reminder_days_before": rows[0][3] if rows[0][3] else 3}
+    await execute_db("INSERT INTO user_reminder_settings (user_id) VALUES (?)", (user_id,))
+    return {"subscription_reminder": 1, "daily_stats_reminder": 0, "weekly_report": 1, "reminder_days_before": 3}
+
+# 20. db_get_active_contests
+async def db_get_active_contests():
+    return await execute_db("SELECT id, title, prize, end_date FROM contests WHERE status='active' ORDER BY end_date LIMIT 10")
+
+# 21. db_get_top_users
+async def db_get_top_users(limit=10):
+    rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
+    return rows if rows else []
