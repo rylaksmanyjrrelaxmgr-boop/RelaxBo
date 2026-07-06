@@ -2168,3 +2168,294 @@ async def db_get_active_contests():
 async def db_get_top_users(limit=10):
     rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
     return rows if rows else []
+# ===================== معالجات الأزرار المفقودة =====================
+
+# 1. ➕ إضافة رد
+elif data == "admin:add_reply":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_KEYWORD"
+    await query.edit_message_text("📝 أرسل الكلمة المفتاحية (مثل: مرحبا، السلام عليكم):")
+
+# 2. 🗑️ حذف رد
+elif data == "admin:del_reply":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_DELETE_REPLY"
+    await query.edit_message_text("🗑️ أرسل الكلمة المفتاحية لحذف ردها:")
+
+# 3. 📋 عرض الردود
+elif data == "admin:list_replies":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    replies = await db_get_all_replies()
+    if not replies:
+        await query.edit_message_text("📭 لا توجد ردود مسجلة")
+        return
+    text = "💬 **الردود التلقائية**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for kw, rep in replies[:30]:
+        text += f"• `{kw}` → {rep[:40]}{'...' if len(rep) > 40 else ''}\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 4. ➕ إضافة كلمة محظورة
+elif data.startswith("banned_words:add:"):
+    chat_id = int(data.split(":")[2])
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        await query.edit_message_text("❌ غير مصرح")
+        return
+    context.user_data["state"] = "WAITING_BANNED_WORD_ADD"
+    context.user_data["banned_chat_id"] = chat_id
+    await query.edit_message_text("➕ أرسل الكلمة التي تريد إضافتها للكلمات المحظورة:")
+
+# 5. 📋 عرض الكلمات المحظورة
+elif data.startswith("banned_words:list:"):
+    chat_id = int(data.split(":")[2])
+    if not await check_permission(context.bot, chat_id, user_id, "view_activity"):
+        await query.edit_message_text("❌ غير مصرح")
+        return
+    words = await db_get_banned_words(chat_id)
+    if not words:
+        await query.edit_message_text("📭 لا توجد كلمات محظورة")
+        return
+    text = "🚫 **الكلمات المحظورة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for w in words[:30]:
+        text += f"• `{w[0]}`\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data=f"security:banned_words_menu:{chat_id}")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 6. 🗑️ حذف كلمة محظورة
+elif data.startswith("banned_words:remove:"):
+    chat_id = int(data.split(":")[2])
+    if not await check_permission(context.bot, chat_id, user_id, "manage_admins"):
+        await query.edit_message_text("❌ غير مصرح")
+        return
+    context.user_data["state"] = "WAITING_BANNED_WORD_REMOVE"
+    context.user_data["banned_chat_id"] = chat_id
+    await query.edit_message_text("🗑️ أرسل الكلمة التي تريد حذفها من الكلمات المحظورة:")
+
+# 7. 📁 صلاحيات /sendcode
+elif data == "admin:manage_sendcode":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    allowed = await db_get_allowed_sendcode_user()
+    text = f"📁 **صلاحية /sendcode**\nالمستخدم الحالي: {allowed if allowed else 'لا يوجد'}"
+    keyboard = [
+        [InlineKeyboardButton("➕ تعيين مستخدم", callback_data="admin:set_sendcode_user")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 8. 📋 تذاكر الدعم
+elif data == "admin:support_tickets":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    tickets = await db_get_all_tickets(10)
+    if not tickets:
+        await query.edit_message_text("📭 لا توجد تذاكر")
+        return
+    text = "📋 **تذاكر الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for t in tickets:
+        text += f"#{t[4]} | {t[2]} | {t[5]} | {t[6][:16]}\n📝 {t[3][:50]}\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 9. 📢 نشر تحديث
+elif data == "admin:updates":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_UPDATE_TEXT"
+    await query.edit_message_text("📢 أرسل نص التحديث لنشره في قناة التحديثات:")
+
+# 10. 📨 إرسال رسالة جماعية
+elif data == "admin:broadcast":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_BROADCAST"
+    await query.edit_message_text("📨 أرسل النص للإرسال لجميع المستخدمين:")
+
+# 11. 💾 نسخة احتياطية
+elif data == "admin:backup":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await create_backup()
+    await query.edit_message_text("✅ تم إنشاء نسخة احتياطية مشفرة")
+
+# 12. 🔄 استعادة نسخة
+elif data == "admin:restore_backup":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    backups = await list_backups()
+    if not backups:
+        await query.edit_message_text("📭 لا توجد نسخ احتياطية")
+        return
+    keyboard = []
+    for b in backups[:10]:
+        keyboard.append([InlineKeyboardButton(b.name, callback_data=f"admin:restore_backup_select:{b.name}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")])
+    await query.edit_message_text("💾 اختر النسخة للاستعادة:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# 13. 🏆 إنشاء مسابقة
+elif data == "admin:create_contest":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_CONTEST_TITLE"
+    await query.edit_message_text("📝 أرسل **عنوان** المسابقة:")
+
+# 14. 🏅 إعلان فائز
+elif data == "admin:declare_winner":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await query.edit_message_text("📝 /declare_winner معرف_المسابقة معرف_المستخدم\nمثال: `/declare_winner 5 123456789`")
+
+# 15. ➕ تعيين مستخدم صلاحية sendcode
+elif data == "admin:set_sendcode_user":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_SENDCODE_USER"
+    await query.edit_message_text("👤 أرسل معرف المستخدم لمنحه صلاحية /sendcode:")
+
+# 16. استعادة نسخة (اختيار)
+elif data.startswith("admin:restore_backup_select:"):
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    backup_name = data.split(":")[2]
+    await query.edit_message_text(f"🔄 جاري استعادة النسخة: {backup_name}...")
+
+# ===== إضافة حالات WAITING جديدة في message_handler =====
+# أضف داخل async def message_handler:
+
+    elif state == "WAITING_KEYWORD":
+        context.user_data["state"] = "WAITING_REPLY"
+        context.user_data["temp_keyword"] = text.strip().lower()
+        await update.message.reply_text(f"📝 أرسل الرد للكلمة `{text.strip()}`:")
+
+    elif state == "WAITING_REPLY":
+        keyword = context.user_data.get("temp_keyword", "")
+        reply = text.strip()
+        if keyword and reply:
+            await db_add_reply(keyword, reply)
+            await update.message.reply_text(f"✅ تم إضافة رد للكلمة `{keyword}`")
+        else:
+            await update.message.reply_text("❌ حدث خطأ")
+        context.user_data.pop("state", None)
+        context.user_data.pop("temp_keyword", None)
+        await admin_panel_callback(update, context)
+
+    elif state == "WAITING_DELETE_REPLY":
+        keyword = text.strip().lower()
+        await db_del_reply(keyword)
+        await update.message.reply_text(f"✅ تم حذف رد الكلمة `{keyword}`")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_BANNED_WORD_ADD":
+        chat_id = context.user_data.get("banned_chat_id")
+        word = text.strip().lower()
+        if len(word) >= 2:
+            await db_add_banned_word(word, chat_id, user_id)
+            await update.message.reply_text(f"✅ تم إضافة كلمة `{word}` إلى الكلمات المحظورة")
+        else:
+            await update.message.reply_text("❌ الكلمة قصيرة جداً (يجب أن تكون حرفين على الأقل)")
+        context.user_data.pop("state", None)
+        context.user_data.pop("banned_chat_id", None)
+
+    elif state == "WAITING_BANNED_WORD_REMOVE":
+        chat_id = context.user_data.get("banned_chat_id")
+        word = text.strip().lower()
+        await db_remove_banned_word(word, chat_id)
+        await update.message.reply_text(f"✅ تم حذف كلمة `{word}` من الكلمات المحظورة")
+        context.user_data.pop("state", None)
+        context.user_data.pop("banned_chat_id", None)
+
+    elif state == "WAITING_SENDCODE_USER":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        try:
+            target_id = int(text.strip())
+            await db_set_allowed_sendcode_user(target_id)
+            await update.message.reply_text(f"✅ تم تعيين {target_id} كمستخدم مصرح لـ /sendcode")
+        except ValueError:
+            await update.message.reply_text("❌ معرف غير صالح")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_UPDATE_TEXT":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        channel = await db_get_updates_channel()
+        if channel:
+            try:
+                await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
+                await update.message.reply_text("✅ تم نشر التحديث")
+            except Exception as e:
+                await update.message.reply_text(f"❌ فشل النشر: {e}")
+        else:
+            await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_BROADCAST":
+        if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+            await update.message.reply_text("🔒 غير مصرح")
+            return
+        users = await execute_db("SELECT user_id FROM users WHERE banned=0")
+        sent = 0
+        failed = 0
+        for (uid,) in users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                sent += 1
+            except:
+                failed += 1
+            await asyncio.sleep(0.1)
+        await update.message.reply_text(f"✅ تم الإرسال إلى {sent} مستخدم\n❌ فشل الإرسال إلى {failed} مستخدم")
+        context.user_data.pop("state", None)
+
+    elif state == "WAITING_CONTEST_TITLE":
+        context.user_data["contest_title"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_DESCRIPTION"
+        await update.message.reply_text("📝 أرسل **وصف** المسابقة:")
+
+    elif state == "WAITING_CONTEST_DESCRIPTION":
+        context.user_data["contest_description"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_PRIZE"
+        await update.message.reply_text("🎁 أرسل **الجائزة** (مثال: 100 نقطة، اشتراك شهر):")
+
+    elif state == "WAITING_CONTEST_PRIZE":
+        context.user_data["contest_prize"] = text.strip()
+        context.user_data["state"] = "WAITING_CONTEST_END_DATE"
+        await update.message.reply_text("📅 أرسل **تاريخ الانتهاء** (بتوقيت مكة) بالصيغة:\n`YYYY-MM-DD HH:MM`\nمثال: `2025-07-01 23:59`")
+
+    elif state == "WAITING_CONTEST_END_DATE":
+        try:
+            end_date = datetime.strptime(text.strip(), "%Y-%m-%d %H:%M")
+            if end_date <= datetime.now():
+                await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
+                return
+            title = context.user_data.get("contest_title", "بدون عنوان")
+            description = context.user_data.get("contest_description", "")
+            prize = context.user_data.get("contest_prize", "")
+            contest_id = await db_create_contest(user_id, title, description, prize, end_date)
+            if contest_id:
+                await update.message.reply_text(f"✅ **تم إنشاء المسابقة بنجاح!**\n\n📌 العنوان: {title}\n🎁 الجائزة: {prize}\n📅 تنتهي: {text.strip()}\n🆔 معرف المسابقة: `{contest_id}`")
+            else:
+                await update.message.reply_text("❌ فشل إنشاء المسابقة")
+        except ValueError:
+            await update.message.reply_text("❌ صيغة غير صحيحة! استخدم `YYYY-MM-DD HH:MM`")
+        context.user_data.pop("state", None)
+        context.user_data.pop("contest_title", None)
+        context.user_data.pop("contest_description", None)
+        context.user_data.pop("contest_prize", None)
