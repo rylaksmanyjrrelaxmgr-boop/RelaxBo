@@ -1813,3 +1813,10 @@ if __name__ == "__main__":
         print("🛑 تم إيقاف البوت")
     except Exception as e:
         print(f"❌ خطأ فادح: {e}")
+
+# ===== تشغيل خادم الويب =====
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+    print(f"🚀 خادم الويب على المنفذ {port}")
+    # تشغيل البوت
+    asyncio.run(main())
