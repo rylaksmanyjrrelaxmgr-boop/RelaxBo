@@ -1654,44 +1654,6 @@ if __name__ == "__main__":
         print(f"❌ خطأ: {e}")
         import traceback
         traceback.print_exc()
-elif data == "groups:my":
-    groups = await db_get_user_groups(user_id)
-    
-    if not groups:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-        ])
-        await query.edit_message_text(
-            "🔒 **أنت لست مشرفاً في أي مجموعة**\n\n"
-            "📌 لتظهر المجموعة هنا:\n"
-            "• أضف البوت إلى مجموعة\n"
-            "• اجعل البوت مشرفاً\n"
-            "• اكتب `/syncgroup` في المجموعة", 
-            reply_markup=keyboard, 
-            parse_mode="MarkdownV2"
-        )
-        return
-    
-    text = "👑 **المجموعات التي تشرف عليها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    keyboard = []
-    
-    for group in groups:
-        chat_id = group[0]
-        chat_name = group[1] or str(chat_id)
-        banned = group[3]
-        role = group[4] if len(group) > 4 else '⭐ مشرف تيليجرام'
-        
-        status = "✅" if not banned else "⛔"
-        text += f"{role} {chat_name}\n"
-        keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
-    
-    keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-# ===================== تفعيل جميع الأزرار =====================
-
 # 1. 🏆 أفضل 10
 elif data == "top":
     top_users = await get_top_users(10)
@@ -1993,3 +1955,42 @@ async def db_get_allowed_sendcode_user():
 async def db_get_updates_channel():
     rows = await execute_db("SELECT value FROM settings WHERE key='updates_channel'")
     return rows[0][0] if rows else None
+# ===================== إصلاح زر مجموعاتي (داخل دالة button_callback) =====================
+# تأكد من أن هذا الكود داخل async def button_callback()
+
+elif data == "groups:my":
+    groups = await db_get_user_groups(user_id)
+    
+    if not groups:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ])
+        await query.edit_message_text(
+            "🔒 **أنت لست مشرفاً في أي مجموعة**\n\n"
+            "📌 لتظهر المجموعة هنا:\n"
+            "• أضف البوت إلى مجموعة\n"
+            "• اجعل البوت مشرفاً\n"
+            "• اكتب `/syncgroup` في المجموعة", 
+            reply_markup=keyboard, 
+            parse_mode="MarkdownV2"
+        )
+        return
+    
+    text = "👑 **المجموعات التي تشرف عليها:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = []
+    
+    for group in groups:
+        chat_id = group[0]
+        chat_name = group[1] or str(chat_id)
+        banned = group[3]
+        role = group[4] if len(group) > 4 else '⭐ مشرف تيليجرام'
+        
+        status = "✅" if not banned else "⛔"
+        text += f"{role} {chat_name}\n"
+        keyboard.append([InlineKeyboardButton(f"{status} {chat_name}", callback_data=f"groups:settings:{chat_id}")])
+    
+    keyboard.append([InlineKeyboardButton("➕ أضف البوت إلى مجموعة", url=f"https://t.me/{BOT_USERNAME}?startgroup")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
