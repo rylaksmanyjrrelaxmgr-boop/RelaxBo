@@ -1,0 +1,26 @@
+{
+  "ar": {
+    "welcome": "🌿 **مرحباً بك في ريلاكس مانيجر**",
+    "help": "❓ **المساعدة**\n/start - القائمة الرئيسية",
+    "no_channels": "لا توجد قنوات",
+    "add_channel": "➕ إضافة قناة",
+    "my_channels": "📡 قنواتي",
+    "settings": "⚙️ الإعدادات",
+    "back": "🔙 رجوع",
+    "admin_only": "🔒 هذا الأمر للمشرفين فقط!",
+    "error": "⚠️ حدث خطأ، حاول مرة أخرى",
+    "cancelled": "❌ تم الإلغاء"
+  },
+  "en": {
+    "welcome": "🌿 **Welcome to Relax Manager**",
+    "help": "❓ **Help**\n/start - Main menu",
+    "no_channels": "No channels",
+    "add_channel": "➕ Add channel",
+    "my_channels": "📡 My channels",
+    "settings": "⚙️ Settings",
+    "back": "🔙 Back",
+    "admin_only": "🔒 For admins only!",
+    "error": "⚠️ An error occurred, try again",
+    "cancelled": "❌ Cancelled"
+  }
+}
