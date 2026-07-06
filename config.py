@@ -1,7 +1,6 @@
 import os
 from cryptography.fernet import Fernet
 
-# ---- متغيرات البيئة ----
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ BOT_TOKEN غير موجود!")
@@ -12,7 +11,6 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "Reelaaaxbot")
 PORT = int(os.getenv("PORT", "10000"))
 DB_PATH = "data/bot.db"
 
-# ---- التشفير ----
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
     ENCRYPTION_KEY = Fernet.generate_key().decode()

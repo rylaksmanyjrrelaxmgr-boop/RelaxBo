@@ -29,7 +29,7 @@ async def main():
     except Exception as e:
         logger.error(f"❌ توكن غير صالح: {e}")
         return
-    
+
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, auto_register), group=1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("claim", claim))
@@ -47,7 +47,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, group_msg))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, msg_handler))
-    
+
     await app.bot.set_my_commands([
         BotCommand("start","بدء"), BotCommand("claim","مالك مخفي"),
         BotCommand("addowner","+مالك"), BotCommand("addadmin","+مشرف"),
@@ -57,15 +57,14 @@ async def main():
         BotCommand("slowmode","وضع بطيء"), BotCommand("welcome","رسالة ترحيب"),
         BotCommand("goodbye","رسالة وداع"), BotCommand("help","مساعدة")
     ])
-    
-    # واجهة الويب
+
     web_app = web.Application()
     web_app.router.add_get("/", health)
     web_app.router.add_get("/health", health)
     runner = web.AppRunner(web_app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    
+
     asyncio.create_task(auto_publish(app))
     asyncio.create_task(reminder_loop(app))
     asyncio.create_task(scheduler_loop(app))

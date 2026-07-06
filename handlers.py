@@ -10,7 +10,6 @@ from deep_translator import GoogleTranslator
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ---- Rate Limiting ----
 _requests = {}
 _RATE_LIMIT = 0.3
 
@@ -22,7 +21,6 @@ def rate_limit(update: Update) -> bool:
     _requests[uid] = now
     return True
 
-# ---- الترجمة ----
 _user_lang = {}
 TXT = {
     "ar": {"welcome": "🌿 ريلاكس مانيجر\nاختر:", "help": "/start /claim /addowner /addadmin /remove /list /contests /referral /reminders /top /language"},
@@ -35,7 +33,6 @@ async def load_lang():
     for row in await fetch("SELECT user_id, language FROM users WHERE language IS NOT NULL"):
         _user_lang[row['user_id']] = row['language']
 
-# ---- نقاط ----
 async def add_points(uid, pts):
     await execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", uid)
     await execute("UPDATE users SET points=points+? WHERE user_id=?", pts, uid)
@@ -45,7 +42,6 @@ async def add_points(uid, pts):
         if lvl > row[0]['level']:
             await execute("UPDATE users SET level=? WHERE user_id=?", lvl, uid)
 
-# ---- صلاحيات + كاش ----
 _perm_cache = {}
 _PERM_TTL = 300
 
@@ -77,7 +73,6 @@ async def get_target(update, context):
             except: return None
     return None
 
-# ---- الكلمات المحظورة كاش ----
 _banned_cache = {}
 
 async def load_banned_cache():
@@ -87,7 +82,6 @@ async def load_banned_cache():
     for r in rows:
         _banned_cache.setdefault(r['chat_id'], []).append(r['word'])
 
-# ---- دوال الحماية ----
 async def has_links(text):
     return bool(re.search(r'https?://\S+', text))
 
@@ -105,7 +99,6 @@ async def auto_penalty(bot, chat_id, user_id):
     except: pass
     await log_mod(chat_id, bot.id, user_id, "auto_kick", "مخالفة")
 
-# ---- أوامر الحماية ----
 async def cmd_lock_links(update: Update, context):
     if update.effective_chat.type not in ['group','supergroup']: return
     u, c = update.effective_user.id, update.effective_chat.id
@@ -164,7 +157,6 @@ async def cmd_goodbye(update: Update, context):
     await execute("UPDATE group_settings SET goodbye_msg=? WHERE chat_id=?", msg, c)
     await update.message.reply_text("✅ تم تعيين رسالة الوداع")
 
-# ---- أوامر أساسية ----
 async def auto_register(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
@@ -234,9 +226,6 @@ async def listall(update: Update, context):
         try: m += f"• {(await context.bot.get_chat(r[0])).first_name}\n"
         except: m += f"• {r[0]}\n"
     await update.message.reply_text(m or "فارغ")
-
-# ---- أزرار (باختصار، لن أعيد كتابتها كلها هنا، لكنها موجودة في النسخة السابقة) ----
-# سأكتب button_handler و msg_handler و group_msg كاملة.
 
 async def handle_groups(uid, context, q):
     groups = await fetch("SELECT DISTINCT bg.chat_id, bg.chat_name FROM bot_groups bg LEFT JOIN owners o ON bg.chat_id=o.chat_id AND o.user_id=? LEFT JOIN admins a ON bg.chat_id=a.chat_id AND a.user_id=? WHERE o.user_id IS NOT NULL OR a.user_id IS NOT NULL", uid, uid)
@@ -339,7 +328,14 @@ async def handle_rank(uid, context, q):
 
 async def handle_top(uid, context, q):
     top = await fetch("SELECT user_id, points, level FROM users ORDER BY points DESC LIMIT 10")
-    txt = "🏆:\n" + "\n".join(f"{i}. {(await context.bot.get_chat(u['user_id'])).first_name if (await context.bot.get_chat(u['user_id'])) else u['user_id']} Lv{u['level']}" for i,u in enumerate(top,1))
+    txt = "🏆:\n"
+    for i,u in enumerate(top,1):
+        try:
+            chat = await context.bot.get_chat(u['user_id'])
+            name = chat.first_name
+        except:
+            name = u['user_id']
+        txt += f"{i}. {name} Lv{u['level']}\n"
     await q.edit_message_text(txt or "لا يوجد")
 
 async def handle_admin_menu(uid, context, q):
@@ -348,8 +344,56 @@ async def handle_admin_menu(uid, context, q):
 
 async def handle_admin_actions(uid, context, q, d):
     if uid != OWNER_ID: return await q.answer("🔒")
-    # (نفس الأوامر السابقة)
-    pass
+    # commands for adm_users, adm_banned, adm_channels, adm_groups, adm_replies, adm_tickets,
+    # adm_addreply, adm_delreply, adm_contest, adm_broadcast, adm_backup, adm_export
+    if d == "adm_users":
+        users = await fetch("SELECT user_id FROM users WHERE banned=0")
+        txt = "👥:\n" + "\n".join(str(u['user_id']) for u in users[:50])
+        await q.edit_message_text(txt, reply_markup=admin_keyboard())
+    elif d == "adm_banned":
+        banned = await fetch("SELECT user_id FROM users WHERE banned=1")
+        txt = "🚫:\n" + "\n".join(str(u['user_id']) for u in banned[:50])
+        await q.edit_message_text(txt, reply_markup=admin_keyboard())
+    elif d == "adm_channels":
+        chs = await fetch("SELECT * FROM channels")
+        txt = "\n".join(f"{c['user_id']} - {c['channel_name'] or c['channel_id']}" for c in chs[:50])
+        await q.edit_message_text(txt or "لا يوجد", reply_markup=admin_keyboard())
+    elif d == "adm_groups":
+        groups = await fetch("SELECT * FROM bot_groups")
+        txt = "\n".join(f"{g['chat_name'] or g['chat_id']}" for g in groups[:50])
+        await q.edit_message_text(txt or "لا يوجد", reply_markup=admin_keyboard())
+    elif d == "adm_replies":
+        replies = await fetch("SELECT * FROM replies")
+        txt = "\n".join(f"{r['keyword']}: {r['reply'][:30]}" for r in replies[:50])
+        await q.edit_message_text(txt or "لا يوجد", reply_markup=admin_keyboard())
+    elif d == "adm_tickets":
+        tickets = await fetch("SELECT * FROM tickets WHERE status='pending'")
+        txt = "\n".join(f"{t['ticket_num']} - {t['username']}: {t['message'][:30]}" for t in tickets[:20])
+        await q.edit_message_text(txt or "لا تذاكر", reply_markup=admin_keyboard())
+    elif d == "adm_addreply":
+        context.user_data["state"] = "ADD_REPLY_KW"
+        await q.edit_message_text("📝 أرسل الكلمة المفتاحية:")
+    elif d == "adm_delreply":
+        context.user_data["state"] = "DEL_REPLY"
+        await q.edit_message_text("🗑️ أرسل الكلمة المفتاحية للحذف:")
+    elif d == "adm_contest":
+        context.user_data["state"] = "CONTEST_TITLE"
+        await q.edit_message_text("🏆 أرسل عنوان المسابقة:")
+    elif d == "adm_broadcast":
+        context.user_data["state"] = "BROADCAST"
+        await q.edit_message_text("📨 أرسل الرسالة للإذاعة:")
+    elif d == "adm_backup":
+        # simple backup: copy db file
+        shutil.copy("data/bot.db", "data/backup.db")
+        await q.edit_message_text("💾 تم النسخ الاحتياطي", reply_markup=admin_keyboard())
+    elif d == "adm_export":
+        await q.edit_message_text("اختر الجدول:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("users", callback_data="export:users"),
+             InlineKeyboardButton("channels", callback_data="export:channels")],
+            [InlineKeyboardButton("posts", callback_data="export:posts"),
+             InlineKeyboardButton("contests", callback_data="export:contests")],
+            [InlineKeyboardButton("🔙", callback_data="admin")]
+        ]))
 
 async def handle_export(uid, context, q, d):
     if uid != OWNER_ID: return
@@ -385,6 +429,34 @@ async def handle_general(uid, context, q, d):
         await execute("UPDATE users SET subscription_end=? WHERE user_id=?", encrypt((datetime.now()+timedelta(days=days)).isoformat()), uid)
         await q.edit_message_text(f"✅ {days} يوم")
 
+async def handle_posts(uid, context, q):
+    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
+    if not active or not active[0]['active_channel']: return await q.edit_message_text("⚠️")
+    posts = await fetch("SELECT * FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT 15", active[0]['active_channel'])
+    if not posts: return await q.edit_message_text("📭")
+    txt = "📋:\n" + "\n".join(f"• {p['text'][:50] if p['text'] else '🖼️'}..." for p in posts)
+    await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="back")]]))
+
+async def handle_recycle(uid, context, q):
+    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
+    if active and active[0]['active_channel']:
+        await execute("UPDATE posts SET published=0 WHERE channel_db_id=?", active[0]['active_channel'])
+        await q.edit_message_text("♻️")
+
+async def handle_stats(uid, context, q):
+    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
+    if not active or not active[0]['active_channel']: return await q.edit_message_text("⚠️")
+    r = await fetch("SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0", active[0]['active_channel'])
+    await q.edit_message_text(f"📊 {r[0]['c'] if r else 0}")
+
+async def handle_full_stats(uid, context, q):
+    chs = await fetch("SELECT * FROM channels WHERE user_id=?", uid)
+    txt = "📈:\n"
+    for c in chs:
+        cnt = await fetch("SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0", c['id'])
+        txt += f"• {c['channel_name'] or c['channel_id']}: {cnt[0]['c']}\n"
+    await q.edit_message_text(txt)
+
 async def button_handler(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -415,33 +487,6 @@ async def button_handler(update: Update, context):
     elif d.startswith("adm_"): await handle_admin_actions(uid, context, q, d)
     elif d.startswith("export:"): await handle_export(uid, context, q, d)
     elif d in ["help","language","lang_ar","lang_en","trial","subscribe","buy:1","buy:30"]: await handle_general(uid, context, q, d)
-
-# تعريف دوال إضافية (handle_posts, handle_recycle, handle_stats, handle_full_stats) - موجودة في النسخة السابقة
-
-async def handle_posts(uid, context, q):
-    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
-    if not active or not active[0]['active_channel']: return await q.edit_message_text("⚠️")
-    posts = await fetch("SELECT * FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT 15", active[0]['active_channel'])
-    if not posts: return await q.edit_message_text("📭")
-    txt = "📋:\n" + "\n".join(f"• {p['text'][:50] if p['text'] else '🖼️'}..." for p in posts)
-    await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="back")]]))
-
-async def handle_recycle(uid, context, q):
-    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
-    if active and active[0]['active_channel']:
-        await execute("UPDATE posts SET published=0 WHERE channel_db_id=?", active[0]['active_channel'])
-        await q.edit_message_text("♻️")
-
-async def handle_stats(uid, context, q):
-    active = (await fetch("SELECT active_channel FROM users WHERE user_id=?", uid))
-    if not active or not active[0]['active_channel']: return await q.edit_message_text("⚠️")
-    r = await fetch("SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0", active[0]['active_channel'])
-    await q.edit_message_text(f"📊 {r[0]['c'] if r else 0}")
-
-async def handle_full_stats(uid, context, q):
-    chs = await fetch("SELECT * FROM channels WHERE user_id=?", uid)
-    txt = "📈:\n" + "\n".join(f"• {c['channel_name'] or c['channel_id']}: { (await fetch('SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0', c['id']))[0]['c'] }" for c in chs)
-    await q.edit_message_text(txt)
 
 async def msg_handler(update: Update, context):
     uid = update.effective_user.id
@@ -521,14 +566,14 @@ async def group_msg(update: Update, context):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     text = update.message.text or ""
-    
+
     settings = await fetch("SELECT * FROM group_settings WHERE chat_id=?", chat_id)
     lock_links = lock_mentions = 0
     if settings:
         s = dict(settings[0])
         lock_links = s.get('lock_links', 0)
         lock_mentions = s.get('lock_mentions', 0)
-    
+
     if lock_links and await has_links(text):
         try: await update.message.delete()
         except: pass
@@ -539,7 +584,7 @@ async def group_msg(update: Update, context):
         except: pass
         await auto_penalty(context.bot, chat_id, user_id)
         return
-    
+
     words = _banned_cache.get(chat_id, []) + _banned_cache.get(-1, [])
     for word in words:
         if word in text.lower():
@@ -547,7 +592,7 @@ async def group_msg(update: Update, context):
             except: pass
             await auto_penalty(context.bot, chat_id, user_id)
             return
-    
+
     r = await fetch("SELECT reply FROM replies WHERE keyword=?", text.lower())
     if r: return await update.message.reply_text(r[0]['reply'])
     replies = {"مرحباً":"أهلاً 🤍", "السلام عليكم":"وعليكم السلام 🌹", "شكراً":"العفو"}

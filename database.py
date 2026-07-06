@@ -1,7 +1,6 @@
 import aiosqlite
 from config import DB_PATH, fernet
 
-# ---- تجميع الاتصال ----
 _conn = None
 
 async def get_conn():
