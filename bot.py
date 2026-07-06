@@ -1,3 +1,5 @@
+import nest_asyncio
+nest_asyncio.apply()
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -545,12 +547,6 @@ def mute_duration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ===================== الأوامر =====================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await db_register_user(user.id)
-    user_language[user.id] = await db_get_user_language(user.id)
-    keyboard = await get_main_keyboard(user.id)
-    await update.message.reply_text(get_text(user.id, "welcome"), reply_markup=keyboard, parse_mode="MarkdownV2")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1608,3 +1604,54 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"✅ واجهة الويب: http://0.0.0.0:{port}")
+
+# ===================== دوال مساعدة للإحصائيات =====================
+async def db_get_user_groups_count(user_id: int) -> int:
+    rows = await execute_db("SELECT COUNT(*) FROM bot_groups WHERE added_by=?", (user_id,))
+    return rows[0][0] if rows else 0
+
+async def db_get_channel_info(channel_db_id: int):
+    rows = await execute_db("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
+    return rows[0] if rows else None
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    
+    await db_register_user(user_id)
+    user_language[user_id] = await db_get_user_language(user_id)
+    
+    # ===== جلب الإحصائيات =====
+    channels = await db_get_channels(user_id)
+    active = await db_get_active_channel(user_id)
+    unpublished = await db_get_unpublished_count(active) if active else 0
+    groups = await db_get_user_groups_count(user_id)
+    has_sub = await db_has_active_subscription(user_id)
+    auto_status = await db_auto_status(user_id)
+    
+    # ===== عرض القناة النشطة =====
+    if active:
+        ch_info = await db_get_channel_info(active)
+        channel_display = ch_info[1] if ch_info else "غير معروف"
+    else:
+        channel_display = "لا توجد قنوات"
+    
+    # ===== عرض الاشتراك =====
+    sub_text = "✅ مفعل" if has_sub else "❌ غير مفعل"
+    
+    # ===== عرض النشر التلقائي =====
+    auto_text = "✅ مفعل" if auto_status else "❌ معطل"
+    
+    # ===== إنشاء النص =====
+    text = f"""🌿 **ريلاكس مانيجر**
+━━━━━━━━━━━━━━━━━━━━━━
+👤 المعرف: `{user_id}`
+👥 مجموعاتي: {groups}
+💎 الاشتراك: {sub_text}
+📡 القناة النشطة: {channel_display}
+📝 المنشورات غير المنشورة: {unpublished}
+⚙️ النشر التلقائي: {auto_text}
+━━━━━━━━━━━━━━━━━━━━━━
+اختر الإجراء المناسب:"""
+    
+    keyboard = await get_main_keyboard(user_id)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="MarkdownV2")

@@ -6,17 +6,17 @@ import sys
 import nest_asyncio
 from bot import run_bot
 
-# تطبيق nest_asyncio لحل مشكلة event loop
 nest_asyncio.apply()
+
+async def main():
+    await run_bot()
 
 if __name__ == "__main__":
     try:
         print("🚀 جاري تشغيل البوت...")
-        asyncio.run(run_bot())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n🛑 تم إيقاف البوت")
     except Exception as e:
         print(f"❌ خطأ: {e}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
