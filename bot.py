@@ -1690,3 +1690,306 @@ elif data == "groups:my":
     keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+# ===================== تفعيل جميع الأزرار =====================
+
+# 1. 🏆 أفضل 10
+elif data == "top":
+    top_users = await get_top_users(10)
+    if not top_users:
+        await query.edit_message_text("📭 لا توجد نقاط مسجلة")
+        return
+    text = "🏆 **أفضل 10 مستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for idx, (uid, points, level) in enumerate(top_users, 1):
+        try:
+            user = await context.bot.get_chat(uid)
+            name = user.first_name or str(uid)
+        except:
+            name = str(uid)
+        text += f"{idx}. {name} → المستوى {level} ({points} نقطة)\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 2. 🏆 المسابقات
+elif data == "contests_menu":
+    contests = await db_get_active_contests()
+    if not contests:
+        await query.edit_message_text("📭 لا توجد مسابقات نشطة حالياً")
+        return
+    text = "🏆 **المسابقات النشطة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = []
+    for contest in contests:
+        cid, title, prize, end_date = contest
+        text += f"📌 {title}\n🎁 {prize}\n📅 ينتهي: {end_date[:16]}\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        keyboard.append([InlineKeyboardButton(f"📝 شارك في {title[:20]}", callback_data=f"contest_join:{cid}")])
+    keyboard.append([InlineKeyboardButton("🏆 الفائزون", callback_data="contest_winners")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 3. 🔗 الإحالات
+elif data == "referral:menu":
+    referral_code = await db_get_referral_code(user_id)
+    if not referral_code:
+        referral_code = await db_generate_referral_code(user_id)
+    stats = await db_get_referral_stats(user_id)
+    text = f"🔗 **الإحالات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 رابطك:\n`https://t.me/{BOT_USERNAME}?start=ref_{referral_code}`\n\n👥 عدد المحالين: {stats['total_referrals']}\n🎁 المكافآت المتاحة: {stats['available_days']} يوم"
+    keyboard = [
+        [InlineKeyboardButton("📋 نسخ الرابط", callback_data=f"referral_copy:{referral_code}")],
+        [InlineKeyboardButton("🎁 صرف المكافآت", callback_data="referral_claim")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 4. ⏰ التذكيرات
+elif data == "reminder:menu":
+    settings = await db_get_user_reminder_settings(user_id)
+    status_sub = "🟢 مفعل" if settings['subscription_reminder'] else "🔴 معطل"
+    status_daily = "🟢 مفعل" if settings['daily_stats_reminder'] else "🔴 معطل"
+    status_weekly = "🟢 مفعل" if settings['weekly_report'] else "🔴 معطل"
+    text = f"⏰ **التذكيرات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تذكير الاشتراك: {status_sub}\n📊 التقرير اليومي: {status_daily}\n📈 التقرير الأسبوعي: {status_weekly}\n⏰ التذكير قبل: {settings['reminder_days_before']} أيام"
+    keyboard = [
+        [InlineKeyboardButton("🔔 تذكير الاشتراك", callback_data="reminder_toggle_sub"), InlineKeyboardButton("📊 يومي", callback_data="reminder_toggle_daily")],
+        [InlineKeyboardButton("📈 أسبوعي", callback_data="reminder_toggle_weekly"), InlineKeyboardButton("⏰ عدد الأيام", callback_data="reminder_set_days")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 5. 📢 التحديثات
+elif data == "updates":
+    channel = await db_get_updates_channel()
+    if channel:
+        text = f"📢 **قناة التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 @{channel}\n\nتابع القناة لمعرفة آخر التحديثات"
+        keyboard = [[InlineKeyboardButton("📢 افتح القناة", url=f"https://t.me/{channel}")], [InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+    else:
+        text = "📢 **لم يتم تعيين قناة التحديثات**"
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 6. 📊 رتبتي
+elif data == "rank":
+    level_data = await db_get_user_level(user_id)
+    text = f"📊 **رتبتك**\n━━━━━━━━━━━━━━━━━━━━━━\n⭐ المستوى: {level_data['level']}\n📈 النقاط: {level_data['points']}\n📌 التالي: {LEVEL_REQUIREMENTS.get(level_data['level'] + 1, level_data['points'])} نقطة"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 7. 📝 جدولة منشور
+elif data == "schedule_post":
+    context.user_data["state"] = "WAITING_SCHEDULE_POST"
+    await query.edit_message_text("📝 أرسل المنشور بالصيغة:\n`YYYY-MM-DD HH:MM نص المنشور`")
+
+# 8. 📤 نشر الكل
+elif data == "publish_all":
+    await query.edit_message_text("📤 جاري النشر في جميع القنوات...")
+    channels = await db_get_channels(user_id)
+    if not channels:
+        await query.edit_message_text("📭 لا توجد قنوات")
+        return
+    success = 0
+    fail = 0
+    for ch in channels:
+        ch_db_id, ch_tele_id, ch_name, banned = ch
+        if banned:
+            continue
+        post = await db_get_next_post(ch_db_id)
+        if not post:
+            continue
+        try:
+            if post["media_type"] == "photo":
+                await context.bot.send_photo(ch_tele_id, post["media_file_id"], caption=post["text"])
+            elif post["media_type"] == "video":
+                await context.bot.send_video(ch_tele_id, post["media_file_id"], caption=post["text"])
+            else:
+                await context.bot.send_message(ch_tele_id, post["text"])
+            await db_mark_published(post["id"])
+            success += 1
+        except:
+            fail += 1
+        await asyncio.sleep(0.5)
+    await query.edit_message_text(f"📤 **نتيجة النشر**\n✅ نجح: {success}\n❌ فشل: {fail}")
+
+# 9. 🏆 إنشاء مسابقة (لوحة الأدمن)
+elif data == "admin:create_contest":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_CONTEST_TITLE"
+    await query.edit_message_text("📝 أرسل **عنوان** المسابقة:")
+
+# 10. 🏅 إعلان فائز (لوحة الأدمن)
+elif data == "admin:declare_winner":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await query.edit_message_text("📝 /declare_winner معرف_المسابقة معرف_المستخدم\nمثال: `/declare_winner 5 123456789`")
+
+# 11. 💾 نسخة احتياطية (لوحة الأدمن)
+elif data == "admin:backup":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await create_backup()
+    await query.edit_message_text("✅ تم إنشاء نسخة احتياطية مشفرة")
+
+# 12. 🔄 استعادة (لوحة الأدمن)
+elif data == "admin:restore_backup":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    backups = await list_backups()
+    if not backups:
+        await query.edit_message_text("📭 لا توجد نسخ احتياطية")
+        return
+    keyboard = []
+    for b in backups[:10]:
+        keyboard.append([InlineKeyboardButton(b.name, callback_data=f"admin:restore_backup_select:{b.name}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")])
+    await query.edit_message_text("💾 اختر النسخة للاستعادة:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# 13. 📢 تحديثات (لوحة الأدمن)
+elif data == "admin:updates":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await query.edit_message_text("📢 أرسل نص التحديث لنشره في قناة التحديثات")
+    context.user_data["state"] = "WAITING_UPDATE_TEXT"
+
+# 14. 📨 إرسال رسالة (لوحة الأدمن)
+elif data == "admin:broadcast":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    await query.edit_message_text("📨 أرسل النص للإرسال لجميع المستخدمين")
+    context.user_data["state"] = "WAITING_BROADCAST"
+
+# 15. 📋 تذاكر (لوحة الأدمن)
+elif data == "admin:support_tickets":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    tickets = await db_get_all_tickets(10)
+    if not tickets:
+        await query.edit_message_text("📭 لا توجد تذاكر")
+        return
+    text = "📋 **تذاكر الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for t in tickets:
+        text += f"#{t[4]} | {t[2]} | {t[5]} | {t[6][:16]}\n📝 {t[3][:50]}\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 16. 📁 صلاحيات (لوحة الأدمن)
+elif data == "admin:manage_sendcode":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    allowed = await db_get_allowed_sendcode_user()
+    text = f"📁 **صلاحية /sendcode**\nالمستخدم الحالي: {allowed if allowed else 'لا يوجد'}"
+    keyboard = [
+        [InlineKeyboardButton("➕ تعيين مستخدم", callback_data="admin:set_sendcode_user")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 17. 👑 + مشرف (لوحة الأدمن)
+elif data == "admin:add_admin":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_ADMIN_ID_ADD"
+    await query.edit_message_text("👑 أرسل معرف المستخدم لإضافته كمشرف:")
+
+# 18. 🗑️ - مشرف (لوحة الأدمن)
+elif data == "admin:remove_admin":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    context.user_data["state"] = "WAITING_ADMIN_ID_REMOVE"
+    await query.edit_message_text("🗑️ أرسل معرف المستخدم لإزالته من المشرفين:")
+
+# 19. 💬 ردود (لوحة الأدمن)
+elif data == "admin:replies":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    replies = await db_get_all_replies()
+    if not replies:
+        text = "📭 لا توجد ردود"
+    else:
+        text = "💬 **الردود التلقائية**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for kw, rep in replies[:20]:
+            text += f"• {kw} → {rep[:30]}{'...' if len(rep) > 30 else ''}\n"
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة رد", callback_data="admin:add_reply")],
+        [InlineKeyboardButton("🗑️ حذف رد", callback_data="admin:del_reply")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# 20. 🚫 كلمات محظورة (عامة) (لوحة الأدمن)
+elif data == "admin:banned_words":
+    if user_id != MAIN_ADMIN_ID and user_id != PRIMARY_OWNER_ID:
+        await query.edit_message_text("🔒 هذا الأمر للمطور فقط!")
+        return
+    words = await db_get_banned_words(-1)
+    if not words:
+        text = "📭 لا توجد كلمات محظورة عامة"
+    else:
+        text = "🚫 **الكلمات المحظورة عامة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for w in words[:20]:
+            text += f"• {w[0]}\n"
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة كلمة", callback_data="admin:add_banned_word")],
+        [InlineKeyboardButton("🗑️ حذف كلمة", callback_data="admin:remove_banned_word")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin:panel")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
+
+# ===================== دوال مساعدة =====================
+async def get_top_users(limit=10):
+    rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
+    return rows if rows else []
+
+async def db_get_active_contests():
+    rows = await execute_db("SELECT id, title, prize, end_date FROM contests WHERE status='active' ORDER BY end_date LIMIT 10")
+    return rows if rows else []
+
+async def db_get_referral_code(user_id):
+    rows = await execute_db("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
+    return rows[0][0] if rows else None
+
+async def db_generate_referral_code(user_id):
+    code = hashlib.md5(f"{user_id}{time.time()}".encode()).hexdigest()[:8]
+    await execute_db("UPDATE users SET referral_code=? WHERE user_id=?", (code, user_id))
+    return code
+
+async def db_get_referral_stats(user_id):
+    total = await execute_db("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
+    rewards = await execute_db("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
+    total_days = rewards[0][0] if rewards else 0
+    claimed = rewards[0][1] if rewards else 0
+    return {
+        "total_referrals": total[0][0] if total else 0,
+        "available_days": total_days - claimed
+    }
+
+async def db_get_user_reminder_settings(user_id):
+    rows = await execute_db("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before FROM user_reminder_settings WHERE user_id=?", (user_id,))
+    if rows:
+        return {"subscription_reminder": rows[0][0], "daily_stats_reminder": rows[0][1], "weekly_report": rows[0][2], "reminder_days_before": rows[0][3] if rows[0][3] else 3}
+    await execute_db("INSERT INTO user_reminder_settings (user_id) VALUES (?)", (user_id,))
+    return {"subscription_reminder": 1, "daily_stats_reminder": 0, "weekly_report": 1, "reminder_days_before": 3}
+
+async def create_backup():
+    import shutil
+    backup_file = BACKUP_DIR / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    shutil.copy2(DB_PATH, backup_file)
+    return backup_file
+
+async def list_backups():
+    return sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+
+async def db_get_allowed_sendcode_user():
+    rows = await execute_db("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
+    return rows[0][0] if rows else None
+
+async def db_get_updates_channel():
+    rows = await execute_db("SELECT value FROM settings WHERE key='updates_channel'")
+    return rows[0][0] if rows else None
