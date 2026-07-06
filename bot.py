@@ -1779,3 +1779,119 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if word in text_lower:
             await update.message.reply_text(reply)
             break
+# ===================== الدوال المفقودة =====================
+
+# 1. db_get_security_settings
+async def db_get_security_settings(chat_id: int):
+    return {"auto_penalty": "kick", "auto_mute_duration": 60}
+
+# 2. apply_penalty
+async def apply_penalty(bot, chat_id, user_id, settings):
+    penalty = settings.get('auto_penalty', 'none')
+    if penalty == 'none':
+        return
+    if penalty == 'kick':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'ban':
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+        except:
+            pass
+    elif penalty == 'mute':
+        try:
+            duration = settings.get('auto_mute_duration', 60)
+            until_date = datetime.now() + timedelta(minutes=duration)
+            await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until_date)
+        except:
+            pass
+
+# 3. db_get_reply
+async def db_get_reply(keyword):
+    rows = await execute_db("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
+    return rows[0][0] if rows else None
+
+# 4. db_add_reply
+async def db_add_reply(keyword, reply):
+    await execute_db("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?, ?)", (keyword.lower(), reply))
+
+# 5. db_del_reply
+async def db_del_reply(keyword):
+    await execute_db("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
+
+# 6. db_get_all_replies
+async def db_get_all_replies():
+    return await execute_db("SELECT keyword, reply FROM group_replies ORDER BY keyword")
+
+# 7. db_get_banned_words
+async def db_get_banned_words(chat_id: int):
+    return await execute_db("SELECT word FROM banned_words WHERE chat_id=? OR chat_id=-1 ORDER BY word", (chat_id,))
+
+# 8. db_add_banned_word
+async def db_add_banned_word(word: str, chat_id: int, added_by: int):
+    await execute_db("INSERT OR IGNORE INTO banned_words (word, chat_id, added_by) VALUES (?, ?, ?)", (word.lower(), chat_id, added_by))
+
+# 9. db_remove_banned_word
+async def db_remove_banned_word(word: str, chat_id: int):
+    await execute_db("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word.lower(), chat_id))
+
+# 10. db_get_updates_channel
+async def db_get_updates_channel():
+    rows = await execute_db("SELECT value FROM settings WHERE key='updates_channel'")
+    return rows[0][0] if rows else None
+
+# 11. db_get_allowed_sendcode_user
+async def db_get_allowed_sendcode_user():
+    rows = await execute_db("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
+    return rows[0][0] if rows else None
+
+# 12. create_backup
+async def create_backup():
+    import shutil
+    backup_file = BACKUP_DIR / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    shutil.copy2(DB_PATH, backup_file)
+    return backup_file
+
+# 13. list_backups
+async def list_backups():
+    return sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+
+# 14. db_get_user_level
+async def db_get_user_level(user_id: int):
+    rows = await execute_db("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
+    if rows:
+        return {"points": rows[0][0], "level": rows[0][1]}
+    return {"points": 0, "level": 1}
+
+# 15. db_get_referral_code
+async def db_get_referral_code(user_id: int):
+    rows = await execute_db("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
+    return rows[0][0] if rows else None
+
+# 16. db_get_referral_stats
+async def db_get_referral_stats(user_id: int):
+    total = await execute_db("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
+    rewards = await execute_db("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
+    total_days = rewards[0][0] if rewards else 0
+    claimed = rewards[0][1] if rewards else 0
+    return {"total_referrals": total[0][0] if total else 0, "available_days": total_days - claimed}
+
+# 17. db_get_user_reminder_settings
+async def db_get_user_reminder_settings(user_id: int):
+    rows = await execute_db("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before FROM user_reminder_settings WHERE user_id=?", (user_id,))
+    if rows:
+        return {"subscription_reminder": rows[0][0], "daily_stats_reminder": rows[0][1], "weekly_report": rows[0][2], "reminder_days_before": rows[0][3] if rows[0][3] else 3}
+    await execute_db("INSERT INTO user_reminder_settings (user_id) VALUES (?)", (user_id,))
+    return {"subscription_reminder": 1, "daily_stats_reminder": 0, "weekly_report": 1, "reminder_days_before": 3}
+
+# 18. db_get_active_contests
+async def db_get_active_contests():
+    return await execute_db("SELECT id, title, prize, end_date FROM contests WHERE status='active' ORDER BY end_date LIMIT 10")
+
+# 19. db_get_top_users
+async def db_get_top_users(limit=10):
+    rows = await execute_db("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
+    return rows if rows else []
