@@ -303,15 +303,13 @@ def admin_kb(uid):
         [InlineKeyboardButton(t(uid, "back"), callback_data="back")],
     ])
 
-# ========== handlers ==========
-
-
+# الأوامر الأساسية
 async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
         if m.id == context.bot.id:
             cid, uid = update.effective_chat.id, update.effective_user.id
-            await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", cid, update.effective_chat.title, uid); await db("INSERT OR IGNORE INTO owners VALUES(?,?)", cid, uid)
+            await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", cid, update.effective_chat.title, uid)
             if not await db1("SELECT 1 FROM owners WHERE chat_id=?", cid):
                 await db("INSERT INTO owners VALUES(?,?)", cid, uid)
                 try: await context.bot.send_message(uid, f"✅ مالك مخفي\n📌 {update.effective_chat.title}")
@@ -351,24 +349,7 @@ async def start(update: Update, context):
             await db("UPDATE rewards SET total=total+5 WHERE user_id=?", ref['user_id'])
     await update.message.reply_text(f"🌿 {BOT_NAME}\nاختر:", reply_markup=main_kb(u.id))
 
-# جميع الأوامر الأساسية (موجودة وسيتم إدراجها كما في السابق بدون اختصار)
-# نظراً لطول الكود جداً، سأقوم بإدراج كافة الدوال التي تم تعريفها في النسخ المستقرة السابقة مع إعلان global الصحيح.
-
-# سأضع الدوال تباعاً مع التأكد من وجود تعريفاتها وعدم ضغطها.
-
 async def help_cmd(update, context): await update.message.reply_text("🛡️ جميع الأوامر متاحة")
-
-async def check_cmd(update,context):
-    uid=update.effective_user.id
-    gs=await db("SELECT * FROM groups")
-    my_owners=await db("SELECT * FROM owners WHERE user_id=?", uid)
-    my_admins=await db("SELECT * FROM admins WHERE user_id=?", uid)
-    msg=f"📊 المجموعات المسجلة: {len(gs)}
-👑 مالك في: {len(my_owners)}
-🛡️ مشرف في: {len(my_admins)}"
-    await update.message.reply_text(msg)
-
-
 async def ping_cmd(update, context):
     start = time.time(); msg = await update.message.reply_text("🫀...")
     end = time.time(); ping_time = round((end - start) * 1000)
@@ -380,7 +361,8 @@ async def claim(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
     if update.effective_chat.type not in ['group','supergroup']: return
     await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", c, update.effective_chat.title, u)
-    await db("INSERT OR IGNORE INTO owners VALUES(?,?)",c,u); await update.message.reply_text("✅ مالك مخفي")
+    await db("INSERT OR IGNORE INTO owners VALUES(?,?)",c,u)
+    await update.message.reply_text("✅ مالك مخفي")
 
 async def addowner(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
@@ -764,7 +746,7 @@ async def show_group_settings(query, uid, cid):
     ])
     await query.edit_message_text(txt, reply_markup=kb)
 
-# جميع الكولباكس (كاملة)
+# جميع الكولباكس
 async def btn(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -878,14 +860,13 @@ async def btn(update: Update, context):
         await q.edit_message_text(f"📊 {ch['channel_name']}\n📝 الكل: {total['c']}\n✅ منشور: {pub['c']}\n⏳ غير منشور: {unpub['c']}")
     elif d == "grps":
         # جلب كل المجموعات التي يملك المستخدم صلاحية عليها
+        # (مضيف، مالك مخفي، مشرف مخفي)
         all_groups = await db("""
             SELECT DISTINCT g.chat_id, g.chat_name FROM groups g
             LEFT JOIN owners o ON g.chat_id = o.chat_id AND o.user_id = ?
             LEFT JOIN admins a ON g.chat_id = a.chat_id AND a.user_id = ?
             WHERE g.added_by = ? OR o.user_id IS NOT NULL OR a.user_id IS NOT NULL
         """, uid, uid, uid)
-        # إضافة المجموعات التي هو مشرف تيليجرام فيها (غير مسجلة بالضرورة)
-        # يمكن الاكتفاء بالمخزنة، أو نضيف فحص تيليجرام إذا أردت (لكن قد يكون بطيء)
         if not all_groups:
             return await q.edit_message_text("📭 لا تملك صلاحيات في أي مجموعة")
         kb = []
@@ -1462,10 +1443,8 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("ping", ping_cmd))
-    app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("reload", reload_cmd))
     app.add_handler(CommandHandler("panel", panel_cmd))
-    
     app.add_handler(CommandHandler("claim", claim))
     app.add_handler(CommandHandler("addowner", addowner))
     app.add_handler(CommandHandler("addadmin", addadmin))
