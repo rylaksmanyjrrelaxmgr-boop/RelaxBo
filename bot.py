@@ -619,6 +619,19 @@ async def ping_cmd(update: Update, context):
     try: await db1("SELECT 1"); db_status = "✅"
     except: db_status = "❌"
     await msg.edit_text(f"🫀 بنق: {ping_time}ms\n🗄️ القاعدة: {db_status}")
+async def ping_cmd(update: Update, context):
+    start = time.time()
+    msg = await update.message.reply_text("🫀 جاري الفحص...")
+    end = time.time()
+    ping_time = round((end - start) * 1000, 2)
+    try:
+        await db1("SELECT 1")
+        db_status = "✅"
+    except:
+        db_status = "❌"
+    await msg.edit_text(f"🫀 بنق: {ping_time}ms
+🗄️ القاعدة: {db_status}")
+
 async def reload_cmd(update: Update, context):
     if update.effective_user.id != OWNER: return await update.message.reply_text("❌")
     await reload_banned_words(); await reload_replies(); await reload_groups()
