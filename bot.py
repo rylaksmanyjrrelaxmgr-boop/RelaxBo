@@ -862,11 +862,19 @@ async def btn(update: Update, context):
         unpub = await db1("SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0", ch['id'])
         await q.edit_message_text(f"📊 {ch['channel_name']}\n📝 الكل: {total['c']}\n✅ منشور: {pub['c']}\n⏳ غير منشور: {unpub['c']}")
     elif d == "grps":
-        gs = await db("SELECT * FROM groups WHERE added_by=?", uid)
-        if not gs:
-            return await q.edit_message_text("📭 لا تملك مجموعات")
+        # جلب كل المجموعات التي يملك المستخدم صلاحية عليها
+        all_groups = await db("""
+            SELECT DISTINCT g.chat_id, g.chat_name FROM groups g
+            LEFT JOIN owners o ON g.chat_id = o.chat_id AND o.user_id = ?
+            LEFT JOIN admins a ON g.chat_id = a.chat_id AND a.user_id = ?
+            WHERE g.added_by = ? OR o.user_id IS NOT NULL OR a.user_id IS NOT NULL
+        """, uid, uid, uid)
+        # إضافة المجموعات التي هو مشرف تيليجرام فيها (غير مسجلة بالضرورة)
+        # يمكن الاكتفاء بالمخزنة، أو نضيف فحص تيليجرام إذا أردت (لكن قد يكون بطيء)
+        if not all_groups:
+            return await q.edit_message_text("📭 لا تملك صلاحيات في أي مجموعة")
         kb = []
-        for g in gs:
+        for g in all_groups:
             kb.append([InlineKeyboardButton(f"📌 {g['chat_name']}", callback_data=f"mgr_{g['chat_id']}")])
         kb.append([InlineKeyboardButton("🔙", callback_data="back")])
         await q.edit_message_text("اختر مجموعة لإدارتها:", reply_markup=InlineKeyboardMarkup(kb))
