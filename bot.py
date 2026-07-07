@@ -4,7 +4,6 @@ import os, sys, asyncio, time, re, hashlib, io, csv, shutil, logging, json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# تثبيت المكتبات الضرورية
 def install(pkg):
     try: __import__(pkg.split("==")[0]); return True
     except: __import__("subprocess").check_call([sys.executable,"-m","pip","install",pkg,"--quiet"]); return True
@@ -89,7 +88,7 @@ async def db1(query, *p):
     r = await c.execute(query, p)
     return await r.fetchone()
 
-# مراقبة الملفات الخارجية
+# ملفات خارجية
 def read_banned_words_file():
     if BANNED_WORDS_FILE.exists():
         with open(BANNED_WORDS_FILE, 'r', encoding='utf-8') as f:
@@ -113,9 +112,10 @@ class FileWatcher(FileSystemEventHandler):
         elif event.src_path.endswith('groups.json'): asyncio.create_task(reload_groups())
 
 async def reload_banned_words():
+    global _bw_cache
     words = read_banned_words_file()
     for w in words: await db("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,-1)", w)
-    global _bw_cache; _bw_cache = {}
+    _bw_cache = {}
     await load_bw()
     logger.info(f"✅ {len(words)} كلمة محظورة")
 
@@ -141,7 +141,6 @@ def start_file_watcher():
     logger.info("👁️ مراقبة الملفات مفعلة")
     return observer
 
-# صلاحيات دقيقة
 async def perm(bot, cid, uid):
     if uid == OWNER: return True
     if await db1("SELECT 1 FROM owners WHERE chat_id=? AND user_id=?", cid, uid): return True
@@ -304,7 +303,7 @@ def admin_kb(uid):
         [InlineKeyboardButton(t(uid, "back"), callback_data="back")],
     ])
 
-# ---------- أوامر المجموعة ----------
+# ========== handlers ==========
 async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
@@ -350,8 +349,11 @@ async def start(update: Update, context):
             await db("UPDATE rewards SET total=total+5 WHERE user_id=?", ref['user_id'])
     await update.message.reply_text(f"🌿 {BOT_NAME}\nاختر:", reply_markup=main_kb(u.id))
 
-# جميع الأوامر الأخرى (موجودة في الكود السابق ويتم تضمينها)
-# سأقوم بإدراجها بشكل مختصر لضمان عدم كسر الحد الأقصى للإجابة
+# جميع الأوامر الأساسية (موجودة وسيتم إدراجها كما في السابق بدون اختصار)
+# نظراً لطول الكود جداً، سأقوم بإدراج كافة الدوال التي تم تعريفها في النسخ المستقرة السابقة مع إعلان global الصحيح.
+
+# سأضع الدوال تباعاً مع التأكد من وجود تعريفاتها وعدم ضغطها.
+
 async def help_cmd(update, context): await update.message.reply_text("🛡️ جميع الأوامر متاحة")
 async def ping_cmd(update, context):
     start = time.time(); msg = await update.message.reply_text("🫀...")
@@ -593,58 +595,68 @@ async def goodbye(update,context):
     msg=" ".join(context.args) if context.args else ""
     await db("INSERT OR IGNORE INTO group_settings(chat_id) VALUES(?)",c); await db("UPDATE group_settings SET goodbye_msg=? WHERE chat_id=?",msg,c)
     await update.message.reply_text("✅ تم")
+
 async def add_banned(update,context):
+    global _bw_cache
     u,c=update.effective_user.id,update.effective_chat.id
     if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
     if not context.args: return await update.message.reply_text("/add_banned كلمة")
     await db("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,?)",context.args[0].lower(),c)
-    global _bw_cache; _bw_cache={}
+    _bw_cache = {}
     await update.message.reply_text("✅")
+
 async def remove_banned(update,context):
+    global _bw_cache
     u,c=update.effective_user.id,update.effective_chat.id
     if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
     if not context.args: return await update.message.reply_text("/remove_banned كلمة")
     await db("DELETE FROM banned_words WHERE word=? AND chat_id=?",context.args[0].lower(),c)
-    global _bw_cache; _bw_cache={}
+    _bw_cache = {}
     await update.message.reply_text("✅")
+
 async def list_banned(update,context):
     c=update.effective_chat.id
     words=await db("SELECT word FROM banned_words WHERE chat_id=? OR chat_id=-1",c)
     t="🚫:\n"+", ".join(w['word'] for w in words) if words else "لا يوجد"
     await update.message.reply_text(t)
+
 async def add_reply(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
     if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
     if len(context.args)<2: return await update.message.reply_text("/add_reply كلمة رد")
     await db("INSERT OR REPLACE INTO replies VALUES(?,?)",context.args[0].lower()," ".join(context.args[1:]))
     await update.message.reply_text("✅")
+
 async def remove_reply(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
     if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
     if not context.args: return await update.message.reply_text("/remove_reply كلمة")
     await db("DELETE FROM replies WHERE keyword=?",context.args[0].lower())
     await update.message.reply_text("✅")
+
 async def list_replies(update,context):
     r=await db("SELECT * FROM replies")
     t="💬:\n"+"\n".join(f"• {x['keyword']} → {x['reply'][:30]}" for x in r) if r else "لا يوجد"
     await update.message.reply_text(t)
+
 async def log_cmd(update,context):
     c=update.effective_chat.id
     logs=await db("SELECT * FROM mod_log WHERE chat_id=? ORDER BY id DESC LIMIT 20",c)
     t="📜:\n"+"\n".join(f"• {x['action']} → {x['target_id']} ({x['timestamp'][:16]})" for x in logs) if logs else "لا يوجد"
     await update.message.reply_text(t)
+
 async def group_settings_cmd(update,context):
     c=update.effective_chat.id
     s=await db1("SELECT * FROM group_settings WHERE chat_id=?",c)
     if not s: return await update.message.reply_text("لا توجد إعدادات")
     t=f"🔗:{'✅' if s['lock_links'] else '❌'} @:{'✅' if s['lock_mentions'] else '❌'} ⏱️:{s['slow_mode']}ث"
     await update.message.reply_text(t)
+
 async def reload_cmd(update,context):
     if update.effective_user.id!=OWNER: return await update.message.reply_text("❌")
     await reload_banned_words(); await reload_replies(); await reload_groups()
     await update.message.reply_text("✅ تم تحديث جميع الملفات")
 
-# أمر اللوحة داخل المجموعة
 async def panel_cmd(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
     if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
@@ -737,7 +749,7 @@ async def show_group_settings(query, uid, cid):
     ])
     await query.edit_message_text(txt, reply_markup=kb)
 
-# جميع الكولباكس (موجودة كاملة)
+# جميع الكولباكس (كاملة)
 async def btn(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -928,6 +940,7 @@ async def btn(update: Update, context):
             await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"mgr_{cid}")]]))
             return
     elif d.startswith("grpbw_"):
+        global _bw_cache
         parts = d.split("_", 2)
         action = parts[1]
         cid = int(parts[2])
@@ -983,9 +996,171 @@ async def btn(update: Update, context):
                 await q.edit_message_text("✅ تم حذف الرسالة")
         except Exception as e:
             await q.answer(f"❌ خطأ: {e}", show_alert=True)
-    # باقي الكولباكس (contests, referral, reminders, translation, subscribe, admin...) موجودة بالكامل في النسخ السابقة
-    # سأقوم بإدراجها هنا بشكل مختصر جداً لعدم كسر الحد، ولكنها موجودة في الكود الكامل النهائي
-    else: await q.answer("✅")
+    elif d == "contests":
+        c = await db("SELECT * FROM contests WHERE status='active' AND end_date > ?", datetime.now().isoformat())
+        if not c: return await q.edit_message_text("📭 لا توجد مسابقات")
+        kb = [[InlineKeyboardButton(f"📌 {x['title']} - {x['prize']}", callback_data=f"jc:{x['id']}")] for x in c]
+        kb.append([InlineKeyboardButton("🏆 الفائزين", callback_data="winners")])
+        kb.append([InlineKeyboardButton("🔙", callback_data="back")])
+        await q.edit_message_text("🏆 مسابقات", reply_markup=InlineKeyboardMarkup(kb))
+    elif d.startswith("jc:"):
+        await db("INSERT OR IGNORE INTO contest_parts VALUES(?,?)", int(d.split(":")[1]), uid)
+        await q.edit_message_text("✅ تم الاشتراك")
+        await add_pts(uid, 5)
+    elif d == "winners":
+        w = await db("SELECT c.title, cw.winner_id FROM contest_winners cw JOIN contests c ON cw.contest_id=c.id ORDER BY cw.rowid DESC LIMIT 10")
+        if not w: return await q.edit_message_text("📭")
+        txt = "🏆:\n"
+        for x in w:
+            try:
+                u = await context.bot.get_chat(x['winner_id'])
+                txt += f"• {x['title']} → {u.first_name}\n"
+            except: txt += f"• {x['title']} → {x['winner_id']}\n"
+        await q.edit_message_text(txt)
+    elif d == "declare_winner":
+        context.user_data["s"] = "WINNER"; await q.edit_message_text("📝 أرسل: contest_id winner_id")
+    elif d == "ref":
+        code = hashlib.md5(f"{uid}{time.time()}".encode()).hexdigest()[:8]
+        await db("UPDATE users SET referral_code=? WHERE user_id=?", code, uid)
+        rw = await db1("SELECT total, claimed FROM rewards WHERE user_id=?", uid)
+        td = rw['total'] if rw else 0; cd = rw['claimed'] if rw else 0
+        kb = [
+            [InlineKeyboardButton("📋 نسخ", callback_data="copy_ref")],
+            [InlineKeyboardButton("🎁 صرف", callback_data="claim_reward")],
+            [InlineKeyboardButton("👥 المحالين", callback_data="ref_list")],
+            [InlineKeyboardButton("🔙", callback_data="back")]
+        ]
+        await q.edit_message_text(f"🔗 `https://t.me/{BOT_USER}?start=ref_{code}`\n👥 {td//5}\n🎁 {td-cd}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="MarkdownV2")
+    elif d == "copy_ref":
+        code = (await db1("SELECT referral_code FROM users WHERE user_id=?", uid))['referral_code']
+        if code: await q.answer(f"https://t.me/{BOT_USER}?start=ref_{code}", show_alert=True)
+    elif d == "claim_reward":
+        rw = await db1("SELECT total, claimed FROM rewards WHERE user_id=?", uid)
+        if rw and rw['total'] > rw['claimed']:
+            avail = rw['total'] - rw['claimed']
+            await db("UPDATE rewards SET claimed=claimed+? WHERE user_id=?", avail, uid)
+            await q.edit_message_text(f"✅ تم صرف {avail} يوم")
+        else: await q.answer("❌ لا توجد مكافآت")
+    elif d == "ref_list":
+        refs = await db("SELECT new_id FROM referrals WHERE ref_id=?", uid)
+        txt = "👥:\n" + "\n".join(f"• {x['new_id']}" for x in refs) if refs else "لا يوجد"
+        await q.edit_message_text(txt)
+    elif d == "remind":
+        r = await db1("SELECT * FROM reminders WHERE user_id=?", uid)
+        if not r: await db("INSERT INTO reminders(user_id) VALUES(?)", uid); r = await db1("SELECT * FROM reminders WHERE user_id=?", uid)
+        r = dict(r)
+        kb = [
+            [InlineKeyboardButton(f"🔔 اشتراك: {'✅' if r['sub'] else '❌'}", callback_data="tog_sub")],
+            [InlineKeyboardButton(f"📊 يومي: {'✅' if r['daily'] else '❌'}", callback_data="tog_daily")],
+            [InlineKeyboardButton(f"📈 أسبوعي: {'✅' if r['weekly'] else '❌'}", callback_data="tog_weekly")],
+            [InlineKeyboardButton("🔙", callback_data="back")]
+        ]
+        await q.edit_message_text("⏰ تذكيرات", reply_markup=InlineKeyboardMarkup(kb))
+    elif d in ["tog_sub","tog_daily","tog_weekly"]:
+        col = {'tog_sub':'sub','tog_daily':'daily','tog_weekly':'weekly'}[d]
+        r = await db1(f"SELECT {col} FROM reminders WHERE user_id=?", uid)
+        if r: await db(f"UPDATE reminders SET {col}=? WHERE user_id=?", 0 if r[col] else 1, uid)
+        await q.answer("✅")
+    elif d == "trans": context.user_data["tr"] = True; await q.edit_message_text("🌐 أرسل نص")
+    elif d == "rank":
+        r = await db1("SELECT points, level FROM users WHERE user_id=?", uid)
+        await q.edit_message_text(f"⭐ Lv{r['level']} | {r['points']} نقطة" if r else "0")
+    elif d == "top":
+        t = await db("SELECT user_id, points, level FROM users ORDER BY points DESC LIMIT 10")
+        txt = "🏆:\n" + "\n".join(f"{i}. {x['user_id']} Lv{x['level']}" for i,x in enumerate(t,1))
+        await q.edit_message_text(txt or "لا")
+    elif d == "trial":
+        await db("UPDATE users SET subscription_end=? WHERE user_id=?", enc((datetime.now()+timedelta(days=30)).isoformat()), uid)
+        await q.edit_message_text("🎁 تم إضافة 30 يوم مجاناً")
+    elif d == "sub":
+        await subscribe_menu(update, context)
+    elif d == "schedule":
+        context.user_data["s"] = "SCHEDULE"; await q.edit_message_text("📝 أرسل: YYYY-MM-DD HH:MM النص")
+    elif d == "support":
+        context.user_data["support"] = True; await q.edit_message_text("📝 اكتب رسالتك")
+    elif d == "dev": await q.edit_message_text("👨‍💻 @RelaxMgr")
+    elif d == "help": await q.edit_message_text("/help للمساعدة الكاملة")
+    elif d == "lang":
+        kb = [[InlineKeyboardButton("العربية", callback_data="lang_ar"), InlineKeyboardButton("English", callback_data="lang_en")]]
+        await q.edit_message_text("🌐 اختر اللغة / Choose language:", reply_markup=InlineKeyboardMarkup(kb))
+    elif d.startswith("lang_"):
+        lang = d.split("_")[1]
+        await db("UPDATE users SET language=? WHERE user_id=?", lang, uid)
+        user_lang[uid] = lang
+        await q.edit_message_text("✅ تم تغيير اللغة" if lang=="ar" else "✅ Language changed", reply_markup=main_kb(uid))
+    elif d == "admin":
+        if uid != OWNER: return await q.answer("🔒")
+        await q.edit_message_text("👑 **لوحة الأدمن**", reply_markup=admin_kb(uid), parse_mode="MarkdownV2")
+    elif d == "ping_status":
+        start = time.time(); await q.answer()
+        ping_time = round((time.time() - start) * 1000)
+        try: await db1("SELECT 1"); db_status = "✅"
+        except: db_status = "❌"
+        await q.edit_message_text(f"🫀 نبض\n⏱️ {ping_time}ms\n🗄️ {db_status}\n🕐 {datetime.now().strftime('%H:%M:%S')}")
+    elif d == "adm_users":
+        u = await db("SELECT user_id, banned FROM users LIMIT 50")
+        t = "👥:\n" + "\n".join(f"{'🚫' if x['banned'] else '✅'} {x['user_id']}" for x in u)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_banned":
+        u = await db("SELECT user_id FROM users WHERE banned=1 LIMIT 50")
+        t = "🚫:\n" + "\n".join(f"• {x['user_id']}" for x in u)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_channels":
+        c = await db("SELECT channel_name FROM channels LIMIT 50")
+        t = "📡:\n" + "\n".join(f"• {x['channel_name']}" for x in c)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_groups":
+        g = await db("SELECT chat_name FROM groups LIMIT 50")
+        t = "📊:\n" + "\n".join(f"• {x['chat_name']}" for x in g)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_replies":
+        r = await db("SELECT * FROM replies LIMIT 30")
+        t = "💬:\n" + "\n".join(f"• {x['keyword']} → {x['reply'][:30]}" for x in r)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_tickets":
+        tic = await db("SELECT * FROM tickets ORDER BY num DESC LIMIT 10")
+        t = "📋:\n" + "\n".join(f"#{x['num']} {x['username']}" for x in tic)
+        await q.edit_message_text(t or "لا", reply_markup=admin_kb(uid))
+    elif d == "adm_addreply":
+        context.user_data["s"] = "ADD_REPLY_KW"; await q.edit_message_text("📝 أرسل الكلمة:")
+    elif d == "adm_delreply":
+        context.user_data["s"] = "DEL_REPLY"; await q.edit_message_text("🗑️ أرسل الكلمة:")
+    elif d == "adm_broadcast":
+        context.user_data["s"] = "BROADCAST"; await q.edit_message_text("📨 أرسل النص:")
+    elif d == "adm_contest":
+        context.user_data["s"] = "CONTEST_TITLE"; await q.edit_message_text("📝 عنوان المسابقة:")
+    elif d == "adm_backup":
+        shutil.copy2(DB, f"data/backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
+        await q.edit_message_text("✅")
+    elif d == "adm_export":
+        tables = ["users","channels","groups","posts","tickets"]
+        kb = [[InlineKeyboardButton(t, callback_data=f"exp:{t}")] for t in tables]
+        kb.append([InlineKeyboardButton("🔙", callback_data="admin")])
+        await q.edit_message_text("📥", reply_markup=InlineKeyboardMarkup(kb))
+    elif d.startswith("exp:"):
+        table = d.split(":")[1]
+        rows = await db(f"SELECT * FROM {table}")
+        if rows:
+            output = io.StringIO()
+            w = csv.writer(output)
+            w.writerow([k for k in dict(rows[0]).keys()])
+            for r in rows: w.writerow([v for v in dict(r).values()])
+            f = io.BytesIO(output.getvalue().encode())
+            f.name = f"{table}.csv"
+            await context.bot.send_document(uid, f)
+            await q.edit_message_text("✅")
+        else: await q.edit_message_text("❌")
+    elif d == "settings":
+        await q.edit_message_text("⚙️ اختر الإعداد:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 النشر التلقائي", callback_data="toggle_auto")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ]))
+    elif d == "toggle_auto":
+        auto = await db1("SELECT auto_publish FROM users WHERE user_id=?", uid)
+        new = 0 if (auto and auto['auto_publish']) else 1
+        await db("UPDATE users SET auto_publish=? WHERE user_id=?", new, uid)
+        await q.edit_message_text(f"{'✅ مفعل' if new else '❌ معطل'}")
+    else: await q.answer("غير معروف")
 
 # اشتراك بالنجوم
 STARS_PACKAGES = [("1 يوم",1,5),("2 يوم",2,9),("30 يوم",30,50),("90 يوم",90,120)]
@@ -1018,6 +1193,7 @@ async def successful_payment_callback(update,context):
 
 # معالج الرسائل الخاصة
 async def msg(update,context):
+    global _bw_cache
     uid,txt=update.effective_user.id,update.message.text or ""
     s=context.user_data.get("s")
     if context.user_data.get("support"):
@@ -1152,14 +1328,14 @@ async def msg(update,context):
     elif s and s.startswith("ADDBW_"):
         cid=int(s.split("_")[1])
         await db("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,?)",txt.lower(),cid)
-        global _bw_cache; _bw_cache={}
+        _bw_cache = {}
         context.user_data.pop("s")
         await update.message.reply_text("✅ تم إضافة الكلمة المحظورة")
         return
     elif s and s.startswith("DELBW_"):
         cid=int(s.split("_")[1])
         await db("DELETE FROM banned_words WHERE word=? AND chat_id=?",txt.lower(),cid)
-        global _bw_cache; _bw_cache={}
+        _bw_cache = {}
         context.user_data.pop("s")
         await update.message.reply_text("✅ تم حذف الكلمة")
         return
@@ -1330,7 +1506,7 @@ async def main():
     asyncio.create_task(start_web())
     asyncio.create_task(self_ping())
     
-    logger.info(f"✅ {BOT_NAME} - عالمي كامل")
+    logger.info(f"✅ {BOT_NAME} - عالمي كامل مع جميع الأزرار")
     try:
         await app.initialize()
         await app.start()
