@@ -350,6 +350,15 @@ async def start(update: Update, context):
     await update.message.reply_text(f"🌿 {BOT_NAME}\nاختر:", reply_markup=main_kb(u.id))
 
 async def help_cmd(update, context): await update.message.reply_text("🛡️ جميع الأوامر متاحة")
+async def check_cmd(update, context):
+    uid=update.effective_user.id
+    gs=await db("SELECT COUNT(*) as c FROM groups")
+    my_o=await db("SELECT COUNT(*) as c FROM owners WHERE user_id=?", uid)
+    my_a=await db("SELECT COUNT(*) as c FROM admins WHERE user_id=?", uid)
+    await update.message.reply_text(f"📊 المجموعات: {gs[0]['c']}
+👑 مالك: {my_o[0]['c']}
+🛡️ مشرف: {my_a[0]['c']}")
+
 async def ping_cmd(update, context):
     start = time.time(); msg = await update.message.reply_text("🫀...")
     end = time.time(); ping_time = round((end - start) * 1000)
@@ -1443,6 +1452,7 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("ping", ping_cmd))
+    app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("reload", reload_cmd))
     app.add_handler(CommandHandler("panel", panel_cmd))
     app.add_handler(CommandHandler("claim", claim))
