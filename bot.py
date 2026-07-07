@@ -204,7 +204,7 @@ LANG_TEXTS = {
     "ar": {
         "add_ch": "➕ إضافة قناة", "chs": "📂 قنواتي", "settings": "⚙️ الإعدادات",
         "add_p": "📝 إضافة 15 منشور", "pub": "🚀 نشر واحد", "my_posts": "📋 منشوراتي",
-        "recycle": "🔄 إعادة تدوير", "stats": "📊 إحصائيات", "all_stats": "📈 ملخص القنوات", "ch_stats": "📈 إحصائيات القناة",
+        "recycle": "🔄 إعادة تدوير", "stats": "📊 إحصائياتي", "full_stats": "📈 إحصائيات كاملة", "ch_stats": "📊 إحصائيات القناة",
         "rank": "🏆 رتبتي", "schedule": "📅 جدولة منشور", "top": "⭐ أفضل 10",
         "publish_all": "📢 نشر الكل", "help": "❓ المساعدة", "lang": "🌐 اللغة",
         "trial": "🆓 تجربة مجانية", "sub": "💎 اشتراك", "support": "📩 الدعم",
@@ -224,7 +224,7 @@ LANG_TEXTS = {
     "en": {
         "add_ch": "➕ Add Channel", "chs": "📂 My Channels", "settings": "⚙️ Settings",
         "add_p": "📝 Add 15 Posts", "pub": "🚀 Publish One", "my_posts": "📋 My Posts",
-        "recycle": "🔄 Recycle", "stats": "📊 Stats", "all_stats": "📈 All Channels", "ch_stats": "📈 Channel Stats",
+        "recycle": "🔄 Recycle", "stats": "📊 My Stats", "full_stats": "📈 Full Stats", "ch_stats": "📊 Channel Stats",
         "rank": "🏆 My Rank", "schedule": "📅 Schedule Post", "top": "⭐ Top 10",
         "publish_all": "📢 Publish All", "help": "❓ Help", "lang": "🌐 Language",
         "trial": "🆓 Free Trial", "sub": "💎 Subscribe", "support": "📩 Support",
@@ -258,7 +258,7 @@ def main_kb(uid):
          InlineKeyboardButton(t(uid, "my_posts"), callback_data="my_posts")],
         [InlineKeyboardButton(t(uid, "recycle"), callback_data="recycle"),
          InlineKeyboardButton(t(uid, "stats"), callback_data="stats"),
-         InlineKeyboardButton(t(uid, "all_stats"), callback_data="all_stats"),
+         InlineKeyboardButton(t(uid, "full_stats"), callback_data="full_stats"),
          InlineKeyboardButton(t(uid, "ch_stats"), callback_data="ch_stats")],
         [InlineKeyboardButton(t(uid, "rank"), callback_data="rank"),
          InlineKeyboardButton(t(uid, "schedule"), callback_data="schedule"),
@@ -846,10 +846,10 @@ async def btn(update: Update, context):
         chs = await db("SELECT COUNT(*) as c FROM channels WHERE user_id=?", uid)
         p = await db("SELECT COUNT(*) as c FROM posts WHERE channel_db_id IN (SELECT id FROM channels WHERE user_id=?)", uid)
         await q.edit_message_text(f"📊 قنوات: {chs[0]['c']}\n📝 منشورات: {p[0]['c']}")
-    elif d == "all_stats":
+    elif d == "full_stats":
         chs = await db("SELECT id, channel_name FROM channels WHERE user_id=?", uid)
         if not chs: return await q.edit_message_text("📭")
-        txt = "📈 ملخص:\n"
+        txt = "📈 إحصائيات كاملة:\n"
         for c in chs:
             unpub = await db1("SELECT COUNT(*) as c FROM posts WHERE channel_db_id=? AND published=0", c['id'])
             txt += f"• {c['channel_name']}: {unpub['c']} غير منشور\n"
