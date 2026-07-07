@@ -212,7 +212,7 @@ LANG_TEXTS = {
     "ar": {
         "add_ch": "➕ إضافة قناة", "chs": "📂 قنواتي", "settings": "⚙️ الإعدادات",
         "add_p": "📝 إضافة 15 منشور", "pub": "🚀 نشر واحد", "my_posts": "📋 منشوراتي",
-        "recycle": "🔄 إعادة تدوير", "stats": "📊 إحصائيات", "ch_stats": "📈 إحصائيات القناة",
+        "recycle": "🔄 إعادة تدوير", "stats": "📊 إحصائيات", "all_stats": "📈 ملخص القنوات", "ch_stats": "📈 إحصائيات القناة",
         "rank": "🏆 رتبتي", "schedule": "📅 جدولة منشور", "top": "⭐ أفضل 10",
         "publish_all": "📢 نشر الكل", "help": "❓ المساعدة", "lang": "🌐 اللغة",
         "trial": "🆓 تجربة مجانية", "sub": "💎 اشتراك", "support": "📩 الدعم",
@@ -232,7 +232,7 @@ LANG_TEXTS = {
     "en": {
         "add_ch": "➕ Add Channel", "chs": "📂 My Channels", "settings": "⚙️ Settings",
         "add_p": "📝 Add 15 Posts", "pub": "🚀 Publish One", "my_posts": "📋 My Posts",
-        "recycle": "🔄 Recycle", "stats": "📊 Stats", "ch_stats": "📈 Channel Stats",
+        "recycle": "🔄 Recycle", "stats": "📊 Stats", "all_stats": "📈 All Channels", "ch_stats": "📈 Channel Stats",
         "rank": "🏆 My Rank", "schedule": "📅 Schedule Post", "top": "⭐ Top 10",
         "publish_all": "📢 Publish All", "help": "❓ Help", "lang": "🌐 Language",
         "trial": "🆓 Free Trial", "sub": "💎 Subscribe", "support": "📩 Support",
@@ -266,6 +266,7 @@ def main_kb(uid):
          InlineKeyboardButton(t(uid, "my_posts"), callback_data="my_posts")],
         [InlineKeyboardButton(t(uid, "recycle"), callback_data="recycle"),
          InlineKeyboardButton(t(uid, "stats"), callback_data="stats"),
+         InlineKeyboardButton(t(uid, "all_stats"), callback_data="all_stats"),
          InlineKeyboardButton(t(uid, "ch_stats"), callback_data="ch_stats")],
         [InlineKeyboardButton(t(uid, "rank"), callback_data="rank"),
          InlineKeyboardButton(t(uid, "schedule"), callback_data="schedule"),
@@ -680,7 +681,8 @@ async def btn(update: Update, context):
     await q.answer()
     uid, d = update.effective_user.id, q.data
     
-    if d == "back": await start(update, context)
+    if d == "back":
+        await q.edit_message_text(f"🌿 {BOT_NAME}\n" + ("اختر:" if get_lang(uid)=="ar" else "Choose:"), reply_markup=main_kb(uid))
     elif d == "reload_files":
         if uid != OWNER: return await q.answer("🔒")
         await reload_banned_words(); await reload_replies(); await reload_groups()
