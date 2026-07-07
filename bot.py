@@ -34,7 +34,6 @@ RENDER_URL = os.getenv("RENDER_URL","")
 DB = "data/bot.db"
 Path(DB).parent.mkdir(exist_ok=True)
 
-# ملفات خارجية
 BANNED_WORDS_FILE = Path("banned_words.txt")
 REPLIES_FILE = Path("replies.json")
 GROUPS_FILE = Path("groups.json")
@@ -93,66 +92,63 @@ async def db1(query, *p):
 
 # ==================== FILE READERS ====================
 def read_banned_words_file():
-    """قراءة ملف الكلمات المحظورة الخارجي"""
     if BANNED_WORDS_FILE.exists():
         with open(BANNED_WORDS_FILE, 'r', encoding='utf-8') as f:
             return [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
     return []
 
 def read_replies_file():
-    """قراءة ملف الردود الخارجي"""
     if REPLIES_FILE.exists():
         with open(REPLIES_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
 def read_groups_file():
-    """قراءة ملف المجموعات الخارجي"""
     if GROUPS_FILE.exists():
         with open(GROUPS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
-# ==================== FILE WATCHER (تحديث تلقائي) ====================
+# ==================== FILE WATCHER ====================
 class FileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if event.src_path.endswith('banned_words.txt'):
-            logger.info("🔄 تحديث: ملف الكلمات المحظورة تغير")
+            logger.info("🔄 تحديث: banned_words.txt")
             asyncio.create_task(reload_banned_words())
         elif event.src_path.endswith('replies.json'):
-            logger.info("🔄 تحديث: ملف الردود تغير")
+            logger.info("🔄 تحديث: replies.json")
             asyncio.create_task(reload_replies())
         elif event.src_path.endswith('groups.json'):
-            logger.info("🔄 تحديث: ملف المجموعات تغير")
+            logger.info("🔄 تحديث: groups.json")
             asyncio.create_task(reload_groups())
 
 async def reload_banned_words():
-    """إعادة تحميل الكلمات المحظورة من الملف"""
     words = read_banned_words_file()
     for w in words:
         await db("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,-1)", w)
     global _bw_cache; _bw_cache = {}
     await load_bw()
-    logger.info(f"✅ تم تحميل {len(words)} كلمة محظورة")
+    logger.info(f"✅ {len(words)} كلمة محظورة")
 
 async def reload_replies():
-    """إعادة تحميل الردود من الملف"""
     replies = read_replies_file()
     for kw, rep in replies.items():
         await db("INSERT OR REPLACE INTO replies VALUES(?,?)", kw, rep)
-    logger.info(f"✅ تم تحميل {len(replies)} رد")
+    logger.info(f"✅ {len(replies)} رد")
 
 async def reload_groups():
-    """إعادة تحميل إعدادات المجموعات من الملف"""
     groups = read_groups_file()
+    count = 0
     for gid, settings in groups.items():
+        if not gid.lstrip('-').isdigit():
+            continue
         await db("INSERT OR IGNORE INTO group_settings(chat_id) VALUES(?)", int(gid))
         for k, v in settings.items():
             await db(f"UPDATE group_settings SET {k}=? WHERE chat_id=?", v, int(gid))
-    logger.info(f"✅ تم تحميل {len(groups)} مجموعة")
+        count += 1
+    logger.info(f"✅ {count} مجموعة")
 
 def start_file_watcher():
-    """بدء مراقبة الملفات للتحديث التلقائي"""
     observer = Observer()
     observer.schedule(FileWatcher(), path=".", recursive=False)
     observer.start()
@@ -278,10 +274,9 @@ async def start(update: Update, context):
             await db("UPDATE rewards SET total=total+5 WHERE user_id=?", ref['user_id'])
     await update.message.reply_text(f"🌿 {BOT_NAME}\nاختر:", reply_markup=main_kb(u.id))
 
-# ==================== COMMANDS ====================
 async def help_cmd(update: Update, context):
     await update.message.reply_text("""🛡️ **أوامر البوت:**
-/start - القائمة /help - مساعدة /ping - فحص
+/start - القائمة /help - مساعدة /ping - فحص /reload - تحديث
 /claim - مالك /addowner - +مالك /addadmin - +مشرف
 /remove - إزالة /list - عرض
 /ban - حظر /unban - فك /mute - كتم /unmute - فك
@@ -291,8 +286,7 @@ async def help_cmd(update: Update, context):
 /transfer - نقل /broadcast - إذاعة
 /lock_links - حظر روابط /unlock_links - فك
 /lock_mentions - حظر @ /unlock_mentions - فك
-/slowmode - بطيء /welcome - ترحيب /goodbye - وداع
-/reload - تحديث الملفات""")
+/slowmode - بطيء /welcome - ترحيب /goodbye - وداع""")
 
 async def claim(update: Update, context):
     u, c = update.effective_user.id, update.effective_chat.id
@@ -605,25 +599,18 @@ async def group_settings_cmd(update: Update, context):
     await update.message.reply_text(t)
 
 async def ping_cmd(update: Update, context):
-    start_time = time.time()
+    start = time.time()
     msg = await update.message.reply_text("🫀 جاري الفحص...")
-    end_time = time.time()
-    ping_time = round((end_time - start_time) * 1000, 2)
+    end = time.time()
+    ping_time = round((end - start) * 1000, 2)
     try:
         await db1("SELECT 1")
-        db_status = "✅ شغالة"
+        db_status = "✅"
     except:
-        db_status = "❌ خطأ"
-    await msg.edit_text(f"""🫀 **تقرير النبض:**
-⏱️ البنق: {ping_time}ms
-🗄️ القاعدة: {db_status}
-🕐 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-👤 المالك: {OWNER}
-📦 البوت: {BOT_NAME}
-📁 ملفات خارجية: {BANNED_WORDS_FILE.exists() and REPLIES_FILE.exists()}""")
+        db_status = "❌"
+    await msg.edit_text(f"🫀 بنق: {ping_time}ms\n🗄️ القاعدة: {db_status}")
 
 async def reload_cmd(update: Update, context):
-    """إعادة تحميل جميع الملفات الخارجية"""
     if update.effective_user.id != OWNER: return await update.message.reply_text("❌")
     await reload_banned_words()
     await reload_replies()
@@ -692,7 +679,7 @@ async def btn(update: Update, context):
         await reload_banned_words()
         await reload_replies()
         await reload_groups()
-        await q.edit_message_text("✅ تم تحديث جميع الملفات الخارجية")
+        await q.edit_message_text("✅ تم تحديث جميع الملفات")
     elif d == "chs":
         chs = await db("SELECT * FROM channels WHERE user_id=?", uid)
         if not chs: return await q.edit_message_text("📭")
@@ -901,14 +888,11 @@ async def btn(update: Update, context):
         if uid != OWNER: return await q.answer("🔒")
         await q.edit_message_text("👑", reply_markup=admin_kb())
     elif d == "ping_status":
-        start_time = time.time()
+        start = time.time()
         await q.answer()
-        ping_time = round((time.time() - start_time) * 1000, 2)
-        try:
-            await db1("SELECT 1")
-            db_status = "✅"
-        except:
-            db_status = "❌"
+        ping_time = round((time.time() - start) * 1000, 2)
+        try: await db1("SELECT 1"); db_status = "✅"
+        except: db_status = "❌"
         await q.edit_message_text(f"🫀 نبض\n⏱️ {ping_time}ms\n🗄️ {db_status}\n🕐 {datetime.now().strftime('%H:%M:%S')}")
     elif d == "adm_users":
         u = await db("SELECT user_id, banned FROM users LIMIT 50")
@@ -1143,7 +1127,7 @@ async def self_ping():
             async with __import__('aiohttp').ClientSession() as session:
                 async with session.get(f"{RENDER_URL}/health", timeout=10) as resp:
                     if resp.status == 200:
-                        logger.info(f"🫀 نبض ناجح")
+                        logger.info("🫀 نبض ناجح")
                     else:
                         logger.warning(f"🫀 نبض: {resp.status}")
         except Exception as e:
@@ -1176,7 +1160,6 @@ async def main():
     await get_db()
     await load_bw()
     
-    # تحميل الملفات الخارجية
     if BANNED_WORDS_FILE.exists():
         await reload_banned_words()
     if REPLIES_FILE.exists():
@@ -1184,7 +1167,6 @@ async def main():
     if GROUPS_FILE.exists():
         await reload_groups()
     
-    # بدء مراقبة الملفات
     observer = start_file_watcher()
     
     app = Application.builder().token(TOKEN).build()
@@ -1258,7 +1240,7 @@ async def main():
     asyncio.create_task(start_web())
     asyncio.create_task(self_ping())
     
-    logger.info(f"✅ {BOT_NAME} - ملفات خارجية + تحديث تلقائي")
+    logger.info(f"✅ {BOT_NAME} - نظام متكامل مع ملفات خارجية وتحديث تلقائي")
     try:
         await app.run_polling(drop_pending_updates=True)
     finally:

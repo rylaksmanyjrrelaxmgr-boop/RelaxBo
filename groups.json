@@ -1,7 +1,7 @@
 {
-    "default": {
+    "-1001234567890": {
         "lock_links": 1,
         "lock_mentions": 0,
-        "slow_mode": 0
+        "slow_mode": 5
     }
 }
