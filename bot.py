@@ -184,6 +184,27 @@ async def add_pts(uid, pts):
         lvl = (row['points']//100)+1
         if lvl > row['level']: await db("UPDATE users SET level=? WHERE user_id=?", lvl, uid)
 
+async def db_has_active_subscription(uid):
+    sub = await db1("SELECT subscription_end FROM users WHERE user_id=?", uid)
+    if sub and sub["subscription_end"]:
+        try:
+            end = datetime.fromisoformat(dec(sub["subscription_end"]))
+            return end > datetime.now()
+        except:
+            return False
+    return False
+
+async def db_get_subscription_days_left(uid):
+    sub = await db1("SELECT subscription_end FROM users WHERE user_id=?", uid)
+    if sub and sub["subscription_end"]:
+        try:
+            end = datetime.fromisoformat(dec(sub["subscription_end"]))
+            days = (end - datetime.now()).days
+            return max(0, days)
+        except:
+            return 0
+    return 0
+
 def main_kb(uid):
     is_admin = uid == OWNER
     kb = [
@@ -239,6 +260,7 @@ def admin_kb():
         [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
     ])
 
+# الأوامر والأحداث الكاملة
 async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
@@ -865,14 +887,24 @@ async def btn(update: Update, context):
         await q.edit_message_text(txt or "لا")
     elif d == "trial":
         await db("UPDATE users SET subscription_end=? WHERE user_id=?", enc((datetime.now()+timedelta(days=30)).isoformat()), uid)
-        await q.edit_message_text("🎁 30 يوم")
+        await q.edit_message_text("🎁 تم إضافة 30 يوم مجاناً")
     elif d == "sub":
-        kb = [[InlineKeyboardButton("⭐ 1 يوم", callback_data="buy:1"), InlineKeyboardButton("⭐ 30 يوم", callback_data="buy:30")], [InlineKeyboardButton("🔙", callback_data="back")]]
-        await q.edit_message_text("💎", reply_markup=InlineKeyboardMarkup(kb))
+        if await db_has_active_subscription(uid):
+            days = await db_get_subscription_days_left(uid)
+            await q.edit_message_text(f"✅ اشتراكك مفعل\n📆 متبقي {days} يوم", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="back")]]))
+        else:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⭐ 1 يوم - 5 نجوم", callback_data="buy:1"),
+                 InlineKeyboardButton("⭐ 2 يوم - 9 نجوم", callback_data="buy:2")],
+                [InlineKeyboardButton("⭐ شهر (30 يوم) - 50 نجمة", callback_data="buy:30"),
+                 InlineKeyboardButton("⭐ 3 أشهر (90 يوم) - 120 نجمة", callback_data="buy:90")],
+                [InlineKeyboardButton("🔙", callback_data="back")]
+            ])
+            await q.edit_message_text("💎 **اختر باقة الاشتراك:**", reply_markup=kb, parse_mode="MarkdownV2")
     elif d.startswith("buy:"):
         days = int(d.split(":")[1])
         await db("UPDATE users SET subscription_end=? WHERE user_id=?", enc((datetime.now()+timedelta(days=days)).isoformat()), uid)
-        await q.edit_message_text(f"✅ {days} يوم")
+        await q.edit_message_text(f"✅ تم شراء {days} يوم\nشكراً لاشتراكك! 🌟")
     elif d == "schedule":
         context.user_data["s"] = "SCHEDULE"
         await q.edit_message_text("📝 أرسل: YYYY-MM-DD HH:MM النص")
@@ -1072,7 +1104,6 @@ async def auto_pub(app):
             interval = int(interval)
         except: interval = 720
         try:
-            # نشر من جميع القنوات النشطة لكل مستخدم
             channels = await db("SELECT id, user_id, channel_id FROM channels WHERE auto_publish=1")
             for ch in channels:
                 p = await db1("SELECT * FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT 1", ch['id'])
@@ -1235,7 +1266,7 @@ async def main():
     asyncio.create_task(start_web())
     asyncio.create_task(self_ping())
     
-    logger.info(f"✅ {BOT_NAME} - جميع القنوات تنشر تلقائياً")
+    logger.info(f"✅ {BOT_NAME} - جميع القنوات تنشر تلقائياً - نظام اشتراك متطور")
     try:
         await app.initialize()
         await app.start()
