@@ -833,6 +833,7 @@ class FileWatcher(FileSystemEventHandler):
 async def reload_banned_words():
     global _bw_cache
     global _bw_cache
+    global _bw_cache
     words = get_banned_words_from_file()
     for w in words:
         await db_execute("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,-1)", w)
@@ -1419,6 +1420,7 @@ async def goodbye_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _bw_cache
     global _bw_cache
+    global _bw_cache
     uid = update.effective_user.id
     cid = update.effective_chat.id
     if not await is_authorized(context.bot, cid, uid):
@@ -1434,6 +1436,7 @@ async def add_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ تم إضافة: {word}")
 
 async def remove_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bw_cache
     global _bw_cache
     global _bw_cache
     uid = update.effective_user.id
@@ -2425,6 +2428,7 @@ async def on_user_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== فلتر رسائل المجموعة ====================
 async def group_message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bw_cache
     global _bw_cache
     if update.effective_chat.type not in ["group", "supergroup"]:
         return
