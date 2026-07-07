@@ -831,9 +831,12 @@ class FileWatcher(FileSystemEventHandler):
             asyncio.create_task(reload_replies())
 
 async def reload_banned_words():
+    global _bw_cache
+    global _bw_cache
     words = get_banned_words_from_file()
     for w in words:
         await db_execute("INSERT OR IGNORE INTO banned_words(word,chat_id) VALUES(?,-1)", w)
+    global _bw_cache
     global _bw_cache
     _bw_cache = await load_banned_cache()
     logger.info(f"✅ تم تحديث الكلمات المحظورة: {len(words)}")
@@ -1414,6 +1417,8 @@ async def goodbye_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم تحديث رسالة الوداع")
 
 async def add_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bw_cache
+    global _bw_cache
     uid = update.effective_user.id
     cid = update.effective_chat.id
     if not await is_authorized(context.bot, cid, uid):
@@ -1424,10 +1429,13 @@ async def add_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db_execute("INSERT OR IGNORE INTO banned_words(word,chat_id,added_by,added_at) VALUES(?,?,?,?)",
                     word, cid, uid, datetime.now().isoformat())
     global _bw_cache
+    global _bw_cache
     _bw_cache = await load_banned_cache()
     await update.message.reply_text(f"✅ تم إضافة: {word}")
 
 async def remove_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bw_cache
+    global _bw_cache
     uid = update.effective_user.id
     cid = update.effective_chat.id
     if not await is_authorized(context.bot, cid, uid):
@@ -1435,6 +1443,7 @@ async def remove_banned_word(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not context.args:
         return await update.message.reply_text("/remove_banned كلمة")
     word = context.args[0].lower()
+    global _bw_cache
     await db_execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", word, cid)
     global _bw_cache
     _bw_cache = await load_banned_cache()
@@ -2416,6 +2425,7 @@ async def on_user_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== فلتر رسائل المجموعة ====================
 async def group_message_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bw_cache
     if update.effective_chat.type not in ["group", "supergroup"]:
         return
     uid = update.effective_user.id
@@ -2448,6 +2458,7 @@ async def group_message_filter(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         return
     
+    global _bw_cache
     # الكلمات المحظورة
     global _bw_cache
     if not _bw_cache:
@@ -2724,6 +2735,7 @@ async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop("state")
     
     elif state and state.startswith("ADD_BW_"):
+    global _bw_cache
         cid = int(state.split("_")[2])
         await db_execute("INSERT OR IGNORE INTO banned_words(word,chat_id,added_by,added_at) VALUES(?,?,?,?)",
                         text.lower(), cid, uid, datetime.now().isoformat())
@@ -2731,6 +2743,7 @@ async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_
         _bw_cache = await load_banned_cache()
         await update.message.reply_text(f"✅ تم إضافة: {text}")
         context.user_data.pop("state")
+    global _bw_cache
     
     elif state and state.startswith("DEL_BW_"):
         cid = int(state.split("_")[2])
