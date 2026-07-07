@@ -23,7 +23,6 @@ from watchdog.events import FileSystemEventHandler
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ==================== CONFIG ====================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN: print("❌ BOT_TOKEN"); sys.exit(1)
 OWNER = int(os.getenv("OWNER_ID","0"))
@@ -44,7 +43,6 @@ fernet = Fernet(KEY.encode())
 def enc(t): return fernet.encrypt(t.encode()).decode() if t else None
 def dec(t): return fernet.decrypt(t.encode()).decode() if t else None
 
-# ==================== DATABASE ====================
 _db = None
 async def get_db():
     global _db
@@ -53,7 +51,7 @@ async def get_db():
         _db.row_factory = aiosqlite.Row
         await _db.executescript("""
             CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, banned INTEGER DEFAULT 0, language TEXT DEFAULT 'ar', points INTEGER DEFAULT 0, level INTEGER DEFAULT 1, active_channel INTEGER, referral_code TEXT, subscription_end TEXT, auto_publish INTEGER DEFAULT 1, warns INTEGER DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id TEXT, channel_name TEXT);
+            CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id TEXT, channel_name TEXT, auto_publish INTEGER DEFAULT 1);
             CREATE TABLE IF NOT EXISTS posts(id INTEGER PRIMARY KEY AUTOINCREMENT, channel_db_id INTEGER, text TEXT, media_type TEXT DEFAULT 'text', media_file_id TEXT, published INTEGER DEFAULT 0, scheduled_time TEXT);
             CREATE TABLE IF NOT EXISTS scheduled_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, task_type TEXT, task_data TEXT, execute_at TEXT, executed INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS groups(chat_id INTEGER PRIMARY KEY, chat_name TEXT, added_by INTEGER);
@@ -90,7 +88,6 @@ async def db1(query, *p):
     r = await c.execute(query, p)
     return await r.fetchone()
 
-# ==================== FILE READERS ====================
 def read_banned_words_file():
     if BANNED_WORDS_FILE.exists():
         with open(BANNED_WORDS_FILE, 'r', encoding='utf-8') as f:
@@ -109,17 +106,13 @@ def read_groups_file():
             return json.load(f)
     return {}
 
-# ==================== FILE WATCHER ====================
 class FileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if event.src_path.endswith('banned_words.txt'):
-            logger.info("🔄 تحديث: banned_words.txt")
             asyncio.create_task(reload_banned_words())
         elif event.src_path.endswith('replies.json'):
-            logger.info("🔄 تحديث: replies.json")
             asyncio.create_task(reload_replies())
         elif event.src_path.endswith('groups.json'):
-            logger.info("🔄 تحديث: groups.json")
             asyncio.create_task(reload_groups())
 
 async def reload_banned_words():
@@ -140,8 +133,7 @@ async def reload_groups():
     groups = read_groups_file()
     count = 0
     for gid, settings in groups.items():
-        if not gid.lstrip('-').isdigit():
-            continue
+        if not gid.lstrip('-').isdigit(): continue
         await db("INSERT OR IGNORE INTO group_settings(chat_id) VALUES(?)", int(gid))
         for k, v in settings.items():
             await db(f"UPDATE group_settings SET {k}=? WHERE chat_id=?", v, int(gid))
@@ -155,7 +147,6 @@ def start_file_watcher():
     logger.info("👁️ مراقبة الملفات مفعلة")
     return observer
 
-# ==================== HELPERS ====================
 async def perm(bot, cid, uid):
     if uid == OWNER: return True
     if await db1("SELECT 1 FROM owners WHERE chat_id=? AND user_id=?", cid, uid): return True
@@ -183,8 +174,7 @@ async def load_bw():
     global _bw_cache
     r = await db("SELECT chat_id, word FROM banned_words")
     _bw_cache = {}
-    for x in r:
-        _bw_cache.setdefault(x['chat_id'], []).append(x['word'])
+    for x in r: _bw_cache.setdefault(x['chat_id'], []).append(x['word'])
 
 async def add_pts(uid, pts):
     await db("INSERT OR IGNORE INTO users(user_id) VALUES(?)", uid)
@@ -194,7 +184,6 @@ async def add_pts(uid, pts):
         lvl = (row['points']//100)+1
         if lvl > row['level']: await db("UPDATE users SET level=? WHERE user_id=?", lvl, uid)
 
-# ==================== KEYBOARDS ====================
 def main_kb(uid):
     is_admin = uid == OWNER
     kb = [
@@ -249,36 +238,7 @@ def admin_kb():
          InlineKeyboardButton("🔄 تحديث", callback_data="reload_files")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
     ])
-        [InlineKeyboardButton("👥 عرض المستخدمين", callback_data="adm_users")],
-        [InlineKeyboardButton("🚫 عرض المحظورين", callback_data="adm_banned")],
-        [InlineKeyboardButton("📡 عرض القنوات", callback_data="adm_channels")],
-        [InlineKeyboardButton("📊 عرض المجموعات", callback_data="adm_groups")],
-        [InlineKeyboardButton("💬 الردود التلقائية", callback_data="adm_replies")],
-        [InlineKeyboardButton("📋 تذاكر الدعم", callback_data="adm_tickets")],
-        [InlineKeyboardButton("➕ إضافة رد", callback_data="adm_addreply")],
-        [InlineKeyboardButton("🗑️ حذف رد", callback_data="adm_delreply")],
-        [InlineKeyboardButton("🏆 إنشاء مسابقة", callback_data="adm_contest")],
-        [InlineKeyboardButton("🏅 إعلان فائز", callback_data="declare_winner")],
-        [InlineKeyboardButton("📨 إذاعة عامة", callback_data="adm_broadcast")],
-        [InlineKeyboardButton("📋 عرض الفائزين", callback_data="winners")],
-        [InlineKeyboardButton("💾 نسخ احتياطي", callback_data="adm_backup")],
-        [InlineKeyboardButton("📥 تصدير بيانات", callback_data="adm_export")],
-        [InlineKeyboardButton("🫀 فحص النبض", callback_data="ping_status")],
-        [InlineKeyboardButton("🔄 تحديث الملفات", callback_data="reload_files")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
-    ])
-        [InlineKeyboardButton("👥 مستخدمين", callback_data="adm_users"), InlineKeyboardButton("🚫 محظورين", callback_data="adm_banned")],
-        [InlineKeyboardButton("📡 قنوات", callback_data="adm_channels"), InlineKeyboardButton("📊 مجموعات", callback_data="adm_groups")],
-        [InlineKeyboardButton("💬 ردود", callback_data="adm_replies"), InlineKeyboardButton("📋 تذاكر", callback_data="adm_tickets")],
-        [InlineKeyboardButton("➕ رد", callback_data="adm_addreply"), InlineKeyboardButton("🗑️ حذف رد", callback_data="adm_delreply")],
-        [InlineKeyboardButton("🏆 مسابقة", callback_data="adm_contest"), InlineKeyboardButton("🏅 فائز", callback_data="declare_winner")],
-        [InlineKeyboardButton("📨 إذاعة", callback_data="adm_broadcast"), InlineKeyboardButton("📋 فائزين", callback_data="winners")],
-        [InlineKeyboardButton("💾 نسخ", callback_data="adm_backup"), InlineKeyboardButton("📥 تصدير", callback_data="adm_export")],
-        [InlineKeyboardButton("🫀 نبض", callback_data="ping_status"), InlineKeyboardButton("🔄 تحديث", callback_data="reload_files")],
-        [InlineKeyboardButton("🔙", callback_data="back")],
-    ])
 
-# ==================== HANDLERS ====================
 async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
@@ -665,7 +625,6 @@ async def reload_cmd(update: Update, context):
     await reload_groups()
     await update.message.reply_text("✅ تم تحديث جميع الملفات")
 
-# ==================== GROUP MESSAGE ====================
 async def group_msg(update: Update, context):
     cid, uid = update.effective_chat.id, update.effective_user.id
     txt = update.message.text or update.message.caption or ""
@@ -715,7 +674,6 @@ async def group_msg(update: Update, context):
     for k,v in reps.items():
         if k in txt.lower(): await update.message.reply_text(v); break
 
-# ==================== CALLBACKS ====================
 async def btn(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -724,9 +682,7 @@ async def btn(update: Update, context):
     if d == "back": await start(update, context)
     elif d == "reload_files":
         if uid != OWNER: return await q.answer("🔒")
-        await reload_banned_words()
-        await reload_replies()
-        await reload_groups()
+        await reload_banned_words(); await reload_replies(); await reload_groups()
         await q.edit_message_text("✅ تم تحديث جميع الملفات")
     elif d == "chs":
         chs = await db("SELECT * FROM channels WHERE user_id=?", uid)
@@ -735,7 +691,6 @@ async def btn(update: Update, context):
         for c in chs:
             kb.append([InlineKeyboardButton(f"📢 {c['channel_name'] or c['channel_id']}", callback_data=f"sel_ch:{c['id']}")])
             kb.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"del_ch:{c['id']}")])
-        kb.append([InlineKeyboardButton("➕ قناة", callback_data="add_ch")])
         kb.append([InlineKeyboardButton("🔙", callback_data="back")])
         await q.edit_message_text("📡 قنواتي", reply_markup=InlineKeyboardMarkup(kb))
     elif d == "add_ch":
@@ -936,8 +891,7 @@ async def btn(update: Update, context):
         if uid != OWNER: return await q.answer("🔒")
         await q.edit_message_text("👑", reply_markup=admin_kb())
     elif d == "ping_status":
-        start = time.time()
-        await q.answer()
+        start = time.time(); await q.answer()
         ping_time = round((time.time() - start) * 1000, 2)
         try: await db1("SELECT 1"); db_status = "✅"
         except: db_status = "❌"
@@ -999,8 +953,17 @@ async def btn(update: Update, context):
             await context.bot.send_document(uid, f)
             await q.edit_message_text("✅")
         else: await q.edit_message_text("❌")
+    elif d == "settings":
+        await q.edit_message_text("⚙️ اختر الإعداد:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 النشر التلقائي", callback_data="toggle_auto")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+        ]))
+    elif d == "toggle_auto":
+        auto = await db1("SELECT auto_publish FROM users WHERE user_id=?", uid)
+        new = 0 if (auto and auto['auto_publish']) else 1
+        await db("UPDATE users SET auto_publish=? WHERE user_id=?", new, uid)
+        await q.edit_message_text(f"{'✅ مفعل' if new else '❌ معطل'}")
 
-# ==================== PRIVATE MESSAGE ====================
 async def msg(update: Update, context):
     uid, txt = update.effective_user.id, update.message.text or ""
     s = context.user_data.get("s")
@@ -1101,7 +1064,6 @@ async def msg(update: Update, context):
             except: await update.message.reply_text("❌ خطأ")
         context.user_data.pop("s")
 
-# ==================== TASKS ====================
 async def auto_pub(app):
     await asyncio.sleep(10)
     while True:
@@ -1110,19 +1072,17 @@ async def auto_pub(app):
             interval = int(interval)
         except: interval = 720
         try:
-            users = await db("SELECT user_id, active_channel FROM users WHERE banned=0 AND auto_publish=1 AND active_channel IS NOT NULL")
-            for u in users:
-                if not u['active_channel']: continue
-                p = await db1("SELECT * FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT 1", u['active_channel'])
+            # نشر من جميع القنوات النشطة لكل مستخدم
+            channels = await db("SELECT id, user_id, channel_id FROM channels WHERE auto_publish=1")
+            for ch in channels:
+                p = await db1("SELECT * FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT 1", ch['id'])
                 if not p: continue
-                ch = await db1("SELECT channel_id FROM channels WHERE id=?", u['active_channel'])
-                if not ch: continue
                 try:
                     if p['media_type']=="photo": await app.bot.send_photo(ch['channel_id'], p['media_file_id'], caption=p['text'])
                     elif p['media_type']=="video": await app.bot.send_video(ch['channel_id'], p['media_file_id'], caption=p['text'])
                     else: await app.bot.send_message(ch['channel_id'], p['text'])
                     await db("UPDATE posts SET published=1 WHERE id=?", p['id'])
-                    await add_pts(u['user_id'], 1)
+                    await add_pts(ch['user_id'], 1)
                 except: pass
                 await asyncio.sleep(2)
         except: pass
@@ -1174,23 +1134,14 @@ async def self_ping():
         try:
             async with __import__('aiohttp').ClientSession() as session:
                 async with session.get(f"{RENDER_URL}/health", timeout=10) as resp:
-                    if resp.status == 200:
-                        logger.info("🫀 نبض ناجح")
-                    else:
-                        logger.warning(f"🫀 نبض: {resp.status}")
-        except Exception as e:
-            logger.error(f"🫀 نبض خطأ: {e}")
+                    if resp.status == 200: logger.info("🫀 نبض ناجح")
+                    else: logger.warning(f"🫀 نبض: {resp.status}")
+        except Exception as e: logger.error(f"🫀 نبض خطأ: {e}")
         await asyncio.sleep(300)
 
-# ==================== WEB ====================
 async def health(request):
     from aiohttp import web
-    return web.json_response({
-        "status": "ok",
-        "bot": BOT_NAME,
-        "time": datetime.now().isoformat(),
-        "owner": OWNER
-    })
+    return web.json_response({"status":"ok","bot":BOT_NAME,"time":datetime.now().isoformat(),"owner":OWNER})
 
 async def start_web():
     from aiohttp import web
@@ -1203,17 +1154,13 @@ async def start_web():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     logger.info(f"✅ Web on port {PORT}")
 
-# ==================== MAIN ====================
 async def main():
     await get_db()
     await load_bw()
     
-    if BANNED_WORDS_FILE.exists():
-        await reload_banned_words()
-    if REPLIES_FILE.exists():
-        await reload_replies()
-    if GROUPS_FILE.exists():
-        await reload_groups()
+    if BANNED_WORDS_FILE.exists(): await reload_banned_words()
+    if REPLIES_FILE.exists(): await reload_replies()
+    if GROUPS_FILE.exists(): await reload_groups()
     
     observer = start_file_watcher()
     
@@ -1288,20 +1235,16 @@ async def main():
     asyncio.create_task(start_web())
     asyncio.create_task(self_ping())
     
-    logger.info(f"✅ {BOT_NAME} - نظام متكامل مع ملفات خارجية وتحديث تلقائي")
+    logger.info(f"✅ {BOT_NAME} - جميع القنوات تنشر تلقائياً")
     try:
-        try:
-            await app.initialize()
-            await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
-            while True:
-                await asyncio.sleep(3600)
-        finally:
-            await app.stop()
-            await app.shutdown()
-            observer.stop()
-            observer.join()
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        while True:
+            await asyncio.sleep(3600)
     finally:
+        await app.stop()
+        await app.shutdown()
         observer.stop()
         observer.join()
 
