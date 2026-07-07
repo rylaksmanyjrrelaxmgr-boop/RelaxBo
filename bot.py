@@ -309,7 +309,7 @@ async def auto_reg(update: Update, context):
     for m in update.message.new_chat_members:
         if m.id == context.bot.id:
             cid, uid = update.effective_chat.id, update.effective_user.id
-            await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", cid, update.effective_chat.title, uid)
+            await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", cid, update.effective_chat.title, uid); await db("INSERT OR IGNORE INTO owners VALUES(?,?)", cid, uid)
             if not await db1("SELECT 1 FROM owners WHERE chat_id=?", cid):
                 await db("INSERT INTO owners VALUES(?,?)", cid, uid)
                 try: await context.bot.send_message(uid, f"✅ مالك مخفي\n📌 {update.effective_chat.title}")
@@ -365,6 +365,7 @@ async def ping_cmd(update, context):
 async def claim(update,context):
     u,c=update.effective_user.id,update.effective_chat.id
     if update.effective_chat.type not in ['group','supergroup']: return
+    await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", c, update.effective_chat.title, u)
     await db("INSERT OR IGNORE INTO owners VALUES(?,?)",c,u); await update.message.reply_text("✅ مالك مخفي")
 
 async def addowner(update,context):
