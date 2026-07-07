@@ -304,6 +304,15 @@ def admin_kb(uid):
     ])
 
 # ========== handlers ==========
+
+async def sync_cmd(update,context):
+    u,c=update.effective_user.id,update.effective_chat.id
+    if update.effective_chat.type not in ['group','supergroup']: return
+    if not await perm(context.bot,c,u): return await update.message.reply_text("❌")
+    await db("INSERT OR IGNORE INTO groups VALUES(?,?,?)", c, update.effective_chat.title, u)
+    await update.message.reply_text("✅ تم تسجيل المجموعة")
+
+
 async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
@@ -1450,6 +1459,7 @@ async def main():
     app.add_handler(CommandHandler("ping", ping_cmd))
     app.add_handler(CommandHandler("reload", reload_cmd))
     app.add_handler(CommandHandler("panel", panel_cmd))
+    app.add_handler(CommandHandler("sync", sync_cmd))
     app.add_handler(CommandHandler("claim", claim))
     app.add_handler(CommandHandler("addowner", addowner))
     app.add_handler(CommandHandler("addadmin", addadmin))
