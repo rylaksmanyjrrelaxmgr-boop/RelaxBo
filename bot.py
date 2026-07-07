@@ -357,6 +357,18 @@ async def start(update: Update, context):
 # سأضع الدوال تباعاً مع التأكد من وجود تعريفاتها وعدم ضغطها.
 
 async def help_cmd(update, context): await update.message.reply_text("🛡️ جميع الأوامر متاحة")
+
+async def check_cmd(update,context):
+    uid=update.effective_user.id
+    gs=await db("SELECT * FROM groups")
+    my_owners=await db("SELECT * FROM owners WHERE user_id=?", uid)
+    my_admins=await db("SELECT * FROM admins WHERE user_id=?", uid)
+    msg=f"📊 المجموعات المسجلة: {len(gs)}
+👑 مالك في: {len(my_owners)}
+🛡️ مشرف في: {len(my_admins)}"
+    await update.message.reply_text(msg)
+
+
 async def ping_cmd(update, context):
     start = time.time(); msg = await update.message.reply_text("🫀...")
     end = time.time(); ping_time = round((end - start) * 1000)
@@ -1450,6 +1462,7 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("ping", ping_cmd))
+    app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("reload", reload_cmd))
     app.add_handler(CommandHandler("panel", panel_cmd))
     
