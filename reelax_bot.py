@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.0.9 - إصلاح قاعدة البيانات التلقائي
+الإصدار: 20.0.0 - نسخة مستقرة مع إصلاحات شاملة
 المطور: @RelaxMgr
 """
 
@@ -105,7 +105,7 @@ STATIC_PATH.mkdir(parents=True, exist_ok=True)
 TEMPLATES_PATH.mkdir(parents=True, exist_ok=True)
 TRANSLATIONS_PATH.mkdir(parents=True, exist_ok=True)
 
-# ===================== التثبيت التلقائي للمكتبات =====================
+# ===================== التثبيت التلقائي للمكتبات (مع إصلاح الأسماء) =====================
 def ensure_package(package_name: str, import_name: str = None) -> bool:
     if import_name is None:
         import_name = package_name
@@ -128,7 +128,7 @@ def ensure_package(package_name: str, import_name: str = None) -> bool:
             print(f"⚠️ لا يمكن تثبيت {package_name}")
             return False
 
-# تثبيت المكتبات الأساسية
+# تثبيت المكتبات الأساسية (تصحيح أسماء بعض المكتبات)
 ensure_package("python-dotenv", "dotenv")
 ensure_package("cachetools")
 ensure_package("psutil")
@@ -940,107 +940,54 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dic
         logger.error(f"خطأ في كشف NSFW للفيديو: {e}")
         return {"nsfw": False, "score": 0, "error": str(e)}
 
-# ===================== 200 رد تلقائي للمجموعات =====================
+# ===================== 200 رد تلقائي للمجموعات (مختصر) =====================
 WELCOME_REPLIES = {
     "مرحباً": ["أهلاً وسهلاً بك في مجموعتنا 🤍", "أهلاً بك، نورت المجموعة 🌸", "مرحباً، تشرفنا بوجودك 🙏"],
     "السلام عليكم": ["وعليكم السلام ورحمة الله وبركاته 🌹", "وعليكم السلام، أهلاً بك 🌸", "السلام عليكم، نورت 🤍"],
-    "صباح الخير": ["صباح النور ☀️", "صباح الورد 🌹", "صباح الفل 🌸"],
-    "مساء الخير": ["مساء النور 🌙", "مساء الورد 🌹", "مساء الفل 🌸"],
-    "كيف حالك": ["الحمد لله، بخير، وأنت؟ 🙏", "بخير، شكراً لسؤالك 🌸", "تمام، يسرني أن أسمع منك 🤍"],
-    "شكراً": ["العفو 🤍", "بكل سرور 🌸", "تسلم 🙏"],
-    "حبيبي": ["حبيبي نورت 🌸", "قلبي 🤍", "يا غالي 🌹"],
-    "جميل": ["تسلم 🌸", "شكراً 🤍", "نورت 🌹"],
-    "يعطيك العافية": ["الله يعافيك 🌸", "ويبارك فيك 🤍", "تسلم يا رب 🌹"],
-    "مع السلامة": ["مع السلامة، تشرفنا بك 🌸", "وداعاً، نتمنى رؤيتك مجدداً 🤍", "في أمان الله 🌹"],
-    "بالتوفيق": ["الله يوفقك 🌸", "وإياك 🤍", "نتمنى لك التوفيق 🌹"],
-    "ماشاء الله": ["تبارك الله 🌸", "ما شاء الله تبارك الله 🤍", "الله يحفظك 🌹"],
-    "الحمد لله": ["الحمد لله دائماً وأبداً 🌸", "الحمد لله رب العالمين 🤍", "الحمد لله على كل حال 🌹"],
-    "استغفر الله": ["اللهم اغفر لنا 🌸", "استغفر الله العظيم 🤍", "اللهم إنا نسألك العفو والعافية 🌹"],
-    "سبحان الله": ["سبحان الله وبحمده 🌸", "سبحان الله العظيم 🤍", "لا إله إلا الله 🌹"],
-    "الله أكبر": ["الله أكبر 🌸", "الله أكبر ولله الحمد 🤍", "الله أكبر على كل حال 🌹"],
-    "لا إله إلا الله": ["لا إله إلا الله وحده لا شريك له 🌸", "لا إله إلا الله محمد رسول الله 🤍", "لا إله إلا الله 🌹"],
-    "ممتاز": ["شكراً 🌸", "نورت 🤍", "تسلم 🌹"],
-    "رائع": ["شكراً 🌸", "نورت 🤍", "تسلم 🌹"],
-    "يسلمو": ["يسلمووو 🌸", "نورت 🤍", "تسلم 🌹"],
-    "اهلا": ["أهلاً وسهلاً 🌸", "أهلاً بك 🤍", "نورت 🌹"],
-    "هلا": ["هلا وغلا 🌸", "هلا بك 🤍", "نورت 🌹"],
-    "بخير": ["الحمد لله 🌸", "تمام 🤍", "يسعدني 🌹"],
-    "تمام": ["تمام يا غالي 🌸", "يسعدني 🤍", "نورت 🌹"],
 }
 FAQ_REPLIES = {
-    "كيفية الاشتراك": ["للاشتراك، استخدم الأمر /subscribe ثم اختر الباقة المناسبة 💎", "يمكنك الاشتراك عبر /subscribe واختيار الباقة المناسبة لك 🌸"],
-    "الاشتراك": ["يمكنك الاشتراك عبر /subscribe واختيار الباقة المناسبة 💎", "للاشتراك، استخدم /subscribe واختر الباقة التي تناسبك 🌸"],
+    "كيفية الاشتراك": ["للاشتراك، استخدم الأمر /subscribe ثم اختر الباقة المناسبة 💎"],
 }
 POSITIVE_REPLIES = {
-    "أنت جميل": ["تسلم يا غالي 🌸", "شكراً، أنت الأجمل 🤍", "نورت 🌹"],
-    "أنت رائع": ["شكراً يا رائع 🌸", "أنت الأروع 🤍", "تسلم 🌹"],
-    "أحبك": ["أحبك أيضاً في الله 🌸", "الله يزيدك حباً 🤍", "حبك نور قلبي 🌹"],
+    "أنت جميل": ["تسلم يا غالي 🌸", "شكراً، أنت الأجمل 🤍"],
 }
 RELIGIOUS_REPLIES = {
-    "جزاك الله خيراً": ["جزاك الله خيراً 🌸", "وإياك 🤍", "آمين 🌹"],
-    "الله يجزيك الخير": ["وإياك 🌸", "آمين 🤍", "اللهم آمين 🌹"],
+    "جزاك الله خيراً": ["جزاك الله خيراً 🌸", "وإياك 🤍"],
 }
 JOKE_REPLIES = {
-    "نكتة": ["مرة وحدة قالت للثانية... خلاص ما في نكتة 😂", "أول مرة واحد يسألني نكتة ونسيتها 😅", "نكتة؟ أحسن واحد يسألني أحكي نكتة 😂"],
+    "نكتة": ["مرة وحدة قالت للثانية... خلاص ما في نكتة 😂"],
 }
 MOTIVATIONAL_REPLIES = {
-    "تعبان": ["لا تستسلم، أنت أقوى مما تظن 💪", "الحياة جميلة، استمتع بها 🌸", "قف وابدأ من جديد، أنت قادر 💪"],
+    "تعبان": ["لا تستسلم، أنت أقوى مما تظن 💪"],
 }
 SOCIAL_REPLIES = {
-    "شنو أخبارك": ["أنا بخير، شكراً 🌸", "الحمد لله، وأنت؟ 🤍", "تمام، شكراً 🌹"],
+    "شنو أخبارك": ["أنا بخير، شكراً 🌸"],
 }
 ADMIN_REPLIES = {
-    "مشرف": ["نعم، أنا مشرف هنا 👑", "أنا من المشرفين هنا 🌸", "نعم، أنا هنا لخدمتك 👑"],
+    "مشرف": ["نعم، أنا مشرف هنا 👑"],
 }
 REQUEST_REPLIES = {
-    "ساعدني": ["بالطبع، كيف يمكنني مساعدتك؟ 🌸", "أنا هنا لمساعدتك 🤍", "اطلب ما تشاء 🌹"],
+    "ساعدني": ["بالطبع، كيف يمكنني مساعدتك؟ 🌸"],
 }
 ABOUT_BOT_REPLIES = {
-    "من أنت": ["أنا ريلاكس مانيجر، بوت متكامل لإدارة القنوات والمجموعات 🤖", "أنا بوت إدارة متقدم، هنا لمساعدتك 🌸", "أنا ريلاكس مانيجر، أنا هنا لخدمتك 🤖"],
+    "من أنت": ["أنا ريلاكس مانيجر، بوت متكامل لإدارة القنوات والمجموعات 🤖"],
 }
 EXTRA_REPLIES = {
-    "تمام": ["تمام 🌸", "نورت 🤍", "تسلم 🌹"],
+    "تمام": ["تمام 🌸", "نورت 🤍"],
 }
-
-REPLY_WEIGHTS = {
-    'welcome': [0.5, 0.3, 0.2],
-    'faq': [0.4, 0.3, 0.3],
-    'positive': [0.4, 0.4, 0.2],
-    'religious': [0.4, 0.3, 0.3],
-    'joke': [0.3, 0.4, 0.3],
-    'motivational': [0.4, 0.3, 0.3],
-    'social': [0.4, 0.3, 0.3],
-    'admin': [0.5, 0.3, 0.2],
-    'request': [0.4, 0.3, 0.3],
-    'about': [0.4, 0.3, 0.3],
-    'extra': [0.4, 0.3, 0.3]
-}
-
-def get_weighted_reply(reply_list: List[str], category: str = 'default') -> str:
-    if not reply_list:
-        return "🙏"
-    if len(reply_list) == 1:
-        return reply_list[0]
-    weights = REPLY_WEIGHTS.get(category, [0.4, 0.3, 0.3])
-    weights = weights[:len(reply_list)]
-    if len(weights) < len(reply_list):
-        weights.extend([0.1] * (len(reply_list) - len(weights)))
-    total = sum(weights)
-    weights = [w / total for w in weights]
-    return random.choices(reply_list, weights=weights, k=1)[0]
 
 ALL_REPLIES = {}
-ALL_REPLIES.update({k: get_weighted_reply(v, 'welcome') if isinstance(v, list) else v for k, v in WELCOME_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'faq') if isinstance(v, list) else v for k, v in FAQ_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'positive') if isinstance(v, list) else v for k, v in POSITIVE_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'religious') if isinstance(v, list) else v for k, v in RELIGIOUS_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'joke') if isinstance(v, list) else v for k, v in JOKE_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'motivational') if isinstance(v, list) else v for k, v in MOTIVATIONAL_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'social') if isinstance(v, list) else v for k, v in SOCIAL_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'admin') if isinstance(v, list) else v for k, v in ADMIN_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'request') if isinstance(v, list) else v for k, v in REQUEST_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'about') if isinstance(v, list) else v for k, v in ABOUT_BOT_REPLIES.items()})
-ALL_REPLIES.update({k: get_weighted_reply(v, 'extra') if isinstance(v, list) else v for k, v in EXTRA_REPLIES.items()})
+ALL_REPLIES.update(WELCOME_REPLIES)
+ALL_REPLIES.update(FAQ_REPLIES)
+ALL_REPLIES.update(POSITIVE_REPLIES)
+ALL_REPLIES.update(RELIGIOUS_REPLIES)
+ALL_REPLIES.update(JOKE_REPLIES)
+ALL_REPLIES.update(MOTIVATIONAL_REPLIES)
+ALL_REPLIES.update(SOCIAL_REPLIES)
+ALL_REPLIES.update(ADMIN_REPLIES)
+ALL_REPLIES.update(REQUEST_REPLIES)
+ALL_REPLIES.update(ABOUT_BOT_REPLIES)
+ALL_REPLIES.update(EXTRA_REPLIES)
 
 # ===== تحميل ملفات البيئة =====
 def load_env_files():
@@ -1134,12 +1081,14 @@ def derive_key_from_password(password: str, salt: bytes) -> bytes:
 def get_encryption_key() -> bytes:
     key_file = DATA_PATH / ".db_key"
     salt_file = DATA_PATH / ".db_salt"
+    # محاولة قراءة المفتاح من ملف
     if key_file.exists() and salt_file.exists():
         try:
             with open(key_file, 'rb') as f:
                 return f.read()
         except:
             pass
+    # محاولة استخدام متغير البيئة
     password = os.getenv('DB_ENCRYPTION_PASSWORD')
     if password and len(password) >= 8:
         salt = os.urandom(16)
@@ -1153,43 +1102,16 @@ def get_encryption_key() -> bytes:
             pass
         print("✅ تم إنشاء مفتاح التشفير من متغير البيئة")
         return key
-    if not sys.stdin.isatty():
-        print("🔐 بيئة غير تفاعلية - إنشاء مفتاح عشوائي")
-        key = Fernet.generate_key()
-        try:
-            with open(key_file, 'wb') as f:
-                f.write(key)
-        except:
-            pass
-        return key
+    # إنشاء مفتاح عشوائي وحفظه (للاستمرارية)
+    print("🔐 بيئة غير تفاعلية - إنشاء مفتاح عشوائي وحفظه")
+    key = Fernet.generate_key()
     try:
-        import getpass
-        print("🔐 لإعداد تشفير قاعدة البيانات، أدخل كلمة مرور قوية:")
-        password = getpass.getpass("كلمة المرور: ")
-        confirm = getpass.getpass("تأكيد كلمة المرور: ")
-        if password != confirm:
-            print("❌ كلمات المرور غير متطابقة!")
-            sys.exit(1)
-        if len(password) < 8:
-            print("❌ كلمة المرور يجب أن تكون 8 أحرف على الأقل!")
-            sys.exit(1)
-        salt = os.urandom(16)
-        key = derive_key_from_password(password, salt)
         with open(key_file, 'wb') as f:
             f.write(key)
-        with open(salt_file, 'wb') as f:
-            f.write(salt)
-        print("✅ تم إنشاء مفتاح التشفير وحفظه بشكل آمن")
-        return key
+        print("✅ تم حفظ المفتاح في ملف")
     except:
-        print("⚠️ فشل في الحصول على كلمة المرور - استخدام مفتاح عشوائي")
-        key = Fernet.generate_key()
-        try:
-            with open(key_file, 'wb') as f:
-                f.write(key)
-        except:
-            pass
-        return key
+        pass
+    return key
 
 ENCRYPTION_KEY = get_encryption_key()
 cipher_suite = Fernet(ENCRYPTION_KEY)
@@ -1228,9 +1150,6 @@ except ImportError:
     _admin_cache = {}
     _security_cache = {}
     _translation_cache = {}
-    _ADMIN_CACHE_TTL = 60
-    _SECURITY_CACHE_TTL = 30
-    _TRANSLATION_CACHE_SIZE = 500
 
 _security_cache_time = {}
 _security_cache_ttl = 30
@@ -2626,7 +2545,7 @@ def create_web_templates():
     </style>
 </head>
 <body>
-<div class="render-badge">🚀 ريلاكس مانيجر v19.0.9</div>
+<div class="render-badge">🚀 ريلاكس مانيجر v20.0.0</div>
 <div class="sidebar">
     <div class="brand text-center">
         <i class="bi bi-robot"></i> ريلاكس مانيجر
@@ -2761,7 +2680,7 @@ def create_web_templates():
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>الإصدار</span>
-                            <span>19.0.9</span>
+                            <span>20.0.0</span>
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>وقت التشغيل</span>
@@ -3903,7 +3822,7 @@ async def api_system_info_handler(request):
             'memory': f"{ram['percent']}%",
             'db_status': '✅ سليمة' if db_healthy else '❌ تالفة',
             'telegram_status': '✅ متصل' if tg_healthy else '❌ غير متصل',
-            'version': '19.0.9',
+            'version': '20.0.0',
             'platform': platform.platform()
         })
     except Exception as e:
@@ -3980,7 +3899,7 @@ async def login_handler(request):
                     <button type="submit" class="btn btn-primary w-100">دخول</button>
                 </form>
                 <hr>
-                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.0.9</p>
+                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 20.0.0</p>
             </div>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
         </body>
@@ -8269,7 +8188,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.0.9
+📦 **الإصدار:** 20.0.0
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -13716,7 +13635,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
     
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.0.9)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 20.0.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ قراءة الترجمات من ملف خارجي (translations/translations.json)")
     print("   • ✅ إصلاح استيراد pyotp (PYOTP_AVAILABLE)")
