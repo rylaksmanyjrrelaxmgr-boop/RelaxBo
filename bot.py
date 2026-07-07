@@ -310,8 +310,7 @@ def admin_kb(uid):
         [InlineKeyboardButton(t(uid, "back"), callback_data="back")],
     ])
 
-# الأوامر الأساسية (كاملة)
-async def auto_reg(update: Update, context): 
+async def auto_reg(update: Update, context):
     if not update.message or not update.message.new_chat_members: return
     for m in update.message.new_chat_members:
         if m.id == context.bot.id:
@@ -357,6 +356,17 @@ async def start(update: Update, context):
     await update.message.reply_text(f"🌿 {BOT_NAME}\nاختر:", reply_markup=main_kb(u.id))
 
 async def help_cmd(update: Update, context): await update.message.reply_text("/start /help /claim /addowner /addadmin /remove /list")
+async def ping_cmd(update: Update, context):
+    start = time.time()
+    msg = await update.message.reply_text("🫀 جاري الفحص...")
+    end = time.time()
+    ping_time = round((end - start) * 1000)
+    try:
+        await db1("SELECT 1")
+        db_status = "✅"
+    except:
+        db_status = "❌"
+    await msg.edit_text(f"🫀 بنق: {ping_time}ms\n🗄️ القاعدة: {db_status}")
 async def claim(update: Update, context):
     u, c = update.effective_user.id, update.effective_chat.id
     if update.effective_chat.type not in ['group','supergroup']: return
@@ -613,31 +623,11 @@ async def group_settings_cmd(update: Update, context):
     if not s: return await update.message.reply_text("لا توجد إعدادات")
     t = f"🔗:{'✅' if s['lock_links'] else '❌'} @:{'✅' if s['lock_mentions'] else '❌'} ⏱️:{s['slow_mode']}ث"
     await update.message.reply_text(t)
-async def ping_cmd(update: Update, context):
-    start = time.time(); msg = await update.message.reply_text("🫀 جاري الفحص...")
-    end = time.time(); ping_time = round((end - start) * 1000, 2)
-    try: await db1("SELECT 1"); db_status = "✅"
-    except: db_status = "❌"
-    await msg.edit_text(f"🫀 بنق: {ping_time}ms\n🗄️ القاعدة: {db_status}")
-async def ping_cmd(update: Update, context):
-    start = time.time()
-    msg = await update.message.reply_text("🫀 جاري الفحص...")
-    end = time.time()
-    ping_time = round((end - start) * 1000, 2)
-    try:
-        await db1("SELECT 1")
-        db_status = "✅"
-    except:
-        db_status = "❌"
-    await msg.edit_text(f"🫀 بنق: {ping_time}ms
-🗄️ القاعدة: {db_status}")
-
 async def reload_cmd(update: Update, context):
     if update.effective_user.id != OWNER: return await update.message.reply_text("❌")
     await reload_banned_words(); await reload_replies(); await reload_groups()
     await update.message.reply_text("✅ تم تحديث جميع الملفات")
 
-# المجموعة
 async def group_msg(update: Update, context):
     cid, uid = update.effective_chat.id, update.effective_user.id
     txt = update.message.text or update.message.caption or ""
@@ -685,7 +675,6 @@ async def group_msg(update: Update, context):
     for k,v in reps.items():
         if k in txt.lower(): await update.message.reply_text(v); break
 
-# الكولباكس (جميع الأزرار)
 async def btn(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -877,7 +866,6 @@ async def btn(update: Update, context):
         await db("UPDATE users SET subscription_end=? WHERE user_id=?", enc((datetime.now()+timedelta(days=30)).isoformat()), uid)
         await q.edit_message_text("🎁 تم إضافة 30 يوم مجاناً")
     elif d == "sub":
-        # اشتراك حقيقي
         await subscribe_menu(update, context)
     elif d == "schedule":
         context.user_data["s"] = "SCHEDULE"; await q.edit_message_text("📝 أرسل: YYYY-MM-DD HH:MM النص")
@@ -898,7 +886,7 @@ async def btn(update: Update, context):
         await q.edit_message_text("👑 **لوحة الأدمن**", reply_markup=admin_kb(uid), parse_mode="MarkdownV2")
     elif d == "ping_status":
         start = time.time(); await q.answer()
-        ping_time = round((time.time() - start) * 1000, 2)
+        ping_time = round((time.time() - start) * 1000)
         try: await db1("SELECT 1"); db_status = "✅"
         except: db_status = "❌"
         await q.edit_message_text(f"🫀 نبض\n⏱️ {ping_time}ms\n🗄️ {db_status}\n🕐 {datetime.now().strftime('%H:%M:%S')}")
@@ -967,7 +955,6 @@ async def btn(update: Update, context):
         await q.edit_message_text(f"{'✅ مفعل' if new else '❌ معطل'}")
     else: await q.answer("غير معروف")
 
-# الدفع بالنجوم
 STARS_PACKAGES = [
     ("1 يوم", 1, 5),
     ("2 يوم", 2, 9),
@@ -1266,12 +1253,11 @@ async def main():
     app.add_handler(CommandHandler("log", log_cmd))
     app.add_handler(CommandHandler("settings", group_settings_cmd))
     
-    # الدفع
     app.add_handler(CallbackQueryHandler(send_invoice, pattern="^buy:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     
-    app.add_handler(CallbackQueryHandler(btn))  # جميع الأزرار الأخرى
+    app.add_handler(CallbackQueryHandler(btn))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, group_msg))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, msg))
     
@@ -1297,7 +1283,7 @@ async def main():
     asyncio.create_task(start_web())
     asyncio.create_task(self_ping())
     
-    logger.info(f"✅ {BOT_NAME} - جميع القنوات تنشر تلقائياً - دفع حقيقي بالنجوم")
+    logger.info(f"✅ {BOT_NAME} - جميع القنوات تنشر تلقائياً - دفع حقيقي بالنجوم - جميع الأزرار تعمل")
     try:
         await app.initialize()
         await app.start()
