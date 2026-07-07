@@ -1242,7 +1242,17 @@ async def main():
     
     logger.info(f"✅ {BOT_NAME} - نظام متكامل مع ملفات خارجية وتحديث تلقائي")
     try:
-        await app.run_polling(drop_pending_updates=True)
+        try:
+            await app.initialize()
+            await app.start()
+            await app.updater.start_polling(drop_pending_updates=True)
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await app.stop()
+            await app.shutdown()
+            observer.stop()
+            observer.join()
     finally:
         observer.stop()
         observer.join()
