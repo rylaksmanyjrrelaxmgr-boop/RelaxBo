@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.1.0 - مع دعم كامل للمشرفين المخفيين والتسجيل الفوري
+الإصدار: 19.2.0 - مع واجهة ويب متكاملة و WebSocket
 المطور: @RelaxMgr
 """
 
@@ -2588,16 +2588,16 @@ async def db_activate_subscription(user_id: int, days: int):
     async def _activate(conn):
         cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
-        if row and row[0]:
-            try:
+        try:
+            if row and row[0]:
                 current_end = datetime.fromisoformat(row[0])
                 if current_end > utc_now():
                     new_end = current_end + timedelta(days=days)
                 else:
                     new_end = utc_now() + timedelta(days=days)
-            except:
+            else:
                 new_end = utc_now() + timedelta(days=days)
-        else:
+        except:
             new_end = utc_now() + timedelta(days=days)
         await conn.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (new_end.isoformat(), user_id))
         await conn.commit()
@@ -2667,6 +2667,10 @@ async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> in
                                 (user_id, channel_id, channel_name, utc_now_iso()))
         row = await cur.fetchone()
         await conn.commit()
+        # تعيين موعد النشر التالي بعد دقيقة لتجنب النشر الفوري المتكرر
+        if row:
+            new_id = row[0]
+            await db_set_next_publish_date(new_id, utc_now() + timedelta(minutes=1))
         return row[0] if row else None
     return await execute_db(_add)
 
@@ -2771,8 +2775,16 @@ async def db_get_all_bot_channels(only_banned: bool = False):
 # ===================== دوال المنشورات =====================
 async def db_save_posts(channel_db_id: int, posts: list) -> int:
     async def _save(conn):
+        # حساب عدد المنشورات غير المنشورة حالياً
+        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
+        current_unpublished = (await cur.fetchone())[0]
+        max_allowed = MAX_UNPUBLISHED_POSTS - current_unpublished
+        if max_allowed <= 0:
+            return 0
+        # اقتطاع القائمة حسب المساحة المتاحة
+        posts_to_save = posts[:max_allowed]
         values = []
-        for text_content, media_type, media_file_id in posts:
+        for text_content, media_type, media_file_id in posts_to_save:
             values.append((channel_db_id, sanitize_text(text_content), media_type, media_file_id, utc_now_iso()))
         await conn.executemany(
             "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -2922,71 +2934,28 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
 async def db_get_user_groups(user_id: int):
     """
     تعرض جميع المجموعات التي للمستخدم صلاحية فيها (مالك مخفي أو مشرف مخفي أو مرتبط بها).
+    تم تحسينها باستخدام استعلام JOIN واحد.
     """
     async def _get(conn):
-        try:
-            # جلب جميع المجموعات
-            cur = await conn.execute("""
-                SELECT chat_id, chat_name, username, banned
-                FROM bot_groups
-                ORDER BY chat_name
-            """)
-            all_groups = await cur.fetchall()
-
-            # جلب المجموعات التي فيها المالك المخفي لهذا المستخدم
-            cur = await conn.execute("""
-                SELECT chat_id FROM hidden_owner_groups WHERE owner_id=?
-            """, (user_id,))
-            hidden_owner_rows = await cur.fetchall()
-            hidden_owner_groups = {row[0] for row in hidden_owner_rows}
-
-            # جلب المجموعات التي فيها المستخدم مشرف مخفي
-            cur = await conn.execute("""
-                SELECT chat_id FROM hidden_admins WHERE admin_id=?
-            """, (user_id,))
-            hidden_admin_rows = await cur.fetchall()
-            hidden_admin_groups = {row[0] for row in hidden_admin_rows}
-
-            # جلب المجموعات التي أضافها المستخدم أو مرتبط بها
-            cur = await conn.execute("""
-                SELECT chat_id FROM bot_groups WHERE added_by=?
-                UNION
-                SELECT chat_id FROM user_groups_link WHERE user_id=?
-            """, (user_id, user_id))
-            linked_rows = await cur.fetchall()
-            linked_groups = {row[0] for row in linked_rows}
-
-            visible_groups = []
-            for group in all_groups:
-                chat_id = group[0]
-
-                # المالك المخفي يرى مجموعاته
-                if chat_id in hidden_owner_groups:
-                    visible_groups.append(group)
-                # المشرف المخفي يرى مجموعاته
-                elif chat_id in hidden_admin_groups:
-                    visible_groups.append(group)
-                # المستخدم العادي: يرى فقط المجموعات التي أضافها أو مرتبط بها
-                elif chat_id in linked_groups:
-                    visible_groups.append(group)
-                # إذا لم يكن مرتبطاً ولا مالكاً ولا مشرفاً مخفياً - لا يظهرها
-                else:
-                    continue
-
-            return visible_groups
-        except Exception as e:
-            logger.error(f"خطأ في جلب مجموعات المستخدم {user_id}: {e}")
-            return []
+        cur = await conn.execute("""
+            SELECT DISTINCT bg.chat_id, bg.chat_name, bg.username, bg.banned
+            FROM bot_groups bg
+            LEFT JOIN hidden_owner_groups hog ON bg.chat_id = hog.chat_id AND hog.owner_id = ?
+            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
+            LEFT JOIN user_groups_link ugl ON bg.chat_id = ugl.chat_id AND ugl.user_id = ?
+            WHERE hog.owner_id IS NOT NULL 
+               OR ha.admin_id IS NOT NULL 
+               OR ugl.user_id IS NOT NULL
+               OR bg.added_by = ?
+            ORDER BY bg.chat_name
+        """, (user_id, user_id, user_id, user_id))
+        return await cur.fetchall()
     return await execute_db(_get)
 
 async def db_get_user_groups_count(user_id: int) -> int:
     async def _get(conn):
-        try:
-            groups = await db_get_user_groups(user_id)
-            return len(groups)
-        except Exception as e:
-            logger.error(f"خطأ في حساب عدد مجموعات المستخدم: {e}")
-            return 0
+        groups = await db_get_user_groups(user_id)
+        return len(groups)
     return await execute_db(_get)
 
 async def db_get_all_groups(only_banned: bool = False):
@@ -7096,7 +7065,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.1.0
+📦 **الإصدار:** 19.2.0
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -7116,7 +7085,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • Health Check متقدم
 • مراقبة الذاكرة التلقائية
 • نظام المسابقات المتكامل
-• واجهة ويب متكاملة
+• واجهة ويب متكاملة (Dark Mode, CSV, WebSocket)
 • حماية واجهة الويب بكلمة مرور
 • مفتاح تشفير منفصل للنسخ الاحتياطي
 • تنقية النصوص باستخدام bleach
@@ -11835,16 +11804,46 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"فشل إرسال الرد: {e}")
 
-# ===================== [إصلاح] خادم الويب =====================
+# ===================== [إصلاح] خادم الويب مع واجهة مستخدم و WebSocket =====================
 # تعريف تطبيق الويب ومدير WebSocket
+from aiohttp import web, WSMsgType
+import json
+import jinja2
+
 web_app = web.Application()
 
 class WebSocketManager:
+    def __init__(self):
+        self.sockets = set()
+        self._lock = asyncio.Lock()
+
     async def broadcast(self, data):
-        # يمكن تنفيذ منطق البث الحقيقي لاحقاً
-        pass
+        async with self._lock:
+            if not self.sockets:
+                return
+            message = json.dumps(data)
+            for ws in list(self.sockets):
+                try:
+                    await ws.send_str(message)
+                except:
+                    self.sockets.remove(ws)
+
+    def add_socket(self, ws):
+        self.sockets.add(ws)
+
+    def remove_socket(self, ws):
+        self.sockets.discard(ws)
 
 ws_manager = WebSocketManager()
+
+# إعداد Jinja2
+try:
+    jinja_env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(TEMPLATES_PATH)),
+        autoescape=jinja2.select_autoescape(['html', 'xml'])
+    )
+except:
+    jinja_env = None
 
 async def health_check_handler(request):
     try:
@@ -11868,7 +11867,121 @@ async def health_check_handler(request):
             'error': str(e)
         }, status=503)
 
+async def dashboard_handler(request):
+    """عرض لوحة التحكم الرئيسية"""
+    try:
+        # جلب الإحصائيات الأولية
+        total, banned, posts, groups, channels = await db_stats()
+        ram = get_ram_usage()
+        stats = {
+            'total_users': total,
+            'active_users': total - banned,
+            'banned_users': banned,
+            'pending_posts': posts,
+            'groups': groups,
+            'channels': channels,
+            'ram': ram,
+            'uptime': int(time_module.time() - getattr(health_check_handler, 'start_time', time_module.time()))
+        }
+        # قالب HTML مضمن
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>لوحة تحكم البوت</title>
+            <style>
+                body { font-family: Arial, sans-serif; direction: rtl; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+                .container { max-width: 1200px; margin: auto; }
+                h1 { text-align: center; color: #e94560; }
+                .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 30px 0; }
+                .stat-card { background: #16213e; padding: 20px; border-radius: 10px; text-align: center; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+                .stat-card h3 { margin: 0; color: #aaa; font-size: 14px; }
+                .stat-card .value { font-size: 32px; font-weight: bold; color: #e94560; margin: 10px 0; }
+                .stat-card .sub { color: #888; font-size: 12px; }
+                .footer { text-align: center; margin-top: 50px; color: #666; }
+                .badge { display: inline-block; background: #e94560; color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 12px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🤖 لوحة تحكم ريلاكس مانيجر</h1>
+                <div class="stats-grid">
+                    <div class="stat-card"><h3>👥 المستخدمين</h3><div class="value">{{ stats.total_users }}</div><div class="sub">نشط: {{ stats.active_users }} | محظور: {{ stats.banned_users }}</div></div>
+                    <div class="stat-card"><h3>📝 المنشورات</h3><div class="value">{{ stats.pending_posts }}</div><div class="sub">غير منشورة</div></div>
+                    <div class="stat-card"><h3>👥 المجموعات</h3><div class="value">{{ stats.groups }}</div></div>
+                    <div class="stat-card"><h3>📡 القنوات</h3><div class="value">{{ stats.channels }}</div></div>
+                    <div class="stat-card"><h3>🖥️ الرام</h3><div class="value">{{ stats.ram.percent }}%</div><div class="sub">{{ stats.ram.used }} / {{ stats.ram.total }} GB</div></div>
+                    <div class="stat-card"><h3>⏱️ التشغيل</h3><div class="value">{{ stats.uptime_hours }} ساعة</div></div>
+                </div>
+                <div style="text-align:center; margin-top:20px;">
+                    <span class="badge">🟢 البوت يعمل</span>
+                </div>
+                <div class="footer">
+                    <p>ريلاكس مانيجر v19.2.0 | © 2026</p>
+                </div>
+            </div>
+            <script>
+                // WebSocket للاتصال الحي
+                const ws = new WebSocket('ws://' + window.location.host + '/ws');
+                ws.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'stats') {
+                        // تحديث الإحصائيات
+                        document.querySelector('.stat-card:nth-child(1) .value').textContent = data.data.total_users;
+                        document.querySelector('.stat-card:nth-child(1) .sub').textContent = 'نشط: ' + data.data.active_users + ' | محظور: ' + data.data.banned_users;
+                        document.querySelector('.stat-card:nth-child(2) .value').textContent = data.data.pending_posts;
+                        document.querySelector('.stat-card:nth-child(3) .value').textContent = data.data.groups;
+                        document.querySelector('.stat-card:nth-child(4) .value').textContent = data.data.channels;
+                    }
+                };
+                ws.onclose = function() { console.log('تم قطع الاتصال'); };
+            </script>
+        </body>
+        </html>
+        """
+        # تقديم القالب مع البيانات
+        if jinja_env:
+            try:
+                template = jinja_env.from_string(html)
+                return web.Response(text=template.render(stats=stats), content_type='text/html')
+            except:
+                pass
+        # إذا فشل Jinja2، استخدم استبدال بسيط
+        html = html.replace('{{ stats.total_users }}', str(stats['total_users']))
+        html = html.replace('{{ stats.active_users }}', str(stats['active_users']))
+        html = html.replace('{{ stats.banned_users }}', str(stats['banned_users']))
+        html = html.replace('{{ stats.pending_posts }}', str(stats['pending_posts']))
+        html = html.replace('{{ stats.groups }}', str(stats['groups']))
+        html = html.replace('{{ stats.channels }}', str(stats['channels']))
+        html = html.replace('{{ stats.ram.percent }}', str(stats['ram']['percent']))
+        html = html.replace('{{ stats.ram.used }}', str(stats['ram']['used']))
+        html = html.replace('{{ stats.ram.total }}', str(stats['ram']['total']))
+        html = html.replace('{{ stats.uptime_hours }}', str(stats['uptime'] // 3600))
+        return web.Response(text=html, content_type='text/html')
+    except Exception as e:
+        logger.error(f"خطأ في لوحة التحكم: {e}")
+        return web.Response(text=f"<h1>خطأ</h1><p>{str(e)}</p>", content_type='text/html', status=500)
+
+async def websocket_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    ws_manager.add_socket(ws)
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                # يمكن معالجة رسائل من العميل هنا
+                pass
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        ws_manager.remove_socket(ws)
+    return ws
+
+# إضافة المسارات
+web_app.router.add_get('/', dashboard_handler)
 web_app.router.add_get('/health', health_check_handler)
+web_app.router.add_get('/ws', websocket_handler)
 
 # ===================== [إصلاح] نظام إدارة المهام =====================
 class TaskManager:
@@ -12191,6 +12304,14 @@ async def cleanup_expired_sessions_improved():
             await conn.commit()
         await execute_db(_cleanup_tickets)
         logger.info(f"✅ تم تنظيف الجلسات المنتهية والتذاكر القديمة")
+
+async def cleanup_user_data_loop():
+    """تنظيف context.user_data للمستخدمين غير النشطين"""
+    while True:
+        await asyncio.sleep(3600)  # كل ساعة
+        # هذه الوظيفة تعتمد على تتبع آخر نشاط، ولكن يمكننا تنفيذها ببساطة بمسح البيانات القديمة
+        # سيتم تنفيذها في المستقبل إذا لزم الأمر
+        pass
 
 async def broadcast_stats_periodically():
     while True:
@@ -13159,6 +13280,7 @@ async def main():
     task_manager.create_task(run_scheduled_posts_loop_improved(application.bot))
     task_manager.create_task(send_reminders_loop_improved(application.bot))
     task_manager.create_task(cleanup_expired_sessions_improved())
+    task_manager.create_task(cleanup_user_data_loop())
     task_manager.create_task(start_web_server())
     task_manager.create_task(self_ping_loop())
     task_manager.create_task(broadcast_stats_periodically())
@@ -13166,7 +13288,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.1.0)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.2.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ إصلاح أمر /syncgroup للمالك المخفي (التحقق عبر Telegram API)")
     print("   • ✅ إرسال رسالة ترويجية للأعضاء العاديين عند استخدام /syncgroup")
@@ -13188,6 +13310,7 @@ async def main():
     print("   • ✅ جميع دوال قاعدة البيانات (40+ جدول)")
     print("   • ✅ معالج الأخطاء العالمي مع إشعار للمطور")
     print("   • ✅ تشغيل الخلفيات (النشر التلقائي، المنشورات المجدولة، الإشعارات)")
+    print("   • ✅ لوحة تحكم ويب مع تحديثات حية عبر WebSocket")
 
     try:
         await application.run_polling(
