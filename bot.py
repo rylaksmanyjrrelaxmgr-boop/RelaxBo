@@ -1079,6 +1079,10 @@ def get_user_friendly_error(error: Exception) -> str:
     error_type = type(error).__name__
     return ERROR_MESSAGES.get(error_type, f"❌ حدث خطأ: {str(error)[:100]}")
 
+def log_error(error: Exception, context: dict = None) -> str:
+    """تسجيل خطأ وإرجاع معرف فريد للخطأ."""
+    return advanced_logger.log_error(str(error), error, context)
+
 # ===================== نظام سجلات متقدم =====================
 class AdvancedLogger:
     def __init__(self):
@@ -5430,7 +5434,7 @@ async def build_days_keyboard(uid, context):
     ])
     return InlineKeyboardMarkup(kb_buttons)
 
-# ===================== [معدل] دالة get_main_keyboard =====================
+# ===================== دالة get_main_keyboard =====================
 async def get_main_keyboard(user_id: int):
     channels = await db_get_channels(user_id)
     active = None
@@ -5489,19 +5493,19 @@ async def get_main_keyboard(user_id: int):
     updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
     keyboard = []
 
-    # ===== الصف 1: مجموعاتي + إضافة قناة (تظهر دائماً) =====
+    # الصف 1: مجموعاتي + إضافة قناة
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY),
         InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD)
     ])
 
-    # ===== الصف 2: قنواتي + الإعدادات (تظهر دائماً) =====
+    # الصف 2: قنواتي + الإعدادات
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY),
         InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)
     ])
 
-    # ===== أزرار القناة (تظهر فقط إذا كانت هناك قناة) =====
+    # أزرار القناة (تظهر فقط إذا كانت هناك قناة)
     if channels:
         keyboard.append([
             InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15),
@@ -5532,7 +5536,7 @@ async def get_main_keyboard(user_id: int):
             InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)
         ])
 
-    # ===== الأزرار العامة (تظهر دائماً) =====
+    # الأزرار العامة
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP),
         InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)
@@ -5785,7 +5789,7 @@ async def select_channel_callback(update: Update, context: ContextTypes.DEFAULT_
     ch_db_id = int(query.data.split(":")[-1])
     await db_set_active_channel(uid, ch_db_id)
     context.user_data['active_channel'] = ch_db_id
-    await invalidate_user_cache(user_id=uid)  # مسح الكاش للمستخدم
+    await invalidate_user_cache(user_id=uid)
     kb, title, new_active = await get_main_keyboard(uid)
     if new_active:
         context.user_data['active_channel'] = new_active
@@ -6098,7 +6102,6 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await conn.execute("DELETE FROM moderation_log WHERE chat_id = ?", (chat_id,))
         await conn.commit()
     await execute_db(_delete_group)
-    # مسح الكاش لهذه المجموعة
     await invalidate_user_cache(chat_id=chat_id)
     if query:
         await query.edit_message_text("✅ تم حذف المجموعة من قاعدة البيانات.")
@@ -10435,13 +10438,17 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
             await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
             await update.message.reply_text("✅ **تم تسجيلك كمالك مخفي لهذه المجموعة.**")
         else:
-            await update.message.reply_text(
-                f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
-                f"📌 **للاستفادة من ميزات البوت المتقدمة، تواصل معنا على الخاص:**\n"
-                f"👉 @{BOT_USERNAME}\n\n"
-                f"💡 يمكنك استخدام البوت لإدارة القنوات والمجموعات بكل احترافية."
-            )
-            return
+            # تحقق من كونه مسجلاً كمشرف مخفي أو مالك مخفي
+            if await db_is_hidden_admin(chat_id, user_id) or await db_is_hidden_owner(chat_id, user_id):
+                await update.message.reply_text("✅ **أنت مسجل بالفعل كمشرف مخفي أو مالك مخفي في هذه المجموعة.**")
+            else:
+                await update.message.reply_text(
+                    f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
+                    f"📌 **للاستفادة من ميزات البوت المتقدمة، تواصل معنا على الخاص:**\n"
+                    f"👉 @{BOT_USERNAME}\n\n"
+                    f"💡 يمكنك استخدام البوت لإدارة القنوات والمجموعات بكل احترافية."
+                )
+                return
     except Exception as e:
         await update.message.reply_text(f"⚠️ تعذر التحقق من صلاحياتك: {e}")
         return
