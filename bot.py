@@ -11836,6 +11836,16 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"فشل إرسال الرد: {e}")
 
 # ===================== [إصلاح] خادم الويب =====================
+# تعريف تطبيق الويب ومدير WebSocket
+web_app = web.Application()
+
+class WebSocketManager:
+    async def broadcast(self, data):
+        # يمكن تنفيذ منطق البث الحقيقي لاحقاً
+        pass
+
+ws_manager = WebSocketManager()
+
 async def health_check_handler(request):
     try:
         db_healthy = await check_database_health()
@@ -12185,18 +12195,21 @@ async def cleanup_expired_sessions_improved():
 async def broadcast_stats_periodically():
     while True:
         await asyncio.sleep(5)
-        total, banned, posts, groups, channels = await db_stats()
-        await ws_manager.broadcast({
-            'type': 'stats',
-            'data': {
-                'total_users': total,
-                'active_users': total - banned,
-                'banned_users': banned,
-                'pending_posts': posts,
-                'groups': groups,
-                'channels': channels
-            }
-        })
+        try:
+            total, banned, posts, groups, channels = await db_stats()
+            await ws_manager.broadcast({
+                'type': 'stats',
+                'data': {
+                    'total_users': total,
+                    'active_users': total - banned,
+                    'banned_users': banned,
+                    'pending_posts': posts,
+                    'groups': groups,
+                    'channels': channels
+                }
+            })
+        except Exception as e:
+            logger.error(f"خطأ في بث الإحصائيات: {e}")
 
 async def auto_close_contests_loop(bot):
     while True:
