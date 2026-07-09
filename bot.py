@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.1.0 - دعم كامل للمشرفين المتعددين وتحسين /sendcode
+الإصدار: 19.1.0 - مع دعم كامل للمشرفين المخفيين والتسجيل الفوري
 المطور: @RelaxMgr
 """
 
@@ -1889,364 +1889,393 @@ async def set_user_translation_language(user_id: int, lang: str):
 user_language = {}
 _user_language_lock = asyncio.Lock()
 
-def get_text(user_id: int, key: str) -> str:
-    lang = user_language.get(user_id, 'ar')
-    texts = {
-        'ar': {
-            'welcome': "🌿 **مرحباً بك في ريلاكس مانيجر**\nاختر اللغة المناسبة",
-            'main_title': "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المعرف: `{1}`\n👥 مجموعاتي: {2}\n💎 الاشتراك: {3}\n📡 القناة النشطة: {4}\n📝 المنشورات غير المنشورة: {5}\n⚙️ النشر التلقائي: {6}",
-            'no_channels': "لا توجد قنوات",
-            'add_channel': "➕ إضافة قناة",
-            'my_channels': "📡 قنواتي",
-            'add_15_posts': "📥 إضافة 15 منشور",
-            'publish_one': "📤 نشر واحد",
-            'my_posts_btn': "📋 منشوراتي",
-            'recycle': "♻️ إعادة تدوير",
-            'stats_btn': "📊 إحصائياتي",
-            'my_stats_btn': "📈 إحصائيات كاملة",
-            'my_groups_btn': "👥 مجموعاتي",
-            'settings_btn': "⚙️ الإعدادات",
-            'schedule_btn': "⏰ الجدولة",
-            'help_btn': "❓ المساعدة",
-            'trial_btn': "🎁 تجربة مجانية",
-            'subscribe_btn': "💎 اشتراك",
-            'developer_btn': "👨‍💻 المطور",
-            'language_btn': "🌐 اللغة",
-            'support_btn': "📞 الدعم",
-            'referral': "🔗 الإحالات",
-            'reminder_settings': "⏰ التذكيرات",
-            'translation_settings': "🌐 الترجمة",
-            'publish_all': "📤 نشر الكل",
-            'updates_btn': "📢 التحديثات",
-            'add_to_group': "➕ إضافة إلى مجموعة",
-            'admin_panel': "👑 لوحة الأدمن",
-            'my_rank_btn': "📊 رتبتي",
-            'top_10_btn': "🏆 أفضل 10",
-            'schedule_post_btn': "📝 جدولة منشور",
-            'channel_stats': "📊 إحصائيات القناة",
-            'my_channels_summary': "📊 ملخص قنواتي",
-            'auto_on': "مفعل",
-            'auto_off': "معطل",
-            'subscribed': "✅ مفعل",
-            'not_subscribed': "❌ غير مفعل",
-            'send_channel_id': "📡 أرسل معرف القناة (مثال: @RelaxMgrr أو -100123456)",
-            'channel_added': "✅ تم إضافة القناة {0}",
-            'channel_exists': "⚠️ القناة موجودة مسبقاً",
-            'no_channels_list': "📭 لا توجد قنوات مسجلة",
-            'channels_list': "📡 **قنواتي**\nاختر قناة للتحكم بها:",
-            'delete_channel': "🗑️ حذف",
-            'channel_deleted': "✅ تم حذف القناة",
-            'delete_failed': "❌ فشل الحذف",
-            'no_posts': "📭 لا توجد منشورات",
-            'my_posts_title': "📋 **منشوراتي غير المنشورة**",
-            'confirm_delete': "⚠️ هل أنت متأكد من حذف جميع المنشورات؟",
-            'deleted_all': "✅ تم حذف جميع المنشورات",
-            'recycled': "♻️ تم إعادة تدوير جميع المنشورات",
-            'pending_stats': "📊 **إحصائيات المنشورات**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 غير المنشورة: {0}\n📋 الإجمالي: {1}",
-            'stats': "📈 **إحصائياتي الكاملة**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n⚙️ النشر التلقائي: {4}",
-            'settings': "⚙️ **الإعدادات**\nاختر الإعداد المطلوب:",
-            'disabled': "❌ تعطيل",
-            'enabled': "✅ تفعيل",
-            'auto_toggled': "✅ تم تغيير حالة النشر التلقائي إلى: {0}",
-            'schedule_settings': "⏰ **إعدادات الجدولة**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nاختر نوع الجدولة:",
-            'interval_minutes': "دقائق: {0}",
-            'interval_hours': "ساعات: {0}",
-            'interval_days': "أيام: {0}",
-            'days_week': "أيام الأسبوع: {0}",
-            'specific_dates': "تواريخ محددة: {0}",
-            'nothing': "لا شيء",
-            'send_minutes': "⏱️ أرسل عدد الدقائق (مثال: 30)",
-            'send_hours': "⏱️ أرسل عدد الساعات (مثال: 2)",
-            'send_days': "⏱️ أرسل عدد الأيام (مثال: 1)",
-            'send_dates': "📅 أرسل التواريخ مفصولة بفواصل (مثال: 2024-12-25,2025-01-01)",
-            'send_time': "🕐 أرسل وقت النشر (مثال: 14:30)",
-            'interval_set': "✅ تم حفظ الإعدادات",
-            'invalid_number': "❌ رقم غير صالح",
-            'invalid_date': "❌ تاريخ غير صالح",
-            'invalid_time': "❌ وقت غير صالح",
-            'days_saved': "✅ تم حفظ أيام النشر",
-            'monday': "الإثنين",
-            'tuesday': "الثلاثاء",
-            'wednesday': "الأربعاء",
-            'thursday': "الخميس",
-            'friday': "الجمعة",
-            'saturday': "السبت",
-            'sunday': "الأحد",
-            'admin_only': "🔒 هذا الأمر للمشرفين فقط!",
-            'group_only': "🔒 هذا الأمر يعمل فقط في المجموعات!",
-            'locked': "🔒 تم قفل المجموعة",
-            'unlocked': "🔓 تم فتح المجموعة",
-            'cancelled': "❌ تم الإلغاء",
-            'error': "⚠️ حدث خطأ، حاول مرة أخرى",
-            'help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/add_hidden_admin - إضافة مشرف مخفي\n/remove_hidden_admin - إزالة مشرف مخفي\n/list_hidden_admins - عرض المشرفين المخفيين\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
-            'support_welcome': "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
-            'support_help': "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
-            'trial_used': "❌ لقد استخدمت التجربة المجانية مسبقاً",
-            'already_subscribed': "✅ لديك اشتراك فعال بالفعل",
-            'trial': "🎁 **تم تفعيل التجربة المجانية!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ لديك 30 يوماً مجاناً\n📌 استمتع بجميع الميزات\n💎 يمكنك الاشتراك بعد انتهاء التجربة",
-            'subscribe': "💎 **الاشتراك**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الباقة المناسبة لك:\n\n⭐ 1 يوم - 5 نجوم\n⭐ 2 يوم - 9 نجوم\n⭐ شهر (30 يوم) - 50 نجمة\n⭐ 3 أشهر (90 يوم) - 120 نجمة\n\n📌 الدفع عبر نجوم تيليجرام",
-            'updates_text': "📢 **آخر التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تابع قناة التحديثات لمعرفة كل جديد:\n• إضافات جديدة\n• تحسينات الأداء\n• إصلاحات الأخطاء\n• ميزات حصرية",
-            'referral_title': "🔗 **الإحالات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 رابط الإحالة الخاص بك:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 عدد المحالين: {3}\n🎁 المكافآت المتاحة: {4} يوم\n⭐ المكافأة لكل إحالة: {5} يوم\n🎁 نقاط الترحيب: {6}",
-            'copy_link': "📋 نسخ الرابط",
-            'claim_reward': "🎁 صرف المكافآت",
-            'referral_list': "📋 قائمة المحالين",
-            'no_referrals': "📭 لا توجد إحالات بعد",
-            'no_reward_available': "❌ لا توجد مكافآت متاحة للصرف",
-            'reward_claimed': "✅ تم صرف {0} يوم اشتراك!",
-            'reminder_title': "⏰ **إعدادات التذكيرات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تذكير انتهاء الاشتراك: {0}\n📊 تقرير يومي: {1}\n📈 تقرير أسبوعي: {2}\n⏰ التذكير قبل: {3} أيام",
-            'reminder_sub': "🔔 تذكير الاشتراك",
-            'reminder_daily': "📊 تقرير يومي",
-            'reminder_weekly': "📈 تقرير أسبوعي",
-            'reminder_days_btn': "⏰ عدد الأيام",
-            'reminder_lang_btn': "🌐 لغة الإشعارات",
-            'subscription_warning': "⚠️ **تنبيه!**\nاشتراكك ينتهي خلال {0} أيام\nقم بتجديده الآن لتستمر الميزات 💎",
-            'daily_stats': "📊 **تقريرك اليومي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}",
-            'weekly_report': "📈 **تقريرك الأسبوعي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n🔗 الإحالات: {4}",
-            'translation_status_off': "معطلة ❌",
-            'translation_status_on': "مفعلة ✅ إلى {0}",
-            'translation_settings': "إعدادات الترجمة",
-            'translation_how_it_works': "📌 كيفية العمل:\nسيتم ترجمة المنشورات تلقائياً عند النشر إلى اللغة التي تختارها",
-            'translation_choose': "اختر لغة الترجمة:",
-            'translation_off': "🚫 إيقاف الترجمة",
-            'translation_disabled': "✅ تم إيقاف الترجمة",
-            'translation_enabled': "✅ تم تفعيل الترجمة إلى {0}",
-            'admin_panel': "👑 **لوحة الأدمن**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الإجراء المطلوب:",
-            'admin_users': "👥 المستخدمين",
-            'admin_banned': "🚫 المحظورين",
-            'admin_channels': "📡 القنوات",
-            'enter_admin_id': "👑 أرسل معرف المستخدم لإضافته كمشرف:",
-            'enter_remove_admin_id': "🗑️ أرسل معرف المستخدم لإزالته من المشرفين:",
-            'no_admins': "📭 لا يوجد مشرفون",
-            'add_admin_success': "✅ تم إضافة {0} كمشرف",
-            'remove_admin_success': "✅ تم إزالة {0} من المشرفين",
-            'cannot_remove_main_admin': "❌ لا يمكن إزالة المطور الأساسي",
-            'invalid_user_id': "❌ معرف مستخدم غير صالح",
-            'select_backup': "💾 اختر النسخة الاحتياطية للاستعادة:",
-            'no_backups': "📭 لا توجد نسخ احتياطية",
-            'current_allowed_user': "📁 المستخدم الحالي المصرح له بـ /sendcode: {0}",
-            'no_allowed_user': "لا يوجد",
-            'set_new_sendcode_user': "➕ تعيين مستخدم جديد",
-            'sendcode_user_set': "✅ تم تعيين {0} كمستخدم مصرح له بـ /sendcode",
-            'confirm_delete_tickets': "⚠️ هل أنت متأكد من حذف جميع تذاكر الدعم؟",
-            'tickets_deleted': "✅ تم حذف {0} تذكرة",
-            'post_published': "✅ تم نشر المنشور بنجاح",
-            'publish_error': "❌ فشل النشر: {0}",
-            'not_admin': "❌ أنت لست مشرفاً في هذه المجموعة",
-            'contests_active': "🏆 **المسابقات النشطة**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━",
-            'no_contests': "📭 لا توجد مسابقات نشطة حالياً.",
-            'contest_join': "📝 شارك في {0}",
-            'contest_participated': "✅ أنت مشترك بالفعل في هذه المسابقة!",
-            'contest_join_success': "✅ تم تسجيل مشاركتك في المسابقة بنجاح!",
-            'contest_join_error': "⚠️ أنت مشترك بالفعل أو حدث خطأ.",
-            'contest_winners_title': "🏆 **آخر الفائزين في المسابقات**\n━━━━━━━━━━━━━━━━━━━━━━\n",
-            'no_winners': "🏆 لا يوجد فائزون سابقون.",
-            'contest_created': "✅ **تم إنشاء المسابقة بنجاح!**\n\n📌 العنوان: {0}\n🎁 الجائزة: {1}\n📅 تنتهي: {2} (بتوقيت مكة)\n🆔 معرف المسابقة: `{3}`",
-            'contest_created_error': "❌ فشل إنشاء المسابقة.",
-            'contest_declared': "✅ **تم إعلان الفائز!**\n\n🏆 المسابقة: {0}\n👤 الفائز: `{1}`\n🎁 الجائزة: {2}",
-            'contest_declared_error': "❌ فشل إعلان الفائز.",
-            'contest_not_found': "❌ المسابقة غير موجودة.",
-            'contest_expired': "❌ هذه المسابقة منتهية بالفعل.",
-            'contest_not_participant': "❌ هذا المستخدم لم يشارك في المسابقة.",
-            'contest_winner_notification': "🎉 **تهانينا!**\n\nلقد فزت في مسابقة **{0}** 🏆\nالجائزة: {1}\n\nتواصل مع المشرف لاستلام جائزتك.",
-            'contest_auto_winner': "🎉 **تهانينا!**\n\nلقد فزت في مسابقة **{0}** 🏆\nالجائزة: {1}\n\nتم اختيارك عشوائياً من بين المشاركين.",
-            'contest_creator': "📢 تم إنشاء مسابقة جديدة بواسطة {0}\nالعنوان: {1}",
-            'create_contest_title': "📝 **إنشاء مسابقة جديدة**\n\nأرسل **عنوان** المسابقة:",
-            'create_contest_description': "📝 أرسل **وصف** المسابقة:",
-            'create_contest_prize': "🎁 أرسل **الجائزة** (مثال: 100 نقطة، اشتراك شهر، هدية):",
-            'create_contest_end_date': "📅 أرسل **تاريخ الانتهاء** (بتوقيت مكة) بالصيغة:\n`YYYY-MM-DD HH:MM`\nمثال: `2025-07-01 23:59`",
-            'contest_date_future': "❌ التاريخ يجب أن يكون في المستقبل!",
-            'contest_date_invalid': "❌ صيغة غير صحيحة! استخدم `YYYY-MM-DD HH:MM`",
-            'declare_winner_usage': "📝 **الاستخدام:**\n`/declare_winner معرف_المسابقة معرف_المستخدم`\n\nمثال: `/declare_winner 5 123456789`",
-            'contests_menu': "🏆 المسابقات",
-            'contest_participants_count': "👥 عدد المشاركين: {0}",
-            'contest_time_left': "⏳ متبقي {0} يوم",
-            'contest_expired_label': "🔴 انتهت",
-            'hidden_admin_added': "✅ تم إضافة المشرف المخفي `{0}` بنجاح",
-            'hidden_admin_removed': "✅ تم إزالة المشرف المخفي `{0}` بنجاح",
-            'hidden_admin_list': "🔒 **قائمة المشرفين المخفيين**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
-            'no_hidden_admins': "📭 لا يوجد مشرفين مخفيين في هذه المجموعة",
-            'hidden_owner_registered': "✅ تم تسجيل المالك المخفي بنجاح",
-            'hidden_owner_already': "⚠️ أنت مسجل بالفعل كمالك مخفي",
+# تحميل الترجمات من ملف خارجي
+def load_translations_from_file() -> dict:
+    translations_file = BASE_PATH / "translations.json"
+    default_translations = {
+        "ar": {
+            "welcome": "🌿 **مرحباً بك في ريلاكس مانيجر**\nاختر اللغة المناسبة",
+            "main_title": "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المعرف: `{1}`\n👥 مجموعاتي: {2}\n💎 الاشتراك: {3}\n📡 القناة النشطة: {4}\n📝 المنشورات غير المنشورة: {5}\n⚙️ النشر التلقائي: {6}",
+            "no_channels": "لا توجد قنوات",
+            "add_channel": "➕ إضافة قناة",
+            "my_channels": "📡 قنواتي",
+            "add_15_posts": "📥 إضافة 15 منشور",
+            "publish_one": "📤 نشر واحد",
+            "my_posts_btn": "📋 منشوراتي",
+            "recycle": "♻️ إعادة تدوير",
+            "stats_btn": "📊 إحصائياتي",
+            "my_stats_btn": "📈 إحصائيات كاملة",
+            "my_groups_btn": "👥 مجموعاتي",
+            "settings_btn": "⚙️ الإعدادات",
+            "schedule_btn": "⏰ الجدولة",
+            "help_btn": "❓ المساعدة",
+            "trial_btn": "🎁 تجربة مجانية",
+            "subscribe_btn": "💎 اشتراك",
+            "developer_btn": "👨‍💻 المطور",
+            "language_btn": "🌐 اللغة",
+            "support_btn": "📞 الدعم",
+            "referral": "🔗 الإحالات",
+            "reminder_settings": "⏰ التذكيرات",
+            "translation_settings": "🌐 الترجمة",
+            "publish_all": "📤 نشر الكل",
+            "updates_btn": "📢 التحديثات",
+            "add_to_group": "➕ إضافة إلى مجموعة",
+            "admin_panel": "👑 لوحة الأدمن",
+            "my_rank_btn": "📊 رتبتي",
+            "top_10_btn": "🏆 أفضل 10",
+            "schedule_post_btn": "📝 جدولة منشور",
+            "channel_stats": "📊 إحصائيات القناة",
+            "my_channels_summary": "📊 ملخص قنواتي",
+            "auto_on": "مفعل",
+            "auto_off": "معطل",
+            "subscribed": "✅ مفعل",
+            "not_subscribed": "❌ غير مفعل",
+            "send_channel_id": "📡 أرسل معرف القناة (مثال: @RelaxMgrr أو -100123456)",
+            "channel_added": "✅ تم إضافة القناة {0}",
+            "channel_exists": "⚠️ القناة موجودة مسبقاً",
+            "no_channels_list": "📭 لا توجد قنوات مسجلة",
+            "channels_list": "📡 **قنواتي**\nاختر قناة للتحكم بها:",
+            "delete_channel": "🗑️ حذف",
+            "channel_deleted": "✅ تم حذف القناة",
+            "delete_failed": "❌ فشل الحذف",
+            "no_posts": "📭 لا توجد منشورات",
+            "my_posts_title": "📋 **منشوراتي غير المنشورة**",
+            "confirm_delete": "⚠️ هل أنت متأكد من حذف جميع المنشورات؟",
+            "deleted_all": "✅ تم حذف جميع المنشورات",
+            "recycled": "♻️ تم إعادة تدوير جميع المنشورات",
+            "pending_stats": "📊 **إحصائيات المنشورات**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 غير المنشورة: {0}\n📋 الإجمالي: {1}",
+            "stats": "📈 **إحصائياتي الكاملة**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n⚙️ النشر التلقائي: {4}",
+            "settings": "⚙️ **الإعدادات**\nاختر الإعداد المطلوب:",
+            "disabled": "❌ تعطيل",
+            "enabled": "✅ تفعيل",
+            "auto_toggled": "✅ تم تغيير حالة النشر التلقائي إلى: {0}",
+            "schedule_settings": "⏰ **إعدادات الجدولة**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nاختر نوع الجدولة:",
+            "interval_minutes": "دقائق: {0}",
+            "interval_hours": "ساعات: {0}",
+            "interval_days": "أيام: {0}",
+            "days_week": "أيام الأسبوع: {0}",
+            "specific_dates": "تواريخ محددة: {0}",
+            "nothing": "لا شيء",
+            "send_minutes": "⏱️ أرسل عدد الدقائق (مثال: 30)",
+            "send_hours": "⏱️ أرسل عدد الساعات (مثال: 2)",
+            "send_days": "⏱️ أرسل عدد الأيام (مثال: 1)",
+            "send_dates": "📅 أرسل التواريخ مفصولة بفواصل (مثال: 2024-12-25,2025-01-01)",
+            "send_time": "🕐 أرسل وقت النشر (مثال: 14:30)",
+            "interval_set": "✅ تم حفظ الإعدادات",
+            "invalid_number": "❌ رقم غير صالح",
+            "invalid_date": "❌ تاريخ غير صالح",
+            "invalid_time": "❌ وقت غير صالح",
+            "days_saved": "✅ تم حفظ أيام النشر",
+            "monday": "الإثنين",
+            "tuesday": "الثلاثاء",
+            "wednesday": "الأربعاء",
+            "thursday": "الخميس",
+            "friday": "الجمعة",
+            "saturday": "السبت",
+            "sunday": "الأحد",
+            "admin_only": "🔒 هذا الأمر للمشرفين فقط!",
+            "group_only": "🔒 هذا الأمر يعمل فقط في المجموعات!",
+            "locked": "🔒 تم قفل المجموعة",
+            "unlocked": "🔓 تم فتح المجموعة",
+            "cancelled": "❌ تم الإلغاء",
+            "error": "⚠️ حدث خطأ، حاول مرة أخرى",
+            "help": "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/add_hidden_admin - إضافة مشرف مخفي\n/remove_hidden_admin - إزالة مشرف مخفي\n/list_hidden_admins - عرض المشرفين المخفيين\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
+            "support_welcome": "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
+            "support_help": "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
+            "trial_used": "❌ لقد استخدمت التجربة المجانية مسبقاً",
+            "already_subscribed": "✅ لديك اشتراك فعال بالفعل",
+            "trial": "🎁 **تم تفعيل التجربة المجانية!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ لديك 30 يوماً مجاناً\n📌 استمتع بجميع الميزات\n💎 يمكنك الاشتراك بعد انتهاء التجربة",
+            "subscribe": "💎 **الاشتراك**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الباقة المناسبة لك:\n\n⭐ 1 يوم - 5 نجوم\n⭐ 2 يوم - 9 نجوم\n⭐ شهر (30 يوم) - 50 نجمة\n⭐ 3 أشهر (90 يوم) - 120 نجمة\n\n📌 الدفع عبر نجوم تيليجرام",
+            "updates_text": "📢 **آخر التحديثات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تابع قناة التحديثات لمعرفة كل جديد:\n• إضافات جديدة\n• تحسينات الأداء\n• إصلاحات الأخطاء\n• ميزات حصرية",
+            "referral_title": "🔗 **الإحالات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 رابط الإحالة الخاص بك:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 عدد المحالين: {3}\n🎁 المكافآت المتاحة: {4} يوم\n⭐ المكافأة لكل إحالة: {5} يوم\n🎁 نقاط الترحيب: {6}",
+            "copy_link": "📋 نسخ الرابط",
+            "claim_reward": "🎁 صرف المكافآت",
+            "referral_list": "📋 قائمة المحالين",
+            "no_referrals": "📭 لا توجد إحالات بعد",
+            "no_reward_available": "❌ لا توجد مكافآت متاحة للصرف",
+            "reward_claimed": "✅ تم صرف {0} يوم اشتراك!",
+            "reminder_title": "⏰ **إعدادات التذكيرات**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 تذكير انتهاء الاشتراك: {0}\n📊 تقرير يومي: {1}\n📈 تقرير أسبوعي: {2}\n⏰ التذكير قبل: {3} أيام",
+            "reminder_sub": "🔔 تذكير الاشتراك",
+            "reminder_daily": "📊 تقرير يومي",
+            "reminder_weekly": "📈 تقرير أسبوعي",
+            "reminder_days_btn": "⏰ عدد الأيام",
+            "reminder_lang_btn": "🌐 لغة الإشعارات",
+            "subscription_warning": "⚠️ **تنبيه!**\nاشتراكك ينتهي خلال {0} أيام\nقم بتجديده الآن لتستمر الميزات 💎",
+            "daily_stats": "📊 **تقريرك اليومي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}",
+            "weekly_report": "📈 **تقريرك الأسبوعي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {0}\n📝 إجمالي المنشورات: {1}\n⏳ غير المنشورة: {2}\n👥 المجموعات: {3}\n🔗 الإحالات: {4}",
+            "translation_status_off": "معطلة ❌",
+            "translation_status_on": "مفعلة ✅ إلى {0}",
+            "translation_settings": "إعدادات الترجمة",
+            "translation_how_it_works": "📌 كيفية العمل:\nسيتم ترجمة المنشورات تلقائياً عند النشر إلى اللغة التي تختارها",
+            "translation_choose": "اختر لغة الترجمة:",
+            "translation_off": "🚫 إيقاف الترجمة",
+            "translation_disabled": "✅ تم إيقاف الترجمة",
+            "translation_enabled": "✅ تم تفعيل الترجمة إلى {0}",
+            "admin_panel": "👑 **لوحة الأدمن**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الإجراء المطلوب:",
+            "admin_users": "👥 المستخدمين",
+            "admin_banned": "🚫 المحظورين",
+            "admin_channels": "📡 القنوات",
+            "enter_admin_id": "👑 أرسل معرف المستخدم لإضافته كمشرف:",
+            "enter_remove_admin_id": "🗑️ أرسل معرف المستخدم لإزالته من المشرفين:",
+            "no_admins": "📭 لا يوجد مشرفون",
+            "add_admin_success": "✅ تم إضافة {0} كمشرف",
+            "remove_admin_success": "✅ تم إزالة {0} من المشرفين",
+            "cannot_remove_main_admin": "❌ لا يمكن إزالة المطور الأساسي",
+            "invalid_user_id": "❌ معرف مستخدم غير صالح",
+            "select_backup": "💾 اختر النسخة الاحتياطية للاستعادة:",
+            "no_backups": "📭 لا توجد نسخ احتياطية",
+            "current_allowed_user": "📁 المستخدم الحالي المصرح له بـ /sendcode: {0}",
+            "no_allowed_user": "لا يوجد",
+            "set_new_sendcode_user": "➕ تعيين مستخدم جديد",
+            "sendcode_user_set": "✅ تم تعيين {0} كمستخدم مصرح له بـ /sendcode",
+            "confirm_delete_tickets": "⚠️ هل أنت متأكد من حذف جميع تذاكر الدعم؟",
+            "tickets_deleted": "✅ تم حذف {0} تذكرة",
+            "post_published": "✅ تم نشر المنشور بنجاح",
+            "publish_error": "❌ فشل النشر: {0}",
+            "not_admin": "❌ أنت لست مشرفاً في هذه المجموعة",
+            "contests_active": "🏆 **المسابقات النشطة**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━",
+            "no_contests": "📭 لا توجد مسابقات نشطة حالياً.",
+            "contest_join": "📝 شارك في {0}",
+            "contest_participated": "✅ أنت مشترك بالفعل في هذه المسابقة!",
+            "contest_join_success": "✅ تم تسجيل مشاركتك في المسابقة بنجاح!",
+            "contest_join_error": "⚠️ أنت مشترك بالفعل أو حدث خطأ.",
+            "contest_winners_title": "🏆 **آخر الفائزين في المسابقات**\n━━━━━━━━━━━━━━━━━━━━━━\n",
+            "no_winners": "🏆 لا يوجد فائزون سابقون.",
+            "contest_created": "✅ **تم إنشاء المسابقة بنجاح!**\n\n📌 العنوان: {0}\n🎁 الجائزة: {1}\n📅 تنتهي: {2} (بتوقيت مكة)\n🆔 معرف المسابقة: `{3}`",
+            "contest_created_error": "❌ فشل إنشاء المسابقة.",
+            "contest_declared": "✅ **تم إعلان الفائز!**\n\n🏆 المسابقة: {0}\n👤 الفائز: `{1}`\n🎁 الجائزة: {2}",
+            "contest_declared_error": "❌ فشل إعلان الفائز.",
+            "contest_not_found": "❌ المسابقة غير موجودة.",
+            "contest_expired": "❌ هذه المسابقة منتهية بالفعل.",
+            "contest_not_participant": "❌ هذا المستخدم لم يشارك في المسابقة.",
+            "contest_winner_notification": "🎉 **تهانينا!**\n\nلقد فزت في مسابقة **{0}** 🏆\nالجائزة: {1}\n\nتواصل مع المشرف لاستلام جائزتك.",
+            "contest_auto_winner": "🎉 **تهانينا!**\n\nلقد فزت في مسابقة **{0}** 🏆\nالجائزة: {1}\n\nتم اختيارك عشوائياً من بين المشاركين.",
+            "contest_creator": "📢 تم إنشاء مسابقة جديدة بواسطة {0}\nالعنوان: {1}",
+            "create_contest_title": "📝 **إنشاء مسابقة جديدة**\n\nأرسل **عنوان** المسابقة:",
+            "create_contest_description": "📝 أرسل **وصف** المسابقة:",
+            "create_contest_prize": "🎁 أرسل **الجائزة** (مثال: 100 نقطة، اشتراك شهر، هدية):",
+            "create_contest_end_date": "📅 أرسل **تاريخ الانتهاء** (بتوقيت مكة) بالصيغة:\n`YYYY-MM-DD HH:MM`\nمثال: `2025-07-01 23:59`",
+            "contest_date_future": "❌ التاريخ يجب أن يكون في المستقبل!",
+            "contest_date_invalid": "❌ صيغة غير صحيحة! استخدم `YYYY-MM-DD HH:MM`",
+            "declare_winner_usage": "📝 **الاستخدام:**\n`/declare_winner معرف_المسابقة معرف_المستخدم`\n\nمثال: `/declare_winner 5 123456789`",
+            "contests_menu": "🏆 المسابقات",
+            "contest_participants_count": "👥 عدد المشاركين: {0}",
+            "contest_time_left": "⏳ متبقي {0} يوم",
+            "contest_expired_label": "🔴 انتهت",
+            "hidden_admin_added": "✅ تم إضافة المشرف المخفي `{0}` بنجاح",
+            "hidden_admin_removed": "✅ تم إزالة المشرف المخفي `{0}` بنجاح",
+            "hidden_admin_list": "🔒 **قائمة المشرفين المخفيين**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            "no_hidden_admins": "📭 لا يوجد مشرفين مخفيين في هذه المجموعة",
+            "hidden_owner_registered": "✅ تم تسجيل المالك المخفي بنجاح",
+            "hidden_owner_already": "⚠️ أنت مسجل بالفعل كمالك مخفي",
         },
-        'en': {
-            'welcome': "🌿 **Welcome to Relax Manager**\nChoose your language",
-            'main_title': "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: `{1}`\n👥 My Groups: {2}\n💎 Subscription: {3}\n📡 Active Channel: {4}\n📝 Unpublished Posts: {5}\n⚙️ Auto Publish: {6}",
-            'no_channels': "No channels",
-            'add_channel': "➕ Add Channel",
-            'my_channels': "📡 My Channels",
-            'add_15_posts': "📥 Add 15 Posts",
-            'publish_one': "📤 Publish One",
-            'my_posts_btn': "📋 My Posts",
-            'recycle': "♻️ Recycle",
-            'stats_btn': "📊 My Stats",
-            'my_stats_btn': "📈 Full Stats",
-            'my_groups_btn': "👥 My Groups",
-            'settings_btn': "⚙️ Settings",
-            'schedule_btn': "⏰ Schedule",
-            'help_btn': "❓ Help",
-            'trial_btn': "🎁 Free Trial",
-            'subscribe_btn': "💎 Subscribe",
-            'developer_btn': "👨‍💻 Developer",
-            'language_btn': "🌐 Language",
-            'support_btn': "📞 Support",
-            'referral': "🔗 Referrals",
-            'reminder_settings': "⏰ Reminders",
-            'translation_settings': "🌐 Translation",
-            'publish_all': "📤 Publish All",
-            'updates_btn': "📢 Updates",
-            'add_to_group': "➕ Add to Group",
-            'admin_panel': "👑 Admin Panel",
-            'my_rank_btn': "📊 My Rank",
-            'top_10_btn': "🏆 Top 10",
-            'schedule_post_btn': "📝 Schedule Post",
-            'channel_stats': "📊 Channel Stats",
-            'my_channels_summary': "📊 My Channels Summary",
-            'auto_on': "Enabled",
-            'auto_off': "Disabled",
-            'subscribed': "✅ Active",
-            'not_subscribed': "❌ Inactive",
-            'send_channel_id': "📡 Send channel ID (e.g., @channel or -100123456)",
-            'channel_added': "✅ Channel {0} added",
-            'channel_exists': "⚠️ Channel already exists",
-            'no_channels_list': "📭 No channels registered",
-            'channels_list': "📡 **My Channels**\nSelect a channel to control:",
-            'delete_channel': "🗑️ Delete",
-            'channel_deleted': "✅ Channel deleted",
-            'delete_failed': "❌ Delete failed",
-            'no_posts': "📭 No posts",
-            'my_posts_title': "📋 **My Unpublished Posts**",
-            'confirm_delete': "⚠️ Are you sure you want to delete all posts?",
-            'deleted_all': "✅ All posts deleted",
-            'recycled': "♻️ All posts recycled",
-            'pending_stats': "📊 **Post Statistics**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Unpublished: {0}\n📋 Total: {1}",
-            'stats': "📈 **My Full Stats**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n⚙️ Auto Publish: {4}",
-            'settings': "⚙️ **Settings**\nSelect the setting:",
-            'disabled': "❌ Disable",
-            'enabled': "✅ Enable",
-            'auto_toggled': "✅ Auto publish status changed to: {0}",
-            'schedule_settings': "⏰ **Schedule Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nSelect schedule type:",
-            'interval_minutes': "Minutes: {0}",
-            'interval_hours': "Hours: {0}",
-            'interval_days': "Days: {0}",
-            'days_week': "Days of week: {0}",
-            'specific_dates': "Specific dates: {0}",
-            'nothing': "Nothing",
-            'send_minutes': "⏱️ Send number of minutes (e.g., 30)",
-            'send_hours': "⏱️ Send number of hours (e.g., 2)",
-            'send_days': "⏱️ Send number of days (e.g., 1)",
-            'send_dates': "📅 Send dates separated by commas (e.g., 2024-12-25,2025-01-01)",
-            'send_time': "🕐 Send publish time (e.g., 14:30)",
-            'interval_set': "✅ Settings saved",
-            'invalid_number': "❌ Invalid number",
-            'invalid_date': "❌ Invalid date",
-            'invalid_time': "❌ Invalid time",
-            'days_saved': "✅ Days saved",
-            'monday': "Monday",
-            'tuesday': "Tuesday",
-            'wednesday': "Wednesday",
-            'thursday': "Thursday",
-            'friday': "Friday",
-            'saturday': "Saturday",
-            'sunday': "Sunday",
-            'admin_only': "🔒 This command is for admins only!",
-            'group_only': "🔒 This command works only in groups!",
-            'locked': "🔒 Group locked",
-            'unlocked': "🔓 Group unlocked",
-            'cancelled': "❌ Cancelled",
-            'error': "⚠️ An error occurred, try again",
-            'help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/add_hidden_admin - Add Hidden Admin\n/remove_hidden_admin - Remove Hidden Admin\n/list_hidden_admins - List Hidden Admins\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
-            'support_welcome': "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
-            'support_help': "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
-            'trial_used': "❌ You have already used the free trial",
-            'already_subscribed': "✅ You already have an active subscription",
-            'trial': "🎁 **Free Trial Activated!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ You have 30 days free\n📌 Enjoy all features\n💎 You can subscribe after trial ends",
-            'subscribe': "💎 **Subscription**\n━━━━━━━━━━━━━━━━━━━━━━\nChoose your plan:\n\n⭐ 1 Day - 5 Stars\n⭐ 2 Days - 9 Stars\n⭐ 30 Days (Month) - 50 Stars\n⭐ 90 Days (3 Months) - 120 Stars\n\n📌 Payment via Telegram Stars",
-            'updates_text': "📢 **Latest Updates**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Follow updates channel for news:\n• New features\n• Performance improvements\n• Bug fixes\n• Exclusive features",
-            'referral_title': "🔗 **Referrals**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Your referral link:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 Total Referrals: {3}\n🎁 Available Rewards: {4} days\n⭐ Reward per Referral: {5} days\n🎁 Welcome Bonus: {6}",
-            'copy_link': "📋 Copy Link",
-            'claim_reward': "🎁 Claim Rewards",
-            'referral_list': "📋 Referral List",
-            'no_referrals': "📭 No referrals yet",
-            'no_reward_available': "❌ No rewards available to claim",
-            'reward_claimed': "✅ Claimed {0} days subscription!",
-            'reminder_title': "⏰ **Reminder Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Subscription Reminder: {0}\n📊 Daily Report: {1}\n📈 Weekly Report: {2}\n⏰ Remind Before: {3} days",
-            'reminder_sub': "🔔 Subscription Reminder",
-            'reminder_daily': "📊 Daily Report",
-            'reminder_weekly': "📈 Weekly Report",
-            'reminder_days_btn': "⏰ Days Before",
-            'reminder_lang_btn': "🌐 Notification Language",
-            'subscription_warning': "⚠️ **Warning!**\nYour subscription expires in {0} days\nRenew now to keep features 💎",
-            'daily_stats': "📊 **Your Daily Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}",
-            'weekly_report': "📈 **Your Weekly Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n🔗 Referrals: {4}",
-            'translation_status_off': "Disabled ❌",
-            'translation_status_on': "Enabled ✅ to {0}",
-            'translation_settings': "Translation Settings",
-            'translation_how_it_works': "📌 How it works:\nPosts will be automatically translated to your chosen language when published",
-            'translation_choose': "Choose translation language:",
-            'translation_off': "🚫 Disable Translation",
-            'translation_disabled': "✅ Translation disabled",
-            'translation_enabled': "✅ Translation enabled to {0}",
-            'admin_panel': "👑 **Admin Panel**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the action:",
-            'admin_users': "👥 Users",
-            'admin_banned': "🚫 Banned",
-            'admin_channels': "📡 Channels",
-            'enter_admin_id': "👑 Send user ID to add as admin:",
-            'enter_remove_admin_id': "🗑️ Send user ID to remove from admins:",
-            'no_admins': "📭 No admins",
-            'add_admin_success': "✅ Added {0} as admin",
-            'remove_admin_success': "✅ Removed {0} from admins",
-            'cannot_remove_main_admin': "❌ Cannot remove main developer",
-            'invalid_user_id': "❌ Invalid user ID",
-            'select_backup': "💾 Select backup to restore:",
-            'no_backups': "📭 No backups",
-            'current_allowed_user': "📁 Currently allowed /sendcode user: {0}",
-            'no_allowed_user': "None",
-            'set_new_sendcode_user': "➕ Set new user",
-            'sendcode_user_set': "✅ Set {0} as allowed /sendcode user",
-            'confirm_delete_tickets': "⚠️ Are you sure you want to delete all support tickets?",
-            'tickets_deleted': "✅ Deleted {0} tickets",
-            'post_published': "✅ Post published successfully",
-            'publish_error': "❌ Publish failed: {0}",
-            'not_admin': "❌ You are not an admin in this group",
-            'contests_active': "🏆 **Active Contests**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━",
-            'no_contests': "📭 No active contests at the moment.",
-            'contest_join': "📝 Join {0}",
-            'contest_participated': "✅ You are already participating in this contest!",
-            'contest_join_success': "✅ Your participation has been registered successfully!",
-            'contest_join_error': "⚠️ You are already participating or an error occurred.",
-            'contest_winners_title': "🏆 **Recent Contest Winners**\n━━━━━━━━━━━━━━━━━━━━━━\n",
-            'no_winners': "🏆 No previous winners.",
-            'contest_created': "✅ **Contest created successfully!**\n\n📌 Title: {0}\n🎁 Prize: {1}\n📅 Ends: {2} (Mecca time)\n🆔 Contest ID: `{3}`",
-            'contest_created_error': "❌ Failed to create contest.",
-            'contest_declared': "✅ **Winner announced!**\n\n🏆 Contest: {0}\n👤 Winner: `{1}`\n🎁 Prize: {2}",
-            'contest_declared_error': "❌ Failed to declare winner.",
-            'contest_not_found': "❌ Contest not found.",
-            'contest_expired': "❌ This contest has already ended.",
-            'contest_not_participant': "❌ This user did not participate in the contest.",
-            'contest_winner_notification': "🎉 **Congratulations!**\n\nYou won the contest **{0}** 🏆\nPrize: {1}\n\nContact the admin to claim your prize.",
-            'contest_auto_winner': "🎉 **Congratulations!**\n\nYou won the contest **{0}** 🏆\nPrize: {1}\n\nYou were randomly selected from the participants.",
-            'contest_creator': "📢 New contest created by {0}\nTitle: {1}",
-            'create_contest_title': "📝 **Create New Contest**\n\nSend the contest **Title**:",
-            'create_contest_description': "📝 Send the contest **Description**:",
-            'create_contest_prize': "🎁 Send the **Prize** (e.g., 100 points, 1 month subscription, gift):",
-            'create_contest_end_date': "📅 Send the **End Date** (Mecca time) in format:\n`YYYY-MM-DD HH:MM`\nExample: `2025-07-01 23:59`",
-            'contest_date_future': "❌ The date must be in the future!",
-            'contest_date_invalid': "❌ Invalid format! Use `YYYY-MM-DD HH:MM`",
-            'declare_winner_usage': "📝 **Usage:**\n`/declare_winner contest_id user_id`\n\nExample: `/declare_winner 5 123456789`",
-            'contests_menu': "🏆 Contests",
-            'contest_participants_count': "👥 Participants: {0}",
-            'contest_time_left': "⏳ {0} days left",
-            'contest_expired_label': "🔴 Expired",
-            'hidden_admin_added': "✅ Hidden admin `{0}` added successfully",
-            'hidden_admin_removed': "✅ Hidden admin `{0}` removed successfully",
-            'hidden_admin_list': "🔒 **Hidden Admins List**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
-            'no_hidden_admins': "📭 No hidden admins in this group",
-            'hidden_owner_registered': "✅ Hidden owner registered successfully",
-            'hidden_owner_already': "⚠️ You are already registered as hidden owner",
+        "en": {
+            "welcome": "🌿 **Welcome to Relax Manager**\nChoose your language",
+            "main_title": "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: `{1}`\n👥 My Groups: {2}\n💎 Subscription: {3}\n📡 Active Channel: {4}\n📝 Unpublished Posts: {5}\n⚙️ Auto Publish: {6}",
+            "no_channels": "No channels",
+            "add_channel": "➕ Add Channel",
+            "my_channels": "📡 My Channels",
+            "add_15_posts": "📥 Add 15 Posts",
+            "publish_one": "📤 Publish One",
+            "my_posts_btn": "📋 My Posts",
+            "recycle": "♻️ Recycle",
+            "stats_btn": "📊 My Stats",
+            "my_stats_btn": "📈 Full Stats",
+            "my_groups_btn": "👥 My Groups",
+            "settings_btn": "⚙️ Settings",
+            "schedule_btn": "⏰ Schedule",
+            "help_btn": "❓ Help",
+            "trial_btn": "🎁 Free Trial",
+            "subscribe_btn": "💎 Subscribe",
+            "developer_btn": "👨‍💻 Developer",
+            "language_btn": "🌐 Language",
+            "support_btn": "📞 Support",
+            "referral": "🔗 Referrals",
+            "reminder_settings": "⏰ Reminders",
+            "translation_settings": "🌐 Translation",
+            "publish_all": "📤 Publish All",
+            "updates_btn": "📢 Updates",
+            "add_to_group": "➕ Add to Group",
+            "admin_panel": "👑 Admin Panel",
+            "my_rank_btn": "📊 My Rank",
+            "top_10_btn": "🏆 Top 10",
+            "schedule_post_btn": "📝 Schedule Post",
+            "channel_stats": "📊 Channel Stats",
+            "my_channels_summary": "📊 My Channels Summary",
+            "auto_on": "Enabled",
+            "auto_off": "Disabled",
+            "subscribed": "✅ Active",
+            "not_subscribed": "❌ Inactive",
+            "send_channel_id": "📡 Send channel ID (e.g., @channel or -100123456)",
+            "channel_added": "✅ Channel {0} added",
+            "channel_exists": "⚠️ Channel already exists",
+            "no_channels_list": "📭 No channels registered",
+            "channels_list": "📡 **My Channels**\nSelect a channel to control:",
+            "delete_channel": "🗑️ Delete",
+            "channel_deleted": "✅ Channel deleted",
+            "delete_failed": "❌ Delete failed",
+            "no_posts": "📭 No posts",
+            "my_posts_title": "📋 **My Unpublished Posts**",
+            "confirm_delete": "⚠️ Are you sure you want to delete all posts?",
+            "deleted_all": "✅ All posts deleted",
+            "recycled": "♻️ All posts recycled",
+            "pending_stats": "📊 **Post Statistics**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Unpublished: {0}\n📋 Total: {1}",
+            "stats": "📈 **My Full Stats**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n⚙️ Auto Publish: {4}",
+            "settings": "⚙️ **Settings**\nSelect the setting:",
+            "disabled": "❌ Disable",
+            "enabled": "✅ Enable",
+            "auto_toggled": "✅ Auto publish status changed to: {0}",
+            "schedule_settings": "⏰ **Schedule Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━\nSelect schedule type:",
+            "interval_minutes": "Minutes: {0}",
+            "interval_hours": "Hours: {0}",
+            "interval_days": "Days: {0}",
+            "days_week": "Days of week: {0}",
+            "specific_dates": "Specific dates: {0}",
+            "nothing": "Nothing",
+            "send_minutes": "⏱️ Send number of minutes (e.g., 30)",
+            "send_hours": "⏱️ Send number of hours (e.g., 2)",
+            "send_days": "⏱️ Send number of days (e.g., 1)",
+            "send_dates": "📅 Send dates separated by commas (e.g., 2024-12-25,2025-01-01)",
+            "send_time": "🕐 Send publish time (e.g., 14:30)",
+            "interval_set": "✅ Settings saved",
+            "invalid_number": "❌ Invalid number",
+            "invalid_date": "❌ Invalid date",
+            "invalid_time": "❌ Invalid time",
+            "days_saved": "✅ Days saved",
+            "monday": "Monday",
+            "tuesday": "Tuesday",
+            "wednesday": "Wednesday",
+            "thursday": "Thursday",
+            "friday": "Friday",
+            "saturday": "Saturday",
+            "sunday": "Sunday",
+            "admin_only": "🔒 This command is for admins only!",
+            "group_only": "🔒 This command works only in groups!",
+            "locked": "🔒 Group locked",
+            "unlocked": "🔓 Group unlocked",
+            "cancelled": "❌ Cancelled",
+            "error": "⚠️ An error occurred, try again",
+            "help": "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/add_hidden_admin - Add Hidden Admin\n/remove_hidden_admin - Remove Hidden Admin\n/list_hidden_admins - List Hidden Admins\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
+            "support_welcome": "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
+            "support_help": "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
+            "trial_used": "❌ You have already used the free trial",
+            "already_subscribed": "✅ You already have an active subscription",
+            "trial": "🎁 **Free Trial Activated!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ You have 30 days free\n📌 Enjoy all features\n💎 You can subscribe after trial ends",
+            "subscribe": "💎 **Subscription**\n━━━━━━━━━━━━━━━━━━━━━━\nChoose your plan:\n\n⭐ 1 Day - 5 Stars\n⭐ 2 Days - 9 Stars\n⭐ 30 Days (Month) - 50 Stars\n⭐ 90 Days (3 Months) - 120 Stars\n\n📌 Payment via Telegram Stars",
+            "updates_text": "📢 **Latest Updates**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Follow updates channel for news:\n• New features\n• Performance improvements\n• Bug fixes\n• Exclusive features",
+            "referral_title": "🔗 **Referrals**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Your referral link:\n`https://t.me/{1}?start=ref_{0}`\n\n👥 Total Referrals: {3}\n🎁 Available Rewards: {4} days\n⭐ Reward per Referral: {5} days\n🎁 Welcome Bonus: {6}",
+            "copy_link": "📋 Copy Link",
+            "claim_reward": "🎁 Claim Rewards",
+            "referral_list": "📋 Referral List",
+            "no_referrals": "📭 No referrals yet",
+            "no_reward_available": "❌ No rewards available to claim",
+            "reward_claimed": "✅ Claimed {0} days subscription!",
+            "reminder_title": "⏰ **Reminder Settings**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 Subscription Reminder: {0}\n📊 Daily Report: {1}\n📈 Weekly Report: {2}\n⏰ Remind Before: {3} days",
+            "reminder_sub": "🔔 Subscription Reminder",
+            "reminder_daily": "📊 Daily Report",
+            "reminder_weekly": "📈 Weekly Report",
+            "reminder_days_btn": "⏰ Days Before",
+            "reminder_lang_btn": "🌐 Notification Language",
+            "subscription_warning": "⚠️ **Warning!**\nYour subscription expires in {0} days\nRenew now to keep features 💎",
+            "daily_stats": "📊 **Your Daily Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}",
+            "weekly_report": "📈 **Your Weekly Report**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 Channels: {0}\n📝 Total Posts: {1}\n⏳ Unpublished: {2}\n👥 Groups: {3}\n🔗 Referrals: {4}",
+            "translation_status_off": "Disabled ❌",
+            "translation_status_on": "Enabled ✅ to {0}",
+            "translation_settings": "Translation Settings",
+            "translation_how_it_works": "📌 How it works:\nPosts will be automatically translated to your chosen language when published",
+            "translation_choose": "Choose translation language:",
+            "translation_off": "🚫 Disable Translation",
+            "translation_disabled": "✅ Translation disabled",
+            "translation_enabled": "✅ Translation enabled to {0}",
+            "admin_panel": "👑 **Admin Panel**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the action:",
+            "admin_users": "👥 Users",
+            "admin_banned": "🚫 Banned",
+            "admin_channels": "📡 Channels",
+            "enter_admin_id": "👑 Send user ID to add as admin:",
+            "enter_remove_admin_id": "🗑️ Send user ID to remove from admins:",
+            "no_admins": "📭 No admins",
+            "add_admin_success": "✅ Added {0} as admin",
+            "remove_admin_success": "✅ Removed {0} from admins",
+            "cannot_remove_main_admin": "❌ Cannot remove main developer",
+            "invalid_user_id": "❌ Invalid user ID",
+            "select_backup": "💾 Select backup to restore:",
+            "no_backups": "📭 No backups",
+            "current_allowed_user": "📁 Currently allowed /sendcode user: {0}",
+            "no_allowed_user": "None",
+            "set_new_sendcode_user": "➕ Set new user",
+            "sendcode_user_set": "✅ Set {0} as allowed /sendcode user",
+            "confirm_delete_tickets": "⚠️ Are you sure you want to delete all support tickets?",
+            "tickets_deleted": "✅ Deleted {0} tickets",
+            "post_published": "✅ Post published successfully",
+            "publish_error": "❌ Publish failed: {0}",
+            "not_admin": "❌ You are not an admin in this group",
+            "contests_active": "🏆 **Active Contests**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}\n━━━━━━━━━━━━━━━━━━━━━━",
+            "no_contests": "📭 No active contests at the moment.",
+            "contest_join": "📝 Join {0}",
+            "contest_participated": "✅ You are already participating in this contest!",
+            "contest_join_success": "✅ Your participation has been registered successfully!",
+            "contest_join_error": "⚠️ You are already participating or an error occurred.",
+            "contest_winners_title": "🏆 **Recent Contest Winners**\n━━━━━━━━━━━━━━━━━━━━━━\n",
+            "no_winners": "🏆 No previous winners.",
+            "contest_created": "✅ **Contest created successfully!**\n\n📌 Title: {0}\n🎁 Prize: {1}\n📅 Ends: {2} (Mecca time)\n🆔 Contest ID: `{3}`",
+            "contest_created_error": "❌ Failed to create contest.",
+            "contest_declared": "✅ **Winner announced!**\n\n🏆 Contest: {0}\n👤 Winner: `{1}`\n🎁 Prize: {2}",
+            "contest_declared_error": "❌ Failed to declare winner.",
+            "contest_not_found": "❌ Contest not found.",
+            "contest_expired": "❌ This contest has already ended.",
+            "contest_not_participant": "❌ This user did not participate in the contest.",
+            "contest_winner_notification": "🎉 **Congratulations!**\n\nYou won the contest **{0}** 🏆\nPrize: {1}\n\nContact the admin to claim your prize.",
+            "contest_auto_winner": "🎉 **Congratulations!**\n\nYou won the contest **{0}** 🏆\nPrize: {1}\n\nYou were randomly selected from the participants.",
+            "contest_creator": "📢 New contest created by {0}\nTitle: {1}",
+            "create_contest_title": "📝 **Create New Contest**\n\nSend the contest **Title**:",
+            "create_contest_description": "📝 Send the contest **Description**:",
+            "create_contest_prize": "🎁 Send the **Prize** (e.g., 100 points, 1 month subscription, gift):",
+            "create_contest_end_date": "📅 Send the **End Date** (Mecca time) in format:\n`YYYY-MM-DD HH:MM`\nExample: `2025-07-01 23:59`",
+            "contest_date_future": "❌ The date must be in the future!",
+            "contest_date_invalid": "❌ Invalid format! Use `YYYY-MM-DD HH:MM`",
+            "declare_winner_usage": "📝 **Usage:**\n`/declare_winner contest_id user_id`\n\nExample: `/declare_winner 5 123456789`",
+            "contests_menu": "🏆 Contests",
+            "contest_participants_count": "👥 Participants: {0}",
+            "contest_time_left": "⏳ {0} days left",
+            "contest_expired_label": "🔴 Expired",
+            "hidden_admin_added": "✅ Hidden admin `{0}` added successfully",
+            "hidden_admin_removed": "✅ Hidden admin `{0}` removed successfully",
+            "hidden_admin_list": "🔒 **Hidden Admins List**\n━━━━━━━━━━━━━━━━━━━━━━\n{0}",
+            "no_hidden_admins": "📭 No hidden admins in this group",
+            "hidden_owner_registered": "✅ Hidden owner registered successfully",
+            "hidden_owner_already": "⚠️ You are already registered as hidden owner",
         }
     }
-    lang_texts = texts.get(lang, texts['ar'])
-    return lang_texts.get(key, key)
+
+    if not translations_file.exists():
+        print(f"⚠️ ملف الترجمة {translations_file} غير موجود، سيتم إنشاؤه")
+        try:
+            with open(translations_file, 'w', encoding='utf-8') as f:
+                json.dump(default_translations, f, ensure_ascii=False, indent=2)
+            print(f"✅ تم إنشاء ملف الترجمة {translations_file}")
+        except Exception as e:
+            print(f"❌ فشل إنشاء ملف الترجمة: {e}")
+        return default_translations
+
+    try:
+        with open(translations_file, 'r', encoding='utf-8') as f:
+            loaded = json.load(f)
+        # التأكد من وجود جميع اللغات
+        for lang in SUPPORTED_LANGUAGES:
+            if lang not in loaded:
+                loaded[lang] = default_translations.get(lang, default_translations['ar'])
+        print(f"✅ تم تحميل الترجمات من {translations_file}")
+        return loaded
+    except Exception as e:
+        print(f"❌ فشل تحميل ملف الترجمة: {e}")
+        return default_translations
+
+TRANSLATIONS = load_translations_from_file()
+
+def get_text(user_id: int, key: str) -> str:
+    lang = user_language.get(user_id, 'ar')
+    lang_data = TRANSLATIONS.get(lang, TRANSLATIONS.get('ar', {}))
+    return lang_data.get(key, key)
 
 async def set_user_language(user_id: int, lang: str):
     async with _user_language_lock:
@@ -2498,2214 +2527,6 @@ class StateDispatcher:
         return False
 
 state_dispatcher = StateDispatcher()
-
-# ===================== واجهة الويب المحسّنة (مع دعم Render) =====================
-
-# ===== تكوين Jinja2 =====
-if JINJA2_AVAILABLE:
-    try:
-        template_loader = jinja2.FileSystemLoader(str(TEMPLATES_PATH))
-        template_env = jinja2.Environment(loader=template_loader, autoescape=True)
-        print("✅ تم تحميل Jinja2 بنجاح")
-    except Exception as e:
-        print(f"⚠️ فشل تحميل Jinja2: {e}")
-        JINJA2_AVAILABLE = False
-else:
-    template_env = None
-    print("⚠️ Jinja2 غير متاح - سيتم استخدام HTML النقي")
-
-# ===== إنشاء ملفات HTML =====
-def create_web_templates():
-    """إنشاء ملفات HTML لواجهة الويب (متوافق مع Render)"""
-
-    # ===== index.html =====
-    index_html = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ريلاكس مانيجر - لوحة التحكم</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        :root {
-            --primary: #2d3436;
-            --secondary: #0984e3;
-            --success: #00b894;
-            --danger: #e17055;
-            --warning: #fdcb6e;
-            --info: #00cec9;
-            --dark: #2d3436;
-            --light: #dfe6e9;
-        }
-        [data-theme="dark"] {
-            --primary: #dfe6e9;
-            --dark: #1a1a2e;
-            --light: #2d3436;
-        }
-        body {
-            background: #f5f6fa;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            transition: background 0.3s, color 0.3s;
-        }
-        [data-theme="dark"] body {
-            background: #1a1a2e;
-            color: #dfe6e9;
-        }
-        .sidebar {
-            min-height: 100vh;
-            background: var(--dark);
-            color: white;
-            padding: 20px;
-            position: fixed;
-            right: 0;
-            top: 0;
-            width: 250px;
-            z-index: 1000;
-            overflow-y: auto;
-            box-shadow: -2px 0 10px rgba(0,0,0,0.1);
-            transition: background 0.3s;
-        }
-        .sidebar .brand {
-            font-size: 24px;
-            font-weight: bold;
-            padding: 20px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-            margin-bottom: 20px;
-            color: #fff;
-        }
-        .sidebar .brand i {
-            color: var(--secondary);
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.7);
-            padding: 12px 15px;
-            border-radius: 10px;
-            margin-bottom: 5px;
-            transition: all 0.3s;
-        }
-        .sidebar .nav-link:hover {
-            background: rgba(255,255,255,0.1);
-            color: white;
-        }
-        .sidebar .nav-link.active {
-            background: var(--secondary);
-            color: white;
-        }
-        .sidebar .nav-link i {
-            margin-left: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        .main-content {
-            margin-right: 250px;
-            padding: 20px;
-            min-height: 100vh;
-        }
-        .stat-card {
-            background: white;
-            border-radius: 15px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-            transition: all 0.3s;
-            border-right: 4px solid var(--secondary);
-        }
-        [data-theme="dark"] .stat-card {
-            background: #2d3436;
-            color: #dfe6e9;
-        }
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-        }
-        .stat-card .stat-icon {
-            font-size: 32px;
-            margin-bottom: 10px;
-        }
-        .stat-card .stat-number {
-            font-size: 28px;
-            font-weight: bold;
-        }
-        .stat-card .stat-label {
-            color: #636e72;
-            font-size: 14px;
-        }
-        [data-theme="dark"] .stat-card .stat-label {
-            color: #b2bec3;
-        }
-        .stat-card.primary { border-right-color: var(--secondary); }
-        .stat-card.success { border-right-color: var(--success); }
-        .stat-card.danger { border-right-color: var(--danger); }
-        .stat-card.warning { border-right-color: var(--warning); }
-        .stat-card.info { border-right-color: var(--info); }
-        .card {
-            border-radius: 15px;
-            border: none;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        [data-theme="dark"] .card {
-            background: #2d3436;
-            color: #dfe6e9;
-        }
-        .card-header {
-            background: white;
-            border-bottom: 1px solid #ecf0f1;
-            border-radius: 15px 15px 0 0 !important;
-            padding: 15px 20px;
-            font-weight: bold;
-        }
-        [data-theme="dark"] .card-header {
-            background: #2d3436;
-            border-bottom-color: #3d3d4e;
-        }
-        .table {
-            font-size: 14px;
-        }
-        [data-theme="dark"] .table {
-            color: #dfe6e9;
-        }
-        .table th {
-            border-top: none;
-            color: #636e72;
-            font-weight: 600;
-        }
-        [data-theme="dark"] .table th {
-            color: #b2bec3;
-        }
-        .status-badge {
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .status-badge.active { background: #d4edda; color: #155724; }
-        .status-badge.banned { background: #f8d7da; color: #721c24; }
-        .status-badge.pending { background: #fff3cd; color: #856404; }
-        .status-badge.success { background: #d4edda; color: #155724; }
-        .status-badge.danger { background: #f8d7da; color: #721c24; }
-        .status-badge.warning { background: #fff3cd; color: #856404; }
-        [data-theme="dark"] .status-badge.active { background: #1a3a2a; color: #00b894; }
-        [data-theme="dark"] .status-badge.banned { background: #3a1a1a; color: #e17055; }
-        [data-theme="dark"] .status-badge.pending { background: #3a3a1a; color: #fdcb6e; }
-        .loading-spinner {
-            display: none;
-            text-align: center;
-            padding: 20px;
-        }
-        .toast-container {
-            position: fixed;
-            bottom: 20px;
-            left: 20px;
-            z-index: 9999;
-        }
-        .profile-img {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: var(--secondary);
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-        }
-        .webhook-status {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 5px;
-        }
-        .webhook-status.online { background: #00b894; }
-        .webhook-status.offline { background: #e17055; }
-        .theme-toggle {
-            cursor: pointer;
-            padding: 8px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.1);
-            transition: all 0.3s;
-        }
-        .theme-toggle:hover {
-            background: rgba(255,255,255,0.2);
-        }
-        .export-btn {
-            cursor: pointer;
-            padding: 5px 15px;
-            border-radius: 20px;
-            background: var(--secondary);
-            color: white;
-            border: none;
-            font-size: 12px;
-            transition: all 0.3s;
-        }
-        .export-btn:hover {
-            opacity: 0.8;
-        }
-        .chart-container {
-            position: relative;
-            height: 300px;
-            margin: 20px 0;
-        }
-        @media (max-width: 768px) {
-            .sidebar {
-                position: static;
-                width: 100%;
-                min-height: auto;
-                padding: 10px;
-            }
-            .main-content {
-                margin-right: 0;
-                padding: 10px;
-            }
-        }
-        .render-badge {
-            position: fixed;
-            bottom: 10px;
-            right: 260px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 12px;
-            z-index: 999;
-        }
-        [data-theme="dark"] .render-badge {
-            background: rgba(255,255,255,0.1);
-        }
-    </style>
-</head>
-<body>
-
-<!-- Render Badge -->
-<div class="render-badge">🚀 ريلاكس مانيجر v19.1.0</div>
-
-<!-- Sidebar -->
-<div class="sidebar">
-    <div class="brand text-center">
-        <i class="bi bi-robot"></i> ريلاكس مانيجر
-    </div>
-    <nav class="nav flex-column">
-        <a class="nav-link active" href="#" data-page="dashboard">
-            <i class="bi bi-speedometer2"></i> لوحة التحكم
-        </a>
-        <a class="nav-link" href="#" data-page="users">
-            <i class="bi bi-people"></i> المستخدمين
-        </a>
-        <a class="nav-link" href="#" data-page="channels">
-            <i class="bi bi-broadcast"></i> القنوات
-        </a>
-        <a class="nav-link" href="#" data-page="groups">
-            <i class="bi bi-chat-dots"></i> المجموعات
-        </a>
-        <a class="nav-link" href="#" data-page="posts">
-            <i class="bi bi-file-post"></i> المنشورات
-        </a>
-        <a class="nav-link" href="#" data-page="contests">
-            <i class="bi bi-trophy"></i> المسابقات
-        </a>
-        <a class="nav-link" href="#" data-page="logs">
-            <i class="bi bi-journal-text"></i> السجلات
-        </a>
-        <a class="nav-link" href="#" data-page="backups">
-            <i class="bi bi-archive"></i> النسخ الاحتياطية
-        </a>
-        <a class="nav-link" href="#" data-page="settings">
-            <i class="bi bi-gear"></i> الإعدادات
-        </a>
-        <hr class="border-secondary">
-        <div class="d-flex justify-content-between align-items-center px-3 py-2">
-            <span class="text-light small">🌙 الوضع</span>
-            <span class="theme-toggle" onclick="toggleTheme()">
-                <i class="bi bi-moon-fill" id="theme-icon"></i>
-            </span>
-        </div>
-        <a class="nav-link text-danger" href="#" onclick="logout()">
-            <i class="bi bi-box-arrow-left"></i> تسجيل الخروج
-        </a>
-    </nav>
-</div>
-
-<!-- Main Content -->
-<div class="main-content">
-    <!-- Header -->
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2 id="page-title">لوحة التحكم</h2>
-        <div class="d-flex align-items-center">
-            <button class="btn btn-sm btn-outline-primary me-2" onclick="exportData()">
-                <i class="bi bi-download"></i> تصدير
-            </button>
-            <span class="me-3">
-                <span class="webhook-status online" id="ws-status"></span>
-                <span id="ws-status-text">متصل</span>
-            </span>
-            <div class="profile-img" id="user-profile">A</div>
-        </div>
-    </div>
-
-    <!-- Loading Spinner -->
-    <div class="loading-spinner" id="loading-spinner">
-        <div class="spinner-border text-primary" role="status">
-            <span class="visually-hidden">جاري التحميل...</span>
-        </div>
-        <p class="mt-2">جاري تحميل البيانات...</p>
-    </div>
-
-    <!-- Pages -->
-    <div id="page-dashboard" class="page-content">
-        <!-- Stats Cards -->
-        <div class="row" id="stats-cards">
-            <div class="col-md-3">
-                <div class="stat-card primary">
-                    <div class="stat-icon"><i class="bi bi-people text-primary"></i></div>
-                    <div class="stat-number" id="stat-users">0</div>
-                    <div class="stat-label">المستخدمين</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card success">
-                    <div class="stat-icon"><i class="bi bi-broadcast text-success"></i></div>
-                    <div class="stat-number" id="stat-channels">0</div>
-                    <div class="stat-label">القنوات</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card warning">
-                    <div class="stat-icon"><i class="bi bi-chat-dots text-warning"></i></div>
-                    <div class="stat-number" id="stat-groups">0</div>
-                    <div class="stat-label">المجموعات</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card danger">
-                    <div class="stat-icon"><i class="bi bi-file-post text-danger"></i></div>
-                    <div class="stat-number" id="stat-posts">0</div>
-                    <div class="stat-label">منشورات غير منشورة</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Charts -->
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-graph-up me-2"></i>نمو المستخدمين
-                    </div>
-                    <div class="card-body">
-                        <div class="chart-container">
-                            <canvas id="userGrowthChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-pie-chart me-2"></i>توزيع المنشورات
-                    </div>
-                    <div class="card-body">
-                        <div class="chart-container">
-                            <canvas id="postsDistributionChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- System Info -->
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-info-circle me-2"></i>معلومات النظام
-                    </div>
-                    <div class="card-body" id="system-info">
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>حالة البوت</span>
-                            <span class="status-badge success">🟢 يعمل</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>الإصدار</span>
-                            <span>19.1.0</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>وقت التشغيل</span>
-                            <span id="uptime">0 ساعة</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>استخدام الذاكرة</span>
-                            <span id="memory-usage">0%</span>
-                        </div>
-                        <div class="d-flex justify-content-between py-2">
-                            <span>قاعدة البيانات</span>
-                            <span class="status-badge success" id="db-status">✅ سليمة</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-activity me-2"></i>النشاطات الأخيرة
-                    </div>
-                    <div class="card-body" id="recent-activity">
-                        <div class="text-muted">لا توجد نشاطات حديثة</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-users" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-people me-2"></i>قائمة المستخدمين</span>
-                <div>
-                    <input type="text" class="form-control form-control-sm" id="user-search" placeholder="بحث..." style="width:200px;display:inline-block;">
-                    <button class="btn btn-sm btn-primary" onclick="refreshUsers()"><i class="bi bi-arrow-clockwise"></i></button>
-                    <button class="btn btn-sm btn-success" onclick="exportData('users')"><i class="bi bi-download"></i></button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="users-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المعرف</th>
-                                <th>الاسم</th>
-                                <th>الحالة</th>
-                                <th>النقاط</th>
-                                <th>المستوى</th>
-                                <th>الإجراءات</th>
-                            </tr>
-                        </thead>
-                        <tbody id="users-tbody">
-                            <tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-channels" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-broadcast me-2"></i>قنوات المستخدمين</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshChannels()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="channels-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المستخدم</th>
-                                <th>القناة</th>
-                                <th>الاسم</th>
-                                <th>الحالة</th>
-                            </tr>
-                        </thead>
-                        <tbody id="channels-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-groups" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-chat-dots me-2"></i>المجموعات</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshGroups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="groups-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المعرف</th>
-                                <th>الاسم</th>
-                                <th>المستخدم</th>
-                                <th>الحالة</th>
-                            </tr>
-                        </thead>
-                        <tbody id="groups-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-posts" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-file-post me-2"></i>المنشورات غير المنشورة</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshPosts()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="posts-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>القناة</th>
-                                <th>النص</th>
-                                <th>النوع</th>
-                                <th>التاريخ</th>
-                            </tr>
-                        </thead>
-                        <tbody id="posts-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-contests" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-trophy me-2"></i>المسابقات</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshContests()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="contests-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>العنوان</th>
-                                <th>الجائزة</th>
-                                <th>المشاركون</th>
-                                <th>التاريخ</th>
-                                <th>الحالة</th>
-                            </tr>
-                        </thead>
-                        <tbody id="contests-tbody">
-                            <tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-logs" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-journal-text me-2"></i>سجلات النظام</span>
-                <div>
-                    <button class="btn btn-sm btn-primary" onclick="refreshLogs()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                    <button class="btn btn-sm btn-danger" onclick="clearLogs()"><i class="bi bi-trash"></i> مسح</button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="logs-table">
-                        <thead>
-                            <tr>
-                                <th>الوقت</th>
-                                <th>المستوى</th>
-                                <th>الرسالة</th>
-                            </tr>
-                        </thead>
-                        <tbody id="logs-tbody">
-                            <tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-backups" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-archive me-2"></i>النسخ الاحتياطية</span>
-                <div>
-                    <button class="btn btn-sm btn-success" onclick="createBackup()"><i class="bi bi-plus"></i> نسخة جديدة</button>
-                    <button class="btn btn-sm btn-primary" onclick="refreshBackups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="backups-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>الملف</th>
-                                <th>الحجم</th>
-                                <th>التاريخ</th>
-                                <th>الإجراءات</th>
-                            </tr>
-                        </thead>
-                        <tbody id="backups-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="page-settings" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header">
-                <i class="bi bi-gear me-2"></i>إعدادات البوت
-            </div>
-            <div class="card-body">
-                <form id="settings-form">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label">اسم البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-name" value="ريلاكس مانيجر">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">معرف البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-username" value="Reelaaaxbot">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">وقت النشر (ثانية)</label>
-                                <input type="number" class="form-control" id="setting-publish-interval" value="720">
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label">قناة التحديثات</label>
-                                <input type="text" class="form-control" id="setting-updates-channel" placeholder="@channel">
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-force-subscribe">
-                                    <label class="form-check-label">الاشتراك الإجباري</label>
-                                </div>
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-auto-backup">
-                                    <label class="form-check-label">النسخ الاحتياطي التلقائي</label>
-                                </div>
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-nsfw">
-                                    <label class="form-check-label">كشف NSFW</label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <button type="submit" class="btn btn-primary">حفظ الإعدادات</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Toast Container -->
-<div class="toast-container">
-    <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-        <div class="toast-header">
-            <strong class="me-auto"><i class="bi bi-bell"></i> إشعار</strong>
-            <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
-        </div>
-        <div class="toast-body" id="toast-body">رسالة</div>
-    </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-// ===== Theme Toggle =====
-let currentTheme = localStorage.getItem('theme') || 'light';
-
-function toggleTheme() {
-    currentTheme = currentTheme === 'light' ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', currentTheme);
-    localStorage.setItem('theme', currentTheme);
-    document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
-}
-
-// تطبيق الثيم عند التحميل
-document.addEventListener('DOMContentLoaded', function() {
-    document.documentElement.setAttribute('data-theme', currentTheme);
-    document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
-});
-
-// ===== Export Data =====
-function exportData(type) {
-    let url = '/api/export';
-    if (type) {
-        url += '?type=' + type;
-    }
-    window.location.href = url;
-}
-
-// ===== WebSocket Connection =====
-let ws = null;
-let wsReconnectAttempts = 0;
-const MAX_WS_RECONNECT = 5;
-
-function connectWebSocket() {
-    const token = '{{ WEB_SECRET_KEY }}';
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws_extended?token=${encodeURIComponent(token)}`;
-
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = function() {
-        console.log('✅ WebSocket متصل');
-        document.getElementById('ws-status').className = 'webhook-status online';
-        document.getElementById('ws-status-text').textContent = 'متصل';
-        wsReconnectAttempts = 0;
-    };
-
-    ws.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-        } catch(e) {
-            console.error('خطأ في تحليل رسالة WebSocket:', e);
-        }
-    };
-
-    ws.onclose = function() {
-        console.log('❌ WebSocket مغلق');
-        document.getElementById('ws-status').className = 'webhook-status offline';
-        document.getElementById('ws-status-text').textContent = 'غير متصل';
-
-        if (wsReconnectAttempts < MAX_WS_RECONNECT) {
-            wsReconnectAttempts++;
-            setTimeout(connectWebSocket, 3000 * wsReconnectAttempts);
-        }
-    };
-
-    ws.onerror = function(error) {
-        console.error('خطأ في WebSocket:', error);
-    };
-}
-
-function handleWebSocketMessage(data) {
-    switch(data.type) {
-        case 'stats':
-            updateStats(data.data);
-            break;
-        case 'broadcast':
-            showToast(data.data.message || 'تم استلام تحديث جديد');
-            break;
-        case 'pong':
-            break;
-        default:
-            console.log('رسالة غير معروفة:', data);
-    }
-}
-
-// ===== Toast Notification =====
-function showToast(message, type = 'info') {
-    const toast = document.getElementById('liveToast');
-    const body = document.getElementById('toast-body');
-    body.textContent = message;
-    const bsToast = new bootstrap.Toast(toast, { delay: 3000 });
-    bsToast.show();
-}
-
-// ===== Update Stats =====
-function updateStats(data) {
-    document.getElementById('stat-users').textContent = data.total_users || 0;
-    document.getElementById('stat-channels').textContent = data.channels || 0;
-    document.getElementById('stat-groups').textContent = data.groups || 0;
-    document.getElementById('stat-posts').textContent = data.pending_posts || 0;
-}
-
-// ===== Charts =====
-let userGrowthChart = null;
-let postsDistributionChart = null;
-
-function initCharts() {
-    const ctx1 = document.getElementById('userGrowthChart').getContext('2d');
-    userGrowthChart = new Chart(ctx1, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: 'المستخدمين',
-                data: [],
-                borderColor: '#0984e3',
-                backgroundColor: 'rgba(9, 132, 227, 0.1)',
-                fill: true,
-                tension: 0.4
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    labels: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    ticks: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                },
-                x: {
-                    ticks: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            }
-        }
-    });
-
-    const ctx2 = document.getElementById('postsDistributionChart').getContext('2d');
-    postsDistributionChart = new Chart(ctx2, {
-        type: 'doughnut',
-        data: {
-            labels: ['منشورة', 'غير منشورة'],
-            datasets: [{
-                data: [0, 0],
-                backgroundColor: ['#00b894', '#e17055'],
-                borderWidth: 2,
-                borderColor: currentTheme === 'dark' ? '#2d3436' : '#ffffff'
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    labels: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            }
-        }
-    });
-}
-
-function updateCharts(userGrowth, postsDistribution) {
-    if (userGrowthChart) {
-        userGrowthChart.data.labels = userGrowth.labels || [];
-        userGrowthChart.data.datasets[0].data = userGrowth.data || [];
-        userGrowthChart.update();
-    }
-    if (postsDistributionChart) {
-        postsDistributionChart.data.datasets[0].data = [postsDistribution.published || 0, postsDistribution.unpublished || 0];
-        postsDistributionChart.update();
-    }
-}
-
-// ===== Page Navigation =====
-document.querySelectorAll('.sidebar .nav-link').forEach(link => {
-    link.addEventListener('click', function(e) {
-        e.preventDefault();
-        document.querySelectorAll('.sidebar .nav-link').forEach(l => l.classList.remove('active'));
-        this.classList.add('active');
-
-        const page = this.dataset.page;
-        document.querySelectorAll('.page-content').forEach(p => p.style.display = 'none');
-
-        const targetPage = document.getElementById(`page-${page}`);
-        if (targetPage) {
-            targetPage.style.display = 'block';
-            document.getElementById('page-title').textContent = this.textContent.trim();
-
-            switch(page) {
-                case 'dashboard': refreshDashboard(); break;
-                case 'users': refreshUsers(); break;
-                case 'channels': refreshChannels(); break;
-                case 'groups': refreshGroups(); break;
-                case 'posts': refreshPosts(); break;
-                case 'contests': refreshContests(); break;
-                case 'logs': refreshLogs(); break;
-                case 'backups': refreshBackups(); break;
-                case 'settings': loadSettings(); break;
-            }
-        }
-    });
-});
-
-// ===== Dashboard =====
-function refreshDashboard() {
-    fetch('/api/stats')
-        .then(res => res.json())
-        .then(data => {
-            updateStats(data);
-            // تحديث الرسوم البيانية
-            fetch('/api/charts')
-                .then(res => res.json())
-                .then(chartData => {
-                    updateCharts(chartData.user_growth, chartData.posts_distribution);
-                })
-                .catch(err => console.error('خطأ في تحميل الرسوم البيانية:', err));
-        })
-        .catch(err => console.error('خطأ في تحميل الإحصائيات:', err));
-
-    fetch('/api/system-info')
-        .then(res => res.json())
-        .then(data => {
-            document.getElementById('uptime').textContent = data.uptime || '0 ساعة';
-            document.getElementById('memory-usage').textContent = data.memory || '0%';
-        })
-        .catch(err => console.error('خطأ في تحميل معلومات النظام:', err));
-}
-
-// ===== Users =====
-function refreshUsers() {
-    const tbody = document.getElementById('users-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/users')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد مستخدمين</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((user, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${user.user_id}</code></td>
-                    <td>${user.first_name || 'غير معروف'}</td>
-                    <td><span class="status-badge ${user.banned ? 'danger' : 'success'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td>
-                    <td>${user.points || 0}</td>
-                    <td>${user.level || 1}</td>
-                    <td>
-                        <button class="btn btn-sm btn-${user.banned ? 'success' : 'danger'}" onclick="toggleBan(${user.user_id})">
-                            ${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المستخدمين:', err);
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-function toggleBan(userId) {
-    fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || 'تم تغيير الحالة');
-            refreshUsers();
-        })
-        .catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
-}
-
-// ===== Channels =====
-function refreshChannels() {
-    const tbody = document.getElementById('channels-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/channels')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد قنوات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((ch, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${ch.user_id}</code></td>
-                    <td><code>${ch.channel_id}</code></td>
-                    <td>${ch.channel_name || ch.channel_id}</td>
-                    <td><span class="status-badge ${ch.banned ? 'danger' : 'success'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل القنوات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-// ===== Groups =====
-function refreshGroups() {
-    const tbody = document.getElementById('groups-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/groups')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد مجموعات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((g, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${g.chat_id}</code></td>
-                    <td>${g.chat_name || g.chat_id}</td>
-                    <td><code>${g.added_by}</code></td>
-                    <td><span class="status-badge ${g.banned ? 'danger' : 'success'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المجموعات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-// ===== Posts =====
-function refreshPosts() {
-    const tbody = document.getElementById('posts-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/posts')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد منشورات غير منشورة</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((p, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${p.channel_name || p.channel_id}</td>
-                    <td>${(p.text || '').substring(0, 50)}${(p.text || '').length > 50 ? '...' : ''}</td>
-                    <td><span class="badge bg-secondary">${p.media_type || 'text'}</span></td>
-                    <td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المنشورات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-// ===== Contests =====
-function refreshContests() {
-    const tbody = document.getElementById('contests-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/contests')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">لا توجد مسابقات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((c, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${c.title || 'بدون عنوان'}</td>
-                    <td>${c.prize || 'غير محددة'}</td>
-                    <td>${c.participants || 0}</td>
-                    <td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td>
-                    <td><span class="status-badge ${c.status === 'active' ? 'success' : 'secondary'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المسابقات:', err);
-            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-// ===== Logs =====
-function refreshLogs() {
-    const tbody = document.getElementById('logs-tbody');
-    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/logs')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">لا توجد سجلات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map(log => {
-                const level = log.level || 'INFO';
-                const levelClass = {
-                    'ERROR': 'danger',
-                    'WARNING': 'warning',
-                    'INFO': 'info',
-                    'DEBUG': 'secondary'
-                }[level] || 'info';
-                return `
-                    <tr>
-                        <td>${log.time || '-'}</td>
-                        <td><span class="badge bg-${levelClass}">${level}</span></td>
-                        <td>${log.message || ''}</td>
-                    </tr>
-                `;
-            }).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل السجلات:', err);
-            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-function clearLogs() {
-    if (!confirm('هل أنت متأكد من مسح جميع السجلات؟')) return;
-    fetch('/api/logs', { method: 'DELETE' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || 'تم مسح السجلات');
-            refreshLogs();
-        })
-        .catch(err => showToast('❌ فشل مسح السجلات', 'error'));
-}
-
-// ===== Backups =====
-function refreshBackups() {
-    const tbody = document.getElementById('backups-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/backups')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد نسخ احتياطية</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((b, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${b.name || 'غير معروف'}</td>
-                    <td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td>
-                    <td>${b.date || '-'}</td>
-                    <td>
-                        <button class="btn btn-sm btn-success" onclick="restoreBackup('${b.name}')">
-                            <i class="bi bi-arrow-counterclockwise"></i> استعادة
-                        </button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')">
-                            <i class="bi bi-trash"></i> حذف
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل النسخ الاحتياطية:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
-}
-
-function createBackup() {
-    fetch('/api/backups', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم إنشاء نسخة احتياطية');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل إنشاء النسخة', 'error'));
-}
-
-function restoreBackup(name) {
-    if (!confirm(`هل أنت متأكد من استعادة النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم استعادة النسخة');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل استعادة النسخة', 'error'));
-}
-
-function deleteBackup(name) {
-    if (!confirm(`هل أنت متأكد من حذف النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم حذف النسخة');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل حذف النسخة', 'error'));
-}
-
-// ===== Settings =====
-function loadSettings() {
-    fetch('/api/settings')
-        .then(res => res.json())
-        .then(data => {
-            if (data.bot_name) document.getElementById('setting-bot-name').value = data.bot_name;
-            if (data.bot_username) document.getElementById('setting-bot-username').value = data.bot_username;
-            if (data.publish_interval) document.getElementById('setting-publish-interval').value = data.publish_interval;
-            if (data.updates_channel) document.getElementById('setting-updates-channel').value = data.updates_channel;
-            document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
-            document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
-            document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
-        })
-        .catch(err => console.error('خطأ في تحميل الإعدادات:', err));
-}
-
-document.getElementById('settings-form').addEventListener('submit', function(e) {
-    e.preventDefault();
-    const data = {
-        bot_name: document.getElementById('setting-bot-name').value,
-        bot_username: document.getElementById('setting-bot-username').value,
-        publish_interval: parseInt(document.getElementById('setting-publish-interval').value) || 720,
-        updates_channel: document.getElementById('setting-updates-channel').value,
-        force_subscribe: document.getElementById('setting-force-subscribe').checked,
-        auto_backup: document.getElementById('setting-auto-backup').checked,
-        nsfw_enabled: document.getElementById('setting-nsfw').checked
-    };
-
-    fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    })
-    .then(res => res.json())
-    .then(data => {
-        showToast(data.message || '✅ تم حفظ الإعدادات');
-    })
-    .catch(err => showToast('❌ فشل حفظ الإعدادات', 'error'));
-});
-
-// ===== Logout =====
-function logout() {
-    if (confirm('هل أنت متأكد من تسجيل الخروج؟')) {
-        document.cookie = 'session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-        window.location.href = '/logout';
-    }
-}
-
-// ===== User Search =====
-document.getElementById('user-search').addEventListener('input', function() {
-    const query = this.value.toLowerCase();
-    const rows = document.querySelectorAll('#users-tbody tr');
-    rows.forEach(row => {
-        const text = row.textContent.toLowerCase();
-        row.style.display = text.includes(query) ? '' : 'none';
-    });
-});
-
-// ===== WebSocket ping =====
-setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-    }
-}, 30000);
-
-// ===== Auto Refresh =====
-setInterval(() => {
-    const activePage = document.querySelector('.sidebar .nav-link.active');
-    if (activePage) {
-        const page = activePage.dataset.page;
-        switch(page) {
-            case 'dashboard': refreshDashboard(); break;
-            case 'users': refreshUsers(); break;
-            case 'channels': refreshChannels(); break;
-            case 'groups': refreshGroups(); break;
-            case 'posts': refreshPosts(); break;
-            case 'contests': refreshContests(); break;
-            case 'logs': refreshLogs(); break;
-            case 'backups': refreshBackups(); break;
-        }
-    }
-}, 30000);
-
-// ===== Initialize =====
-document.addEventListener('DOMContentLoaded', function() {
-    connectWebSocket();
-    initCharts();
-    refreshDashboard();
-    document.getElementById('page-dashboard').style.display = 'block';
-});
-</script>
-</body>
-</html>"""
-
-    # ===== إنشاء الملفات =====
-    try:
-        with open(TEMPLATES_PATH / "index.html", "w", encoding="utf-8") as f:
-            f.write(index_html)
-        logger.info("✅ تم إنشاء قالب HTML لواجهة الويب")
-        return True
-    except Exception as e:
-        logger.error(f"❌ فشل إنشاء قالب HTML: {e}")
-        return False
-
-# محاولة إنشاء القوالب
-try:
-    create_web_templates()
-except Exception as e:
-    print(f"⚠️ فشل إنشاء قوالب الويب: {e}")
-
-# ===== واجهة الويب =====
-web_app = web.Application()
-WEB_SESSIONS = {}
-WEB_SESSION_TIMEOUT = 3600
-WEB_RATE_LIMITS = defaultdict(list)
-WEB_RATE_LIMIT = 100
-WEB_RATE_WINDOW = 60
-
-def generate_session_id() -> str:
-    return secrets.token_urlsafe(32)
-
-def create_session(user_data: dict) -> str:
-    session_id = generate_session_id()
-    WEB_SESSIONS[session_id] = {
-        'user_data': user_data,
-        'created_at': time_module.time(),
-        'last_activity': time_module.time()
-    }
-    return session_id
-
-def get_session(session_id: str) -> dict | None:
-    if session_id not in WEB_SESSIONS:
-        return None
-    session = WEB_SESSIONS[session_id]
-    if time_module.time() - session['last_activity'] > WEB_SESSION_TIMEOUT:
-        del WEB_SESSIONS[session_id]
-        return None
-    session['last_activity'] = time_module.time()
-    return session['user_data']
-
-def delete_session(session_id: str):
-    if session_id in WEB_SESSIONS:
-        del WEB_SESSIONS[session_id]
-
-def check_rate_limit(ip: str) -> bool:
-    now = time_module.time()
-    WEB_RATE_LIMITS[ip] = [t for t in WEB_RATE_LIMITS[ip] if now - t < WEB_RATE_WINDOW]
-    if len(WEB_RATE_LIMITS[ip]) >= WEB_RATE_LIMIT:
-        return False
-    WEB_RATE_LIMITS[ip].append(now)
-    return True
-
-def check_web_auth(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        session = get_session(session_id)
-        if session:
-            return True
-
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
-    return False
-
-@web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
-        return await handler(request)
-    if request.path.startswith('/static/'):
-        return await handler(request)
-    if not check_web_auth(request):
-        return web.Response(status=401, text="🔒 مطلوب مصادقة")
-    return await handler(request)
-
-web_app.middlewares.append(auth_middleware)
-
-# ===== API Handlers =====
-
-async def api_stats_handler(request):
-    """الحصول على إحصائيات البوت"""
-    try:
-        total, banned, posts, groups, channels = await db_stats()
-        return web.json_response({
-            'total_users': total,
-            'active_users': total - banned,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_charts_handler(request):
-    """الحصول على بيانات الرسوم البيانية"""
-    try:
-        # نمو المستخدمين (آخر 30 يوم)
-        user_growth = {'labels': [], 'data': []}
-        try:
-            async def _get_user_growth(conn):
-                cur = await conn.execute("""
-                    SELECT date(last_updated) as date, COUNT(*) as count
-                    FROM users_cache
-                    WHERE last_updated >= datetime('now', '-30 days')
-                    GROUP BY date(last_updated)
-                    ORDER BY date
-                """)
-                return await cur.fetchall()
-            growth_data = await execute_db(_get_user_growth)
-            for row in growth_data:
-                user_growth['labels'].append(row[0])
-                user_growth['data'].append(row[1])
-        except:
-            pass
-
-        # توزيع المنشورات
-        posts_distribution = {'published': 0, 'unpublished': 0}
-        try:
-            async def _get_posts_dist(conn):
-                cur = await conn.execute("SELECT published, COUNT(*) FROM posts GROUP BY published")
-                return await cur.fetchall()
-            dist_data = await execute_db(_get_posts_dist)
-            for row in dist_data:
-                if row[0] == 1:
-                    posts_distribution['published'] = row[1]
-                else:
-                    posts_distribution['unpublished'] = row[1]
-        except:
-            pass
-
-        return web.json_response({
-            'user_growth': user_growth,
-            'posts_distribution': posts_distribution
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_export_handler(request):
-    """تصدير البيانات كـ CSV"""
-    try:
-        export_type = request.query.get('type', 'all')
-
-        # إنشاء ملف CSV مؤقت
-        import csv
-        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8')
-
-        if export_type == 'users' or export_type == 'all':
-            users = await db_get_all_users()
-            writer = csv.writer(temp_file)
-            writer.writerow(['User ID', 'Banned'])
-            for user_id, banned in users:
-                writer.writerow([user_id, banned])
-            temp_file.write('\n')
-
-        if export_type == 'channels' or export_type == 'all':
-            channels = await db_get_all_user_channels_no_limit()
-            writer = csv.writer(temp_file)
-            writer.writerow(['User ID', 'Channel DB ID', 'Channel ID', 'Channel Name', 'Banned'])
-            for user_id, ch_id, ch_tele, ch_name, banned in channels:
-                writer.writerow([user_id, ch_id, ch_tele, ch_name, banned])
-            temp_file.write('\n')
-
-        if export_type == 'groups' or export_type == 'all':
-            groups = await db_get_all_groups()
-            writer = csv.writer(temp_file)
-            writer.writerow(['Chat ID', 'Chat Name', 'Username', 'Added By', 'Added At', 'Banned'])
-            for chat_id, chat_name, username, added_by, added_at, banned in groups:
-                writer.writerow([chat_id, chat_name, username, added_by, added_at, banned])
-            temp_file.write('\n')
-
-        if export_type == 'posts' or export_type == 'all':
-            async def _get_posts(conn):
-                cur = await conn.execute("SELECT p.id, p.text, p.media_type, p.published, p.created_at, uc.channel_id FROM posts p JOIN user_channels uc ON p.channel_db_id = uc.id LIMIT 1000")
-                return await cur.fetchall()
-            posts = await execute_db(_get_posts)
-            writer = csv.writer(temp_file)
-            writer.writerow(['Post ID', 'Text', 'Media Type', 'Published', 'Created At', 'Channel ID'])
-            for post in posts:
-                writer.writerow([post[0], post[1][:100] if post[1] else '', post[2], post[3], post[4], post[5]])
-
-        temp_file.close()
-
-        # إرسال الملف
-        with open(temp_file.name, 'rb') as f:
-            data = f.read()
-        os.unlink(temp_file.name)
-
-        filename = f"export_{export_type}_{mecca_now().strftime('%Y%m%d_%H%M%S')}.csv"
-        return web.Response(body=data, headers={
-            'Content-Type': 'text/csv',
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_users_handler(request):
-    """الحصول على قائمة المستخدمين"""
-    try:
-        users = await db_get_all_users()
-        result = []
-        for user_id, banned in users:
-            level_data = await db_get_user_level(user_id)
-            result.append({
-                'user_id': user_id,
-                'banned': banned == 1,
-                'points': level_data['points'],
-                'level': level_data['level'],
-                'first_name': 'مستخدم'
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_user_toggle_ban_handler(request):
-    """تبديل حالة حظر المستخدم"""
-    try:
-        user_id = int(request.match_info['user_id'])
-        users = await db_get_all_users()
-        user_exists = any(u[0] == user_id for u in users)
-        if not user_exists:
-            return web.json_response({'error': 'المستخدم غير موجود'}, status=404)
-
-        current_ban = await db_is_banned(user_id)
-        await db_set_ban(user_id, not current_ban)
-        return web.json_response({
-            'success': True,
-            'message': f'تم {"حظر" if not current_ban else "إلغاء حظر"} المستخدم'
-        })
-    except ValueError:
-        return web.json_response({'error': 'معرف غير صالح'}, status=400)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_channels_handler(request):
-    """الحصول على قائمة القنوات"""
-    try:
-        channels = await db_get_all_user_channels_no_limit()
-        result = []
-        for user_id, ch_id, ch_tele, ch_name, banned in channels:
-            result.append({
-                'user_id': user_id,
-                'channel_id': ch_tele,
-                'channel_name': ch_name,
-                'banned': banned == 1
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_groups_handler(request):
-    """الحصول على قائمة المجموعات"""
-    try:
-        groups = await db_get_all_groups()
-        result = []
-        for chat_id, chat_name, username, added_by, added_at, banned in groups:
-            result.append({
-                'chat_id': chat_id,
-                'chat_name': chat_name,
-                'username': username,
-                'added_by': added_by,
-                'added_at': added_at,
-                'banned': banned == 1
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_posts_handler(request):
-    """الحصول على قائمة المنشورات غير المنشورة"""
-    try:
-        async def _get_posts(conn):
-            cur = await conn.execute("""
-                SELECT p.id, p.channel_db_id, p.text, p.media_type, p.created_at,
-                       uc.channel_id, uc.channel_name
-                FROM posts p
-                JOIN user_channels uc ON p.channel_db_id = uc.id
-                WHERE p.published = 0
-                ORDER BY p.created_at DESC
-                LIMIT 100
-            """)
-            return await cur.fetchall()
-
-        posts = await execute_db(_get_posts)
-        result = []
-        for post in posts:
-            result.append({
-                'id': post[0],
-                'channel_db_id': post[1],
-                'text': post[2],
-                'media_type': post[3],
-                'created_at': post[4],
-                'channel_id': post[5],
-                'channel_name': post[6]
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_contests_handler(request):
-    """الحصول على قائمة المسابقات"""
-    try:
-        contests = await db_get_active_contests_with_participants(limit=20)
-        result = []
-        for contest in contests:
-            result.append({
-                'id': contest[0],
-                'title': contest[1],
-                'description': contest[2],
-                'prize': contest[3],
-                'end_date': contest[4],
-                'participants': contest[5] if len(contest) > 5 else 0,
-                'status': 'active'
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_logs_handler(request):
-    """الحصول على سجلات النظام"""
-    try:
-        limit = int(request.query.get('limit', 50))
-        logs = []
-        if LOG_PATH.exists():
-            with open(LOG_PATH, 'r', encoding='utf-8') as f:
-                lines = f.readlines()[-limit:]
-                for line in lines:
-                    try:
-                        parts = line.strip().split(' - ', 3)
-                        if len(parts) >= 4:
-                            logs.append({
-                                'time': parts[0],
-                                'level': parts[1] if len(parts) > 1 else 'INFO',
-                                'message': parts[-1]
-                            })
-                        else:
-                            logs.append({
-                                'time': '',
-                                'level': 'INFO',
-                                'message': line.strip()
-                            })
-                    except:
-                        logs.append({
-                            'time': '',
-                            'level': 'INFO',
-                            'message': line.strip()
-                        })
-        return web.json_response(logs)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_logs_delete_handler(request):
-    """مسح سجلات النظام"""
-    try:
-        if LOG_PATH.exists():
-            with open(LOG_PATH, 'w', encoding='utf-8') as f:
-                f.write('')
-        return web.json_response({'success': True, 'message': 'تم مسح السجلات'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backups_handler(request):
-    """الحصول على قائمة النسخ الاحتياطية"""
-    try:
-        backups = await list_backups()
-        result = []
-        for backup in backups:
-            stat = backup.stat()
-            result.append({
-                'name': backup.name,
-                'size': stat.st_size,
-                'date': datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_create_handler(request):
-    """إنشاء نسخة احتياطية جديدة"""
-    try:
-        backup_path = await create_backup()
-        return web.json_response({
-            'success': True,
-            'message': '✅ تم إنشاء نسخة احتياطية',
-            'file': backup_path.name
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_restore_handler(request):
-    """استعادة نسخة احتياطية"""
-    try:
-        name = request.match_info['name']
-        backup_path = BACKUP_DIR / name
-        if not backup_path.exists():
-            return web.json_response({'error': 'الملف غير موجود'}, status=404)
-        await restore_backup(backup_path)
-        return web.json_response({'success': True, 'message': '✅ تم استعادة النسخة'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_delete_handler(request):
-    """حذف نسخة احتياطية"""
-    try:
-        name = request.match_info['name']
-        backup_path = BACKUP_DIR / name
-        if not backup_path.exists():
-            return web.json_response({'error': 'الملف غير موجود'}, status=404)
-        backup_path.unlink()
-        return web.json_response({'success': True, 'message': '✅ تم حذف النسخة'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_settings_handler(request):
-    """الحصول على إعدادات البوت"""
-    try:
-        publish_interval = await db_get_publish_interval()
-        updates_channel = await db_get_updates_channel()
-        force_subscribe = await db_get_force_subscribe_status()
-        auto_backup = await db_get_auto_backup()
-        return web.json_response({
-            'bot_name': BOT_NAME,
-            'bot_username': BOT_USERNAME,
-            'publish_interval': publish_interval,
-            'updates_channel': updates_channel or '',
-            'force_subscribe': force_subscribe,
-            'auto_backup': auto_backup,
-            'nsfw_enabled': NSFW_ENABLED
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_settings_update_handler(request):
-    """تحديث إعدادات البوت"""
-    try:
-        data = await request.json()
-
-        if 'publish_interval' in data:
-            seconds = int(data['publish_interval']) * 60
-            await db_set_publish_interval_seconds(seconds, PRIMARY_OWNER_ID, is_admin=True)
-
-        if 'updates_channel' in data:
-            channel = data['updates_channel'].strip()
-            if channel:
-                if channel.startswith('@'):
-                    channel = channel[1:]
-                await db_set_updates_channel(channel)
-
-        if 'force_subscribe' in data:
-            await db_set_force_subscribe_status(data['force_subscribe'])
-
-        if 'auto_backup' in data:
-            await db_set_auto_backup(data['auto_backup'])
-
-        if 'nsfw_enabled' in data:
-            global NSFW_ENABLED
-            NSFW_ENABLED = data['nsfw_enabled']
-            os.environ["NSFW_ENABLED"] = "True" if NSFW_ENABLED else "False"
-
-        return web.json_response({'success': True, 'message': '✅ تم حفظ الإعدادات'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_system_info_handler(request):
-    """الحصول على معلومات النظام"""
-    try:
-        ram = get_ram_usage()
-        uptime = time_module.time() - getattr(api_system_info_handler, 'start_time', time_module.time())
-        uptime_hours = int(uptime / 3600)
-        uptime_minutes = int((uptime % 3600) / 60)
-
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-
-        return web.json_response({
-            'uptime': f'{uptime_hours} ساعة {uptime_minutes} دقيقة',
-            'memory': f"{ram['percent']}%",
-            'db_status': '✅ سليمة' if db_healthy else '❌ تالفة',
-            'telegram_status': '✅ متصل' if tg_healthy else '❌ غير متصل',
-            'version': '19.1.0',
-            'platform': platform.platform()
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-# ===== Web Routes =====
-
-async def root_handler(request):
-    """الصفحة الرئيسية"""
-    try:
-        if check_web_auth(request):
-            session_id = request.cookies.get('session_id')
-            if JINJA2_AVAILABLE and template_env:
-                try:
-                    template = template_env.get_template('index.html')
-                    html = template.render(
-                        WEB_SECRET_KEY=WEB_SECRET_KEY,
-                        BOT_NAME=BOT_NAME,
-                        BOT_USERNAME=BOT_USERNAME
-                    )
-                    return web.Response(text=html, content_type='text/html')
-                except Exception as e:
-                    logger.error(f"خطأ في عرض القالب: {e}")
-
-            # استخدام HTML المباشر إذا فشل Jinja2
-            try:
-                with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
-                    html = f.read()
-                    html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
-                    html = html.replace("{{ BOT_NAME }}", BOT_NAME)
-                    html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
-                    return web.Response(text=html, content_type='text/html')
-            except:
-                return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
-                <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
-        else:
-            return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="البوت"'})
-    except Exception as e:
-        logger.error(f"خطأ في عرض الصفحة الرئيسية: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
-async def login_handler(request):
-    """تسجيل الدخول"""
-    try:
-        if request.method == 'POST':
-            data = await request.post()
-            username = data.get('username', '')
-            password = data.get('password', '')
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                session_id = create_session({'username': username})
-                response = web.Response(status=302, headers={'Location': '/'})
-                response.set_cookie('session_id', session_id, httponly=True, max_age=WEB_SESSION_TIMEOUT)
-                return response
-            return web.Response(text='❌ اسم المستخدم أو كلمة المرور غير صحيحة', status=401)
-
-        # عرض صفحة تسجيل الدخول
-        html = """
-        <!DOCTYPE html>
-        <html lang="ar" dir="rtl">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>تسجيل الدخول - ريلاكس مانيجر</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <style>
-                body {
-                    background: #f5f6fa;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    min-height: 100vh;
-                }
-                .login-card {
-                    background: white;
-                    border-radius: 20px;
-                    padding: 40px;
-                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-                    width: 100%;
-                    max-width: 400px;
-                }
-                .login-card .brand {
-                    font-size: 28px;
-                    font-weight: bold;
-                    color: #2d3436;
-                    margin-bottom: 30px;
-                    text-align: center;
-                }
-                .login-card .brand i {
-                    color: #0984e3;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="login-card">
-                <div class="brand">
-                    <i class="bi bi-robot"></i> ريلاكس مانيجر
-                </div>
-                <h5 class="text-center mb-4">🔐 تسجيل الدخول</h5>
-                <form method="POST">
-                    <div class="mb-3">
-                        <label class="form-label">اسم المستخدم</label>
-                        <input type="text" name="username" class="form-control" required autofocus>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">كلمة المرور</label>
-                        <input type="password" name="password" class="form-control" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">دخول</button>
-                </form>
-                <hr>
-                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.1.0</p>
-            </div>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-        </body>
-        </html>
-        """
-        return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        logger.error(f"خطأ في صفحة تسجيل الدخول: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
-async def logout_handler(request):
-    """تسجيل الخروج"""
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        delete_session(session_id)
-    response = web.Response(status=302, headers={'Location': '/login'})
-    response.del_cookie('session_id')
-    return response
-
-async def health_check_handler(request):
-    """فحص صحة البوت"""
-    try:
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        ram = get_ram_usage()
-        checks = {
-            'database': db_healthy,
-            'telegram_api': tg_healthy,
-            'memory': ram,
-            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        }
-        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
-        return web.json_response({
-            'status': 'healthy' if status == 200 else 'unhealthy',
-            'checks': checks
-        }, status=status)
-    except Exception as e:
-        return web.json_response({
-            'status': 'unhealthy',
-            'error': str(e)
-        }, status=503)
-
-# ===== تسجيل المسارات =====
-web_app.router.add_get('/', root_handler)
-web_app.router.add_get('/login', login_handler)
-web_app.router.add_post('/login', login_handler)
-web_app.router.add_get('/logout', logout_handler)
-web_app.router.add_get('/health', health_check_handler)
-
-# ===== API Routes =====
-web_app.router.add_get('/api/stats', api_stats_handler)
-web_app.router.add_get('/api/charts', api_charts_handler)
-web_app.router.add_get('/api/export', api_export_handler)
-web_app.router.add_get('/api/users', api_users_handler)
-web_app.router.add_post('/api/users/{user_id}/toggle-ban', api_user_toggle_ban_handler)
-web_app.router.add_get('/api/channels', api_channels_handler)
-web_app.router.add_get('/api/groups', api_groups_handler)
-web_app.router.add_get('/api/posts', api_posts_handler)
-web_app.router.add_get('/api/contests', api_contests_handler)
-web_app.router.add_get('/api/logs', api_logs_handler)
-web_app.router.add_delete('/api/logs', api_logs_delete_handler)
-web_app.router.add_get('/api/backups', api_backups_handler)
-web_app.router.add_post('/api/backups', api_backup_create_handler)
-web_app.router.add_post('/api/backups/{name}/restore', api_backup_restore_handler)
-web_app.router.add_delete('/api/backups/{name}', api_backup_delete_handler)
-web_app.router.add_get('/api/settings', api_settings_handler)
-web_app.router.add_post('/api/settings', api_settings_update_handler)
-web_app.router.add_get('/api/system-info', api_system_info_handler)
-
-# ===== WebSocket Manager =====
-class WebSocketManager:
-    def __init__(self):
-        self.connections = set()
-        self.lock = asyncio.Lock()
-
-    async def broadcast(self, data: dict):
-        async with self.lock:
-            if not self.connections:
-                return
-            message = json.dumps(data)
-            to_remove = []
-            for ws in self.connections:
-                try:
-                    await ws.send_str(message)
-                except:
-                    to_remove.append(ws)
-            for ws in to_remove:
-                self.connections.discard(ws)
-
-    async def handler(self, request):
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        async with self.lock:
-            self.connections.add(ws)
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                        if data.get('type') == 'ping':
-                            await ws.send_str(json.dumps({'type': 'pong'}))
-                    except:
-                        pass
-                elif msg.type == WSMsgType.ERROR:
-                    logger.error(f"خطأ في WebSocket: {ws.exception()}")
-        finally:
-            async with self.lock:
-                self.connections.discard(ws)
-        return ws
-
-ws_manager = WebSocketManager()
-web_app.router.add_get('/ws', ws_manager.handler)
-
-# ===== WebSocket Extended =====
-class WebSocketExtendedHandler:
-    def __init__(self):
-        self.connections = {}
-        self.subscriptions = defaultdict(set)
-        self.lock = asyncio.Lock()
-
-    async def handle_auth(self, ws, token: str):
-        if token == WEB_SECRET_KEY:
-            self.connections[token] = ws
-            await ws.send_str(json.dumps({'type': 'auth', 'status': 'success'}))
-            return True
-        await ws.send_str(json.dumps({'type': 'auth', 'status': 'failed'}))
-        return False
-
-    async def handle_subscribe(self, ws, channel: str):
-        async with self.lock:
-            self.subscriptions[channel].add(ws)
-            await ws.send_str(json.dumps({'type': 'subscribe', 'channel': channel, 'status': 'success'}))
-
-    async def handle_unsubscribe(self, ws, channel: str):
-        async with self.lock:
-            if channel in self.subscriptions:
-                self.subscriptions[channel].discard(ws)
-            await ws.send_str(json.dumps({'type': 'unsubscribe', 'channel': channel, 'status': 'success'}))
-
-    async def broadcast(self, channel: str, data: dict):
-        async with self.lock:
-            if channel in self.subscriptions:
-                message = json.dumps({'type': 'broadcast', 'channel': channel, 'data': data})
-                for ws in list(self.subscriptions[channel]):
-                    try:
-                        await ws.send_str(message)
-                    except:
-                        self.subscriptions[channel].discard(ws)
-
-    async def get_stats(self) -> dict:
-        total, banned, posts, groups, channels = await db_stats()
-        return {
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        }
-
-    async def get_logs(self, limit: int = 50) -> list:
-        logs = []
-        try:
-            with open(LOG_PATH, 'r') as f:
-                lines = f.readlines()
-                for line in lines[-limit:]:
-                    logs.append(line.strip())
-        except:
-            pass
-        return logs
-
-    async def get_users(self, limit: int = 50) -> list:
-        users = await db_get_all_users()
-        return users[:limit]
-
-    async def get_channels(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_channels(user_id)
-        return await db_get_all_user_channels_no_limit()
-
-    async def get_groups(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_user_groups(user_id)
-        return await db_get_all_groups()
-
-    async def get_contests(self, limit: int = 10) -> list:
-        return await db_get_active_contests_with_participants(limit)
-
-    async def notify(self, user_id: int, message: str):
-        try:
-            from telegram import Bot
-            bot = Bot(token=TOKEN)
-            await bot.send_message(chat_id=user_id, text=message)
-        except:
-            pass
-
-ws_extended = WebSocketExtendedHandler()
-
-async def websocket_extended_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-
-    token = request.query.get('token')
-    if not token:
-        await ws.close()
-        return ws
-
-    authenticated = await ws_extended.handle_auth(ws, token)
-    if not authenticated:
-        await ws.close()
-        return ws
-
-    try:
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    action = data.get('action')
-
-                    if action == 'subscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_subscribe(ws, channel)
-
-                    elif action == 'unsubscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_unsubscribe(ws, channel)
-
-                    elif action == 'get_stats':
-                        stats = await ws_extended.get_stats()
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_stats', 'data': stats}))
-
-                    elif action == 'get_logs':
-                        logs = await ws_extended.get_logs(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_logs', 'data': logs}))
-
-                    elif action == 'get_users':
-                        users = await ws_extended.get_users(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_users', 'data': users}))
-
-                    elif action == 'get_channels':
-                        channels = await ws_extended.get_channels(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_channels', 'data': channels}))
-
-                    elif action == 'get_groups':
-                        groups = await ws_extended.get_groups(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_groups', 'data': groups}))
-
-                    elif action == 'get_contests':
-                        contests = await ws_extended.get_contests(limit=data.get('limit', 10))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_contests', 'data': contests}))
-
-                    elif action == 'notify':
-                        user_id = data.get('user_id')
-                        message = data.get('message')
-                        if user_id and message:
-                            await ws_extended.notify(user_id, message)
-                            await ws.send_str(json.dumps({'type': 'response', 'action': 'notify', 'status': 'sent'}))
-
-                    elif action == 'ping':
-                        await ws.send_str(json.dumps({'type': 'pong'}))
-
-                except Exception as e:
-                    await ws.send_str(json.dumps({'type': 'error', 'message': str(e)}))
-
-    except Exception as e:
-        logger.error(f"خطأ في WebSocket: {e}")
-
-    finally:
-        for channel in list(ws_extended.subscriptions):
-            ws_extended.subscriptions[channel].discard(ws)
-
-    return ws
-
-web_app.router.add_get('/ws_extended', websocket_extended_handler)
 
 # ===================== دوال قاعدة البيانات الأساسية =====================
 async def db_register_user(user_id: int) -> bool:
@@ -5100,14 +2921,11 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
 
 async def db_get_user_groups(user_id: int):
     """
-    ترجع جميع المجموعات التي يظهرها البوت للمستخدم، مع تصفية المخفية.
-    - يعرض للمالك المخفي مجموعاته
-    - يخفي عن المشرفين المخفيين المجموعات التي هم مشرفون فيها (ما عدا المالك)
-    - يعرض للمستخدمين العاديين المجموعات التي أضافوها أو مرتبطون بها
+    تعرض جميع المجموعات التي للمستخدم صلاحية فيها (مالك مخفي أو مشرف مخفي أو مرتبط بها).
     """
     async def _get(conn):
         try:
-            # 1. جلب جميع المجموعات التي أضيف إليها البوت (من جدول bot_groups)
+            # جلب جميع المجموعات
             cur = await conn.execute("""
                 SELECT chat_id, chat_name, username, banned
                 FROM bot_groups
@@ -5115,21 +2933,21 @@ async def db_get_user_groups(user_id: int):
             """)
             all_groups = await cur.fetchall()
 
-            # 2. جلب المجموعات التي فيها المالك المخفي لهذا المستخدم
+            # جلب المجموعات التي فيها المالك المخفي لهذا المستخدم
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_owner_groups WHERE owner_id=?
             """, (user_id,))
             hidden_owner_rows = await cur.fetchall()
             hidden_owner_groups = {row[0] for row in hidden_owner_rows}
 
-            # 3. جلب المجموعات التي فيها المستخدم مشرف مخفي
+            # جلب المجموعات التي فيها المستخدم مشرف مخفي
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_admins WHERE admin_id=?
             """, (user_id,))
             hidden_admin_rows = await cur.fetchall()
             hidden_admin_groups = {row[0] for row in hidden_admin_rows}
 
-            # 4. جلب المجموعات التي أضافها المستخدم أو مرتبط بها
+            # جلب المجموعات التي أضافها المستخدم أو مرتبط بها
             cur = await conn.execute("""
                 SELECT chat_id FROM bot_groups WHERE added_by=?
                 UNION
@@ -5138,19 +2956,16 @@ async def db_get_user_groups(user_id: int):
             linked_rows = await cur.fetchall()
             linked_groups = {row[0] for row in linked_rows}
 
-            # 5. تصفية النتائج:
-            # - المالك المخفي يرى مجموعاته المخفية
-            # - المشرف المخفي يرى كل شيء ما عدا المجموعات التي هو مشرف مخفي فيها (لأنه يخفيها)
-            # - المستخدم العادي يرى فقط المجموعات التي أضافها أو مرتبط بها
             visible_groups = []
             for group in all_groups:
                 chat_id = group[0]
+
                 # المالك المخفي يرى مجموعاته
                 if chat_id in hidden_owner_groups:
                     visible_groups.append(group)
-                # المشرف المخفي لا يرى المجموعات التي هو مشرف فيها (إلا إذا كان مالكاً)
+                # المشرف المخفي يرى مجموعاته
                 elif chat_id in hidden_admin_groups:
-                    continue
+                    visible_groups.append(group)
                 # المستخدم العادي: يرى فقط المجموعات التي أضافها أو مرتبط بها
                 elif chat_id in linked_groups:
                     visible_groups.append(group)
@@ -5353,14 +3168,12 @@ async def db_contains_banned_word(text: str, chat_id: int) -> str:
     for word, _, _ in words:
         if word in text_lower:
             return word
-    # التحقق من الأنماط النمطية
     for pattern in BANNED_PATTERNS:
         if pattern.search(text_lower):
             return pattern.pattern
     return None
 
 async def add_banned_pattern(pattern: str) -> bool:
-    """إضافة نمط Regex للكلمات المحظورة"""
     try:
         compiled = re.compile(pattern.lower())
         BANNED_PATTERNS.append(compiled)
@@ -5369,7 +3182,6 @@ async def add_banned_pattern(pattern: str) -> bool:
         return False
 
 async def check_banned_patterns(text: str) -> bool:
-    """التحقق من الأنماط النمطية المحظورة"""
     text_lower = text.lower()
     for pattern in BANNED_PATTERNS:
         if pattern.search(text_lower):
@@ -5478,45 +3290,36 @@ async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
         if await db_is_hidden_owner(chat_id, user_id):
             return False
         if await db_is_hidden_admin(chat_id, user_id):
-            return True
+            return False  # المشرف المخفي يظهر له المجموعة
         return False
     return await execute_db(_check)
 
 # ===================== [محسن] دالة is_authorized_in_group مع تخزين مؤقت =====================
-_admin_cache_ttl = 300  # 5 دقائق
+_admin_cache_ttl = 300
 _admin_cache = {}
 _admin_cache_time = {}
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """
-    التحقق مما إذا كان المستخدم مصرحاً له في المجموعة (مالك أو مشرف).
-    يتم تخزين النتيجة مؤقتاً لمدة 5 دقائق لتقليل استدعاءات API.
-    """
-    # تحقق من الكاش
     cache_key = f"{chat_id}:{user_id}"
     now = time_module.time()
     if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _admin_cache_ttl:
         return _admin_cache[cache_key]
 
-    # 1. تحقق من المالك الأعلى
     if user_id == PRIMARY_OWNER_ID:
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
-    # 2. تحقق من المالك المخفي
     if await db_is_hidden_owner(chat_id, user_id):
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
-    # 3. تحقق من المشرف المخفي
     if await db_is_hidden_admin(chat_id, user_id):
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
-    # 4. مشرف تيليجرام حقيقي (الجزء المضاف)
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ['creator', 'administrator']:
@@ -5526,7 +3329,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     except Exception as e:
         logger.error(f"خطأ في التحقق من صلاحيات المستخدم {user_id} في {chat_id}: {e}")
 
-    # غير مصرح
     _admin_cache[cache_key] = False
     _admin_cache_time[cache_key] = now
     return False
@@ -5772,7 +3574,6 @@ async def db_set_last_publish(channel_db_id: int, publish_time: datetime):
     return await execute_db(_set)
 
 async def schedule_cron(channel_db_id: int, cron_expression: str):
-    """جدولة باستخدام تعبير Cron"""
     async def _save(conn):
         await conn.execute("""
             UPDATE schedule SET schedule_type='cron', cron_expression=?, next_publish_date=NULL
@@ -5843,18 +3644,14 @@ async def db_update_next_publish_date(channel_db_id: int):
             else:
                 next_date = utc_now() + timedelta(days=1)
         elif schedule_type == 'cron':
-            # تنفيذ CRON مبسط
             cron_expr = schedule.get('cron_expression', '0 0 * * *')
             try:
                 parts = cron_expr.split()
                 if len(parts) >= 5:
                     minute_cron, hour_cron, day_cron, month_cron, weekday_cron = parts[:5]
-                    # محاولة العثور على التاريخ التالي (تنفيذ مبسط)
                     next_date = last_time + timedelta(days=1)
-                    # تصحيح: البحث عن التاريخ التالي
                     for i in range(1, 31):
                         check_date = last_time + timedelta(days=i)
-                        # تحقق بسيط - سيتم تحسينه لاحقاً
                         if check_date.hour == hour and check_date.minute == minute:
                             if day_cron == '*' or check_date.day == int(day_cron):
                                 if month_cron == '*' or check_date.month == int(month_cron):
@@ -5864,7 +3661,6 @@ async def db_update_next_publish_date(channel_db_id: int):
             except:
                 next_date = utc_now() + timedelta(days=1)
         else:
-            # نوع غير معروف، استخدام الافتراضي
             next_date = utc_now() + timedelta(minutes=schedule.get('interval_minutes', 12))
 
         if next_date:
@@ -6298,7 +4094,6 @@ async def get_top_users(limit: int = 10):
 
 # ===================== نظام النقاط المتقدم =====================
 async def daily_reward(user_id: int) -> int:
-    """مكافأة يومية"""
     today = utc_now().date()
     async def _check(conn):
         cur = await conn.execute("SELECT last_daily_reward FROM users WHERE user_id=?", (user_id,))
@@ -6312,7 +4107,7 @@ async def daily_reward(user_id: int) -> int:
                 pass
         await conn.execute("UPDATE users SET last_daily_reward=? WHERE user_id=?", (utc_now_iso(), user_id))
         await conn.commit()
-        return 10  # 10 نقاط يومياً
+        return 10
     reward = await execute_db(_check)
     if reward > 0:
         data = await db_get_user_level(user_id)
@@ -6320,7 +4115,6 @@ async def daily_reward(user_id: int) -> int:
     return reward
 
 async def weekly_reward(user_id: int) -> int:
-    """مكافأة أسبوعية"""
     week_start = (utc_now() - timedelta(days=utc_now().weekday())).date()
     async def _check(conn):
         cur = await conn.execute("SELECT last_weekly_reward FROM users WHERE user_id=?", (user_id,))
@@ -6334,7 +4128,7 @@ async def weekly_reward(user_id: int) -> int:
                 pass
         await conn.execute("UPDATE users SET last_weekly_reward=? WHERE user_id=?", (utc_now_iso(), user_id))
         await conn.commit()
-        return 50  # 50 نقطة أسبوعياً
+        return 50
     reward = await execute_db(_check)
     if reward > 0:
         data = await db_get_user_level(user_id)
@@ -6353,7 +4147,6 @@ ACHIEVEMENTS = {
 }
 
 async def achievement_system(user_id: int, action: str) -> str:
-    """نظام الإنجازات"""
     async def _get_achievements(conn):
         cur = await conn.execute("SELECT achievements FROM users WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
@@ -6656,7 +4449,6 @@ async def db_get_random_participant(contest_id: int) -> int | None:
     return await execute_db(_get)
 
 async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
-    """تصحيح المسابقات تلقائياً"""
     async def _get_participants(conn):
         cur = await conn.execute(
             "SELECT user_id, answer FROM contest_participants WHERE contest_id = ?",
@@ -6669,17 +4461,14 @@ async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
     for user_id, answer in participants:
         score = 0
         if answer and answer_key:
-            # مقارنة بسيطة - يمكن تحسينها
             if answer.lower() == answer_key.lower():
                 score = 100
             else:
-                # مقارنة تشابه
                 similarity = len(set(answer.lower().split()) & set(answer_key.lower().split()))
                 if similarity > 0:
                     score = min(100, similarity * 20)
         results[user_id] = score
 
-    # العثور على الفائز
     if results:
         winner = max(results, key=results.get)
         if results[winner] > 0:
@@ -6996,7 +4785,6 @@ async def invalidate_user_cache(user_id: int):
     try:
         if user_id in _admin_cache:
             del _admin_cache[user_id]
-        # حذف من كاش الصلاحيات أيضاً
         keys_to_remove = [k for k in _admin_cache.keys() if str(user_id) in k]
         for key in keys_to_remove:
             del _admin_cache[key]
@@ -7035,7 +4823,6 @@ async def create_backup():
         raise
 
 async def incremental_backup():
-    """نسخ احتياطي متزايد - يحفظ فقط البيانات الجديدة"""
     try:
         last_backup = await db_get_last_backup_time()
         if last_backup:
@@ -7043,7 +4830,6 @@ async def incremental_backup():
         else:
             last_time = utc_now() - timedelta(days=7)
 
-        # تصدير البيانات الجديدة فقط
         backup_data = {}
 
         async def _get_new_posts(conn):
@@ -7103,9 +4889,7 @@ async def restore_backup(backup_path: Path):
     except Exception as e:
         raise ValueError(f"فشل فك الضغط: {e}")
 
-    # التحقق من نوع النسخ الاحتياطي
     if backup_path.suffix == '.inc':
-        # نسخ متزايد - دمج البيانات
         data = json.loads(decompressed.decode('utf-8'))
         async def _merge_data(conn):
             if 'posts' in data:
@@ -7124,7 +4908,6 @@ async def restore_backup(backup_path: Path):
         await execute_db(_merge_data)
         logger.info(f"✅ تم دمج النسخة المتزايدة: {backup_path}")
     else:
-        # نسخة كاملة
         temp_restore = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
         temp_restore.write(decompressed)
         temp_restore.close()
@@ -7144,7 +4927,6 @@ async def auto_backup():
             await asyncio.sleep(AUTO_BACKUP_SLEEP)
             auto_enabled = await db_get_auto_backup()
             if auto_enabled:
-                # نسخ احتياطي كامل كل 7 أيام
                 last_backup = await db_get_last_backup_time()
                 if not last_backup:
                     await create_backup()
@@ -8283,10 +6065,6 @@ async def my_full_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض جميع المجموعات التي يظهرها البوت للمستخدم، مع تصفية المخفية.
-    يستخدم db_get_user_groups التي تقوم بالتصفية حسب الصلاحيات.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -8854,10 +6632,6 @@ async def security_main_callback(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(msg)
 
 async def security_select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض إعدادات الأمان لمجموعة محددة مع التحقق من الصلاحيات.
-    يستخدم is_authorized_in_group مع التخزين المؤقت.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -8906,10 +6680,6 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
 
 async def security_refresh_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    تحديث قائمة المجموعات مع تصفية الصلاحيات.
-    يستخدم db_get_user_groups لتصفية المجموعات المخفية.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -9243,7 +7013,7 @@ async def subscribe_menu_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer()
     uid = update.effective_user.id
     if await db_has_active_subscription(uid):
-        days = await get_subscription_days_left(uid)
+        days = await db_get_subscription_days_left(uid)
         msg = f"✅ اشتراكك مفعل، متبقي {days} يوم\nشكراً لدعمك ❤️"
         if query:
             await query.edit_message_text(msg)
@@ -11122,10 +8892,6 @@ async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.
     )
 
 async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض قائمة المجموعات لإدارة الردود التلقائية مع تصفية الصلاحيات.
-    يستخدم db_get_user_groups لتصفية المجموعات المخفية.
-    """
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -12569,10 +10335,6 @@ async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===================== [محسن] معالج /sendcode مع مهلة 10 دقائق =====================
 async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    أمر /sendcode - يرسل كود البوت الكامل للمستخدم المصرح له.
-    المهلة: 10 دقائق (600 ثانية) بدلاً من 5 دقائق.
-    """
     user_id = update.effective_user.id
     allowed_user = await db_get_allowed_sendcode_user()
     if user_id != PRIMARY_OWNER_ID and user_id != allowed_user:
@@ -12591,20 +10353,17 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
 
     temp_password = secrets.token_urlsafe(12)
     context.user_data['sendcode_temp_password'] = temp_password
-    context.user_data['sendcode_temp_timestamp'] = time_module.time()  # وقت الإنشاء
+    context.user_data['sendcode_temp_timestamp'] = time_module.time()
     context.user_data['state'] = UserState.WAITING_SENDCODE_PASSWORD
 
     await update.message.reply_text(
         f"🔐 **تأكيد أمني إضافي**\n\n"
         f"لإرسال الكود، يرجى تأكيد هويتك بإرسال كلمة المرور المؤقتة:\n"
         f"`{temp_password}`\n\n"
-        f"⏰ **تنتهي الصلاحية خلال 10 دقائق.** (تم تمديد المهلة لتجنب انتهاء الوقت)"
+        f"⏰ **تنتهي الصلاحية خلال 10 دقائق.**"
     )
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    معالج تأكيد كلمة المرور لـ /sendcode مع مهلة 10 دقائق.
-    """
     user_id = update.effective_user.id
     expected_password = context.user_data.get('sendcode_temp_password')
     timestamp = context.user_data.get('sendcode_temp_timestamp', 0)
@@ -12614,7 +10373,6 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
         context.user_data.pop('state', None)
         return
 
-    # المهلة: 10 دقائق (600 ثانية) بدلاً من 5 دقائق
     SENDCODE_TIMEOUT = 600
     if time_module.time() - timestamp > SENDCODE_TIMEOUT:
         await update.message.reply_text(
@@ -12692,6 +10450,10 @@ async def language_command_handler(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(get_text(user_id, 'welcome'), reply_markup=keyboard)
 
 async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    أمر /syncgroup - يتم التحقق من صلاحيات المستخدم عبر Telegram API مباشرة
+    وتسجيله كمالك مخفي إذا كان مشرفاً في المجموعة.
+    """
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
         return
@@ -12700,15 +10462,34 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
     chat_name = update.effective_chat.title or "بدون اسم"
     user_id = update.effective_user.id
 
+    # تسجيل المجموعة في قاعدة البيانات
     await db_register_group(chat_id, chat_name, user_id, update.effective_chat.username)
 
+    # التحقق من صلاحيات البوت
     bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
     if not bot_perms['can_act']:
         await update.message.reply_text(f"⚠️ **تنبيه:**\n{bot_perms['reason']}\n\nيرجى منح البوت الصلاحيات المطلوبة.")
         return
 
-    if await is_authorized_in_group(context.bot, chat_id, user_id):
-        await db_register_hidden_owner_group(chat_id, user_id)
+    # التحقق من صلاحيات المستخدم في تيليجرام (وليس من قاعدة البيانات)
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status in ['creator', 'administrator']:
+            # تسجيل المستخدم كمالك مخفي
+            await db_register_hidden_owner_group(chat_id, user_id)
+            await update.message.reply_text("✅ **تم تسجيلك كمالك مخفي لهذه المجموعة.**")
+        else:
+            # المستخدم ليس مشرفاً: إرسال رسالة ترويجية
+            await update.message.reply_text(
+                f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
+                f"📌 **للاستفادة من ميزات البوت المتقدمة، تواصل معنا على الخاص:**\n"
+                f"👉 @{BOT_USERNAME}\n\n"
+                f"💡 يمكنك استخدام البوت لإدارة القنوات والمجموعات بكل احترافية."
+            )
+            return
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ تعذر التحقق من صلاحياتك: {e}")
+        return
 
     await update.message.reply_text(
         f"✅ **تم تفعيل المجموعة بنجاح!**\n\n"
@@ -13041,12 +10822,11 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db_register_group(chat.id, chat_name, added_by_id, chat.username)
             chat_type_name = "مجموعة" if chat.type == 'group' else "سوبر جروب"
 
-            # ========== التعديل الأساسي: تسجيل المضيف كمالك مخفي دائماً ==========
-            # 1. تسجيل المضيف (الشخص الذي أضاف البوت) كمالك مخفي
+            # تسجيل المضيف كمالك مخفي دائماً
             await db_register_hidden_owner_group(chat.id, added_by_id)
             logger.info(f"🔒 تم تسجيل المضيف {added_by_id} كمالك مخفي للمجموعة {chat.id}")
 
-            # 2. إذا كان هناك مالك حقيقي مختلف، نسجله أيضاً
+            # إذا كان هناك مالك حقيقي مختلف، نسجله أيضاً
             owner_info = await detect_owner_type(context.bot, chat.id)
             if owner_info.get('user_id') and owner_info['user_id'] != added_by_id:
                 await db_register_hidden_owner_group(chat.id, owner_info['user_id'])
@@ -13078,7 +10858,6 @@ async def track_chat_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif chat.type in ['group', 'supergroup']:
                 await db_register_group(chat.id, chat.title or "بدون اسم", adder.id, chat.username)
                 chat_type_name = "مجموعة" if chat.type == 'group' else "سوبر جروب"
-                # أيضاً نسجل المضيف كمالك مخفي إذا أضيف البوت
                 await db_register_hidden_owner_group(chat.id, adder.id)
             else:
                 return
@@ -14030,7 +11809,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
 
-    # ===== [إصلاح] البحث عن الرد مع المطابقة الجزئية =====
+    # ===== البحث عن الرد مع المطابقة الجزئية =====
     reply = None
     text_lower = text.lower()
 
@@ -14475,7 +12254,6 @@ async def memory_monitor():
 
 async def start_web_server():
     try:
-        # استخدام PORT من متغيرات البيئة أولاً
         render_port = int(os.getenv("PORT", "0"))
         ports_to_try = []
         if render_port > 0:
@@ -14489,7 +12267,6 @@ async def start_web_server():
                 site = web.TCPSite(runner, WEB_HOST, port)
                 await site.start()
                 logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
-                # حفظ المنفذ المستخدم
                 global WEB_PORT_USED
                 WEB_PORT_USED = port
                 return
@@ -14506,8 +12283,6 @@ WEB_PORT_USED = WEB_PORT
 
 async def self_ping_loop():
     await asyncio.sleep(10)
-    # استخدام 0.0.0.0 بدلاً من 127.0.0.1 لتوافق Render
-    # أو استخدام RENDER_EXTERNAL_URL إن وجد
     external_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if external_url:
         url = f"{external_url}/"
@@ -15039,7 +12814,6 @@ async def init_db_improved():
 
 # ===================== [جديد] استيراد الكلمات المحظورة من ملف عند التشغيل =====================
 async def import_banned_words_on_startup():
-    """استيراد الكلمات المحظورة من ملف عند بدء التشغيل"""
     try:
         words = load_banned_words_from_file(BANNED_WORDS_FILE)
         if words:
@@ -15067,10 +12841,8 @@ async def import_banned_words_on_startup():
 async def main():
     await init_db_improved()
 
-    # ===== [جديد] استيراد الكلمات المحظورة من ملف =====
     await import_banned_words_on_startup()
 
-    # ===== تحسينات الذاكرة =====
     task_manager.create_task(memory_optimizer_loop())
 
     if USE_PROXY:
@@ -15383,37 +13155,26 @@ async def main():
 
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.1.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print("   • ✅ إصلاح استيراد pyotp (PYOTP_AVAILABLE)")
-    print("   • ✅ إصلاح Google Drive (GOOGLE_AUTH_AVAILABLE)")
-    print("   • ✅ إصلاح zstandard (ZSTD_AVAILABLE)")
-    print("   • ✅ إصلاح OpenCV (CV2_AVAILABLE)")
-    print("   • ✅ تحسين إدارة الذاكرة (memory_optimizer)")
-    print("   • ✅ تحسين معالجة الأخطاء (ErrorHandler)")
-    print("   • ✅ تحسين نظام الردود (REPLY_WEIGHTS)")
-    print("   • ✅ تحسين نظام NSFW (تخزين مؤقت)")
-    print("   • ✅ نظام سجلات متقدم (AdvancedLogger)")
-    print("   • ✅ تحسين قاعدة البيانات (فهارس إضافية)")
-    print("   • ✅ تحسين واجهة الويب (Dark Mode, تصدير, رسوم بيانية)")
-    print("   • ✅ نسخ احتياطي متزايد (incremental_backup)")
-    print("   • ✅ تحسين نظام الترجمة (12 لغة)")
-    print("   • ✅ نظام إشعارات متقدم (NotificationSystem)")
-    print("   • ✅ تحسين نظام المسابقات (Quiz, Raffle, Vote, Submission)")
-    print("   • ✅ تحسين الكلمات المحظورة (دعم Regex)")
-    print("   • ✅ نظام نقاط متقدم (مكافآت يومية وأسبوعية)")
-    print("   • ✅ تحسين الجدولة (دعم CRON)")
-    print("   • ✅ إصلاح خطأ jinja2 (JINJA2_AVAILABLE)")
-    print("   • ✅ إصلاح DB_ENCRYPTION_PASSWORD (مفتاح عشوائي لـ Render)")
-    print("   • ✅ إصلاح المنفذ (دعم PORT من Render)")
-    print("   • ✅ إصلاح مشكلة النبض (Heartbeat) على Render (استخدام 0.0.0.0)")
-    print("   • ✅ تعديل إظهار زر 'مجموعاتي' في القائمة الرئيسية دائماً")
-    print("   • ✅ تعديل إظهار زر 'إضافة قناة' في القائمة الرئيسية دائماً")
-    print("   • ✅ تعديل إظهار زر 'قنواتي' في القائمة الرئيسية دائماً")
-    print("   • ✅ تعديل إظهار زر 'الإعدادات' في القائمة الرئيسية دائماً")
-    print("   • ✅ إضافة دعم RENDER_EXTERNAL_URL للنبض")
-    print("   • ✅ **مهلة /sendcode ممددة إلى 10 دقائق مع رسائل أوضح**")
-    print("   • ✅ **تخزين مؤقت محسن للصلاحيات (5 دقائق)**")
-    print("   • ✅ **دعم كامل للمشرفين المتعددين عبر is_authorized_in_group**")
-    print("   • ✅ **عرض المجموعات المصرح بها فقط في my_groups_callback**")
+    print("   • ✅ إصلاح أمر /syncgroup للمالك المخفي (التحقق عبر Telegram API)")
+    print("   • ✅ إرسال رسالة ترويجية للأعضاء العاديين عند استخدام /syncgroup")
+    print("   • ✅ إظهار المجموعات للمشرفين المخفيين في قائمة مجموعاتي")
+    print("   • ✅ نظام الترجمة من ملف translations.json خارجي")
+    print("   • ✅ تحسين الأداء باستخدام TTLCache")
+    print("   • ✅ دعم 12 لغة بالكامل")
+    print("   • ✅ جميع الأوامر والمعالجات مكتملة")
+    print("   • ✅ نظام الردود التلقائية 200 رد مدمج")
+    print("   • ✅ نظام NSFW مع تخزين مؤقت")
+    print("   • ✅ نظام المسابقات المتكامل")
+    print("   • ✅ واجهة ويب متكاملة (Dark Mode, CSV, WebSocket)")
+    print("   • ✅ نظام النسخ الاحتياطي (كامل ومتزايد)")
+    print("   • ✅ نظام التذكيرات والإحالات والمستويات")
+    print("   • ✅ الجدولة المتقدمة مع CRON")
+    print("   • ✅ الترجمة التلقائية للمنشورات (12 لغة)")
+    print("   • ✅ نظام الأمان المتقدم (حذف الروابط/المعرفات، كلمات محظورة)")
+    print("   • ✅ إدارة المشرفين المخفيين والمالكين المخفيين")
+    print("   • ✅ جميع دوال قاعدة البيانات (40+ جدول)")
+    print("   • ✅ معالج الأخطاء العالمي مع إشعار للمطور")
+    print("   • ✅ تشغيل الخلفيات (النشر التلقائي، المنشورات المجدولة، الإشعارات)")
 
     try:
         await application.run_polling(
@@ -15432,7 +13193,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # تعيين متغير البيئة للتوافق مع Render
         os.environ["WEB_CONCURRENCY"] = "1"
         asyncio.run(main())
     except KeyboardInterrupt:

@@ -1,3 +1,15 @@
-data/bot_data.db
-data/bot_data.db
 .env
+*.db
+*.enc
+*.key
+*.salt
+__pycache__/
+*.pyc
+data/
+logs/
+backups/
+temp/
+static/
+templates/
+credentials.json
+token.json
