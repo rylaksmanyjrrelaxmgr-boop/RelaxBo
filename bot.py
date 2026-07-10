@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.2.0 - مع واجهة ويب متكاملة و WebSocket
+الإصدار: 19.2.0 - مع واجهة ويب متكاملة و WebSocket (مضمنة)
 المطور: @RelaxMgr
 """
 
@@ -790,7 +790,8 @@ if not TOKEN:
 
 PRIMARY_OWNER_ID = get_env_or_default("MAIN_ADMIN_ID", 0, int)
 if PRIMARY_OWNER_ID == 0:
-    raise ValueError("❌ MAIN_ADMIN_ID غير محدد في ملفات البيئة")
+    print("⚠️ تحذير: MAIN_ADMIN_ID غير محدد في ملفات البيئة. سيتم تعطيل صلاحيات المطور الأساسي.")
+    # نتركها 0، لكن البوت سيعمل بدون مطور أساسي
 
 BOT_NAME = get_env_or_default("BOT_NAME", "ريلاكس مانيجر", str)
 BOT_USERNAME = get_env_or_default("BOT_USERNAME", "Reelaaaxbot", str)
@@ -3263,26 +3264,31 @@ async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
         _admin_cache_time.clear()
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    # التحقق من الكاش
     cache_key = f"{chat_id}:{user_id}"
     now = time_module.time()
     if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _admin_cache_ttl:
         return _admin_cache[cache_key]
 
-    if user_id == PRIMARY_OWNER_ID:
+    # 1. المطور الأساسي
+    if user_id == PRIMARY_OWNER_ID and PRIMARY_OWNER_ID != 0:
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
+    # 2. مالك مخفي في قاعدة البيانات
     if await db_is_hidden_owner(chat_id, user_id):
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
+    # 3. مشرف مخفي في قاعدة البيانات
     if await db_is_hidden_admin(chat_id, user_id):
         _admin_cache[cache_key] = True
         _admin_cache_time[cache_key] = now
         return True
 
+    # 4. مشرف فعلي في تيليجرام (API)
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ['creator', 'administrator']:
@@ -3290,8 +3296,9 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
             _admin_cache_time[cache_key] = now
             return True
     except Exception as e:
-        logger.error(f"خطأ في التحقق من صلاحيات المستخدم {user_id} في {chat_id}: {e}")
+        logger.warning(f"فشل التحقق من صلاحيات المستخدم {user_id} في {chat_id} عبر API: {e}")
 
+    # غير مصرح
     _admin_cache[cache_key] = False
     _admin_cache_time[cache_key] = now
     return False
@@ -11804,10 +11811,9 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"فشل إرسال الرد: {e}")
 
-# ===================== [إصلاح] خادم الويب مع واجهة مستخدم و WebSocket =====================
+# ===================== خادم الويب مع واجهة مستخدم و WebSocket (مضمنة) =====================
 from aiohttp import web, WSMsgType
 import json
-import jinja2
 
 web_app = web.Application()
 
@@ -11835,19 +11841,135 @@ class WebSocketManager:
 
 ws_manager = WebSocketManager()
 
-# توليد ملفات الويب إذا لم تكن موجودة
-def ensure_web_files():
-    # index.html
-    index_path = TEMPLATES_PATH / "index.html"
-    if not index_path.exists():
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.write("""<!DOCTYPE html>
+# ===================== دوال خادم الويب =====================
+async def health_check_handler(request):
+    try:
+        db_healthy = await check_database_health()
+        tg_healthy = await check_telegram_health()
+        ram = get_ram_usage()
+        checks = {
+            'database': db_healthy,
+            'telegram_api': tg_healthy,
+            'memory': ram,
+            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
+        }
+        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
+        return web.json_response({
+            'status': 'healthy' if status == 200 else 'unhealthy',
+            'checks': checks
+        }, status=status)
+    except Exception as e:
+        return web.json_response({
+            'status': 'unhealthy',
+            'error': str(e)
+        }, status=503)
+
+async def dashboard_handler(request):
+    """عرض لوحة التحكم مع تضمين CSS و JS داخل HTML"""
+    try:
+        # إحصائيات أولية
+        total, banned, posts, groups, channels = await db_stats()
+        ram = get_ram_usage()
+        uptime = int(time_module.time() - getattr(health_check_handler, 'start_time', time_module.time()))
+        stats = {
+            'total_users': total,
+            'active_users': total - banned,
+            'banned_users': banned,
+            'pending_posts': posts,
+            'groups': groups,
+            'channels': channels,
+            'ram_percent': ram['percent'],
+            'ram_used': ram['used'],
+            'ram_total': ram['total'],
+            'uptime_hours': uptime // 3600
+        }
+        init_data = json.dumps(stats)
+
+        html = f"""
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>لوحة تحكم البوت</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            direction: rtl;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 1200px;
+            width: 100%;
+        }}
+        h1 {{
+            text-align: center;
+            color: #e94560;
+            margin-bottom: 30px;
+            font-weight: 300;
+            letter-spacing: 1px;
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }}
+        .stat-card {{
+            background: #16213e;
+            padding: 20px 15px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.4);
+            transition: transform 0.2s ease;
+        }}
+        .stat-card:hover {{
+            transform: translateY(-5px);
+        }}
+        .stat-card h3 {{
+            margin: 0 0 10px 0;
+            color: #aaa;
+            font-size: 16px;
+            font-weight: 400;
+        }}
+        .stat-card .value {{
+            font-size: 36px;
+            font-weight: bold;
+            color: #e94560;
+            margin: 5px 0;
+        }}
+        .stat-card .sub {{
+            color: #888;
+            font-size: 13px;
+            margin-top: 5px;
+        }}
+        .badge {{
+            display: inline-block;
+            background: #e94560;
+            color: #fff;
+            padding: 6px 18px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 50px;
+            color: #666;
+            font-size: 14px;
+        }}
+    </style>
 </head>
 <body>
     <div class="container">
@@ -11889,214 +12011,50 @@ def ensure_web_files():
             <p>ريلاكس مانيجر v19.2.0 | © 2026</p>
         </div>
     </div>
-    <script src="/static/script.js"></script>
+    <script>
+        const INIT_DATA = {init_data};
+        document.addEventListener('DOMContentLoaded', function() {{
+            document.getElementById('totalUsers').textContent = INIT_DATA.total_users;
+            document.getElementById('activeUsers').textContent = INIT_DATA.active_users;
+            document.getElementById('bannedUsers').textContent = INIT_DATA.banned_users;
+            document.getElementById('pendingPosts').textContent = INIT_DATA.pending_posts;
+            document.getElementById('groups').textContent = INIT_DATA.groups;
+            document.getElementById('channels').textContent = INIT_DATA.channels;
+            document.getElementById('ramPercent').textContent = INIT_DATA.ram_percent + '%';
+            document.getElementById('ramUsed').textContent = INIT_DATA.ram_used;
+            document.getElementById('ramTotal').textContent = INIT_DATA.ram_total;
+            document.getElementById('uptimeHours').textContent = INIT_DATA.uptime_hours;
+        }});
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
+        ws.onmessage = function(event) {{
+            const data = JSON.parse(event.data);
+            if (data.type === 'stats') {{
+                document.getElementById('totalUsers').textContent = data.data.total_users;
+                document.getElementById('activeUsers').textContent = data.data.active_users;
+                document.getElementById('bannedUsers').textContent = data.data.banned_users;
+                document.getElementById('pendingPosts').textContent = data.data.pending_posts;
+                document.getElementById('groups').textContent = data.data.groups;
+                document.getElementById('channels').textContent = data.data.channels;
+                document.getElementById('ramPercent').textContent = data.data.ram_percent + '%';
+                document.getElementById('ramUsed').textContent = data.data.ram_used;
+                document.getElementById('ramTotal').textContent = data.data.ram_total;
+                document.getElementById('uptimeHours').textContent = data.data.uptime_hours;
+            }}
+        }};
+        ws.onclose = function() {{
+            console.log('تم قطع الاتصال بخادم الويب، محاولة إعادة الاتصال...');
+            setTimeout(() => {{ location.reload(); }}, 5000);
+        }};
+    </script>
 </body>
-</html>""")
-        print("✅ تم إنشاء index.html")
-
-    # style.css
-    css_path = STATIC_PATH / "style.css"
-    if not css_path.exists():
-        with open(css_path, 'w', encoding='utf-8') as f:
-            f.write("""* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    direction: rtl;
-    background: #1a1a2e;
-    color: #eee;
-    min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 20px;
-}
-.container {
-    max-width: 1200px;
-    width: 100%;
-}
-h1 {
-    text-align: center;
-    color: #e94560;
-    margin-bottom: 30px;
-    font-weight: 300;
-    letter-spacing: 1px;
-}
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 20px;
-    margin: 30px 0;
-}
-.stat-card {
-    background: #16213e;
-    padding: 20px 15px;
-    border-radius: 12px;
-    text-align: center;
-    box-shadow: 0 8px 16px rgba(0,0,0,0.4);
-    transition: transform 0.2s ease;
-}
-.stat-card:hover {
-    transform: translateY(-5px);
-}
-.stat-card h3 {
-    margin: 0 0 10px 0;
-    color: #aaa;
-    font-size: 16px;
-    font-weight: 400;
-}
-.stat-card .value {
-    font-size: 36px;
-    font-weight: bold;
-    color: #e94560;
-    margin: 5px 0;
-}
-.stat-card .sub {
-    color: #888;
-    font-size: 13px;
-    margin-top: 5px;
-}
-.badge {
-    display: inline-block;
-    background: #e94560;
-    color: #fff;
-    padding: 6px 18px;
-    border-radius: 30px;
-    font-size: 14px;
-    font-weight: 500;
-}
-.footer {
-    text-align: center;
-    margin-top: 50px;
-    color: #666;
-    font-size: 14px;
-}""")
-        print("✅ تم إنشاء style.css")
-
-    # script.js
-    js_path = STATIC_PATH / "script.js"
-    if not js_path.exists():
-        with open(js_path, 'w', encoding='utf-8') as f:
-            f.write("""document.addEventListener('DOMContentLoaded', function() {
-    const ws = new WebSocket('ws://' + window.location.host + '/ws');
-
-    ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        if (data.type === 'stats') {
-            document.getElementById('totalUsers').textContent = data.data.total_users;
-            document.getElementById('activeUsers').textContent = data.data.active_users;
-            document.getElementById('bannedUsers').textContent = data.data.banned_users;
-            document.getElementById('pendingPosts').textContent = data.data.pending_posts;
-            document.getElementById('groups').textContent = data.data.groups;
-            document.getElementById('channels').textContent = data.data.channels;
-            document.getElementById('ramPercent').textContent = data.data.ram_percent + '%';
-            document.getElementById('ramUsed').textContent = data.data.ram_used;
-            document.getElementById('ramTotal').textContent = data.data.ram_total;
-            document.getElementById('uptimeHours').textContent = data.data.uptime_hours;
-        }
-    };
-
-    ws.onclose = function() {
-        console.log('تم قطع الاتصال بخادم الويب');
-        setTimeout(() => {
-            location.reload();
-        }, 5000);
-    };
-});""")
-        print("✅ تم إنشاء script.js")
-
-ensure_web_files()
-
-try:
-    jinja_env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(TEMPLATES_PATH)),
-        autoescape=jinja2.select_autoescape(['html', 'xml'])
-    )
-except:
-    jinja_env = None
-
-async def health_check_handler(request):
-    try:
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        ram = get_ram_usage()
-        checks = {
-            'database': db_healthy,
-            'telegram_api': tg_healthy,
-            'memory': ram,
-            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        }
-        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
-        return web.json_response({
-            'status': 'healthy' if status == 200 else 'unhealthy',
-            'checks': checks
-        }, status=status)
-    except Exception as e:
-        return web.json_response({
-            'status': 'unhealthy',
-            'error': str(e)
-        }, status=503)
-
-async def dashboard_handler(request):
-    try:
-        total, banned, posts, groups, channels = await db_stats()
-        ram = get_ram_usage()
-        uptime = int(time_module.time() - getattr(health_check_handler, 'start_time', time_module.time()))
-        stats = {
-            'total_users': total,
-            'active_users': total - banned,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels,
-            'ram': ram,
-            'uptime_hours': uptime // 3600
-        }
-        # قراءة ملف HTML
-        html_path = TEMPLATES_PATH / "index.html"
-        if not html_path.exists():
-            return web.Response(text="<h1>❌ ملف index.html غير موجود</h1>", content_type='text/html', status=404)
-
-        async with aiofiles.open(html_path, 'r', encoding='utf-8') as f:
-            html_content = await f.read()
-
-        # حقن البيانات الأولية
-        import json
-        init_json = json.dumps(stats)
-        script_tag = f"<script>window.INIT_DATA = {init_json};</script>"
-        html_content = html_content.replace('</head>', script_tag + '</head>')
-        # يمكننا أيضاً استخدام الـ script لتعيين القيم الأولية
-        # لكننا سنعتمد على WebSocket لتحديث البيانات، وسنضع القيم الأولية في الـ DOM
-        # سنقوم بتعديل الـ script.js لقراءة INIT_DATA
-        # لكننا سنكتفي بالـ WebSocket حيث سيتم تحديث البيانات فور الاتصال
-
-        return web.Response(text=html_content, content_type='text/html')
+</html>
+        """
+        return web.Response(text=html, content_type='text/html')
     except Exception as e:
         logger.error(f"خطأ في لوحة التحكم: {e}")
         return web.Response(text=f"<h1>خطأ</h1><p>{str(e)}</p>", content_type='text/html', status=500)
-
-async def static_handler(request):
-    """خدمة الملفات الثابتة (CSS, JS)"""
-    path = request.match_info.get('path', '')
-    full_path = STATIC_PATH / path
-    if not full_path.exists():
-        return web.Response(status=404)
-    ext = full_path.suffix.lower()
-    content_type = 'text/plain'
-    if ext == '.css':
-        content_type = 'text/css'
-    elif ext == '.js':
-        content_type = 'application/javascript'
-    elif ext == '.png':
-        content_type = 'image/png'
-    elif ext == '.jpg' or ext == '.jpeg':
-        content_type = 'image/jpeg'
-    async with aiofiles.open(full_path, 'rb') as f:
-        content = await f.read()
-    return web.Response(body=content, content_type=content_type)
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
@@ -12115,7 +12073,6 @@ async def websocket_handler(request):
 web_app.router.add_get('/', dashboard_handler)
 web_app.router.add_get('/health', health_check_handler)
 web_app.router.add_get('/ws', websocket_handler)
-web_app.router.add_get('/static/{path:.*}', static_handler)
 
 # ===================== [إصلاح] نظام إدارة المهام =====================
 class TaskManager:
@@ -13436,7 +13393,6 @@ async def main():
     print("   • ✅ معالج الأخطاء العالمي مع إشعار للمطور")
     print("   • ✅ تشغيل الخلفيات (النشر التلقائي، المنشورات المجدولة، الإشعارات)")
     print("   • ✅ لوحة تحكم ويب مع تحديثات حية عبر WebSocket")
-    print("   • ✅ فصل واجهة الويب إلى ملفات منفصلة (HTML, CSS, JS)")
 
     try:
         await application.run_polling(
