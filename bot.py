@@ -13722,3 +13722,33 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+# ===================== دوال معالجة API =====================
+async def api_users_handler(request):
+    return web.json_response(await get_users_data())
+
+async def api_channels_handler(request):
+    return web.json_response(await get_channels_data())
+
+async def api_groups_handler(request):
+    return web.json_response(await get_groups_data())
+
+async def api_posts_handler(request):
+    return web.json_response(await get_posts_data())
+
+async def api_logs_handler(request):
+    logs = []
+    if ERROR_LOG.exists():
+        with open(ERROR_LOG, "r", encoding="utf-8") as f:
+            logs = f.readlines()[-50:]
+    return web.json_response(logs)
+
+
+# تعريفات مسارات API الجديدة
+web_app.router.add_get('/api/users', api_users_handler)
+web_app.router.add_get('/api/channels', api_channels_handler)
+web_app.router.add_get('/api/groups', api_groups_handler)
+web_app.router.add_get('/api/posts', api_posts_handler)
+web_app.router.add_get('/api/logs', api_logs_handler)
+web_app.router.add_get('/api/export', api_export)
+
