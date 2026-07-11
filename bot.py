@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.2.1 - مع تصحيح جميع الثغرات الأمنية والأوامر
+الإصدار: 19.2.3 - نسخة مبسطة مع إصلاح الأخطاء
 المطور: @RelaxMgr
 """
 
@@ -260,7 +260,6 @@ BANNED_WORDS_FILE = BASE_PATH / "banned_words.txt"
 BANNED_PATTERNS = []
 
 def load_banned_words_from_file(file_path: Path) -> List[str]:
-    """تحميل الكلمات المحظورة من ملف نصي"""
     words = []
     if not file_path.exists():
         print(f"⚠️ ملف {file_path} غير موجود، سيتم إنشاؤه فارغاً")
@@ -305,11 +304,9 @@ def load_banned_words_from_file(file_path: Path) -> List[str]:
         print(f"✅ تم تحميل {len(BANNED_PATTERNS)} نمط محظور")
     except Exception as e:
         print(f"❌ فشل تحميل الكلمات المحظورة: {e}")
-
     return words
 
 def import_banned_words_from_file(conn, words: List[str], added_by: int = 1) -> int:
-    """استيراد الكلمات المحظورة إلى قاعدة البيانات مع chat_id=-1 (عامة)"""
     if not words:
         return 0
     imported = 0
@@ -331,23 +328,17 @@ def import_banned_words_from_file(conn, words: List[str], added_by: int = 1) -> 
 
 # ===================== نظام كشف NSFW المحسن =====================
 async def check_nsfw_cached(image_bytes: bytes, cache_key: str = None) -> dict:
-    """التحقق من NSFW مع تخزين مؤقت"""
     if cache_key is None:
         cache_key = hashlib.md5(image_bytes).hexdigest()
 
-    # التحقق من الكاش
     if cache_key in NSFW_CACHE:
         cached_data, cached_time = NSFW_CACHE[cache_key]
         if time_module.time() - cached_time < NSFW_CACHE_TTL:
             return cached_data
 
-    # استدعاء API
     result = await check_nsfw_image(image_bytes)
-
-    # تخزين النتيجة
     NSFW_CACHE[cache_key] = (result, time_module.time())
 
-    # تنظيف الكاش القديم
     if len(NSFW_CACHE) > 100:
         expired_keys = [k for k, (_, t) in NSFW_CACHE.items() if time_module.time() - t > NSFW_CACHE_TTL]
         for k in expired_keys:
@@ -356,7 +347,6 @@ async def check_nsfw_cached(image_bytes: bytes, cache_key: str = None) -> dict:
     return result
 
 async def check_nsfw_image(image_bytes: bytes) -> dict:
-    """التحقق من صورة إذا كانت غير لائقة باستخدام Sightengine API"""
     try:
         if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
             return {"nsfw": False, "score": 0, "error": "API غير مفعل"}
@@ -409,7 +399,6 @@ async def check_nsfw_image(image_bytes: bytes) -> dict:
         return {"nsfw": False, "score": 0, "error": str(e)}
 
 async def check_nsfw_video(video_bytes: bytes, frames: int = NSFW_FRAMES) -> dict:
-    """التحقق من فيديو عن طريق أخذ عينات من الإطارات"""
     if not CV2_AVAILABLE:
         return {"nsfw": False, "score": 0, "error": "cv2 غير مثبت"}
 
@@ -724,7 +713,6 @@ REPLY_WEIGHTS = {
 }
 
 def get_weighted_reply(reply_list: List[str], category: str = 'default') -> str:
-    """اختيار رد عشوائي من القائمة مع الأوزان"""
     if not reply_list:
         return "🙏"
     if len(reply_list) == 1:
@@ -858,7 +846,6 @@ def get_encryption_key() -> bytes:
     key_file = DATA_PATH / ".db_key"
     salt_file = DATA_PATH / ".db_salt"
 
-    # محاولة تحميل المفتاح من ملف
     if key_file.exists() and salt_file.exists():
         try:
             with open(key_file, 'rb') as f:
@@ -867,7 +854,6 @@ def get_encryption_key() -> bytes:
         except:
             pass
 
-    # محاولة استخدام كلمة المرور من متغير البيئة
     password = os.getenv('DB_ENCRYPTION_PASSWORD')
     if password and len(password) >= 8:
         salt = os.urandom(16)
@@ -882,7 +868,6 @@ def get_encryption_key() -> bytes:
         print("✅ تم إنشاء مفتاح التشفير من متغير البيئة")
         return key
 
-    # في بيئة غير تفاعلية (مثل Render)، إنشاء مفتاح عشوائي
     if not sys.stdin.isatty():
         print("🔐 بيئة غير تفاعلية - إنشاء مفتاح عشوائي")
         key = Fernet.generate_key()
@@ -893,7 +878,6 @@ def get_encryption_key() -> bytes:
             pass
         return key
 
-    # بيئة تفاعلية - طلب كلمة مرور من المستخدم
     try:
         import getpass
         print("🔐 لإعداد تشفير قاعدة البيانات، أدخل كلمة مرور قوية:")
@@ -1092,7 +1076,6 @@ class AdvancedLogger:
         self._setup_loggers()
 
     def _setup_loggers(self):
-        # Logger للأخطاء
         error_logger = logging.getLogger('error_logger')
         error_logger.setLevel(logging.ERROR)
         error_handler = logging.FileHandler(ERROR_LOG, encoding='utf-8')
@@ -1100,7 +1083,6 @@ class AdvancedLogger:
         error_logger.addHandler(error_handler)
         self.loggers['error'] = error_logger
 
-        # Logger للوصول
         access_logger = logging.getLogger('access_logger')
         access_logger.setLevel(logging.INFO)
         access_handler = logging.FileHandler(ACCESS_LOG, encoding='utf-8')
@@ -1108,7 +1090,6 @@ class AdvancedLogger:
         access_logger.addHandler(access_handler)
         self.loggers['access'] = access_logger
 
-        # Logger للأمان
         security_logger = logging.getLogger('security_logger')
         security_logger.setLevel(logging.WARNING)
         security_handler = logging.FileHandler(SECURITY_LOG, encoding='utf-8')
@@ -1141,6 +1122,17 @@ class AdvancedLogger:
 
 advanced_logger = AdvancedLogger()
 
+# ===================== [إصلاح] تعريف log_error =====================
+def log_error(error: Exception, context: dict = None) -> str:
+    """تسجيل الأخطاء وإرجاع معرف الخطأ"""
+    error_id = secrets.token_hex(4)
+    error_msg = f"[{error_id}] {str(error)}"
+    if context:
+        error_msg += f" - السياق: {json.dumps(context, default=str)[:200]}"
+    logger.error(error_msg)
+    traceback.print_exc()
+    return error_id
+
 # ===================== نظام إدارة الأخطاء =====================
 class ErrorHandler:
     def __init__(self, max_retries: int = 3, base_delay: float = 1.0):
@@ -1150,7 +1142,6 @@ class ErrorHandler:
         self._lock = asyncio.Lock()
 
     async def handle_async(self, func: Callable, *args, **kwargs) -> Any:
-        """معالجة دالة غير متزامنة مع إعادة المحاولة"""
         last_error = None
         for attempt in range(self.max_retries):
             try:
@@ -1176,7 +1167,6 @@ class ErrorHandler:
         return None
 
     def handle_sync(self, func: Callable, *args, **kwargs) -> Any:
-        """معالجة دالة متزامنة مع إعادة المحاولة"""
         last_error = None
         for attempt in range(self.max_retries):
             try:
@@ -1196,9 +1186,7 @@ error_handler = ErrorHandler()
 
 # ===================== نظام إدارة الذاكرة =====================
 def memory_optimizer():
-    """تحسين استخدام الذاكرة"""
     try:
-        # تنظيف الكاش
         if CACHETOOLS_AVAILABLE:
             _admin_cache.clear()
             _security_cache.clear()
@@ -1207,24 +1195,17 @@ def memory_optimizer():
             _security_cache.clear()
             _security_cache_time.clear()
 
-        # تنظيف كاش الترجمة
         _translation_cache.clear()
-
-        # تنظيف كاش NSFW
         NSFW_CACHE.clear()
-
-        # جمع القمامة
         gc.collect()
-
         return True
     except Exception as e:
         advanced_logger.log_error("فشل تحسين الذاكرة", e)
         return False
 
 async def memory_optimizer_loop():
-    """حلقة تحسين الذاكرة التلقائية"""
     while True:
-        await asyncio.sleep(300)  # كل 5 دقائق
+        await asyncio.sleep(300)
         try:
             memory_optimizer()
             advanced_logger.log_access(0, "MEMORY_OPTIMIZED", {"timestamp": utc_now_iso()})
@@ -1239,7 +1220,6 @@ class NotificationSystem:
         self._scheduled_tasks = []
 
     async def send_notification(self, bot, user_id: int, text: str, parse_mode: str = "MarkdownV2", reply_markup=None):
-        """إرسال إشعار لمستخدم"""
         try:
             await safe_send_markdown(bot, user_id, text, reply_markup)
             advanced_logger.log_access(user_id, "NOTIFICATION_SENT", {"text": text[:50]})
@@ -1249,7 +1229,6 @@ class NotificationSystem:
             return False
 
     async def send_bulk_notification(self, bot, user_ids: List[int], text: str, parse_mode: str = "MarkdownV2", delay: float = 0.5):
-        """إرسال إشعار لمجموعة من المستخدمين"""
         results = []
         semaphore = asyncio.Semaphore(10)
 
@@ -1277,7 +1256,6 @@ class NotificationSystem:
         return success, failed
 
     async def schedule_notification(self, bot, user_id: int, text: str, delay_seconds: int):
-        """جدولة إشعار لاحقاً"""
         async def delayed():
             await asyncio.sleep(delay_seconds)
             await self.send_notification(bot, user_id, text)
@@ -2260,7 +2238,6 @@ def load_translations_from_file() -> dict:
     try:
         with open(translations_file, 'r', encoding='utf-8') as f:
             loaded = json.load(f)
-        # التأكد من وجود جميع اللغات
         for lang in SUPPORTED_LANGUAGES:
             if lang not in loaded:
                 loaded[lang] = default_translations.get(lang, default_translations['ar'])
@@ -2667,7 +2644,6 @@ async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> in
                                 (user_id, channel_id, channel_name, utc_now_iso()))
         row = await cur.fetchone()
         await conn.commit()
-        # تعيين موعد النشر التالي بعد دقيقة لتجنب النشر الفوري المتكرر
         if row:
             new_id = row[0]
             await db_set_next_publish_date(new_id, utc_now() + timedelta(minutes=1))
@@ -2775,13 +2751,11 @@ async def db_get_all_bot_channels(only_banned: bool = False):
 # ===================== دوال المنشورات =====================
 async def db_save_posts(channel_db_id: int, posts: list) -> int:
     async def _save(conn):
-        # حساب عدد المنشورات غير المنشورة حالياً
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
         current_unpublished = (await cur.fetchone())[0]
         max_allowed = MAX_UNPUBLISHED_POSTS - current_unpublished
         if max_allowed <= 0:
             return 0
-        # اقتطاع القائمة حسب المساحة المتاحة
         posts_to_save = posts[:max_allowed]
         values = []
         for text_content, media_type, media_file_id in posts_to_save:
@@ -2932,21 +2906,15 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
     return await execute_db(_register)
 
 async def db_get_user_groups(user_id: int):
-    """
-    تعرض جميع المجموعات التي للمستخدم صلاحية فيها (مالك مخفي أو مشرف مخفي أو مرتبط بها).
-    تم تحسينها باستخدام استعلام JOIN واحد.
-    """
+    """جلب جميع المجموعات التي للمستخدم صلاحية فيها"""
     async def _get(conn):
         cur = await conn.execute("""
-            SELECT DISTINCT bg.chat_id, bg.chat_name, bg.username, bg.banned
+            SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
             FROM bot_groups bg
-            LEFT JOIN hidden_owner_groups hog ON bg.chat_id = hog.chat_id AND hog.owner_id = ?
-            LEFT JOIN hidden_admins ha ON bg.chat_id = ha.chat_id AND ha.admin_id = ?
-            LEFT JOIN user_groups_link ugl ON bg.chat_id = ugl.chat_id AND ugl.user_id = ?
-            WHERE hog.owner_id IS NOT NULL 
-               OR ha.admin_id IS NOT NULL 
-               OR ugl.user_id IS NOT NULL
-               OR bg.added_by = ?
+            WHERE bg.added_by = ?
+               OR EXISTS (SELECT 1 FROM hidden_owner_groups hog WHERE hog.chat_id = bg.chat_id AND hog.owner_id = ?)
+               OR EXISTS (SELECT 1 FROM hidden_admins ha WHERE ha.chat_id = bg.chat_id AND ha.admin_id = ?)
+               OR EXISTS (SELECT 1 FROM user_groups_link ugl WHERE ugl.chat_id = bg.chat_id AND ugl.user_id = ?)
             ORDER BY bg.chat_name
         """, (user_id, user_id, user_id, user_id))
         return await cur.fetchall()
@@ -3259,24 +3227,22 @@ async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
         if await db_is_hidden_owner(chat_id, user_id):
             return False
         if await db_is_hidden_admin(chat_id, user_id):
-            return False  # المشرف المخفي يظهر له المجموعة
+            return False
         return False
     return await execute_db(_check)
 
-# ===================== [محسن] دالة is_authorized_in_group مع تخزين مؤقت =====================
-# استخدام TTLCache من cachetools إذا كانت متوفرة، وإلا نستخدم dict مع تنظيف يدوي
+# ===================== [إصلاح] دالة is_authorized_in_group (تعتمد على قاعدة البيانات فقط) =====================
 if CACHETOOLS_AVAILABLE:
-    _admin_cache = TTLCache(maxsize=2000, ttl=300)  # 5 دقائق
+    _admin_cache = TTLCache(maxsize=2000, ttl=300)
 else:
     _admin_cache = {}
     _admin_cache_time = {}
     _admin_cache_ttl = 300
 
-# دالة لتنظيف الكاش بعد تغيير الصلاحيات
+# ===================== [إصلاح] تعريف invalidate_user_cache بشكل صحيح =====================
 async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
     """تنظيف الكاش لمستخدم أو مجموعة معينة"""
     if CACHETOOLS_AVAILABLE:
-        # TTLCache تدعم الحذف
         if user_id is not None:
             keys_to_remove = [k for k in list(_admin_cache.keys()) if str(user_id) in k]
             for key in keys_to_remove:
@@ -3289,7 +3255,6 @@ async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
             _admin_cache.clear()
         logger.info(f"🧹 تم تنظيف كاش الصلاحيات (user_id={user_id}, chat_id={chat_id})")
     else:
-        # التنظيف اليدوي
         if user_id is not None:
             keys_to_remove = [k for k in list(_admin_cache.keys()) if str(user_id) in k]
             for key in keys_to_remove:
@@ -3310,16 +3275,11 @@ async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     """
     التحقق من صلاحيات المستخدم في المجموعة مع تخزين مؤقت.
-    يدعم 4 أنواع من الصلاحيات:
-    1. المطور الأساسي (PRIMARY_OWNER_ID)
-    2. المالك المخفي (hidden owner)
-    3. المشرف المخفي (hidden admin)
-    4. مشرف حقيقي في تيليجرام (creator/administrator)
+    يعتمد فقط على قاعدة البيانات (لا يتحقق من مشرفي تيليجرام).
     """
     cache_key = f"{chat_id}:{user_id}"
     now = time_module.time()
 
-    # التحقق من الكاش
     if CACHETOOLS_AVAILABLE:
         cached = _admin_cache.get(cache_key)
         if cached is not None:
@@ -3331,43 +3291,22 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     # 1. المطور الأساسي
     if user_id == PRIMARY_OWNER_ID:
         _admin_cache[cache_key] = True
-        if not CACHETOOLS_AVAILABLE:
-            _admin_cache_time[cache_key] = now
         return True
 
     # 2. المالك المخفي
     if await db_is_hidden_owner(chat_id, user_id):
         _admin_cache[cache_key] = True
-        if not CACHETOOLS_AVAILABLE:
-            _admin_cache_time[cache_key] = now
         return True
 
     # 3. المشرف المخفي
     if await db_is_hidden_admin(chat_id, user_id):
         _admin_cache[cache_key] = True
-        if not CACHETOOLS_AVAILABLE:
-            _admin_cache_time[cache_key] = now
         return True
 
-    # 4. مشرف حقيقي في تيليجرام (مع استثناء البوت نفسه)
-    try:
-        if user_id != bot.id:  # لا نتحقق من البوت نفسه
-            member = await bot.get_chat_member(chat_id, user_id)
-            if member.status in ['creator', 'administrator']:
-                _admin_cache[cache_key] = True
-                if not CACHETOOLS_AVAILABLE:
-                    _admin_cache_time[cache_key] = now
-                return True
-    except Exception as e:
-        logger.error(f"خطأ في التحقق من صلاحيات المستخدم {user_id} في {chat_id}: {e}")
-
-    # لا توجد صلاحيات
     _admin_cache[cache_key] = False
-    if not CACHETOOLS_AVAILABLE:
-        _admin_cache_time[cache_key] = now
     return False
 
-# دالة للتحقق من صلاحيات تيليجرام فقط (دون المخفيين) للاستخدام في /register_hidden_owner
+# ===================== دالة is_telegram_admin للتحقق من صلاحيات تيليجرام فقط =====================
 async def is_telegram_admin(bot, chat_id: int, user_id: int) -> bool:
     """التحقق من صلاحيات تيليجرام فقط (بدون المخفيين)"""
     try:
@@ -3393,7 +3332,6 @@ async def register_hidden_owner_handler(update: Update, context: ContextTypes.DE
     chat_id = chat.id
     user_id = user.id
 
-    # التحقق من صلاحيات تيليجرام فقط (وليس المخفيين)
     if not await is_telegram_admin(context.bot, chat_id, user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
@@ -3403,7 +3341,7 @@ async def register_hidden_owner_handler(update: Update, context: ContextTypes.DE
         return
 
     await db_register_hidden_owner_group(chat_id, user_id)
-    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)  # تنظيف الكاش
+    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
     await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
 
 async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3414,7 +3352,6 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # يجب أن يكون المالك المخفي أو المطور الأساسي أو مشرف حقيقي
     if not await is_telegram_admin(context.bot, chat_id, user_id) and not await db_is_hidden_owner(chat_id, user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
@@ -3465,7 +3402,7 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
 
     success = await db_add_hidden_admin(chat_id, target_id, user_id)
     if success:
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
             "chat_id": chat_id,
@@ -3511,7 +3448,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
 
     success = await db_remove_hidden_admin(chat_id, target_id)
     if success:
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
             "chat_id": chat_id,
@@ -4831,16 +4768,6 @@ def contains_link(text):
 def contains_mention(text):
     return bool(re.search(r'@\w+', text))
 
-async def invalidate_user_cache(user_id: int):
-    try:
-        if user_id in _admin_cache:
-            del _admin_cache[user_id]
-        keys_to_remove = [k for k in _admin_cache.keys() if str(user_id) in k]
-        for key in keys_to_remove:
-            del _admin_cache[key]
-    except:
-        pass
-
 async def cleanup_points_cache():
     while True:
         await asyncio.sleep(3600)
@@ -5147,7 +5074,6 @@ async def apply_penalty(bot, chat_id, user_id, settings):
     penalty = settings.get('auto_penalty', 'none')
     if penalty == 'none':
         return
-    # التحقق من أن المستهدف ليس مالكاً مخفياً أو مشرفاً مخفياً
     if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
         return
     if penalty == 'kick':
@@ -5161,11 +5087,9 @@ async def apply_penalty(bot, chat_id, user_id, settings):
 # ===================== دوال الإجراءات المتقدمة =====================
 async def execute_ban(bot, chat_id: int, user_id: int, until_date=None, reason: str = "", moderator_id: int = None):
     try:
-        # التحقق من أن المستهدف ليس مالكاً مخفياً أو مشرفاً مخفياً (إلا إذا كان المنفذ هو المطور الأساسي)
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
             if moderator_id != PRIMARY_OWNER_ID:
                 return False, "❌ لا يمكن معاقبة مالك مخفي أو مشرف مخفي!"
-        # منع حظر البوت نفسه
         if user_id == bot.id:
             return False, "❌ لا يمكن حظر البوت نفسه!"
         await bot.ban_chat_member(chat_id, user_id, until_date=until_date)
@@ -5638,19 +5562,16 @@ async def get_main_keyboard(user_id: int):
     updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
     keyboard = []
 
-    # ===== الصف 1: مجموعاتي + إضافة قناة (تظهر دائماً) =====
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY),
         InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD)
     ])
 
-    # ===== الصف 2: قنواتي + الإعدادات (تظهر دائماً) =====
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY),
         InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)
     ])
 
-    # ===== أزرار القناة (تظهر فقط إذا كانت هناك قناة) =====
     if channels:
         keyboard.append([
             InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15),
@@ -5681,7 +5602,6 @@ async def get_main_keyboard(user_id: int):
             InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)
         ])
 
-    # ===== الأزرار العامة (تظهر دائماً) =====
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP),
         InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)
@@ -6208,7 +6128,6 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         is_locked = await is_chat_locked(chat_id)
         lock_label = "🔒 قفل" if not is_locked else "🔓 فتح"
         lock_callback = f"{CallbackData.PANEL_LOCK_PREFIX}{chat_id}" if not is_locked else f"{CallbackData.PANEL_UNLOCK_PREFIX}{chat_id}"
-        # زر الحذف متاح فقط للمالك المخفي أو المطور الأساسي
         can_delete = await db_is_hidden_owner(chat_id, uid) or uid == PRIMARY_OWNER_ID
         if can_delete:
             keyboard.append([
@@ -6240,7 +6159,6 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('delete_group_id')
     if not chat_id:
         return
-    # التحقق من أن المستخدم مالك مخفي أو المطور الأساسي
     if not await db_is_hidden_owner(chat_id, uid) and uid != PRIMARY_OWNER_ID:
         if query:
             await query.answer("❌ غير مصرح", show_alert=True)
@@ -7209,7 +7127,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.2.1
+📦 **الإصدار:** 19.2.3
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -8171,10 +8089,9 @@ async def admin_restore_backup_select_callback(update: Update, context: ContextT
         return
     backup_path = BACKUP_DIR / backup_name
     try:
-        # التحقق من صحة النسخة قبل الاستعادة
         with open(backup_path, 'rb') as f:
             encrypted = f.read()
-        BACKUP_CIPHER.decrypt(encrypted)  # فك التشفير للتحقق
+        BACKUP_CIPHER.decrypt(encrypted)
         await restore_backup(backup_path)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         msg = f"✅ تم استعادة النسخة الاحتياطية المشفرة بنجاح.\n\n📁 الملف: `{backup_name}`"
@@ -8267,7 +8184,6 @@ async def admin_send_update_callback(update: Update, context: ContextTypes.DEFAU
         else:
             await update.message.reply_text(get_text(uid, 'admin_only'))
         return
-    # التحقق من وجود قناة تحديثات قبل طلب النص
     channel = await db_get_updates_channel()
     if not channel:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ تعيين قناة", callback_data=CallbackData.ADMIN_SET_UPDATE_CHANNEL)],
@@ -8428,7 +8344,6 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         else:
             await update.message.reply_text("❌ لا يوجد نص للإرسال")
         return
-    # تنقية النص من المحتوى الضار
     dangerous_patterns = [r'<script', r'javascript:', r'data:', r'vbscript:', r'<\?php', r'<%', r'{%']
     for pattern in dangerous_patterns:
         if re.search(pattern, broadcast_text, re.IGNORECASE):
@@ -10200,174 +10115,6 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
     else:
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
-# ===================== معالجات الكولباك للمالك والمشرفين المخفيين =====================
-async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
-        return
-    user = update.effective_user
-    if user is None:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ يعمل فقط في المجموعات")
-        return
-
-    chat_id = chat.id
-    user_id = user.id
-
-    # التحقق من صلاحيات تيليجرام فقط (وليس المخفيين)
-    if not await is_telegram_admin(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    if await db_is_hidden_owner(chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'hidden_owner_already'))
-        return
-
-    await db_register_hidden_owner_group(chat_id, user_id)
-    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)  # تنظيف الكاش
-    await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
-
-async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    # يجب أن يكون المالك المخفي أو المطور الأساسي أو مشرف حقيقي
-    if not await is_telegram_admin(context.bot, chat_id, user_id) and not await db_is_hidden_owner(chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text(
-            "📝 **الاستخدام:**\n"
-            "/add_hidden_admin معرف_المستخدم\n\n"
-            "مثال: `/add_hidden_admin 123456789`"
-        )
-        return
-
-    try:
-        target_id = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
-        return
-
-    if target_id == PRIMARY_OWNER_ID:
-        await update.message.reply_text("❌ لا يمكن إضافة المطور الأساسي كمشرف مخفي!")
-        return
-
-    if target_id == user_id:
-        await update.message.reply_text("❌ لا يمكن إضافة نفسك كمشرف مخفي!")
-        return
-
-    try:
-        member = await context.bot.get_chat_member(chat_id, target_id)
-        if member.status in ['left', 'kicked']:
-            await update.message.reply_text("❌ المستخدم ليس في المجموعة!")
-            return
-    except Exception as e:
-        await update.message.reply_text(f"❌ لا يمكن العثور على المستخدم: {e}")
-        return
-
-    try:
-        user = await context.bot.get_chat(target_id)
-        if user.is_bot:
-            await update.message.reply_text("❌ لا يمكن إضافة بوت كمشرف مخفي!")
-            return
-    except:
-        pass
-
-    if await db_is_hidden_admin(chat_id, target_id):
-        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` مشرف مخفي بالفعل!")
-        return
-
-    success = await db_add_hidden_admin(chat_id, target_id, user_id)
-    if success:
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
-        await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
-    else:
-        await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
-
-async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_telegram_admin(context.bot, chat_id, user_id) and not await db_is_hidden_owner(chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text(
-            "📝 **الاستخدام:**\n"
-            "/remove_hidden_admin معرف_المستخدم\n\n"
-            "مثال: `/remove_hidden_admin 123456789`"
-        )
-        return
-
-    try:
-        target_id = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
-        return
-
-    if target_id == PRIMARY_OWNER_ID:
-        await update.message.reply_text("❌ لا يمكن إزالة المطور الأساسي!")
-        return
-
-    if not await db_is_hidden_admin(chat_id, target_id):
-        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` ليس مشرفاً مخفياً!")
-        return
-
-    success = await db_remove_hidden_admin(chat_id, target_id)
-    if success:
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
-        await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
-    else:
-        await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
-
-async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    admins = await db_get_hidden_admins(chat_id)
-    if not admins:
-        await update.message.reply_text(get_text(user_id, 'no_hidden_admins'))
-        return
-
-    text = get_text(user_id, 'hidden_admin_list').format("")
-    for admin in admins:
-        text += f"👤 المستخدم: `{admin['admin_id']}`\n"
-        text += f"➕ أضيف بواسطة: `{admin['added_by']}`\n"
-        text += f"🕐 التاريخ: {admin['added_at'][:16]}\n"
-        text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
-
 # ===================== [محسن] الأمر syncgroup مع الكاش ورسائل أفضل =====================
 async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -10382,22 +10129,17 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
     chat_name = update.effective_chat.title or "بدون اسم"
     user_id = update.effective_user.id
 
-    # تسجيل المجموعة في قاعدة البيانات
     await db_register_group(chat_id, chat_name, user_id, update.effective_chat.username)
 
-    # التحقق من صلاحيات البوت
     bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
     if not bot_perms['can_act']:
         await update.message.reply_text(f"⚠️ **تنبيه:**\n{bot_perms['reason']}\n\nيرجى منح البوت الصلاحيات المطلوبة.")
         return
 
-    # التحقق من صلاحيات المستخدم في تيليجرام (وليس من قاعدة البيانات)
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
         if member.status in ['creator', 'administrator']:
-            # تسجيل المستخدم كمالك مخفي
             await db_register_hidden_owner_group(chat_id, user_id)
-            # تنظيف الكاش للمستخدم والمجموعة
             await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
             await update.message.reply_text(
                 f"✅ **تم تسجيلك كمالك مخفي لهذه المجموعة.**\n\n"
@@ -10408,7 +10150,6 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
                 f"🛠️ استخدم /panel للوحة التحكم"
             )
         else:
-            # المستخدم ليس مشرفاً: إرسال رسالة ترويجية مفصلة
             await update.message.reply_text(
                 f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
                 f"📌 **للاستفادة من ميزات البوت المتقدمة، تواصل معنا على الخاص:**\n"
@@ -10659,7 +10400,6 @@ async def language_command_handler(update: Update, context: ContextTypes.DEFAULT
 async def security_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج /security - يعمل في الخاص والمجموعات"""
     user_id = update.effective_user.id
-    # إذا كان الأمر في مجموعة، نتعامل معه مباشرة
     if update.effective_chat.type in ['group', 'supergroup']:
         chat_id = update.effective_chat.id
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -10668,7 +10408,6 @@ async def security_command_handler(update: Update, context: ContextTypes.DEFAULT
         await security_select_group_callback(update, context)
         return
 
-    # في الخاص: عرض قائمة المجموعات
     groups = await db_get_user_groups(user_id)
     if not groups:
         keyboard = InlineKeyboardMarkup([
@@ -10817,7 +10556,6 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
     user_id = update.effective_user.id
     chat_id = None
 
-    # إذا كان الأمر في مجموعة، نأخذ chat_id من المجموعة
     if update.effective_chat.type in ['group', 'supergroup']:
         chat_id = update.effective_chat.id
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -10827,11 +10565,9 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(get_text(user_id, 'locked'), parse_mode="MarkdownV2")
         return
 
-    # في الخاص: نبحث عن chat_id من الوسيط أو نعرض القائمة
     args = context.args
     if args and args[0].lstrip('-').isdigit():
         chat_id = int(args[0])
-        # تحقق من أن المستخدم لديه صلاحيات في هذه المجموعة
         if await is_authorized_in_group(context.bot, chat_id, user_id):
             await db_set_chat_lock(chat_id, True, user_id)
             await update.message.reply_text(get_text(user_id, 'locked'), parse_mode="MarkdownV2")
@@ -10840,7 +10576,6 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("❌ غير مصرح أو البوت ليس في المجموعة.")
             return
 
-    # عرض قائمة المجموعات للاختيار
     groups = await db_get_user_groups(user_id)
     if not groups:
         await update.message.reply_text("📭 لا توجد مجموعات مسجلة.\nأضف البوت إلى مجموعة واجعلها نشطة.")
@@ -10898,7 +10633,6 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not await ensure_force_subscribe(update, context, user_id):
         return
 
-    # إذا كان في مجموعة
     if update.effective_chat.type in ['group', 'supergroup']:
         chat = update.effective_chat
         chat_id = chat.id
@@ -10916,7 +10650,6 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"🔧 **لوحة تحكم المجموعة**\n━━━━━━━━━━━━━━\n📌 **المجموعة:** {chat.title}\n🔐 **الحالة:** {lock_status_text}\n━━━━━━━━━━━━━━\n\nاستخدم الأزرار للتحكم في قفل وفتح المجموعة والإجراءات المتقدمة", reply_markup=kb, parse_mode="MarkdownV2")
         return
 
-    # في الخاص: عرض قائمة المجموعات
     groups = await db_get_user_groups(user_id)
     if not groups:
         await update.message.reply_text("📭 لا توجد مجموعات مسجلة.\nأضف البوت إلى مجموعة واجعلها نشطة.")
@@ -10939,7 +10672,6 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
     chat_id = None
     args = context.args
 
-    # إذا كان في مجموعة
     if update.effective_chat.type in ['group', 'supergroup']:
         chat_id = update.effective_chat.id
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -10964,7 +10696,6 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
             await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!", parse_mode="MarkdownV2")
             return
 
-    # في الخاص: نحتاج إلى chat_id
     if len(args) >= 4:
         try:
             chat_id = int(args[0])
@@ -10990,7 +10721,6 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
             await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!", parse_mode="MarkdownV2")
             return
 
-    # عرض قائمة المجموعات للاختيار
     groups = await db_get_user_groups(user_id)
     if not groups:
         await update.message.reply_text("📭 لا توجد مجموعات مسجلة.")
@@ -11077,30 +10807,24 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"❌ {bot_perms['reason']}")
         return
 
-    # دعم الأوامر المباشرة بدون رد: استخراج user_id من النص أو @username
     def extract_user_id_from_text(txt: str):
-        # محاولة استخراج معرف رقمي
         parts = txt.split()
         if len(parts) >= 2:
             try:
                 return int(parts[1])
             except ValueError:
-                # محاولة @username
                 if parts[1].startswith('@'):
                     return parts[1]
         return None
 
-    # دالة للحصول على user_id من النص أو الرد
     async def get_target_user_id(txt: str, reply_msg):
         if reply_msg and reply_msg.from_user:
             return reply_msg.from_user.id
-        # محاولة استخراج من النص
         extracted = extract_user_id_from_text(txt)
         if extracted:
             if isinstance(extracted, int):
                 return extracted
             if isinstance(extracted, str) and extracted.startswith('@'):
-                # محاولة الحصول على user_id من المعرف
                 try:
                     chat = await context.bot.get_chat(extracted)
                     return chat.id
@@ -11111,7 +10835,6 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
     reason = ""
     args = text.split(maxsplit=1)
     if len(args) > 1:
-        # إذا كان النص يحتوي على معرف وسبب، نحاول فصل السبب
         parts = args[1].split(maxsplit=1)
         if len(parts) > 1:
             reason = parts[1]
@@ -11162,7 +10885,6 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
         await safe_send_markdown(context.bot, chat_id, msg)
         return
 
-    # أوامر الكلمات المحظورة العامة
     if text.startswith("/add_banned_word"):
         args = text.split(maxsplit=1)
         if len(args) < 2:
@@ -11207,13 +10929,10 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db_register_group(chat.id, chat_name, added_by_id, chat.username)
             chat_type_name = "مجموعة" if chat.type == 'group' else "سوبر جروب"
 
-            # تسجيل المضيف كمالك مخفي دائماً
             await db_register_hidden_owner_group(chat.id, added_by_id)
-            # تنظيف الكاش للمضيف والمجموعة
             await invalidate_user_cache(user_id=added_by_id, chat_id=chat.id)
             logger.info(f"🔒 تم تسجيل المضيف {added_by_id} كمالك مخفي للمجموعة {chat.id}")
 
-            # إذا كان هناك مالك حقيقي مختلف، نسجله أيضاً
             owner_info = await detect_owner_type(context.bot, chat.id)
             if owner_info.get('user_id') and owner_info['user_id'] != added_by_id:
                 await db_register_hidden_owner_group(chat.id, owner_info['user_id'])
@@ -11314,7 +11033,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
     if user and user.is_bot:
         return
 
-    # ===== التحقق من حجم الملفات =====
     if update.message.photo:
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         if file.file_size > MAX_FILE_SIZE:
@@ -11346,7 +11064,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ حجم المتحركة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
             return
 
-    # ===== معالجة إلغاء العملية =====
     if text == "/cancel":
         context.user_data.pop('state', None)
         context.user_data.pop('support_mode', None)
@@ -11355,7 +11072,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await main_menu_callback(update, context)
         return
 
-    # ===== معالجة المصادقة الثنائية =====
     if context.user_data.get('waiting_2fa') and text:
         if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
             try:
@@ -11376,7 +11092,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data.pop('waiting_2fa', None)
                 return
 
-    # ===== معالجة الحالات =====
     if await state_dispatcher.handle(update, context):
         return
 
@@ -11455,7 +11170,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_sendcode_confirmation_handler(update, context)
         return
 
-    # ===== WAITING_CHANNEL_ID =====
     if state == UserState.WAITING_CHANNEL_ID:
         context.user_data.pop('state', None)
         channel_id = text.strip()
@@ -11475,7 +11189,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
         return
 
-    # ===== WAITING_INTERVAL_MINUTES =====
     if state == UserState.WAITING_INTERVAL_MINUTES:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -11514,7 +11227,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'invalid_number'))
         return
 
-    # ===== WAITING_INTERVAL_HOURS =====
     if state == UserState.WAITING_INTERVAL_HOURS:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -11530,7 +11242,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
 
-    # ===== WAITING_INTERVAL_DAYS =====
     if state == UserState.WAITING_INTERVAL_DAYS:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -11546,7 +11257,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
 
-    # ===== WAITING_DATES =====
     if state == UserState.WAITING_DATES:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -11566,7 +11276,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
 
-    # ===== WAITING_PUBLISH_TIME =====
     if state == UserState.WAITING_PUBLISH_TIME:
         context.user_data.pop('state', None)
         ch_db_id = context.user_data.pop('schedule_ch_id', None)
@@ -11584,7 +11293,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await schedule_menu_callback(update, context)
         return
 
-    # ===== WAITING_SCHEDULE_POST =====
     if state == UserState.WAITING_SCHEDULE_POST:
         context.user_data.pop('state', None)
         chat_id = context.user_data.get('schedule_chat_id')
@@ -11611,7 +11319,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await main_menu_callback(update, context)
         return
 
-    # ===== WAITING_REMINDER_DAYS =====
     if state == UserState.WAITING_REMINDER_DAYS:
         context.user_data.pop('state', None)
         try:
@@ -11626,7 +11333,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await reminder_menu_callback(update, context)
         return
 
-    # ===== WAITING_UPDATE_TEXT =====
     if state == UserState.WAITING_UPDATE_TEXT:
         context.user_data.pop('state', None)
         channel = await db_get_updates_channel()
@@ -11641,7 +11347,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_UPDATE_CHANNEL =====
     if state == UserState.WAITING_UPDATE_CHANNEL:
         context.user_data.pop('state', None)
         channel = text.strip()
@@ -11680,7 +11385,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_FORCE_CHANNEL =====
     if state == UserState.WAITING_FORCE_CHANNEL:
         context.user_data.pop('state', None)
         await db_set_force_subscribe_channel(text)
@@ -11688,7 +11392,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_BROADCAST =====
     if state == UserState.WAITING_BROADCAST:
         context.user_data.pop('state', None)
         confirm_kb = InlineKeyboardMarkup([
@@ -11699,7 +11402,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📨 **تأكيد الإرسال الجماعي**\n\nالنص المرسل:\n━━━━━━━━━━━━━━\n{text[:500]}\n━━━━━━━━━━━━━━\n\n⚠️ سيتم إرسال هذه الرسالة إلى **جميع مستخدمي البوت**\nهل أنت متأكد؟", reply_markup=confirm_kb, parse_mode="MarkdownV2")
         return
 
-    # ===== WAITING_SENDCODE_USER =====
     if state == UserState.WAITING_SENDCODE_USER:
         context.user_data.pop('state', None)
         try:
@@ -11713,7 +11415,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_LOG_CHANNEL =====
     if state == UserState.WAITING_LOG_CHANNEL:
         context.user_data.pop('state', None)
         identifier = text.strip()
@@ -11750,7 +11451,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_KEYWORD =====
     if state == UserState.WAITING_KEYWORD:
         context.user_data.pop('state', None)
         keyword = text.strip().lower()
@@ -11763,7 +11463,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"📝 **إضافة رد للكلمة:** `{keyword}`\n\nأرسل الرد الذي تريده لهذه الكلمة:", parse_mode="MarkdownV2")
         return
 
-    # ===== WAITING_REPLY =====
     if state == UserState.WAITING_REPLY:
         context.user_data.pop('state', None)
         if context.user_data.get('admin_del_reply'):
@@ -11785,7 +11484,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_replies_callback(update, context)
         return
 
-    # ===== WAITING_ADMIN_ID_ADD =====
     if state == UserState.WAITING_ADMIN_ID_ADD:
         try:
             target_id = int(text)
@@ -11801,7 +11499,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_ADMIN_ID_REMOVE =====
     if state == UserState.WAITING_ADMIN_ID_REMOVE:
         try:
             target_id = int(text)
@@ -11817,7 +11514,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_panel_callback(update, context)
         return
 
-    # ===== WAITING_GROUP_BANNED_WORD =====
     if state == UserState.WAITING_GROUP_BANNED_WORD:
         chat_id = context.user_data.get('banned_words_chat_id')
         if chat_id:
@@ -11833,7 +11529,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await banned_words_list_callback(update, context)
         return
 
-    # ===== WAITING_REMOVE_GROUP_BANNED_WORD =====
     if state == UserState.WAITING_REMOVE_GROUP_BANNED_WORD:
         chat_id = context.user_data.get('banned_words_chat_id')
         if chat_id:
@@ -11846,7 +11541,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await banned_words_list_callback(update, context)
         return
 
-    # ===== WAITING_GLOBAL_BANNED_WORD =====
     if state == UserState.WAITING_GLOBAL_BANNED_WORD:
         word = text.split()[0].lower() if text else ""
         if len(word) < 2:
@@ -11860,7 +11554,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_banned_words_callback(update, context)
         return
 
-    # ===== WAITING_REMOVE_GLOBAL_BANNED_WORD =====
     if state == UserState.WAITING_REMOVE_GLOBAL_BANNED_WORD:
         word = text.lower()
         async def _remove(conn):
@@ -11872,7 +11565,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_banned_words_callback(update, context)
         return
 
-    # ===== WAITING_NSFW_THRESHOLD =====
     if state == UserState.WAITING_NSFW_THRESHOLD:
         try:
             threshold = float(text)
@@ -11889,7 +11581,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await nsfw_settings_callback(update, context)
         return
 
-    # ===== معالجة الأوامر المتقدمة (ban, mute, warn, kick, restrict, pin, unban) =====
     if state and isinstance(state, UserState) and state.name.startswith('WAITING_'):
         chat_id = context.user_data.get('advanced_chat_id')
         if not chat_id:
@@ -11975,7 +11666,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop('state', None)
             return
 
-    # ===== وضع الدعم =====
     if context.user_data.get('support_mode') and chat.type == 'private' and text and not text.startswith('/'):
         ticket_num = await db_get_next_ticket_number()
         username = user.full_name or user.first_name or str(uid)
@@ -11990,7 +11680,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['support_mode'] = False
         return
 
-    # ===== أوامر الخاصة =====
     if chat.type == 'private':
         if text == "/start":
             await start_command_handler(update, context)
@@ -12072,7 +11761,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if user.is_bot:
         return
 
-    # ===== التحقق من قفل المجموعة =====
     if await is_chat_locked(chat_id):
         try:
             await update.message.delete()
@@ -12085,7 +11773,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if not bot_perms['can_act']:
         return
 
-    # ===== التحقق من الوضع البطيء =====
     if not await db_check_slow_mode(chat_id, user_id):
         try:
             await update.message.delete()
@@ -12094,9 +11781,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
         return
 
-    # ===================== كشف NSFW =====================
     if NSFW_ENABLED:
-        # كشف الصور
         if update.message.photo:
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             if file.file_size > NSFW_MAX_FILE_SIZE:
@@ -12120,7 +11805,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 logger.error(f"خطأ في تحليل الصورة NSFW: {e}")
 
-        # كشف الفيديوهات
         elif update.message.video:
             if not CV2_AVAILABLE:
                 logger.warning("cv2 غير مثبت، تخطي كشف NSFW للفيديو")
@@ -12147,28 +11831,21 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 logger.error(f"خطأ في تحليل الفيديو NSFW: {e}")
 
-    # ===================== الردود التلقائية =====================
-
-    # 1. التحقق من إعدادات المستخدم
     user_reply_enabled = await db_get_user_auto_reply_status(user_id)
     if not user_reply_enabled:
         return
 
-    # 2. التحقق من إعدادات المجموعة
     settings = await db_get_auto_reply_settings(chat_id)
     if not settings['enabled']:
         return
 
-    # 3. التحقق من صلاحيات المستخدم (إذا كان المشرفين فقط)
     if settings['only_admins']:
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
             return
 
-    # 4. تجاهل البوتات
     if settings['ignore_bots'] and update.effective_user.is_bot:
         return
 
-    # 5. التحقق من إعدادات الأمان
     security_settings = await db_get_security_settings(chat_id)
 
     text = update.message.text or update.message.caption or ""
@@ -12202,26 +11879,21 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
 
-    # ===== البحث عن الرد مع المطابقة الجزئية =====
     reply = None
     text_lower = text.lower()
 
-    # المستوى 1: ردود مخصصة (قاعدة البيانات) - بحث مباشر
     if text_lower:
         reply = await db_get_reply(text_lower)
 
-    # المستوى 2: ردود مضمنة (مطابقة تامة)
     if not reply and text_lower in ALL_REPLIES:
         reply = ALL_REPLIES[text_lower]
 
-    # المستوى 3: ردود مضمنة (مطابقة جزئية)
     if not reply:
         for keyword, response in ALL_REPLIES.items():
             if keyword in text_lower:
                 reply = response
                 break
 
-    # إرسال الرد
     if reply:
         try:
             await update.message.reply_text(reply)
@@ -12229,7 +11901,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"فشل إرسال الرد: {e}")
 
 # ===================== [إصلاح] خادم الويب مع واجهة مستخدم و WebSocket =====================
-# تعريف تطبيق الويب ومدير WebSocket
 from aiohttp import web, WSMsgType
 import json
 import jinja2
@@ -12260,7 +11931,6 @@ class WebSocketManager:
 
 ws_manager = WebSocketManager()
 
-# إعداد Jinja2
 try:
     jinja_env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(str(TEMPLATES_PATH)),
@@ -12292,9 +11962,7 @@ async def health_check_handler(request):
         }, status=503)
 
 async def dashboard_handler(request):
-    """عرض لوحة التحكم الرئيسية"""
     try:
-        # جلب الإحصائيات الأولية
         total, banned, posts, groups, channels = await db_stats()
         ram = get_ram_usage()
         stats = {
@@ -12307,7 +11975,6 @@ async def dashboard_handler(request):
             'ram': ram,
             'uptime': int(time_module.time() - getattr(health_check_handler, 'start_time', time_module.time()))
         }
-        # قالب HTML مضمن
         html = """
         <!DOCTYPE html>
         <html>
@@ -12342,16 +12009,14 @@ async def dashboard_handler(request):
                     <span class="badge">🟢 البوت يعمل</span>
                 </div>
                 <div class="footer">
-                    <p>ريلاكس مانيجر v19.2.1 | © 2026</p>
+                    <p>ريلاكس مانيجر v19.2.3 | © 2026</p>
                 </div>
             </div>
             <script>
-                // WebSocket للاتصال الحي
                 const ws = new WebSocket('ws://' + window.location.host + '/ws');
                 ws.onmessage = function(event) {
                     const data = JSON.parse(event.data);
                     if (data.type === 'stats') {
-                        // تحديث الإحصائيات
                         document.querySelector('.stat-card:nth-child(1) .value').textContent = data.data.total_users;
                         document.querySelector('.stat-card:nth-child(1) .sub').textContent = 'نشط: ' + data.data.active_users + ' | محظور: ' + data.data.banned_users;
                         document.querySelector('.stat-card:nth-child(2) .value').textContent = data.data.pending_posts;
@@ -12364,14 +12029,12 @@ async def dashboard_handler(request):
         </body>
         </html>
         """
-        # تقديم القالب مع البيانات
         if jinja_env:
             try:
                 template = jinja_env.from_string(html)
                 return web.Response(text=template.render(stats=stats), content_type='text/html')
             except:
                 pass
-        # إذا فشل Jinja2، استخدم استبدال بسيط
         html = html.replace('{{ stats.total_users }}', str(stats['total_users']))
         html = html.replace('{{ stats.active_users }}', str(stats['active_users']))
         html = html.replace('{{ stats.banned_users }}', str(stats['banned_users']))
@@ -12394,7 +12057,6 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
-                # يمكن معالجة رسائل من العميل هنا
                 pass
             elif msg.type == WSMsgType.ERROR:
                 break
@@ -12402,7 +12064,6 @@ async def websocket_handler(request):
         ws_manager.remove_socket(ws)
     return ws
 
-# إضافة المسارات
 web_app.router.add_get('/', dashboard_handler)
 web_app.router.add_get('/health', health_check_handler)
 web_app.router.add_get('/ws', websocket_handler)
@@ -12730,11 +12391,8 @@ async def cleanup_expired_sessions_improved():
         logger.info(f"✅ تم تنظيف الجلسات المنتهية والتذاكر القديمة")
 
 async def cleanup_user_data_loop():
-    """تنظيف context.user_data للمستخدمين غير النشطين"""
     while True:
-        await asyncio.sleep(3600)  # كل ساعة
-        # هذه الوظيفة تعتمد على تتبع آخر نشاط، ولكن يمكننا تنفيذها ببساطة بمسح البيانات القديمة
-        # سيتم تنفيذها في المستقبل إذا لزم الأمر
+        await asyncio.sleep(3600)
         pass
 
 async def broadcast_stats_periodically():
@@ -12868,8 +12526,6 @@ async def init_db_improved():
         await conn.execute("PRAGMA optimize")
         await conn.execute("PRAGMA max_page_count=1000000")
         await conn.execute("PRAGMA secure_delete=ON")
-
-        # ========== إنشاء جميع الجداول ==========
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -13210,8 +12866,6 @@ async def init_db_improved():
             )
         """)
 
-        # ========== جداول المسابقات ==========
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -13247,8 +12901,6 @@ async def init_db_improved():
             )
         """)
 
-        # ========== جدول إعدادات الردود التلقائية ==========
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_reply_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -13258,8 +12910,6 @@ async def init_db_improved():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
-        # ========== الفهارس (Indexes) للتحسين ==========
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule(next_publish_date)")
@@ -13280,8 +12930,6 @@ async def init_db_improved():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_daily ON users(last_daily_reward)")
-
-        # ========== تحديث الجداول القديمة ==========
 
         try:
             cursor = await conn.execute("PRAGMA table_info(group_security)")
@@ -13343,8 +12991,6 @@ async def init_db_improved():
                 await conn.execute("ALTER TABLE schedule ADD COLUMN cron_expression TEXT DEFAULT NULL")
         except:
             pass
-
-        # ========== إدراج البيانات الافتراضية ==========
 
         await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (PRIMARY_OWNER_ID,))
 
@@ -13427,7 +13073,6 @@ async def main():
 
     application.add_error_handler(global_error_handler)
 
-    # ========== Command Handlers ==========
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -13466,7 +13111,6 @@ async def main():
     application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
     application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
 
-    # ========== CallbackQuery Handlers ==========
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CallbackData.MAIN_MENU}$"))
@@ -13590,7 +13234,6 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_remove_banned_word_callback, pattern=f"^{CallbackData.ADMIN_REMOVE_BANNED_WORD}$"))
     application.add_handler(CallbackQueryHandler(admin_del_banned_word_callback, pattern="^admin_del_banned_word_"))
 
-    # ===== معالجات التحكم في الردود =====
     application.add_handler(CallbackQueryHandler(auto_reply_toggle_callback, pattern=f"^{CallbackData.AUTO_REPLY_TOGGLE_PREFIX}"))
     application.add_handler(CallbackQueryHandler(auto_reply_admins_callback, pattern=f"^{CallbackData.AUTO_REPLY_ADMINS_PREFIX}"))
     application.add_handler(CallbackQueryHandler(auto_reply_reset_callback, pattern=f"^{CallbackData.AUTO_REPLY_RESET_PREFIX}"))
@@ -13601,7 +13244,6 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern=f"^{CallbackData.ADMIN_AUTO_REPLY}$"))
     application.add_handler(CallbackQueryHandler(admin_auto_reply_select_callback, pattern=f"^{CallbackData.ADMIN_AUTO_REPLY_SELECT_PREFIX}"))
 
-    # ===== معالجات NSFW =====
     application.add_handler(CallbackQueryHandler(nsfw_settings_callback, pattern=f"^{CallbackData.NSFW_SETTINGS}$"))
     application.add_handler(CallbackQueryHandler(nsfw_toggle_callback, pattern=f"^{CallbackData.NSFW_TOGGLE}$"))
     application.add_handler(CallbackQueryHandler(nsfw_threshold_callback, pattern=f"^{CallbackData.NSFW_THRESHOLD_SET}$"))
@@ -13669,7 +13311,8 @@ async def main():
         BotCommand("start", "بدء البوت"),
         BotCommand("trial", "تجربة مجانية"),
         BotCommand("subscribe", "الاشتراك"),
-        BotCommand("syncgroup", "تفعيل المجموعة"),
+        BotCommand("syncgroup", "تفعيل المجموعة (للمشرفين)"),
+        BotCommand("activate", "تنشيط المجموعة (للمضيف)"),
         BotCommand("security", "إعدادات الأمان"),
         BotCommand("register_hidden_owner", "تسجيل مالك مخفي"),
         BotCommand("add_hidden_admin", "إضافة مشرف مخفي"),
@@ -13719,7 +13362,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.2.1)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.2.3)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ إصلاح ثغرة ترقية المشرف المخفي (is_telegram_admin)")
     print("   • ✅ منع عقوبات المالك المخفي والمشرف المخفي")
@@ -13736,6 +13379,7 @@ async def main():
     print("   • ✅ إضافة زر رد في تذاكر الدعم")
     print("   • ✅ التحقق من صلاحيات البوت قبل الإجراءات")
     print("   • ✅ جميع الأزرار تعمل بشكل صحيح")
+    print("   • ✅ إصلاح دالة invalidate_user_cache")
 
     try:
         await application.run_polling(
