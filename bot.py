@@ -972,11 +972,6 @@ except ImportError:
     _SECURITY_CACHE_TTL = 30
     _TRANSLATION_CACHE_SIZE = 500
 
-# ===================== [جديد] نظام التخزين المؤقت لصلاحيات المشرفين =====================
-_admin_cache_ttl = 300  # 5 دقائق
-_admin_cache = {}
-_admin_cache_time = {}
-
 _security_cache_time = {}
 _security_cache_ttl = 30
 
@@ -3269,82 +3264,274 @@ async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
     return await execute_db(_check)
 
 # ===================== [محسن] دالة is_authorized_in_group مع تخزين مؤقت =====================
-async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """
-    التحقق من صلاحيات المستخدم في المجموعة مع تخزين مؤقت للنتائج
-    - المطور الأساسي ✅
-    - المالك المخفي ✅
-    - المشرف المخفي ✅
-    - المشرف الحقيقي في تيليجرام ✅
-    """
-    cache_key = f"{chat_id}:{user_id}"
-    now = time_module.time()
-    
-    # التحقق من الكاش
-    if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _admin_cache_ttl:
-        return _admin_cache[cache_key]
+# استخدام TTLCache من cachetools إذا كانت متوفرة، وإلا نستخدم dict مع تنظيف يدوي
+if CACHETOOLS_AVAILABLE:
+    _admin_cache = TTLCache(maxsize=2000, ttl=300)  # 5 دقائق
+else:
+    _admin_cache = {}
+    _admin_cache_time = {}
+    _admin_cache_ttl = 300
 
-    # 1️⃣ المطور الأساسي
-    if user_id == PRIMARY_OWNER_ID:
-        _admin_cache[cache_key] = True
-        _admin_cache_time[cache_key] = now
-        return True
-
-    # 2️⃣ المالك المخفي
-    if await db_is_hidden_owner(chat_id, user_id):
-        _admin_cache[cache_key] = True
-        _admin_cache_time[cache_key] = now
-        return True
-
-    # 3️⃣ المشرف المخفي
-    if await db_is_hidden_admin(chat_id, user_id):
-        _admin_cache[cache_key] = True
-        _admin_cache_time[cache_key] = now
-        return True
-
-    # 4️⃣ مشرف حقيقي في تيليجرام
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        if member.status in ['creator', 'administrator']:
-            _admin_cache[cache_key] = True
-            _admin_cache_time[cache_key] = now
-            return True
-    except Exception as e:
-        logger.error(f"خطأ في التحقق من صلاحيات المستخدم {user_id} في {chat_id}: {e}")
-
-    _admin_cache[cache_key] = False
-    _admin_cache_time[cache_key] = now
-    return False
-
-async def invalidate_user_cache(user_id: int, chat_id: int = None):
-    """
-    تنظيف الكاش لمستخدم معين
-    - إذا تم تمرير chat_id: يحذف المفتاح المحدد فقط
-    - إذا لم يتم تمرير chat_id: يحذف جميع مفاتيح المستخدم
-    """
-    try:
-        if chat_id is not None:
-            cache_key = f"{chat_id}:{user_id}"
-            if cache_key in _admin_cache:
-                del _admin_cache[cache_key]
-            if cache_key in _admin_cache_time:
-                del _admin_cache_time[cache_key]
+# دالة لتنظيف الكاش بعد تغيير الصلاحيات
+async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
+    """تنظيف الكاش لمستخدم أو مجموعة معينة"""
+    if CACHETOOLS_AVAILABLE:
+        # TTLCache تدعم الحذف
+        if user_id is not None:
+            keys_to_remove = [k for k in list(_admin_cache.keys()) if str(user_id) in k]
+            for key in keys_to_remove:
+                del _admin_cache[key]
+        elif chat_id is not None:
+            keys_to_remove = [k for k in list(_admin_cache.keys()) if k.startswith(f"{chat_id}:")]
+            for key in keys_to_remove:
+                del _admin_cache[key]
         else:
-            # حذف جميع مفاتيح هذا المستخدم
-            keys_to_remove = [k for k in _admin_cache.keys() if str(user_id) in k]
+            _admin_cache.clear()
+        logger.info(f"🧹 تم تنظيف كاش الصلاحيات (user_id={user_id}, chat_id={chat_id})")
+    else:
+        # التنظيف اليدوي
+        if user_id is not None:
+            keys_to_remove = [k for k in list(_admin_cache.keys()) if str(user_id) in k]
             for key in keys_to_remove:
                 del _admin_cache[key]
                 if key in _admin_cache_time:
                     del _admin_cache_time[key]
-    except Exception as e:
-        logger.error(f"خطأ في تنظيف الكاش للمستخدم {user_id}: {e}")
+        elif chat_id is not None:
+            keys_to_remove = [k for k in list(_admin_cache.keys()) if k.startswith(f"{chat_id}:")]
+            for key in keys_to_remove:
+                del _admin_cache[key]
+                if key in _admin_cache_time:
+                    del _admin_cache_time[key]
+        else:
+            _admin_cache.clear()
+            _admin_cache_time.clear()
+        logger.info(f"🧹 تم تنظيف كاش الصلاحيات اليدوي (user_id={user_id}, chat_id={chat_id})")
 
-async def clear_admin_cache():
-    """تنظيف كاش الصلاحيات بالكامل"""
-    global _admin_cache, _admin_cache_time
-    _admin_cache.clear()
-    _admin_cache_time.clear()
-    logger.info("🧹 تم تنظيف كاش صلاحيات المشرفين بالكامل")
+async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """
+    التحقق من صلاحيات المستخدم في المجموعة مع تخزين مؤقت.
+    يدعم 4 أنواع من الصلاحيات:
+    1. المطور الأساسي (PRIMARY_OWNER_ID)
+    2. المالك المخفي (hidden owner)
+    3. المشرف المخفي (hidden admin)
+    4. مشرف حقيقي في تيليجرام (creator/administrator)
+    """
+    cache_key = f"{chat_id}:{user_id}"
+    now = time_module.time()
+
+    # التحقق من الكاش
+    if CACHETOOLS_AVAILABLE:
+        cached = _admin_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    else:
+        if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _admin_cache_ttl:
+            return _admin_cache[cache_key]
+
+    # 1. المطور الأساسي
+    if user_id == PRIMARY_OWNER_ID:
+        _admin_cache[cache_key] = True
+        if not CACHETOOLS_AVAILABLE:
+            _admin_cache_time[cache_key] = now
+        return True
+
+    # 2. المالك المخفي
+    if await db_is_hidden_owner(chat_id, user_id):
+        _admin_cache[cache_key] = True
+        if not CACHETOOLS_AVAILABLE:
+            _admin_cache_time[cache_key] = now
+        return True
+
+    # 3. المشرف المخفي
+    if await db_is_hidden_admin(chat_id, user_id):
+        _admin_cache[cache_key] = True
+        if not CACHETOOLS_AVAILABLE:
+            _admin_cache_time[cache_key] = now
+        return True
+
+    # 4. مشرف حقيقي في تيليجرام (مع استثناء البوت نفسه)
+    try:
+        if user_id != bot.id:  # لا نتحقق من البوت نفسه
+            member = await bot.get_chat_member(chat_id, user_id)
+            if member.status in ['creator', 'administrator']:
+                _admin_cache[cache_key] = True
+                if not CACHETOOLS_AVAILABLE:
+                    _admin_cache_time[cache_key] = now
+                return True
+    except Exception as e:
+        logger.error(f"خطأ في التحقق من صلاحيات المستخدم {user_id} في {chat_id}: {e}")
+
+    # لا توجد صلاحيات
+    _admin_cache[cache_key] = False
+    if not CACHETOOLS_AVAILABLE:
+        _admin_cache_time[cache_key] = now
+    return False
+
+# ===================== دوال المالك والمشرفين المخفيين - الأوامر =====================
+async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        return
+    user = update.effective_user
+    if user is None:
+        return
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ يعمل فقط في المجموعات")
+        return
+
+    chat_id = chat.id
+    user_id = user.id
+
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+
+    if await db_is_hidden_owner(chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'hidden_owner_already'))
+        return
+
+    await db_register_hidden_owner_group(chat_id, user_id)
+    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)  # تنظيف الكاش
+    await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
+
+async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/add_hidden_admin معرف_المستخدم\n\n"
+            "مثال: `/add_hidden_admin 123456789`"
+        )
+        return
+
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
+        return
+
+    if target_id == PRIMARY_OWNER_ID:
+        await update.message.reply_text("❌ لا يمكن إضافة المطور الأساسي كمشرف مخفي!")
+        return
+
+    if target_id == user_id:
+        await update.message.reply_text("❌ لا يمكن إضافة نفسك كمشرف مخفي!")
+        return
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, target_id)
+        if member.status in ['left', 'kicked']:
+            await update.message.reply_text("❌ المستخدم ليس في المجموعة!")
+            return
+    except Exception as e:
+        await update.message.reply_text(f"❌ لا يمكن العثور على المستخدم: {e}")
+        return
+
+    try:
+        user = await context.bot.get_chat(target_id)
+        if user.is_bot:
+            await update.message.reply_text("❌ لا يمكن إضافة بوت كمشرف مخفي!")
+            return
+    except:
+        pass
+
+    if await db_is_hidden_admin(chat_id, target_id):
+        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` مشرف مخفي بالفعل!")
+        return
+
+    success = await db_add_hidden_admin(chat_id, target_id, user_id)
+    if success:
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
+        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
+            "chat_id": chat_id,
+            "target": target_id
+        }, "HIGH")
+    else:
+        await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
+
+async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "📝 **الاستخدام:**\n"
+            "/remove_hidden_admin معرف_المستخدم\n\n"
+            "مثال: `/remove_hidden_admin 123456789`"
+        )
+        return
+
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
+        return
+
+    if target_id == PRIMARY_OWNER_ID:
+        await update.message.reply_text("❌ لا يمكن إزالة المطور الأساسي!")
+        return
+
+    if not await db_is_hidden_admin(chat_id, target_id):
+        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` ليس مشرفاً مخفياً!")
+        return
+
+    success = await db_remove_hidden_admin(chat_id, target_id)
+    if success:
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
+        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
+            "chat_id": chat_id,
+            "target": target_id
+        }, "HIGH")
+    else:
+        await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
+
+async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+
+    admins = await db_get_hidden_admins(chat_id)
+    if not admins:
+        await update.message.reply_text(get_text(user_id, 'no_hidden_admins'))
+        return
+
+    text = get_text(user_id, 'hidden_admin_list').format("")
+    for admin in admins:
+        text += f"👤 المستخدم: `{admin['admin_id']}`\n"
+        text += f"➕ أضيف بواسطة: `{admin['added_by']}`\n"
+        text += f"🕐 التاريخ: {admin['added_at'][:16]}\n"
+        text += "━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 # ===================== دوال المشرفين =====================
 async def add_bot_admin(user_id: int):
@@ -4631,7 +4818,7 @@ def contains_link(text):
 def contains_mention(text):
     return bool(re.search(r'@\w+', text))
 
-async def invalidate_user_cache_old(user_id: int):
+async def invalidate_user_cache(user_id: int):
     try:
         if user_id in _admin_cache:
             del _admin_cache[user_id]
@@ -6986,7 +7173,6 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • 📤 **تصدير البيانات** (CSV)
 • 🌙 **وضع Dark Mode**
 • ⏱️ **جدولة CRON**
-• ⚡ **نظام التخزين المؤقت لصلاحيات المشرفين** مع TTL 5 دقائق
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -9942,7 +10128,7 @@ async def register_hidden_owner_handler(update: Update, context: ContextTypes.DE
         return
 
     await db_register_hidden_owner_group(chat_id, user_id)
-    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
+    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)  # تنظيف الكاش
     await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
 
 async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10003,13 +10189,12 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
 
     success = await db_add_hidden_admin(chat_id, target_id, user_id)
     if success:
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
             "chat_id": chat_id,
             "target": target_id
         }, "HIGH")
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)
-        await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
 
@@ -10050,13 +10235,12 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
 
     success = await db_remove_hidden_admin(chat_id, target_id)
     if success:
+        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)  # تنظيف الكاش
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
             "chat_id": chat_id,
             "target": target_id
         }, "HIGH")
-        await invalidate_user_cache(user_id=target_id, chat_id=chat_id)
-        await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
     else:
         await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
 
@@ -10086,7 +10270,76 @@ async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAU
 
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
-# ===================== معالجات الكولباك للإجراءات المتقدمة (الجزء الثاني) =====================
+# ===================== [محسن] الأمر syncgroup مع الكاش ورسائل أفضل =====================
+async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    أمر /syncgroup - يتم التحقق من صلاحيات المستخدم عبر Telegram API مباشرة
+    وتسجيله كمالك مخفي إذا كان مشرفاً في المجموعة.
+    """
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title or "بدون اسم"
+    user_id = update.effective_user.id
+
+    # تسجيل المجموعة في قاعدة البيانات
+    await db_register_group(chat_id, chat_name, user_id, update.effective_chat.username)
+
+    # التحقق من صلاحيات البوت
+    bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
+    if not bot_perms['can_act']:
+        await update.message.reply_text(f"⚠️ **تنبيه:**\n{bot_perms['reason']}\n\nيرجى منح البوت الصلاحيات المطلوبة.")
+        return
+
+    # التحقق من صلاحيات المستخدم في تيليجرام (وليس من قاعدة البيانات)
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status in ['creator', 'administrator']:
+            # تسجيل المستخدم كمالك مخفي
+            await db_register_hidden_owner_group(chat_id, user_id)
+            # تنظيف الكاش للمستخدم والمجموعة
+            await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
+            await update.message.reply_text(
+                f"✅ **تم تسجيلك كمالك مخفي لهذه المجموعة.**\n\n"
+                f"📌 اسم المجموعة: {chat_name}\n"
+                f"🆔 المعرف: {chat_id}\n"
+                f"👤 المستخدم: {user_id}\n\n"
+                f"🔐 استخدم /security لإعدادات الأمان\n"
+                f"🛠️ استخدم /panel للوحة التحكم"
+            )
+        else:
+            # المستخدم ليس مشرفاً: إرسال رسالة ترويجية مفصلة
+            await update.message.reply_text(
+                f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
+                f"📌 **للاستفادة من ميزات البوت المتقدمة، تواصل معنا على الخاص:**\n"
+                f"👉 @{BOT_USERNAME}\n\n"
+                f"💡 **ماذا يمكنك أن تفعل مع البوت؟**\n"
+                f"• إدارة قنواتك ونشر المنشورات تلقائياً\n"
+                f"• حماية المجموعات من الروابط والمزعجين\n"
+                f"• إحصائيات متقدمة ومخططات نمو\n"
+                f"• نظام مسابقات متكامل\n"
+                f"• وأكثر من 200 ميزة! 🚀\n\n"
+                f"🔗 **ادعُ البوت إلى مجموعتك:**\n"
+                f"https://t.me/{BOT_USERNAME}?startgroup"
+            )
+            return
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ تعذر التحقق من صلاحياتك: {e}")
+        return
+
+    await update.message.reply_text(
+        f"✅ **تم تفعيل المجموعة بنجاح!**\n\n"
+        f"📌 اسم المجموعة: {chat_name}\n"
+        f"🆔 المعرف: {chat_id}\n"
+        f"👤 المضافة بواسطة: {user_id}\n\n"
+        f"🔐 استخدم /security لإعدادات الأمان\n"
+        f"🛠️ استخدم /panel للوحة التحكم",
+        parse_mode="MarkdownV2"
+    )
+
+# ===================== دوال إضافية =====================
 async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
     if query.invoice_payload.startswith("sub_"):
@@ -10304,68 +10557,6 @@ async def language_command_handler(update: Update, context: ContextTypes.DEFAULT
          InlineKeyboardButton("한국어 🇰🇷", callback_data="lang_ko")]
     ])
     await update.message.reply_text(get_text(user_id, 'welcome'), reply_markup=keyboard)
-
-async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    أمر /syncgroup - التحقق من صلاحيات المستخدم مع تخزين مؤقت
-    """
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    chat_name = update.effective_chat.title or "بدون اسم"
-    user_id = update.effective_user.id
-
-    # 1️⃣ تسجيل المجموعة أولاً
-    await db_register_group(chat_id, chat_name, user_id, update.effective_chat.username)
-
-    # 2️⃣ التحقق من صلاحيات البوت أولاً
-    bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
-    if not bot_perms['can_act']:
-        await update.message.reply_text(
-            f"⚠️ **تنبيه:**\n{bot_perms['reason']}\n\n"
-            f"يرجى منح البوت الصلاحيات المطلوبة:\n"
-            f"• حظر المستخدمين\n"
-            f"• حذف الرسائل\n"
-            f"• تثبيت الرسائل"
-        )
-        return
-
-    # 3️⃣ ✅ استخدام دالة is_authorized_in_group مع التخزين المؤقت
-    if await is_authorized_in_group(context.bot, chat_id, user_id):
-        # المستخدم مشرف (حقيقي أو مخفي)
-        await db_register_hidden_owner_group(chat_id, user_id)
-        await invalidate_user_cache(user_id=user_id, chat_id=chat_id)  # تنظيف الكاش فوراً
-
-        await update.message.reply_text(
-            f"✅ **تم تسجيلك كمالك مخفي لهذه المجموعة!**\n\n"
-            f"📌 اسم المجموعة: {chat_name}\n"
-            f"🆔 المعرف: `{chat_id}`\n\n"
-            f"🔐 استخدم /security لإعدادات الأمان\n"
-            f"🛠️ استخدم /panel للوحة التحكم\n"
-            f"👑 استخدم /register_hidden_owner لتسجيل مالك مخفي آخر\n"
-            f"➕ استخدم /add_hidden_admin لإضافة مشرف مخفي",
-            parse_mode="MarkdownV2"
-        )
-    else:
-        # المستخدم ليس مشرفاً - عرض رسالة ترويجية
-        await update.message.reply_text(
-            f"⚠️ **عذراً، أنت لست مشرفاً في هذه المجموعة.**\n\n"
-            f"📌 **للاستفادة من ميزات البوت المتقدمة:**\n"
-            f"• أضف البوت إلى مجموعتك\n"
-            f"• اجعل البوت مشرفاً\n"
-            f"• تواصل معنا على الخاص:\n"
-            f"👉 @{BOT_USERNAME}\n\n"
-            f"💡 يمكنك استخدام البوت لإدارة القنوات والمجموعات بكل احترافية.\n\n"
-            f"🔹 **ميزات البوت:**\n"
-            f"• النشر التلقائي 📡\n"
-            f"• حماية المجموعة 🛡️\n"
-            f"• ردود تلقائية 🤖\n"
-            f"• مسابقات 🏆\n"
-            f"• إحصائيات متقدمة 📊",
-            parse_mode="MarkdownV2"
-        )
 
 async def security_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -10690,17 +10881,16 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # تسجيل المضيف كمالك مخفي دائماً
             await db_register_hidden_owner_group(chat.id, added_by_id)
+            # تنظيف الكاش للمضيف والمجموعة
+            await invalidate_user_cache(user_id=added_by_id, chat_id=chat.id)
             logger.info(f"🔒 تم تسجيل المضيف {added_by_id} كمالك مخفي للمجموعة {chat.id}")
 
             # إذا كان هناك مالك حقيقي مختلف، نسجله أيضاً
             owner_info = await detect_owner_type(context.bot, chat.id)
             if owner_info.get('user_id') and owner_info['user_id'] != added_by_id:
                 await db_register_hidden_owner_group(chat.id, owner_info['user_id'])
-                logger.info(f"👑 تم تسجيل المالك الحقيقي {owner_info['user_id']} أيضاً كمالك مخفي للمجموعة {chat.id}")
-
-            await invalidate_user_cache(user_id=added_by_id, chat_id=chat.id)
-            if owner_info.get('user_id'):
                 await invalidate_user_cache(user_id=owner_info['user_id'], chat_id=chat.id)
+                logger.info(f"👑 تم تسجيل المالك الحقيقي {owner_info['user_id']} أيضاً كمالك مخفي للمجموعة {chat.id}")
 
             await send_addition_report(context.bot, inviter, chat, chat_type_name)
 
@@ -13192,7 +13382,6 @@ async def main():
 
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.2.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print("   • ✅ نظام التخزين المؤقت لصلاحيات المشرفين مع TTL 5 دقائق")
     print("   • ✅ إصلاح أمر /syncgroup للمالك المخفي (التحقق عبر Telegram API)")
     print("   • ✅ إرسال رسالة ترويجية للأعضاء العاديين عند استخدام /syncgroup")
     print("   • ✅ إظهار المجموعات للمشرفين المخفيين في قائمة مجموعاتي")
