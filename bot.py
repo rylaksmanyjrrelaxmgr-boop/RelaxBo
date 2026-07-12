@@ -3,17 +3,14 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.0 - نظام أوامر مشرفين موحد + تحسين سرعة الردود
+الإصدار: 19.3.1 - جميع التصحيحات والتحسينات
 المطور: @RelaxMgr
 
-التحسينات النهائية:
-1. تصليح NameError: name 'UserState' is not defined
-2. ترتيب التعريفات: UserState ← CallbackData ← StateDispatcher
-3. إضافة كاش الردود _reply_cache مع نظام تنظيف تلقائي
-4. تصليح check_admin_access لدعم المشرفين المخفيين (Anonymous)
-5. إضافة نظام CacheCleaner لتنظيف الكاش التلقائي
-6. إضافة دوال NSFW المفقودة
-7. إضافة أمر update_admins
+التصحيحات المطبقة:
+1-12: تصحيح 12 خطأ خطير (توقف البوت)
+13-25: تصحيح 13 خطأ متوسط (تؤثر على الأداء)
+26-30: تصحيح 5 أخطاء منخفضة (تأثير محدود)
+31-35: إضافة 5 تحسينات إضافية
 """
 
 import sys
@@ -227,6 +224,30 @@ try:
     AIOFILES_AVAILABLE = True
 except ImportError:
     AIOFILES_AVAILABLE = False
+
+# ===================== [تحسين 32] إضافة retry decorator =====================
+def retry_async(max_retries=3, delay=1, backoff=2, exceptions=(Exception,)):
+    """ديكوراتور لإعادة المحاولة عند فشل الدوال غير المتزامنة"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            _delay = delay
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_retries - 1:
+                        raise
+                    jitter = random.uniform(0, 0.5)
+                    await asyncio.sleep(_delay + jitter)
+                    _delay *= backoff
+            if last_exception:
+                raise last_exception
+            return None
+        return wrapper
+    return decorator
 
 # ===================== تعريف UserState =====================
 class UserState(Enum):
@@ -466,6 +487,9 @@ class StateDispatcher:
         self.handlers[state] = handler
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if not update or not update.effective_user:
+            return False
+        
         user_id = update.effective_user.id
         state = context.user_data.get('state')
         if state is None or state == UserState.NONE:
@@ -499,6 +523,8 @@ MAX_CONNECTIONS = 20
 _ADMIN_CACHE_TTL = 300
 _ADMIN_CACHE_TIME = {}
 WEB_PORT_USED = int(os.getenv("PORT", "10000"))
+REQUEST_TIMEOUT = 30
+DB_MAX_RETRIES = 3
 
 # ===================== تحسينات اللغة =====================
 SUPPORTED_LANGUAGES = {
@@ -1197,13 +1223,13 @@ def clean_text_for_telegram(text: str) -> str:
     text = text.replace('\ufeff', '').replace('\ufffc', '')
     return text
 
+# ===================== [تحسين 29] تحسين دالة escape_markdown_v2 =====================
 def escape_markdown_v2(text: str) -> str:
     if not text:
         return ""
-    special_chars = r'_*[]()~`>#+\-=|{}.!'
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
+    # تحسين: استخدام re.sub لتجنب تكرار replace
+    special_chars = r'([_*\[\]()~`>#+\-=|{}.!\\])'
+    return re.sub(special_chars, r'\\\1', text)
 
 def sanitize_text(text: str, max_length: int = 4096, allow_tags: list = None) -> str:
     if not text:
@@ -1403,6 +1429,7 @@ class NotificationSystem:
         self._lock = asyncio.Lock()
         self._scheduled_tasks = []
 
+    @retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
     async def send_notification(self, bot, user_id: int, text: str, parse_mode: str = "MarkdownV2", reply_markup=None):
         try:
             await safe_send_markdown(bot, user_id, text, reply_markup)
@@ -1452,6 +1479,7 @@ class NotificationSystem:
 notification_system = NotificationSystem()
 
 # ===================== دوال الإرسال الآمنة =====================
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
     if not text:
         return None
@@ -1465,6 +1493,7 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
             text=escaped,
             parse_mode='MarkdownV2',
             reply_markup=reply_markup,
+            timeout=REQUEST_TIMEOUT,
             **kwargs
         )
     except BadRequest as e:
@@ -1478,6 +1507,7 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
                     text=html_text,
                     parse_mode='HTML',
                     reply_markup=reply_markup,
+                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
             except:
@@ -1488,10 +1518,12 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
                     chat_id=chat_id,
                     text=plain,
                     reply_markup=reply_markup,
+                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
         raise
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
     if not query or not query.message:
         return None
@@ -1522,6 +1554,7 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
             text=escaped,
             parse_mode='MarkdownV2',
             reply_markup=reply_markup,
+            timeout=REQUEST_TIMEOUT,
             **kwargs
         )
     except BadRequest as e:
@@ -1535,6 +1568,7 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                     text=html_text,
                     parse_mode='HTML',
                     reply_markup=reply_markup,
+                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
             except:
@@ -1544,6 +1578,7 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                 return await query.edit_message_text(
                     text=plain,
                     reply_markup=reply_markup,
+                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
         elif "message is not modified" in error_msg:
@@ -1622,6 +1657,16 @@ def utc_to_mecca(utc_dt):
     if hasattr(utc_dt, 'tzinfo') and utc_dt.tzinfo is not None:
         utc_dt = utc_dt.replace(tzinfo=None)
     return utc_dt + timedelta(hours=3)
+
+# ===================== [تحسين 30] دالة safe_parse_date =====================
+def safe_parse_date(date_str: str, fmt: str = "%Y-%m-%d %H:%M") -> Optional[datetime]:
+    """دالة آمنة لتحويل التاريخ مع معالجة الأخطاء"""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, fmt)
+    except (ValueError, TypeError):
+        return None
 
 # ===================== نظام التسجيل المحسن =====================
 class CustomFormatter(logging.Formatter):
@@ -1764,11 +1809,13 @@ class DatabasePool:
             await self.initialize()
         return self._pool
 
+    @retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
     async def execute(self, query: str, params: tuple = None):
         conn = await self.get_connection()
         async with conn.execute(query, params or ()) as cursor:
             return await cursor.fetchall()
 
+    @retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
     async def execute_many(self, queries: List[Tuple[str, tuple]]):
         conn = await self.get_connection()
         async with conn:
@@ -1783,6 +1830,7 @@ class DatabasePool:
 
 db_pool = DatabasePool(max_connections=MAX_CONNECTIONS)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def execute_db(func: Callable):
     conn = await db_pool.get_connection()
     try:
@@ -1793,6 +1841,7 @@ async def execute_db(func: Callable):
     finally:
         pass
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def execute_transaction(queries: List[Tuple[str, tuple]]) -> Any:
     conn = await db_pool.get_connection()
     try:
@@ -1976,7 +2025,7 @@ class AsyncTranslator:
 
     async def get_session(self):
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
         return self.session
 
     async def translate(self, text: str, target: str) -> str:
@@ -2003,7 +2052,7 @@ class AsyncTranslator:
                 "dt": "t",
                 "q": text
             }
-            async with session.get(url, params=params, timeout=10) as resp:
+            async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as resp:
                 data = await resp.json()
                 translated = data[0][0][0] if data and data[0] and data[0][0] else text
                 await _translation_cache.set(cache_key, translated)
@@ -2013,6 +2062,7 @@ class AsyncTranslator:
                 return translated
         except Exception as e:
             logger.error(f"خطأ في الترجمة: {e}")
+            # [تحسين 26] استخدام النص الأصلي في حالة فشل الترجمة
             for future in self.pending[text]:
                 if not future.done():
                     future.set_result(text)
@@ -2451,6 +2501,7 @@ async def set_user_language(user_id: int, lang: str):
         user_language[user_id] = lang
 
 # ===================== دوال قاعدة البيانات الأساسية =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_register_user(user_id: int) -> bool:
     async def _register(conn):
         cur = await conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
@@ -2461,12 +2512,14 @@ async def db_register_user(user_id: int) -> bool:
         return True
     return await execute_db(_register)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_users():
     async def _get(conn):
         cur = await conn.execute("SELECT user_id, banned FROM users ORDER BY user_id")
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_user_cache(user_id: int, username: str, first_name: str):
     async def _update(conn):
         await conn.execute("INSERT OR REPLACE INTO users_cache (user_id, username, first_name, last_updated) VALUES (?, ?, ?, ?)",
@@ -2474,6 +2527,7 @@ async def db_update_user_cache(user_id: int, username: str, first_name: str):
         await conn.commit()
     return await execute_db(_update)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_is_banned(user_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
@@ -2481,12 +2535,14 @@ async def db_is_banned(user_id: int) -> bool:
         return row and row[0] == 1
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_ban(user_id: int, banned: bool):
     async def _set(conn):
         await conn.execute("UPDATE users SET banned=? WHERE user_id=?", (1 if banned else 0, user_id))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_has_used_trial(user_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("SELECT trial_used FROM users WHERE user_id=?", (user_id,))
@@ -2494,6 +2550,7 @@ async def db_has_used_trial(user_id: int) -> bool:
         return row and row[0] == 1
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_activate_trial(user_id: int) -> int:
     async def _activate(conn):
         cur = await conn.execute("SELECT trial_used FROM users WHERE user_id=?", (user_id,))
@@ -2506,6 +2563,7 @@ async def db_activate_trial(user_id: int) -> int:
         return 30
     return await execute_db(_activate)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_activate_subscription(user_id: int, days: int):
     async def _activate(conn):
         cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
@@ -2525,6 +2583,7 @@ async def db_activate_subscription(user_id: int, days: int):
         await conn.commit()
     return await execute_db(_activate)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_has_active_subscription(user_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
@@ -2538,6 +2597,7 @@ async def db_has_active_subscription(user_id: int) -> bool:
         return False
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_subscription_days_left(user_id: int) -> int:
     async def _get(conn):
         cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
@@ -2552,6 +2612,7 @@ async def db_get_subscription_days_left(user_id: int) -> int:
         return 0
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_auto_status(user_id: int) -> bool:
     async def _get(conn):
         cur = await conn.execute("SELECT auto_publish FROM users WHERE user_id=?", (user_id,))
@@ -2559,6 +2620,7 @@ async def db_auto_status(user_id: int) -> bool:
         return row and row[0] == 1
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_auto(user_id: int, enabled: bool):
     async def _set(conn):
         await conn.execute("UPDATE users SET auto_publish=? WHERE user_id=?", (1 if enabled else 0, user_id))
@@ -2566,6 +2628,7 @@ async def db_set_auto(user_id: int, enabled: bool):
     return await execute_db(_set)
 
 # ===================== دوال auto_recycle =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_auto_recycle(user_id: int) -> bool:
     async def _get(conn):
         cur = await conn.execute("SELECT auto_recycle FROM users WHERE user_id=?", (user_id,))
@@ -2573,6 +2636,7 @@ async def db_get_auto_recycle(user_id: int) -> bool:
         return row and row[0] == 1
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_auto_recycle(user_id: int, enabled: bool):
     async def _set(conn):
         await conn.execute("UPDATE users SET auto_recycle=? WHERE user_id=?", (1 if enabled else 0, user_id))
@@ -2580,6 +2644,7 @@ async def db_set_auto_recycle(user_id: int, enabled: bool):
     return await execute_db(_set)
 
 # ===================== دوال قنوات المستخدمين =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> int:
     async def _add(conn):
         cur = await conn.execute("SELECT id FROM user_channels WHERE user_id=? AND channel_id=?", (user_id, channel_id))
@@ -2595,6 +2660,7 @@ async def db_add_channel(user_id: int, channel_id: str, channel_name: str) -> in
         return row[0] if row else None
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_channels(user_id: int):
     async def _get(conn):
         try:
@@ -2617,12 +2683,14 @@ async def db_get_channels(user_id: int):
             return []
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_channel_info(channel_db_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT channel_id, channel_name FROM user_channels WHERE id=?", (channel_db_id,))
         return await cur.fetchone()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_delete_channel_by_id(user_id: int, channel_db_id: int) -> bool:
     async def _delete(conn):
         await conn.execute("DELETE FROM user_channels WHERE id=? AND user_id=?", (channel_db_id, user_id))
@@ -2632,6 +2700,7 @@ async def db_delete_channel_by_id(user_id: int, channel_db_id: int) -> bool:
         return True
     return await execute_db(_delete)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_active_channel(user_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT active_channel FROM users WHERE user_id=?", (user_id,))
@@ -2643,12 +2712,14 @@ async def db_get_active_channel(user_id: int):
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_active_channel(user_id: int, channel_db_id: int):
     async def _set(conn):
         await conn.execute("UPDATE users SET active_channel=? WHERE user_id=?", (channel_db_id, user_id))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_channels_count(user_id: int) -> int:
     async def _get(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM user_channels WHERE user_id=?", (user_id,))
@@ -2656,12 +2727,14 @@ async def db_get_user_channels_count(user_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_user_channels_no_limit():
     async def _get(conn):
         cur = await conn.execute("SELECT uc.user_id, uc.id, uc.channel_id, uc.channel_name, uc.banned FROM user_channels uc ORDER BY uc.id")
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_all_users_channels(only_banned: bool = False, limit: int = 500):
     async def _get(conn):
         if only_banned:
@@ -2671,6 +2744,7 @@ async def db_all_users_channels(only_banned: bool = False, limit: int = 500):
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_register_channel(channel_id: int, channel_name: str, added_by: int):
     async def _register(conn):
         cur = await conn.execute("SELECT channel_id FROM bot_channels WHERE channel_id=?", (channel_id,))
@@ -2684,6 +2758,7 @@ async def db_register_channel(channel_id: int, channel_name: str, added_by: int)
         return True
     return await execute_db(_register)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_bot_channels(only_banned: bool = False):
     async def _get(conn):
         if only_banned:
@@ -2694,6 +2769,7 @@ async def db_get_all_bot_channels(only_banned: bool = False):
     return await execute_db(_get)
 
 # ===================== دوال المنشورات =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_save_posts(channel_db_id: int, posts: list) -> int:
     async def _save(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
@@ -2713,6 +2789,7 @@ async def db_save_posts(channel_db_id: int, posts: list) -> int:
         return len(values)
     return await execute_db(_save)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_next_post(channel_db_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT id, text, media_type, media_file_id FROM posts WHERE channel_db_id=? AND published=0 AND (fail_count IS NULL OR fail_count < 3) ORDER BY id LIMIT 1", (channel_db_id,))
@@ -2722,18 +2799,21 @@ async def db_get_next_post(channel_db_id: int):
         return None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_mark_published(post_id: int):
     async def _mark(conn):
         await conn.execute("UPDATE posts SET published=1 WHERE id=?", (post_id,))
         await conn.commit()
     return await execute_db(_mark)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_increment_fail_count(post_id: int):
     async def _inc(conn):
         await conn.execute("UPDATE posts SET fail_count = fail_count + 1 WHERE id=?", (post_id,))
         await conn.commit()
     return await execute_db(_inc)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_posts_count(channel_db_id: int) -> int:
     async def _count(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (channel_db_id,))
@@ -2741,6 +2821,7 @@ async def db_get_posts_count(channel_db_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_count)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_published_count(channel_db_id: int) -> int:
     async def _count(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=1", (channel_db_id,))
@@ -2748,6 +2829,7 @@ async def db_get_published_count(channel_db_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_count)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_reset_all_posts_to_unpublished(channel_db_id: int) -> int:
     async def _reset(conn):
         await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
@@ -2757,23 +2839,27 @@ async def db_reset_all_posts_to_unpublished(channel_db_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_reset)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_should_auto_recycle(channel_db_id: int) -> bool:
     total = await db_get_posts_count(channel_db_id)
     published = await db_get_published_count(channel_db_id)
     return total > 0 and published >= total
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_reset_posts_to_unpublished(channel_db_id: int, user_id: int = None):
     async def _reset(conn):
         await conn.execute("UPDATE posts SET published=0, fail_count=0 WHERE channel_db_id=?", (channel_db_id,))
         await conn.commit()
     return await execute_db(_reset)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_posts_for_channel(channel_db_id: int, limit=15):
     async def _get(conn):
         cur = await conn.execute("SELECT id, text, media_type FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT ?", (channel_db_id, limit))
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_delete_single_post(post_id: int, user_id: int, channel_db_id: int) -> bool:
     async def _delete(conn):
         cur = await conn.execute("SELECT 1 FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE p.id=? AND uc.user_id=?", (post_id, user_id))
@@ -2784,6 +2870,7 @@ async def db_delete_single_post(post_id: int, user_id: int, channel_db_id: int) 
         return True
     return await execute_db(_delete)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_unpublished_posts(user_id: int) -> int:
     async def _get(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=? AND p.published=0", (user_id,))
@@ -2791,6 +2878,7 @@ async def db_get_user_unpublished_posts(user_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_total_posts(user_id: int) -> int:
     async def _get(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=?", (user_id,))
@@ -2798,6 +2886,7 @@ async def db_get_user_total_posts(user_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_unpublished_count(channel_db_id: int) -> int:
     async def _count(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,))
@@ -2805,6 +2894,7 @@ async def db_unpublished_count(channel_db_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_count)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_post_views(post_id: int, views_count: int = None):
     async def _update_views(conn):
         if views_count is not None:
@@ -2820,6 +2910,7 @@ async def db_update_post_views(post_id: int, views_count: int = None):
         await conn.commit()
     await execute_db(_update_views)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_stats():
     async def _stats(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM users")
@@ -2836,6 +2927,7 @@ async def db_stats():
     return await execute_db(_stats)
 
 # ===================== دوال المجموعات =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_register_group(chat_id: int, chat_name: str, added_by: int, username: str = None) -> bool:
     async def _register(conn):
         cur = await conn.execute("SELECT chat_id FROM bot_groups WHERE chat_id=?", (chat_id,))
@@ -2850,6 +2942,7 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
         return True
     return await execute_db(_register)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_groups(user_id: int):
     async def _get(conn):
         cur = await conn.execute("""
@@ -2864,12 +2957,14 @@ async def db_get_user_groups(user_id: int):
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_groups_count(user_id: int) -> int:
     async def _get(conn):
         groups = await db_get_user_groups(user_id)
         return len(groups)
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_groups(only_banned: bool = False):
     async def _get(conn):
         if only_banned:
@@ -2879,6 +2974,7 @@ async def db_get_all_groups(only_banned: bool = False):
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_chat_lock(chat_id: int, locked: bool, locked_by: int = None):
     async def _set(conn):
         if locked:
@@ -2888,6 +2984,7 @@ async def db_set_chat_lock(chat_id: int, locked: bool, locked_by: int = None):
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def is_chat_locked(chat_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("SELECT locked FROM chat_locks WHERE chat_id=?", (chat_id,))
@@ -2896,6 +2993,7 @@ async def is_chat_locked(chat_id: int) -> bool:
     return await execute_db(_check)
 
 # ===================== دوال الأمان =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_security_settings(chat_id: int):
     if CACHETOOLS_AVAILABLE:
         if chat_id in _security_cache:
@@ -2932,6 +3030,7 @@ async def db_get_security_settings(chat_id: int):
         return default_settings
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_security_settings(chat_id: int, **kwargs):
     async def _set(conn):
         cur = await conn.execute("SELECT 1 FROM group_security WHERE chat_id=?", (chat_id,))
@@ -3002,6 +3101,7 @@ async def db_set_security_settings(chat_id: int, **kwargs):
             del _security_cache[chat_id]
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
     settings = await db_get_security_settings(chat_id)
     if not settings['slow_mode']:
@@ -3020,6 +3120,7 @@ async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
         return True
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_banned_word(word: str, chat_id: int, added_by: int) -> bool:
     async def _add(conn):
         try:
@@ -3030,6 +3131,7 @@ async def db_add_banned_word(word: str, chat_id: int, added_by: int) -> bool:
             return False
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_remove_banned_word(word: str, chat_id: int) -> bool:
     async def _remove(conn):
         await conn.execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word, chat_id))
@@ -3037,12 +3139,14 @@ async def db_remove_banned_word(word: str, chat_id: int) -> bool:
         return True
     return await execute_db(_remove)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_banned_words(chat_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT word, added_by, added_at FROM banned_words WHERE chat_id=? OR chat_id=-1 ORDER BY word", (chat_id,))
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_contains_banned_word(text: str, chat_id: int) -> str:
     words = await db_get_banned_words(chat_id)
     text_lower = text.lower()
@@ -3070,6 +3174,7 @@ async def check_banned_patterns(text: str) -> bool:
     return False
 
 # ===================== دوال المالك والمشرفين المخفيين =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_register_hidden_owner_group(chat_id: int, owner_id: int):
     async def _register(conn):
         await conn.execute("""
@@ -3083,12 +3188,14 @@ async def db_register_hidden_owner_group(chat_id: int, owner_id: int):
         await conn.commit()
     return await execute_db(_register)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_is_hidden_owner(chat_id: int, user_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
         return await cur.fetchone() is not None
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_hidden_admin(chat_id: int, admin_id: int, added_by: int) -> bool:
     async def _add(conn):
         try:
@@ -3107,6 +3214,7 @@ async def db_add_hidden_admin(chat_id: int, admin_id: int, added_by: int) -> boo
             return False
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_remove_hidden_admin(chat_id: int, admin_id: int) -> bool:
     async def _remove(conn):
         await conn.execute("""
@@ -3121,6 +3229,7 @@ async def db_remove_hidden_admin(chat_id: int, admin_id: int) -> bool:
         return True
     return await execute_db(_remove)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_is_hidden_admin(chat_id: int, user_id: int) -> bool:
     async def _check(conn):
         cur = await conn.execute("""
@@ -3130,6 +3239,7 @@ async def db_is_hidden_admin(chat_id: int, user_id: int) -> bool:
         return await cur.fetchone() is not None
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_hidden_admins(chat_id: int) -> List[Dict]:
     async def _get(conn):
         cur = await conn.execute("""
@@ -3149,6 +3259,7 @@ async def db_get_hidden_admins(chat_id: int) -> List[Dict]:
         ]
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_hidden_admins(user_id: int) -> List[Dict]:
     async def _get(conn):
         cur = await conn.execute("""
@@ -3166,6 +3277,7 @@ async def db_get_all_hidden_admins(user_id: int) -> List[Dict]:
         ]
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
     async def _check(conn):
         if await db_is_hidden_owner(chat_id, user_id):
@@ -3206,14 +3318,49 @@ async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
             _admin_cache_time.clear()
         logger.info(f"🧹 تم تنظيف كاش الصلاحيات اليدوي (user_id={user_id}, chat_id={chat_id})")
 
-# ===================== [محسن] دالة التحقق من صلاحيات المشرف المتقدمة =====================
+# ===================== [تحسين 31] دالة check_admin_access المحسنة =====================
 async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user = update.effective_user
-    if not user:
+    """
+    دالة متقدمة للتحقق من صلاحيات المشرف.
+    
+    المميزات:
+    1. دعم المشرفين المخفيين (Anonymous) عبر sender_chat
+    2. الفصل الذكي بين الخاص والمجموعة
+    3. صلاحية مطلقة لـ MAIN_ADMIN_ID
+    4. تخزين مؤقت محسن مع تنظيف تلقائي
+    
+    [تحسين 31] دعم جميع حالات المشرفين:
+    - المطور الأساسي
+    - المشرفين الخارقين (bot_admins)
+    - المالك المخفي (hidden_owner)
+    - المشرف المخفي (hidden_admin)
+    - المشرفين عبر sender_chat (Anonymous)
+    - مشرفي تيليجرام العاديين
+    
+    Returns:
+        bool: True إذا كان المستخدم مشرفاً، False otherwise
+    """
+    # [تحسين 6] if not update: return
+    if not update:
         return False
     
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return False
+    
+    user = update.effective_user
     user_id = user.id
+    
+    # [تحسين 17] if not context: return False
+    if not context:
+        return False
+    
     chat = update.effective_chat
+    
+    # [تحسين 12] التحقق من وجود PRIMARY_OWNER_ID
+    if not PRIMARY_OWNER_ID:
+        logger.error("PRIMARY_OWNER_ID غير معرف!")
+        return False
     
     if user_id == PRIMARY_OWNER_ID:
         return True
@@ -3237,7 +3384,8 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except:
         pass
     
-    if chat is None:
+    # [تحسين 18] if not chat: return False
+    if not chat:
         return False
     
     chat_type = chat.type
@@ -3267,8 +3415,9 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             pass
         
-        if update.message and update.message.sender_chat:
-            sender_chat = update.message.sender_chat
+        # [تحسين 23] استخدام getattr للوصول الآمن إلى sender_chat
+        sender_chat = getattr(update.message, 'sender_chat', None) if update.message else None
+        if sender_chat:
             try:
                 bot_member = await context.bot.get_chat_member(sender_chat.id, context.bot.id)
                 if bot_member.status in ['administrator', 'creator']:
@@ -3288,7 +3437,7 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             return True
                     except:
                         pass
-            except Exception as e:
+            except Exception:
                 pass
         
         try:
@@ -3328,19 +3477,20 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int, update: Update
     except:
         pass
     
-    if update and update.message and update.message.sender_chat:
-        sender_chat = update.message.sender_chat
-        try:
-            bot_member = await bot.get_chat_member(sender_chat.id, bot.id)
-            if bot_member.status in ['administrator', 'creator']:
-                try:
-                    member = await bot.get_chat_member(sender_chat.id, user_id)
-                    if member.status in ['administrator', 'creator']:
-                        return True
-                except:
-                    pass
-        except:
-            pass
+    if update and update.message:
+        sender_chat = getattr(update.message, 'sender_chat', None)
+        if sender_chat:
+            try:
+                bot_member = await bot.get_chat_member(sender_chat.id, bot.id)
+                if bot_member.status in ['administrator', 'creator']:
+                    try:
+                        member = await bot.get_chat_member(sender_chat.id, user_id)
+                        if member.status in ['administrator', 'creator']:
+                            return True
+                    except:
+                        pass
+            except:
+                pass
     
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -3356,14 +3506,15 @@ async def is_telegram_admin(bot, chat_id: int, user_id: int, update: Update = No
         if user_id == PRIMARY_OWNER_ID:
             return True
         
-        if update and update.message and update.message.sender_chat:
-            sender_chat = update.message.sender_chat
-            try:
-                member = await bot.get_chat_member(sender_chat.id, user_id)
-                if member.status in ['administrator', 'creator']:
-                    return True
-            except:
-                pass
+        if update and update.message:
+            sender_chat = getattr(update.message, 'sender_chat', None)
+            if sender_chat:
+                try:
+                    member = await bot.get_chat_member(sender_chat.id, user_id)
+                    if member.status in ['administrator', 'creator']:
+                        return True
+                except:
+                    pass
         
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
@@ -3371,18 +3522,21 @@ async def is_telegram_admin(bot, chat_id: int, user_id: int, update: Update = No
         return False
 
 # ===================== دوال المشرفين =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def add_bot_admin(user_id: int):
     async def _add(conn):
         await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (user_id,))
         await conn.commit()
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def remove_bot_admin(user_id: int):
     async def _remove(conn):
         await conn.execute("DELETE FROM bot_admins WHERE user_id=?", (user_id,))
         await conn.commit()
     return await execute_db(_remove)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def is_bot_admin(user_id: int) -> bool:
     if user_id == PRIMARY_OWNER_ID:
         return True
@@ -3391,6 +3545,7 @@ async def is_bot_admin(user_id: int) -> bool:
         return await cur.fetchone() is not None
     return await execute_db(_check)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def get_all_bot_admins():
     async def _get(conn):
         cur = await conn.execute("SELECT user_id FROM bot_admins")
@@ -3404,6 +3559,7 @@ class ScheduleType(Enum):
     CRON = "cron"
     RECURRING = "recurring"
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_save_schedule(channel_db_id: int, schedule_type: str, interval_minutes: int = None, interval_hours: int = None, interval_days: int = None, days_of_week: str = None, specific_dates: str = None, publish_time: str = None, cron_expression: str = None):
     async def _save(conn):
         await conn.execute("""
@@ -3413,6 +3569,7 @@ async def db_save_schedule(channel_db_id: int, schedule_type: str, interval_minu
         await conn.commit()
     return await execute_db(_save)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_schedule(channel_db_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT schedule_type, interval_minutes, interval_hours, interval_days, days_of_week, specific_dates, publish_time, cron_expression, next_publish_date FROM schedule WHERE channel_db_id=?", (channel_db_id,))
@@ -3432,6 +3589,7 @@ async def db_get_schedule(channel_db_id: int):
         return {'type': 'interval_minutes', 'interval_minutes': 12, 'interval_hours': 0, 'interval_days': 0, 'days_of_week': '[]', 'specific_dates': '[]', 'publish_time': '00:00', 'cron_expression': None, 'next_publish_date': None}
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_next_publish_date(channel_db_id: int, next_date: datetime):
     async def _set(conn):
         if next_date:
@@ -3441,12 +3599,14 @@ async def db_set_next_publish_date(channel_db_id: int, next_date: datetime):
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_last_publish(channel_db_id: int, publish_time: datetime):
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)", (channel_db_id, publish_time.isoformat()))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def schedule_cron(channel_db_id: int, cron_expression: str):
     async def _save(conn):
         await conn.execute("""
@@ -3456,6 +3616,7 @@ async def schedule_cron(channel_db_id: int, cron_expression: str):
         await conn.commit()
     return await execute_db(_save)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_next_publish_date(channel_db_id: int):
     async def _update(conn):
         schedule = await db_get_schedule(channel_db_id)
@@ -3542,6 +3703,7 @@ async def db_update_next_publish_date(channel_db_id: int):
             await conn.commit()
     return await execute_db(_update)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_publish_time(channel_db_id: int, time_str: str):
     async def _set(conn):
         await conn.execute("UPDATE schedule SET publish_time=? WHERE channel_db_id=?", (time_str, channel_db_id))
@@ -3549,24 +3711,28 @@ async def db_set_publish_time(channel_db_id: int, time_str: str):
     return await execute_db(_set)
 
 # ===================== دوال المنشورات المجدولة =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_scheduled_post(chat_id: int, text: str, publish_time: datetime):
     async def _add(conn):
         await conn.execute("INSERT INTO scheduled_posts (chat_id, text, publish_time, fail_count) VALUES (?, ?, ?, 0)", (chat_id, sanitize_text(text), publish_time.isoformat()))
         await conn.commit()
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_due_scheduled_posts(now: datetime):
     async def _get(conn):
         cur = await conn.execute("SELECT id, chat_id, text, fail_count FROM scheduled_posts WHERE publish_time <= ?", (now.isoformat(),))
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_scheduled_post_fail(post_id: int, fail_count: int):
     async def _update(conn):
         await conn.execute("UPDATE scheduled_posts SET fail_count = ? WHERE id = ?", (fail_count, post_id))
         await conn.commit()
     return await execute_db(_update)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_delete_scheduled_post(post_id: int):
     async def _delete(conn):
         await conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (post_id,))
@@ -3574,18 +3740,21 @@ async def db_delete_scheduled_post(post_id: int):
     return await execute_db(_delete)
 
 # ===================== دوال الردود =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_reply(keyword, reply):
     async def _add(conn):
         await conn.execute("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?,?)", (keyword.lower(), reply))
         await conn.commit()
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_del_reply(keyword):
     async def _del(conn):
         await conn.execute("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
         await conn.commit()
     return await execute_db(_del)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_reply(keyword):
     async def _get(conn):
         cur = await conn.execute("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
@@ -3593,6 +3762,7 @@ async def db_get_reply(keyword):
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_replies():
     async def _get(conn):
         cur = await conn.execute("SELECT keyword, reply FROM group_replies ORDER BY keyword")
@@ -3600,6 +3770,7 @@ async def db_get_all_replies():
     return await execute_db(_get)
 
 # ===================== دوال الردود المتقدمة =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_auto_reply_settings(chat_id: int) -> dict:
     async def _get(conn):
         cur = await conn.execute(
@@ -3616,6 +3787,7 @@ async def db_get_auto_reply_settings(chat_id: int) -> dict:
         return {'enabled': True, 'only_admins': False, 'ignore_bots': True}
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_auto_reply_enabled(chat_id: int, enabled: bool) -> None:
     async def _set(conn):
         await conn.execute("""
@@ -3625,6 +3797,7 @@ async def db_set_auto_reply_enabled(chat_id: int, enabled: bool) -> None:
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_auto_reply_only_admins(chat_id: int, only_admins: bool) -> None:
     async def _set(conn):
         await conn.execute("""
@@ -3634,12 +3807,14 @@ async def db_set_auto_reply_only_admins(chat_id: int, only_admins: bool) -> None
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_toggle_auto_reply(chat_id: int) -> bool:
     settings = await db_get_auto_reply_settings(chat_id)
     new_status = not settings['enabled']
     await db_set_auto_reply_enabled(chat_id, new_status)
     return new_status
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_auto_reply_status(user_id: int) -> bool:
     async def _get(conn):
         cur = await conn.execute(
@@ -3650,6 +3825,7 @@ async def db_get_user_auto_reply_status(user_id: int) -> bool:
         return row[0] == 1 if row else True
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_user_auto_reply_status(user_id: int, enabled: bool) -> None:
     async def _set(conn):
         await conn.execute(
@@ -3660,6 +3836,7 @@ async def db_set_user_auto_reply_status(user_id: int, enabled: bool) -> None:
     return await execute_db(_set)
 
 # ===================== دوال التذاكر =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_next_ticket_number():
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='last_ticket_number'")
@@ -3667,6 +3844,7 @@ async def db_get_next_ticket_number():
         return int(row[0]) if row else 0
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_save_ticket(user_id, username, message, ticket_num):
     async def _save(conn):
         created_at = utc_now_iso()
@@ -3675,18 +3853,21 @@ async def db_save_ticket(user_id, username, message, ticket_num):
         return True
     return await execute_db(_save)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_ticket(user_id):
     async def _get(conn):
         cur = await conn.execute("SELECT ticket_number, status, created_at FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
         return await cur.fetchone()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_tickets(limit=20):
     async def _get(conn):
         cur = await conn.execute("SELECT id, user_id, username, message, ticket_number, status, created_at FROM support_tickets ORDER BY id DESC LIMIT ?", (limit,))
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_last_ticket_id_for_user(user_id):
     async def _get(conn):
         cur = await conn.execute("SELECT id FROM support_tickets WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,))
@@ -3694,12 +3875,14 @@ async def db_get_last_ticket_id_for_user(user_id):
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_mark_ticket_replied(ticket_id):
     async def _mark(conn):
         await conn.execute("UPDATE support_tickets SET status='replied', replied=1 WHERE id=?", (ticket_id,))
         await conn.commit()
     return await execute_db(_mark)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_delete_all_tickets() -> int:
     async def _delete(conn):
         cur = await conn.execute("DELETE FROM support_tickets")
@@ -3710,6 +3893,7 @@ async def db_delete_all_tickets() -> int:
     return await execute_db(_delete)
 
 # ===================== دوال الإحالات =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_referral_settings() -> dict:
     async def _get(conn):
         settings = {}
@@ -3720,6 +3904,7 @@ async def db_get_referral_settings() -> dict:
         return settings
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_referral_code(user_id: int) -> str:
     async def _get(conn):
         cur = await conn.execute("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
@@ -3727,6 +3912,7 @@ async def db_get_referral_code(user_id: int) -> str:
         return row[0] if row and row[0] else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_generate_referral_code(user_id: int) -> str:
     async def _generate(conn):
         code_hash = hashlib.md5(f"{user_id}{time_module.time()}".encode()).hexdigest()[:8]
@@ -3736,6 +3922,7 @@ async def db_generate_referral_code(user_id: int) -> str:
         return referral_code
     return await execute_db(_generate)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_by_referral_code(referral_code: str) -> int | None:
     async def _get(conn):
         cur = await conn.execute("SELECT user_id FROM users WHERE referral_code=?", (referral_code,))
@@ -3743,6 +3930,7 @@ async def db_get_user_by_referral_code(referral_code: str) -> int | None:
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_add_referral(referrer_id: int, referred_id: int) -> bool:
     async def _add(conn):
         if referrer_id == referred_id:
@@ -3763,6 +3951,7 @@ async def db_add_referral(referrer_id: int, referred_id: int) -> bool:
         return True
     return await execute_db(_add)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_auto_reward_referral(referrer_id: int, referred_id: int) -> int:
     async def _reward(conn):
         settings = await db_get_referral_settings()
@@ -3773,6 +3962,7 @@ async def db_auto_reward_referral(referrer_id: int, referred_id: int) -> int:
         return reward_days
     return await execute_db(_reward)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_referral_stats(user_id: int) -> dict:
     async def _get(conn):
         cur = await conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
@@ -3788,6 +3978,7 @@ async def db_get_referral_stats(user_id: int) -> dict:
         }
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_claim_referral_reward(user_id: int) -> int:
     async def _claim(conn):
         cur = await conn.execute("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
@@ -3808,11 +3999,13 @@ async def db_claim_referral_reward(user_id: int) -> int:
         return available
     return await execute_db(_claim)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_welcome_bonus_points() -> int:
     settings = await db_get_referral_settings()
     return int(settings.get('welcome_bonus_points', '10'))
 
 # ===================== دوال التذكيرات =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_reminder_settings(user_id: int) -> dict:
     async def _get(conn):
         cur = await conn.execute("SELECT subscription_reminder, daily_stats_reminder, weekly_report, reminder_days_before, last_reminder_sent, notification_lang FROM user_reminder_settings WHERE user_id=?", (user_id,))
@@ -3832,6 +4025,7 @@ async def db_get_user_reminder_settings(user_id: int) -> dict:
             return {'subscription_reminder': True, 'daily_stats_reminder': False, 'weekly_report': True, 'reminder_days_before': 3, 'last_reminder_sent': 0, 'notification_lang': 'ar'}
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_reminder_settings(user_id: int, **kwargs):
     async def _update(conn):
         fields, values = [], []
@@ -3858,6 +4052,7 @@ async def db_update_reminder_settings(user_id: int, **kwargs):
             await conn.commit()
     return await execute_db(_update)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_last_reminder_sent(user_id: int, reminder_type: str):
     async def _update(conn):
         now_timestamp = int(time_module.time())
@@ -3865,6 +4060,7 @@ async def db_update_last_reminder_sent(user_id: int, reminder_type: str):
         await conn.commit()
     return await execute_db(_update)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_users_needing_reminder() -> list:
     async def _get(conn):
         now = utc_now()
@@ -3895,6 +4091,7 @@ async def db_get_users_needing_reminder() -> list:
         return users
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_all_active_users_for_report() -> list:
     async def _get(conn):
         thirty_days_ago = (utc_now() - timedelta(days=30)).isoformat()
@@ -3905,6 +4102,7 @@ async def db_get_all_active_users_for_report() -> list:
 # ===================== دوال المستويات =====================
 LEVEL_REQUIREMENTS = {1: 0, 2: 100, 3: 250, 4: 500, 5: 1000, 6: 2000, 7: 3500, 8: 5000, 9: 7500, 10: 10000}
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_level(user_id: int):
     async def _get(conn):
         cur = await conn.execute("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
@@ -3914,6 +4112,7 @@ async def db_get_user_level(user_id: int):
         return {'points': 0, 'level': 1}
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_update_user_level(user_id: int, points: int, level: int):
     async def _update(conn):
         await conn.execute("INSERT OR REPLACE INTO user_levels (user_id, points, level) VALUES (?,?,?)", (user_id, points, level))
@@ -3960,6 +4159,7 @@ async def add_points(user_id: int, update: Update = None, context: ContextTypes.
 async def get_rank(user_id: int) -> dict:
     return await db_get_user_level(user_id)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def get_top_users(limit: int = 10):
     async def _get(conn):
         cur = await conn.execute("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
@@ -3967,6 +4167,7 @@ async def get_top_users(limit: int = 10):
     return await execute_db(_get)
 
 # ===================== نظام النقاط المتقدم =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def daily_reward(user_id: int) -> int:
     today = utc_now().date()
     async def _check(conn):
@@ -3988,6 +4189,7 @@ async def daily_reward(user_id: int) -> int:
         await db_update_user_level(user_id, data['points'] + reward, data['level'])
     return reward
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def weekly_reward(user_id: int) -> int:
     week_start = (utc_now() - timedelta(days=utc_now().weekday())).date()
     async def _check(conn):
@@ -4020,6 +4222,7 @@ ACHIEVEMENTS = {
     'contest_winner': {'name': 'فائز بمسابقة', 'points': 100, 'icon': '🥇'},
 }
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def achievement_system(user_id: int, action: str) -> str:
     async def _get_achievements(conn):
         cur = await conn.execute("SELECT achievements FROM users WHERE user_id=?", (user_id,))
@@ -4041,6 +4244,7 @@ async def achievement_system(user_id: int, action: str) -> str:
     return ""
 
 # ===================== دوال الإعدادات العامة =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_publish_interval() -> int:
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='publish_interval'")
@@ -4051,6 +4255,7 @@ async def db_get_publish_interval() -> int:
 async def db_get_publish_interval_seconds() -> int:
     return await db_get_publish_interval()
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_publish_interval_seconds(seconds: int, admin_id: int, is_admin: bool = False):
     if not is_admin and admin_id != PRIMARY_OWNER_ID:
         return False
@@ -4060,6 +4265,7 @@ async def db_set_publish_interval_seconds(seconds: int, admin_id: int, is_admin:
     await execute_db(_set)
     return True
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_updates_channel():
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
@@ -4072,6 +4278,7 @@ async def db_get_updates_channel():
         return None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_updates_channel(channel: str):
     if not channel:
         return False
@@ -4087,6 +4294,7 @@ async def db_set_updates_channel(channel: str):
     logger.info(f"✅ تم حفظ قناة التحديثات: {channel}")
     return True
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_force_subscribe_status() -> bool:
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_enabled'")
@@ -4094,12 +4302,14 @@ async def db_get_force_subscribe_status() -> bool:
         return row and row[0] == '1'
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_force_subscribe_status(enabled: bool):
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_enabled', ?)", ('1' if enabled else '0',))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_force_subscribe_channel():
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_channel'")
@@ -4107,12 +4317,14 @@ async def db_get_force_subscribe_channel():
         return row[0] if row and row[0] else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_force_subscribe_channel(channel: str):
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_channel', ?)", (channel,))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_log_channel_id():
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='log_channel_id'")
@@ -4120,12 +4332,14 @@ async def db_get_log_channel_id():
         return row[0] if row and row[0] else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_log_channel_id(channel_id: str):
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_channel_id', ?)", (channel_id,))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_auto_backup() -> bool:
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='auto_backup'")
@@ -4133,12 +4347,14 @@ async def db_get_auto_backup() -> bool:
         return row and row[0] == '1'
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_auto_backup(enabled: bool) -> None:
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_backup', ?)", ('1' if enabled else '0',))
         await conn.commit()
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_last_backup_time():
     async def _get(conn):
         cur = await conn.execute("SELECT value FROM settings WHERE key='last_backup'")
@@ -4146,6 +4362,7 @@ async def db_get_last_backup_time():
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_allowed_sendcode_user() -> int | None:
     async def _get(conn):
         cur = await conn.execute("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
@@ -4153,6 +4370,7 @@ async def db_get_allowed_sendcode_user() -> int | None:
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_allowed_sendcode_user(user_id: int) -> None:
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
@@ -4166,6 +4384,7 @@ class ContestTypes(Enum):
     VOTE = "vote"
     SUBMISSION = "submission"
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_active_contests_with_participants(limit: int = 10) -> list:
     try:
         async def _get(conn):
@@ -4206,6 +4425,7 @@ async def db_get_active_contests_with_participants(limit: int = 10) -> list:
         logger.error(f"خطأ في db_get_active_contests_with_participants: {e}")
         return []
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_create_contest(creator_id: int, title: str, description: str, prize: str, end_date: datetime, contest_type: str = 'raffle') -> int:
     try:
         async def _create(conn):
@@ -4231,6 +4451,7 @@ async def db_create_contest(creator_id: int, title: str, description: str, prize
         logger.error(f"❌ خطأ في db_create_contest: {e}")
         raise
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_contest(contest_id: int) -> dict | None:
     async def _get(conn):
         cur = await conn.execute(
@@ -4249,6 +4470,7 @@ async def db_get_contest(contest_id: int) -> dict | None:
         return None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_participate_in_contest(user_id: int, contest_id: int, answer: str = "") -> bool:
     async def _participate(conn):
         try:
@@ -4262,6 +4484,7 @@ async def db_participate_in_contest(user_id: int, contest_id: int, answer: str =
             return False
     return await execute_db(_participate)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_user_participation(user_id: int, contest_id: int) -> dict | None:
     async def _get(conn):
         cur = await conn.execute(
@@ -4274,6 +4497,7 @@ async def db_get_user_participation(user_id: int, contest_id: int) -> dict | Non
         return None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_set_contest_winner(contest_id: int, winner_id: int) -> bool:
     async def _set(conn):
         await conn.execute(
@@ -4288,6 +4512,7 @@ async def db_set_contest_winner(contest_id: int, winner_id: int) -> bool:
         return True
     return await execute_db(_set)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_contest_winners(limit: int = 10) -> list:
     async def _get(conn):
         cur = await conn.execute(
@@ -4300,6 +4525,7 @@ async def db_get_contest_winners(limit: int = 10) -> list:
         return await cur.fetchall()
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_delete_contest(contest_id: int, user_id: int) -> bool:
     async def _delete(conn):
         cur = await conn.execute("SELECT creator_id FROM contests WHERE id = ?", (contest_id,))
@@ -4312,6 +4538,7 @@ async def db_delete_contest(contest_id: int, user_id: int) -> bool:
         return False
     return await execute_db(_delete)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_random_participant(contest_id: int) -> int | None:
     async def _get(conn):
         cur = await conn.execute(
@@ -4322,6 +4549,7 @@ async def db_get_random_participant(contest_id: int) -> int | None:
         return row[0] if row else None
     return await execute_db(_get)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
     async def _get_participants(conn):
         cur = await conn.execute(
@@ -4352,6 +4580,7 @@ async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
     return {'winner': None, 'score': 0, 'total_participants': len(participants)}
 
 # ===================== دوال إحصائيات القنوات =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_channel_stats(channel_db_id: int) -> dict:
     async def _get_stats(conn):
         cur = await conn.execute(
@@ -4504,6 +4733,7 @@ async def db_get_channel_stats(channel_db_id: int) -> dict:
         }
     return await execute_db(_get_stats)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_channel_stats_summary(user_id: int) -> dict:
     async def _get_summary(conn):
         channels = await db_get_channels(user_id)
@@ -4543,6 +4773,7 @@ async def db_get_channel_stats_summary(user_id: int) -> dict:
         }
     return await execute_db(_get_summary)
 
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def db_get_channel_growth(channel_db_id: int, days: int = 30) -> dict:
     async def _get_growth(conn):
         start_date = (utc_now() - timedelta(days=days)).isoformat()
@@ -4578,6 +4809,7 @@ async def db_get_channel_growth(channel_db_id: int, days: int = 30) -> dict:
     return await execute_db(_get_growth)
 
 # ===================== دوال الصحة =====================
+@retry_async(max_retries=DB_MAX_RETRIES, delay=1, backoff=2, exceptions=(sqlite3.OperationalError,))
 async def check_database_health() -> bool:
     try:
         async def _check(conn):
@@ -4661,6 +4893,7 @@ async def cleanup_points_cache():
         user_points_last_hour.clear()
 
 # ===================== دوال النسخ الاحتياطي =====================
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def create_backup():
     try:
         encrypted_path = encrypt_db_backup()
@@ -4686,6 +4919,7 @@ async def create_backup():
         logger.error(f"❌ فشل إنشاء النسخة الاحتياطية: {e}")
         raise
 
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def incremental_backup():
     try:
         last_backup = await db_get_last_backup_time()
@@ -4734,11 +4968,13 @@ async def incremental_backup():
         logger.error(f"❌ فشل إنشاء النسخة الاحتياطية المتزايدة: {e}")
         return None
 
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def list_backups():
     backups = sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
     incremental = sorted(BACKUP_DIR.glob("incremental_*.inc"), key=lambda x: x.stat().st_mtime, reverse=True)
     return backups + incremental
 
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def restore_backup(backup_path: Path):
     if not backup_path.exists():
         raise FileNotFoundError(f"الملف {backup_path} غير موجود")
@@ -4816,6 +5052,7 @@ _DRIVE_SERVICE_CACHE = None
 _DRIVE_SERVICE_CACHE_TIME = 0
 _DRIVE_SERVICE_CACHE_TTL = 3600
 
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def get_google_drive_service(force_refresh: bool = False):
     global _DRIVE_SERVICE_CACHE, _DRIVE_SERVICE_CACHE_TIME
     if not CLOUD_BACKUP_ENABLED or not GOOGLE_AUTH_AVAILABLE:
@@ -4870,6 +5107,7 @@ async def get_google_drive_service(force_refresh: bool = False):
         logger.error(f"❌ خطأ في خدمة Google Drive: {e}")
         return None
 
+@retry_async(max_retries=3, delay=2, backoff=2, exceptions=(Exception,))
 async def upload_backup_to_drive(backup_path: Path, max_retries: int = 3) -> str:
     if not CLOUD_BACKUP_ENABLED or not GOOGLE_AUTH_AVAILABLE or not GOOGLE_DRIVE_FOLDER_ID:
         return None
@@ -4972,6 +5210,7 @@ async def apply_penalty(bot, chat_id, user_id, settings):
         await execute_mute(bot, chat_id, user_id, duration, "مخالفة قواعد المجموعة")
 
 # ===================== دوال الإجراءات المتقدمة =====================
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_ban(bot, chat_id: int, user_id: int, until_date=None, reason: str = "", moderator_id: int = None):
     try:
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
@@ -4989,6 +5228,7 @@ async def execute_ban(bot, chat_id: int, user_id: int, until_date=None, reason: 
     except Exception as e:
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_mute(bot, chat_id: int, user_id: int, duration_minutes: int = None, reason: str = "", moderator_id: int = None):
     try:
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
@@ -5020,6 +5260,7 @@ async def execute_mute(bot, chat_id: int, user_id: int, duration_minutes: int = 
     except Exception as e:
         return False, f"❌ فشل الكتم: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_kick(bot, chat_id: int, user_id: int, reason: str = "", moderator_id: int = None):
     try:
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
@@ -5038,6 +5279,7 @@ async def execute_kick(bot, chat_id: int, user_id: int, reason: str = "", modera
     except Exception as e:
         return False, f"❌ فشل الطرد: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_warn(bot, chat_id: int, user_id: int, moderator_id: int, reason: str = "", auto_ban_limit: int = 3):
     try:
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
@@ -5066,6 +5308,7 @@ async def execute_warn(bot, chat_id: int, user_id: int, moderator_id: int, reaso
     except Exception as e:
         return False, f"❌ فشل التحذير: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_restrict(bot, chat_id: int, user_id: int, reason: str = "", moderator_id: int = None):
     try:
         if await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id):
@@ -5089,6 +5332,7 @@ async def execute_restrict(bot, chat_id: int, user_id: int, reason: str = "", mo
     except Exception as e:
         return False, f"❌ فشل التقييد: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_pin(bot, chat_id: int, message_id: int, disable_notification: bool = False):
     try:
         await bot.pin_chat_message(chat_id, message_id, disable_notification=disable_notification)
@@ -5096,6 +5340,7 @@ async def execute_pin(bot, chat_id: int, message_id: int, disable_notification: 
     except Exception as e:
         return False, f"❌ فشل التثبيت: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_unban(bot, chat_id: int, user_id: int, moderator_id: int = None):
     try:
         if user_id == bot.id:
@@ -5110,6 +5355,7 @@ async def execute_unban(bot, chat_id: int, user_id: int, moderator_id: int = Non
     except Exception as e:
         return False, f"❌ فشل إلغاء الحظر: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def execute_unmute(bot, chat_id: int, user_id: int, moderator_id: int = None):
     try:
         if user_id == bot.id:
@@ -5130,6 +5376,7 @@ async def execute_unmute(bot, chat_id: int, user_id: int, moderator_id: int = No
     except Exception as e:
         return False, f"❌ فشل إلغاء الكتم: {str(e)[:100]}"
 
+@retry_async(max_retries=3, delay=1, backoff=2, exceptions=(TimedOut, NetworkError))
 async def get_moderation_log(chat_id: int, limit: int = 20) -> str:
     async def _get_log(conn):
         cur = await conn.execute("""
@@ -5538,6 +5785,10 @@ async def get_main_keyboard(user_id: int):
 # ===================== دالة معالجة حالات إنشاء المسابقات =====================
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState) -> bool:
     try:
+        # [تحسين 2] if not update.effective_user: return
+        if not update or not update.effective_user:
+            return False
+        
         user_id = update.effective_user.id
         text = update.message.text.strip() if update.message.text else ""
 
@@ -5570,7 +5821,12 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
 
         elif state == UserState.WAITING_CONTEST_END_DATE:
             try:
-                end_date = datetime.strptime(text, "%Y-%m-%d %H:%M")
+                # [تحسين 30] استخدام safe_parse_date
+                end_date = safe_parse_date(text, "%Y-%m-%d %H:%M")
+                if not end_date:
+                    await update.message.reply_text(get_text(user_id, 'contest_date_invalid'))
+                    return True
+                
                 now_mecca = mecca_now()
                 if end_date <= now_mecca:
                     await update.message.reply_text(get_text(user_id, 'contest_date_future'))
@@ -5642,9 +5898,18 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
 
 # ===================== معالجات الكولباك الأساسية =====================
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     kb, title, active_channel = await get_main_keyboard(uid)
     if active_channel:
@@ -5659,9 +5924,18 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu_callback(update, context)
 
 async def cancel_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     context.user_data.pop(f"session_{uid}", None)
     context.user_data.pop(f"session_target_{uid}", None)
@@ -5673,9 +5947,18 @@ async def cancel_session_callback(update: Update, context: ContextTypes.DEFAULT_
     await main_menu_callback(update, context)
 
 async def add_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     context.user_data['state'] = UserState.WAITING_CHANNEL_ID
     msg = get_text(uid, 'send_channel_id')
@@ -5685,9 +5968,18 @@ async def add_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(msg)
 
 async def my_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     channels = await db_get_channels(uid)
     if not channels:
@@ -5714,10 +6006,23 @@ async def my_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, get_text(uid, 'channels_list'), reply_markup=InlineKeyboardMarkup(kb))
 
 async def delete_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('delete_channel_id')
     if not ch_db_id:
         return
@@ -5734,10 +6039,23 @@ async def delete_channel_callback(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text(get_text(uid, 'delete_failed'))
 
 async def select_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1])
     await db_set_active_channel(uid, ch_db_id)
     context.user_data['active_channel'] = ch_db_id
@@ -5751,9 +6069,18 @@ async def select_channel_callback(update: Update, context: ContextTypes.DEFAULT_
         await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
 
 async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
     if not active:
@@ -5764,10 +6091,11 @@ async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     unpublished_count = await db_unpublished_count(active)
     if unpublished_count >= MAX_UNPUBLISHED_POSTS:
+        remaining = MAX_UNPUBLISHED_POSTS - unpublished_count
         if query:
-            await query.edit_message_text(f"⚠️ لقد تجاوزت الحد الأقصى للمنشورات غير المنشورة ({MAX_UNPUBLISHED_POSTS}).\nقم بنشر بعض المنشورات أولاً.")
+            await query.edit_message_text(f"⚠️ لقد تجاوزت الحد الأقصى للمنشورات غير المنشورة ({MAX_UNPUBLISHED_POSTS}).\nالعدد المتبقي: {remaining} منشور\nقم بنشر بعض المنشورات أولاً.")
         else:
-            await update.message.reply_text(f"⚠️ لقد تجاوزت الحد الأقصى للمنشورات غير المنشورة ({MAX_UNPUBLISHED_POSTS}).\nقم بنشر بعض المنشورات أولاً.")
+            await update.message.reply_text(f"⚠️ لقد تجاوزت الحد الأقصى للمنشورات غير المنشورة ({MAX_UNPUBLISHED_POSTS}).\nالعدد المتبقي: {remaining} منشور\nقم بنشر بعض المنشورات أولاً.")
         return
     context.user_data[f"session_{uid}"] = []
     context.user_data[f"session_target_{uid}"] = min(15, MAX_UNPUBLISHED_POSTS - unpublished_count)
@@ -5780,9 +6108,18 @@ async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg, reply_markup=cancel_kb)
 
 async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
     if not active:
@@ -5838,9 +6175,18 @@ async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await main_menu_callback(update, context)
 
 async def my_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
     if not active:
@@ -5871,10 +6217,23 @@ async def my_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_markdown(context.bot, uid, msg, reply_markup=InlineKeyboardMarkup(kb_buttons))
 
 async def delete_single_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     parts = query.data.split(":")[-1].split("_") if query else context.user_data.get('delete_post_data', '').split("_")
     if len(parts) >= 2:
         post_id = int(parts[0])
@@ -5892,10 +6251,23 @@ async def delete_single_post_callback(update: Update, context: ContextTypes.DEFA
                 await update.message.reply_text("❌ فشل الحذف")
 
 async def confirm_clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     active = int(query.data.split(":")[-1]) if query else context.user_data.get('clear_all_posts_id')
     if not active:
         return
@@ -5909,10 +6281,23 @@ async def confirm_clear_all_posts_callback(update: Update, context: ContextTypes
         await update.message.reply_text(get_text(uid, 'confirm_delete'), reply_markup=kb)
 
 async def clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     active = int(query.data.split(":")[-1]) if query else context.user_data.get('clear_all_posts_id')
     if not active:
         return
@@ -5927,9 +6312,18 @@ async def clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT
     await main_menu_callback(update, context)
 
 async def recycle_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
     if active:
@@ -5946,9 +6340,18 @@ async def recycle_posts_callback(update: Update, context: ContextTypes.DEFAULT_T
     await main_menu_callback(update, context)
 
 async def my_pending_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     unpublished = await db_get_user_unpublished_posts(uid)
     total = await db_get_user_total_posts(uid)
@@ -5960,9 +6363,18 @@ async def my_pending_stats_callback(update: Update, context: ContextTypes.DEFAUL
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def my_full_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     channels = await db_get_user_channels_count(uid)
     total = await db_get_user_total_posts(uid)
@@ -5977,9 +6389,18 @@ async def my_full_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
 
     groups = await db_get_user_groups(uid)
@@ -6039,10 +6460,23 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_send_markdown(context.bot, uid, text, reply_markup=reply_markup)
 
 async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('delete_group_id')
     if not chat_id:
         return
@@ -6067,10 +6501,23 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await my_groups_callback(update, context)
 
 async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('group_chat_id')
     if not chat_id:
         if query:
@@ -6121,9 +6568,18 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
 
 async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     auto = await db_auto_status(uid)
     auto_btn = get_text(uid, 'disabled') if auto else get_text(uid, 'enabled')
@@ -6140,9 +6596,18 @@ async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(get_text(uid, 'settings'), reply_markup=kb)
 
 async def toggle_auto_publish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     cur = await db_auto_status(uid)
     await db_set_auto(uid, not cur)
@@ -6154,9 +6619,18 @@ async def toggle_auto_publish_callback(update: Update, context: ContextTypes.DEF
     await main_menu_callback(update, context)
 
 async def toggle_auto_recycle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     cur = await db_get_auto_recycle(uid)
     new_status = not cur
@@ -6170,10 +6644,23 @@ async def toggle_auto_recycle_callback(update: Update, context: ContextTypes.DEF
 
 # ===================== معالجات الكولباك للجدولة =====================
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     parts = query.data.split(":") if query else context.user_data.get('schedule_data', '').split(":")
     if len(parts) >= 3:
         ch_db_id = int(parts[-1])
@@ -6221,10 +6708,23 @@ async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, get_text(uid, 'schedule_settings').format(txt), reply_markup=kb)
 
 async def set_interval_minutes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6236,10 +6736,23 @@ async def set_interval_minutes_callback(update: Update, context: ContextTypes.DE
         await update.message.reply_text(get_text(uid, 'send_minutes'))
 
 async def set_interval_hours_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6251,10 +6764,23 @@ async def set_interval_hours_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(get_text(uid, 'send_hours'))
 
 async def set_interval_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6266,10 +6792,23 @@ async def set_interval_days_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(get_text(uid, 'send_days'))
 
 async def set_cron_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6283,10 +6822,23 @@ async def set_cron_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="MarkdownV2")
 
 async def set_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6299,10 +6851,23 @@ async def set_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر أيام النشر (بتوقيت مكة):", reply_markup=await build_days_keyboard(uid, context))
 
 async def set_dates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6314,10 +6879,23 @@ async def set_dates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(get_text(uid, 'send_dates'))
 
 async def set_publish_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('schedule_ch_id')
     if not ch_db_id:
         return
@@ -6329,10 +6907,23 @@ async def set_publish_time_callback(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(get_text(uid, 'send_time'))
 
 async def day_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     day = int(query.data.split(":")[-1]) if query else context.user_data.get('selected_day')
     if day is None:
         return
@@ -6348,10 +6939,23 @@ async def day_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("اختر أيام النشر (بتوقيت مكة):", reply_markup=await build_days_keyboard(uid, context))
 
 async def save_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     ch = context.user_data.get('selected_days_ch')
     if ch:
         days_json = json.dumps(context.user_data.get('selected_days', []))
@@ -6373,10 +6977,23 @@ async def save_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ===================== معالجات الكولباك للأمان =====================
 async def security_links_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6396,10 +7013,23 @@ async def security_links_callback(update: Update, context: ContextTypes.DEFAULT_
     await group_settings_callback(update, context)
 
 async def security_mentions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6419,10 +7049,23 @@ async def security_mentions_callback(update: Update, context: ContextTypes.DEFAU
     await group_settings_callback(update, context)
 
 async def security_warn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6442,10 +7085,23 @@ async def security_warn_callback(update: Update, context: ContextTypes.DEFAULT_T
     await group_settings_callback(update, context)
 
 async def security_slowmode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6465,10 +7121,23 @@ async def security_slowmode_callback(update: Update, context: ContextTypes.DEFAU
     await group_settings_callback(update, context)
 
 async def security_banned_words_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6486,10 +7155,23 @@ async def security_banned_words_menu_callback(update: Update, context: ContextTy
         await update.message.reply_text(msg, reply_markup=get_group_banned_words_keyboard(chat_id))
 
 async def security_welcome_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6509,10 +7191,23 @@ async def security_welcome_callback(update: Update, context: ContextTypes.DEFAUL
     await group_settings_callback(update, context)
 
 async def security_goodbye_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6532,15 +7227,28 @@ async def security_goodbye_callback(update: Update, context: ContextTypes.DEFAUL
     await group_settings_callback(update, context)
 
 async def security_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
         await query.message.delete()
 
 async def security_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     context.user_data['state'] = UserState.WAITING_GROUP_SECURITY
     msg = get_text(uid, 'security_main')
@@ -6550,10 +7258,23 @@ async def security_main_callback(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(msg)
 
 async def security_select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6598,9 +7319,18 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
 
 async def security_refresh_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     groups = await db_get_user_groups(uid)
     if not groups:
@@ -6644,10 +7374,23 @@ async def security_refresh_groups_callback(update: Update, context: ContextTypes
 
 # ===================== معالجات الكولباك للكلمات المحظورة =====================
 async def banned_words_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('banned_words_chat_id')
     if not chat_id:
         return
@@ -6666,10 +7409,23 @@ async def banned_words_add_callback(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(msg)
 
 async def banned_words_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('banned_words_chat_id')
     if not chat_id:
         return
@@ -6699,10 +7455,23 @@ async def banned_words_list_callback(update: Update, context: ContextTypes.DEFAU
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def banned_words_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('banned_words_chat_id')
     if not chat_id:
         return
@@ -6722,10 +7491,23 @@ async def banned_words_remove_callback(update: Update, context: ContextTypes.DEF
 
 # ===================== معالجات الكولباك للعقوبات =====================
 async def penalty_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6742,10 +7524,23 @@ async def penalty_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg, reply_markup=penalty_keyboard(chat_id))
 
 async def penalty_kick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6763,10 +7558,23 @@ async def penalty_kick_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("✅ تم تعيين العقوبة التلقائية إلى: **طرد**", reply_markup=kb)
 
 async def penalty_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6784,10 +7592,23 @@ async def penalty_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("✅ تم تعيين العقوبة التلقائية إلى: **حظر**", reply_markup=kb)
 
 async def penalty_mute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
     if not chat_id:
         return
@@ -6805,9 +7626,23 @@ async def penalty_mute_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg, reply_markup=mute_duration_keyboard(chat_id))
 
 async def penalty_mute_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
+    uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     data_parts = query.data.split(":") if query else context.user_data.get('penalty_mute_data', '').split(":")
     if len(data_parts) == 3:
         duration = data_parts[1]
@@ -6839,9 +7674,18 @@ async def penalty_mute_duration_callback(update: Update, context: ContextTypes.D
 
 # ===================== معالجات الكولباك للدعم =====================
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
@@ -6852,9 +7696,18 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_markdown(context.bot, user_id, get_text(user_id, 'help'), reply_markup=keyboard)
 
 async def support_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     context.user_data['support_mode'] = True
     keyboard = InlineKeyboardMarkup([
@@ -6869,9 +7722,18 @@ async def support_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def support_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.SUPPORT_MENU)]
@@ -6883,9 +7745,18 @@ async def support_help_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def support_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     context.user_data['support_mode'] = True
     keyboard = InlineKeyboardMarkup([
@@ -6902,9 +7773,18 @@ async def support_back_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===================== معالجات الكولباك للتجربة والاشتراك =====================
 async def trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if await db_has_used_trial(uid):
         if query:
@@ -6926,9 +7806,18 @@ async def trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu_callback(update, context)
 
 async def subscribe_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if await db_has_active_subscription(uid):
         days = await db_get_subscription_days_left(uid)
@@ -6952,6 +7841,10 @@ async def subscribe_menu_callback(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(text, reply_markup=kb)
 
 async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, price: int, title: str):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     user_id = update.effective_user.id
     try:
@@ -6981,24 +7874,40 @@ async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAUL
                 await update.message.reply_text(f"❌ خطأ: {str(e)[:100]}")
 
 async def buy_subscription_1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
     await buy_subscription_callback(update, context, 1, 5, "اشتراك 1 يوم")
 
 async def buy_subscription_2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
     await buy_subscription_callback(update, context, 2, 9, "اشتراك 2 يوم")
 
 async def buy_subscription_30_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
     await buy_subscription_callback(update, context, 30, 50, "اشتراك شهر")
 
 async def buy_subscription_90_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
@@ -7006,15 +7915,24 @@ async def buy_subscription_90_callback(update: Update, context: ContextTypes.DEF
 
 # ===================== معالجات الكولباك للمطور والتحديثات =====================
 async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     metrics_stats = metrics.get_stats()
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.3.0
+📦 **الإصدار:** 19.3.1
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -7051,9 +7969,18 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     updates_channel = await db_get_updates_channel()
     if updates_channel:
@@ -7092,9 +8019,18 @@ async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===================== معالجات الكولباك للإحالات =====================
 async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     referral_code = await db_get_referral_code(uid)
     if not referral_code:
@@ -7116,9 +8052,18 @@ async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def referral_copy_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     referral_code = query.data.split(":")[-1] if query else context.user_data.get('referral_code')
     if not referral_code:
@@ -7131,9 +8076,18 @@ async def referral_copy_link_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def referral_claim_reward_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     stats = await db_get_referral_stats(uid)
     if stats['available_days'] <= 0:
@@ -7151,9 +8105,18 @@ async def referral_claim_reward_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, get_text(uid, 'reward_claimed').format(claimed), reply_markup=kb)
 
 async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     async def _get_referrals(conn):
         cur = await conn.execute("SELECT r.referred_id, r.referred_at, r.is_rewarded, u.first_name, u.username FROM referrals r LEFT JOIN users_cache u ON r.referred_id = u.user_id WHERE r.referrer_id = ? ORDER BY r.referred_at DESC LIMIT 20", (uid,))
@@ -7189,9 +8152,18 @@ async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # ===================== معالجات الكولباك للتذكيرات =====================
 async def reminder_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     settings = await db_get_user_reminder_settings(uid)
     status_sub = "🟢 مفعل" if settings['subscription_reminder'] else "🔴 معطل"
@@ -7212,36 +8184,72 @@ async def reminder_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def reminder_toggle_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     settings = await db_get_user_reminder_settings(uid)
     await db_update_reminder_settings(uid, subscription_reminder=not settings['subscription_reminder'])
     await reminder_menu_callback(update, context)
 
 async def reminder_toggle_daily_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     settings = await db_get_user_reminder_settings(uid)
     await db_update_reminder_settings(uid, daily_stats_reminder=not settings['daily_stats_reminder'])
     await reminder_menu_callback(update, context)
 
 async def reminder_toggle_weekly_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     settings = await db_get_user_reminder_settings(uid)
     await db_update_reminder_settings(uid, weekly_report=not settings['weekly_report'])
     await reminder_menu_callback(update, context)
 
 async def reminder_set_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     context.user_data['state'] = UserState.WAITING_REMINDER_DAYS
     msg = "⏰ **عدد أيام التذكير**\n\nأرسل عدد الأيام التي تريد أن يتم تذكيرك بها قبل انتهاء الاشتراك (1-10 أيام):"
@@ -7252,9 +8260,18 @@ async def reminder_set_days_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg, reply_markup=kb)
 
 async def reminder_set_lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("العربية 🇸🇦", callback_data=f"{CallbackData.REMINDER_LANG_PREFIX}ar"),
@@ -7268,9 +8285,18 @@ async def reminder_set_lang_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg, reply_markup=keyboard)
 
 async def reminder_lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     lang = query.data.split(":")[-1] if query else context.user_data.get('reminder_lang')
     if not lang:
@@ -7280,9 +8306,18 @@ async def reminder_lang_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # ===================== معالجات الكولباك للترجمة =====================
 async def translation_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     current_lang = await get_user_translation_language(uid)
     if current_lang == 'off':
@@ -7341,9 +8376,18 @@ async def translation_menu_callback(update: Update, context: ContextTypes.DEFAUL
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def translation_off_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     await set_user_translation_language(uid, 'off')
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]])
@@ -7353,9 +8397,18 @@ async def translation_off_callback(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(get_text(uid, 'translation_disabled'), reply_markup=kb)
 
 async def translation_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     lang = query.data.split(":")[-1] if query else context.user_data.get('translation_lang')
     if not lang:
@@ -7375,9 +8428,18 @@ async def translation_set_callback(update: Update, context: ContextTypes.DEFAULT
 
 # ===================== معالجات الكولباك للوحة المشرف =====================
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7391,9 +8453,18 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, get_text(uid, 'admin_panel'), reply_markup=get_admin_keyboard(uid))
 
 async def admin_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7422,9 +8493,18 @@ async def admin_users_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_banned_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7454,9 +8534,18 @@ async def admin_banned_users_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def admin_unban_all_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7475,9 +8564,18 @@ async def admin_unban_all_users_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text("✅ تم إلغاء حظر جميع المستخدمين.", reply_markup=kb)
 
 async def admin_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7510,9 +8608,18 @@ async def admin_all_channels_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_banned_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7541,9 +8648,18 @@ async def admin_banned_channels_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def admin_activate_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7562,9 +8678,18 @@ async def admin_activate_all_channels_callback(update: Update, context: ContextT
         await update.message.reply_text("✅ تم إلغاء حظر جميع قنوات المستخدمين.", reply_markup=kb)
 
 async def admin_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7597,9 +8722,18 @@ async def admin_groups_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_banned_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7628,9 +8762,18 @@ async def admin_banned_groups_callback(update: Update, context: ContextTypes.DEF
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def admin_unban_all_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7649,9 +8792,18 @@ async def admin_unban_all_groups_callback(update: Update, context: ContextTypes.
         await update.message.reply_text("✅ تم إلغاء حظر جميع المجموعات.", reply_markup=kb)
 
 async def admin_bot_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7677,9 +8829,18 @@ async def admin_bot_channels_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_banned_bot_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7708,9 +8869,18 @@ async def admin_banned_bot_channels_callback(update: Update, context: ContextTyp
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def admin_unban_all_bot_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7729,9 +8899,18 @@ async def admin_unban_all_bot_channels_callback(update: Update, context: Context
         await update.message.reply_text("✅ تم إلغاء حظر جميع قنوات البوت.", reply_markup=kb)
 
 async def admin_monitor_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7767,9 +8946,18 @@ async def admin_monitor_users_callback(update: Update, context: ContextTypes.DEF
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_add_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7784,9 +8972,18 @@ async def admin_add_admin_callback(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(get_text(uid, 'enter_admin_id'))
 
 async def admin_remove_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7812,9 +9009,18 @@ async def admin_remove_admin_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(text)
 
 async def admin_ram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7831,9 +9037,18 @@ async def admin_ram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7850,9 +9065,18 @@ async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_metrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7880,9 +9104,18 @@ async def admin_metrics_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7908,9 +9141,18 @@ async def admin_backup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await safe_send_markdown(context.bot, uid, msg, reply_markup=kb)
 
 async def admin_restore_backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7936,9 +9178,18 @@ async def admin_restore_backup_callback(update: Update, context: ContextTypes.DE
         await update.message.reply_text(get_text(uid, 'select_backup'), reply_markup=InlineKeyboardMarkup(kb))
 
 async def admin_restore_backup_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7971,9 +9222,18 @@ async def admin_restore_backup_select_callback(update: Update, context: ContextT
             await safe_send_markdown(context.bot, uid, msg, reply_markup=kb)
 
 async def admin_backup_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -7994,9 +9254,18 @@ async def admin_backup_settings_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_toggle_auto_backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8015,9 +9284,18 @@ async def admin_toggle_auto_backup_callback(update: Update, context: ContextType
         await update.message.reply_text(f"✅ تم تغيير إعداد النسخ التلقائي إلى: {status}", reply_markup=kb)
 
 async def admin_change_interval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8036,9 +9314,18 @@ async def admin_change_interval_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text(msg)
 
 async def admin_send_update_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8064,9 +9351,18 @@ async def admin_send_update_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg)
 
 async def admin_set_update_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8092,9 +9388,18 @@ async def admin_set_update_channel_callback(update: Update, context: ContextType
         await update.message.reply_text(msg)
 
 async def admin_show_update_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     channel = await db_get_updates_channel()
     if channel:
@@ -8113,9 +9418,18 @@ async def admin_show_update_channel_callback(update: Update, context: ContextTyp
     await safe_edit_markdown(query, text, reply_markup=keyboard)
 
 async def admin_updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8132,9 +9446,18 @@ async def admin_updates_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8153,9 +9476,18 @@ async def admin_force_subscribe_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text(f"✅ تم {status_text} الاشتراك الإجباري.", reply_markup=kb)
 
 async def admin_set_force_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8171,9 +9503,18 @@ async def admin_set_force_channel_callback(update: Update, context: ContextTypes
         await update.message.reply_text(msg)
 
 async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8189,9 +9530,18 @@ async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(msg)
 
 async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8262,9 +9612,18 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         await update.message.reply_text(msg, reply_markup=kb)
 
 async def admin_support_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8297,9 +9656,18 @@ async def admin_support_tickets_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def admin_delete_all_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8317,9 +9685,18 @@ async def admin_delete_all_tickets_callback(update: Update, context: ContextType
         await update.message.reply_text(get_text(uid, 'confirm_delete_tickets'), reply_markup=confirm_kb)
 
 async def admin_confirm_delete_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8335,9 +9712,18 @@ async def admin_confirm_delete_tickets_callback(update: Update, context: Context
         await update.message.reply_text(get_text(uid, 'tickets_deleted').format(count), reply_markup=kb)
 
 async def admin_manage_sendcode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8360,9 +9746,18 @@ async def admin_manage_sendcode_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, current_text, reply_markup=keyboard)
 
 async def admin_set_sendcode_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8378,9 +9773,18 @@ async def admin_set_sendcode_user_callback(update: Update, context: ContextTypes
         await update.message.reply_text(msg)
 
 async def admin_show_log_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8405,9 +9809,18 @@ async def admin_show_log_channel_callback(update: Update, context: ContextTypes.
             await update.message.reply_text(text, reply_markup=kb)
 
 async def admin_set_log_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8424,9 +9837,18 @@ async def admin_set_log_channel_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text(msg, reply_markup=kb)
 
 async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8441,9 +9863,18 @@ async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(msg, reply_markup=get_replies_keyboard())
 
 async def admin_add_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8459,9 +9890,18 @@ async def admin_add_reply_callback(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(msg)
 
 async def admin_list_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8490,9 +9930,18 @@ async def admin_list_replies_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_del_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8518,9 +9967,18 @@ async def admin_del_reply_callback(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text(msg)
 
 async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8535,9 +9993,18 @@ async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(msg, reply_markup=get_banned_words_admin_keyboard())
 
 async def admin_add_banned_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8553,9 +10020,18 @@ async def admin_add_banned_word_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text(msg)
 
 async def admin_list_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8583,9 +10059,18 @@ async def admin_list_banned_words_callback(update: Update, context: ContextTypes
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_remove_banned_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8601,9 +10086,18 @@ async def admin_remove_banned_word_callback(update: Update, context: ContextType
         await update.message.reply_text(msg)
 
 async def admin_del_banned_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8626,9 +10120,18 @@ async def admin_del_banned_word_callback(update: Update, context: ContextTypes.D
 
 # ===================== معالجات الكولباك لحظر القنوات والمجموعات =====================
 async def admin_toggle_channel_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8636,6 +10139,10 @@ async def admin_toggle_channel_ban_callback(update: Update, context: ContextType
         else:
             await update.message.reply_text(get_text(uid, 'admin_only'))
         return
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     channel_db_id = int(query.data.split(":")[-1])
     async def _get_ban(conn):
         cur = await conn.execute("SELECT banned FROM user_channels WHERE id=?", (channel_db_id,))
@@ -8653,9 +10160,18 @@ async def admin_toggle_channel_ban_callback(update: Update, context: ContextType
     await admin_all_channels_callback(update, context)
 
 async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8663,6 +10179,10 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
         else:
             await update.message.reply_text(get_text(uid, 'admin_only'))
         return
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     group_chat_id = int(query.data.split(":")[-1])
     async def _get_ban(conn):
         cur = await conn.execute("SELECT banned FROM bot_groups WHERE chat_id=?", (group_chat_id,))
@@ -8681,8 +10201,17 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
 
 # ===================== معالجات الكولباك للردود التلقائية =====================
 async def auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     user_id = update.effective_user.id
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -8697,8 +10226,17 @@ async def auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAU
     )
 
 async def auto_reply_admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     user_id = update.effective_user.id
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -8715,8 +10253,17 @@ async def auto_reply_admins_callback(update: Update, context: ContextTypes.DEFAU
     )
 
 async def auto_reply_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     user_id = update.effective_user.id
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -8732,8 +10279,17 @@ async def auto_reply_reset_callback(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def auto_reply_confirm_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     user_id = update.effective_user.id
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -8752,15 +10308,33 @@ async def auto_reply_confirm_reset_callback(update: Update, context: ContextType
     )
 
 async def auto_reply_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     settings = await db_get_auto_reply_settings(chat_id)
     await query.edit_message_text("❌ تم إلغاء إعادة التعيين", reply_markup=get_auto_reply_keyboard(chat_id, settings))
 
 async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     user_id = update.effective_user.id
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -8789,8 +10363,17 @@ async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
 
 async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = int(query.data.split(":")[-1])
     current_status = await db_get_user_auto_reply_status(user_id)
     new_status = not current_status
@@ -8802,8 +10385,17 @@ async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.
     )
 
 async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     groups = await db_get_user_groups(user_id)
     if not groups:
@@ -8821,8 +10413,17 @@ async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def admin_auto_reply_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     settings = await db_get_auto_reply_settings(chat_id)
     async def _get_name(conn):
@@ -8837,9 +10438,18 @@ async def admin_auto_reply_select_callback(update: Update, context: ContextTypes
 
 # ===================== معالجات الكولباك لإعدادات NSFW =====================
 async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8886,9 +10496,18 @@ async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def nsfw_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8905,9 +10524,18 @@ async def nsfw_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await nsfw_settings_callback(update, context)
 
 async def nsfw_threshold_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if uid != PRIMARY_OWNER_ID and not await is_bot_admin(uid):
         if query:
@@ -8936,8 +10564,14 @@ async def nsfw_threshold_callback(update: Update, context: ContextTypes.DEFAULT_
 # ===================== معالجات الكولباك للمسابقات =====================
 async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not update or not update.effective_user:
-            logger.error("update أو effective_user غير موجود")
+        # [تحسين 6] if not update: return
+        if not update:
+            logger.error("update غير موجود")
+            return
+        
+        # [تحسين 2] if not update.effective_user: return
+        if not update.effective_user:
+            logger.error("effective_user غير موجود")
             return
 
         user_id = update.effective_user.id
@@ -9048,6 +10682,10 @@ async def contests_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
     await contests_command_handler(update, context)
 
 async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if not query:
         return
@@ -9057,6 +10695,10 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except:
         pass
 
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
 
     try:
@@ -9125,12 +10767,21 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     try:
         if query:
             await query.answer()
     except:
         pass
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     try:
         winners = await db_get_contest_winners(limit=10)
@@ -9182,6 +10833,14 @@ async def contests_back_callback(update: Update, context: ContextTypes.DEFAULT_T
     await contests_command_handler(update, context)
 
 async def create_contest_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
@@ -9190,11 +10849,19 @@ async def create_contest_command_handler(update: Update, context: ContextTypes.D
     await update.message.reply_text(get_text(user_id, 'create_contest_title'))
 
 async def declare_winner_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
     if len(args) < 2:
         await update.message.reply_text(get_text(user_id, 'declare_winner_usage'))
         return
@@ -9233,6 +10900,10 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
         await update.message.reply_text(get_text(user_id, 'contest_declared_error'))
 
 async def admin_create_contest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         try:
@@ -9240,6 +10911,10 @@ async def admin_create_contest_callback(update: Update, context: ContextTypes.DE
         except:
             pass
 
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
 
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
@@ -9268,6 +10943,10 @@ async def admin_create_contest_callback(update: Update, context: ContextTypes.DE
             pass
 
 async def admin_declare_winner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         try:
@@ -9275,6 +10954,10 @@ async def admin_declare_winner_callback(update: Update, context: ContextTypes.DE
         except:
             pass
 
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
 
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
@@ -9303,9 +10986,18 @@ async def admin_declare_winner_callback(update: Update, context: ContextTypes.DE
 
 # ===================== معالجات الكولباك للغة =====================
 async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if query:
         lang = query.data.split("_")[1] if "_" in query.data else None
@@ -9343,9 +11035,18 @@ async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_send_markdown(context.bot, uid, f"✅ تم تغيير اللغة إلى {lang_name}\n\n{title}", reply_markup=kb)
 
 async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     data = query.data if query else context.user_data.get('text_callback_data')
     if not data:
@@ -9417,10 +11118,23 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===================== معالجات الكولباك للإجراءات المتقدمة =====================
 async def advanced_actions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if chat_id == 0:
         if query:
@@ -9441,10 +11155,23 @@ async def advanced_actions_callback(update: Update, context: ContextTypes.DEFAUL
         await safe_send_markdown(context.bot, uid, msg, reply_markup=get_advanced_group_actions_keyboard(chat_id))
 
 async def group_action_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9463,10 +11190,23 @@ async def group_action_ban_callback(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(msg)
 
 async def group_action_mute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9483,9 +11223,23 @@ async def group_action_mute_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg, reply_markup=get_advanced_mute_duration_keyboard(chat_id))
 
 async def advanced_mute_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
+    uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     parts = query.data.split(":") if query else context.user_data.get('mute_duration_data', '').split(":")
     if len(parts) == 3:
         minutes = int(parts[1])
@@ -9514,10 +11268,23 @@ async def advanced_mute_duration_callback(update: Update, context: ContextTypes.
             await update.message.reply_text(msg)
 
 async def group_action_warn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9536,10 +11303,23 @@ async def group_action_warn_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg)
 
 async def group_action_kick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9558,10 +11338,23 @@ async def group_action_kick_callback(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(msg)
 
 async def group_action_restrict_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9580,10 +11373,23 @@ async def group_action_restrict_callback(update: Update, context: ContextTypes.D
         await update.message.reply_text(msg)
 
 async def group_action_pin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9602,10 +11408,23 @@ async def group_action_pin_callback(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(msg)
 
 async def group_action_log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9625,10 +11444,23 @@ async def group_action_log_callback(update: Update, context: ContextTypes.DEFAUL
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def group_action_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('advanced_chat_id')
     if not chat_id:
         return
@@ -9648,10 +11480,23 @@ async def group_action_unban_callback(update: Update, context: ContextTypes.DEFA
 
 # ===================== معالجات الكولباك للوحة التحكم =====================
 async def panel_lock_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('panel_chat_id')
     if not chat_id:
         return
@@ -9668,10 +11513,23 @@ async def panel_lock_callback_handler(update: Update, context: ContextTypes.DEFA
             await update.message.reply_text(get_text(uid, 'admin_only'))
 
 async def panel_unlock_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('panel_chat_id')
     if not chat_id:
         return
@@ -9688,6 +11546,10 @@ async def panel_unlock_callback_handler(update: Update, context: ContextTypes.DE
             await update.message.reply_text(get_text(uid, 'admin_only'))
 
 async def panel_close_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
@@ -9695,9 +11557,18 @@ async def panel_close_callback_handler(update: Update, context: ContextTypes.DEF
 
 # ===================== معالجات الكولباك للإشتراك الإجباري =====================
 async def check_subscribe_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     enabled = await db_get_force_subscribe_status()
     channel = await db_get_force_subscribe_channel()
@@ -9726,9 +11597,18 @@ async def check_subscribe_callback_handler(update: Update, context: ContextTypes
 
 # ===================== معالجات الكولباك للنشر في جميع القنوات =====================
 async def publish_all_channels_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     channels = await db_get_channels(uid)
     if not channels:
@@ -9801,10 +11681,23 @@ async def publish_all_channels_callback_handler(update: Update, context: Context
 
 # ===================== معالجات الكولباك لإحصائيات القنوات =====================
 async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     try:
         channel_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('channel_stats_id')
     except:
@@ -9879,10 +11772,23 @@ async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def channel_growth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     try:
         channel_db_id = int(query.data.split(":")[-1]) if query else context.user_data.get('channel_stats_id')
     except:
@@ -9939,9 +11845,18 @@ async def channel_stats_refresh_callback(update: Update, context: ContextTypes.D
     await channel_stats_callback(update, context)
 
 async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     if query:
         await query.answer()
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     summary = await db_get_channel_stats_summary(user_id)
     if not summary:
@@ -9979,6 +11894,14 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
 
 # ===================== [محسن] الأمر syncgroup مع الكاش ورسائل أفضل =====================
 async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
         return
@@ -10038,6 +11961,14 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
 
 # ===================== [محسن] أمر /update_admins =====================
 async def update_admins_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
         return
@@ -10124,6 +12055,10 @@ async def update_admins_command_handler(update: Update, context: ContextTypes.DE
 
 # ===================== دوال إضافية =====================
 async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.pre_checkout_query
     if query.invoice_payload.startswith("sub_"):
         await query.answer(ok=True)
@@ -10131,8 +12066,14 @@ async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DE
         await query.answer(ok=False, error_message="بيانات غير صالحة")
 
 async def successful_payment_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None or update.effective_user is None:
+    # [تحسين 7] if not update.message: return
+    if not update or not update.message:
         return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     payment = update.message.successful_payment
     try:
@@ -10185,6 +12126,14 @@ async def is_user_subscribed(bot, user_id, channel):
         return False
 
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user = update.effective_user
     if not user:
         return
@@ -10227,6 +12176,14 @@ async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===================== [محسن] معالج /sendcode مع مهلة 10 دقائق =====================
 async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     allowed_user = await db_get_allowed_sendcode_user()
     if user_id != PRIMARY_OWNER_ID and user_id != allowed_user:
@@ -10256,6 +12213,14 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     expected_password = context.user_data.get('sendcode_temp_password')
     timestamp = context.user_data.get('sendcode_temp_timestamp', 0)
@@ -10324,6 +12289,14 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
 
 # ===================== معالجات الكولباك للأوامر الإضافية =====================
 async def language_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"),
@@ -10342,6 +12315,14 @@ async def language_command_handler(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(get_text(user_id, 'welcome'), reply_markup=keyboard)
 
 async def security_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     if update.effective_chat.type in ['group', 'supergroup']:
         chat_id = update.effective_chat.id
@@ -10393,10 +12374,26 @@ async def subscribe_command_handler(update: Update, context: ContextTypes.DEFAUL
     await subscribe_menu_callback(update, context)
 
 async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     await update.message.reply_text(get_text(user_id, 'help'), parse_mode="MarkdownV2")
 
 async def support_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     context.user_data['support_mode'] = True
     keyboard = InlineKeyboardMarkup([
@@ -10407,10 +12404,18 @@ async def support_command_handler(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(get_text(user_id, 'support_welcome'), reply_markup=keyboard)
 
 async def support_reply_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     if update.effective_user.id != PRIMARY_OWNER_ID and not await is_bot_admin(update.effective_user.id):
         await update.message.reply_text(get_text(update.effective_user.id, 'admin_only'))
         return
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
     if len(args) < 2:
         await update.message.reply_text("📝 **الاستخدام:**\n`/support_reply user_id نص الرد`", parse_mode="MarkdownV2")
         return
@@ -10438,8 +12443,18 @@ async def updates_command_handler(update: Update, context: ContextTypes.DEFAULT_
     await updates_callback(update, context)
 
 async def stats_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     uid = update.effective_user.id
     if not await ensure_force_subscribe(update, context, uid):
         return
@@ -10493,8 +12508,18 @@ async def stats_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat is None or update.effective_user is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     chat_id = None
 
@@ -10507,7 +12532,7 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(get_text(user_id, 'locked'), parse_mode="MarkdownV2")
         return
 
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
     if args and args[0].lstrip('-').isdigit():
         chat_id = int(args[0])
         if await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -10530,8 +12555,18 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text("🔒 **اختر مجموعة لقفلها:**", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def unlock_chat_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat is None or update.effective_user is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     chat_id = None
 
@@ -10544,7 +12579,7 @@ async def unlock_chat_command_handler(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(get_text(user_id, 'unlocked'), parse_mode="MarkdownV2")
         return
 
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
     if args and args[0].lstrip('-').isdigit():
         chat_id = int(args[0])
         if await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -10567,8 +12602,18 @@ async def unlock_chat_command_handler(update: Update, context: ContextTypes.DEFA
     await update.message.reply_text("🔓 **اختر مجموعة لفتحها:**", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None or update.effective_user is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
 
     if not await ensure_force_subscribe(update, context, user_id):
@@ -10606,11 +12651,21 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("🔧 **لوحة التحكم**\nاختر مجموعة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def schedule_post_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None or update.effective_user is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     chat_id = None
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
 
     if update.effective_chat.type in ['group', 'supergroup']:
         chat_id = update.effective_chat.id
@@ -10673,8 +12728,16 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
     await update.message.reply_text("📝 **اختر مجموعة لجدولة منشور:**", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def schedule_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     query = update.callback_query
     await query.answer()
+    # [تحسين 5] if not query: return
+    if not query:
+        return
+    
     chat_id = int(query.data.split(":")[-1])
     context.user_data['schedule_chat_id'] = chat_id
     context.user_data['state'] = UserState.WAITING_SCHEDULE_POST
@@ -10684,11 +12747,19 @@ async def schedule_select_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def set_log_channel_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
-    args = context.args
+    args = context.args or []  # [تحسين 10] استخدام context.args or []
     if not args and context.user_data.get('state') == UserState.WAITING_LOG_CHANNEL:
         identifier = context.user_data.get('temp_log_channel_identifier')
         if identifier:
@@ -10730,14 +12801,32 @@ async def set_log_channel_command_handler(update: Update, context: ContextTypes.
 
 # ===================== [محسن] معالج أوامر الإدارة الموحد =====================
 async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None or update.effective_chat is None or update.effective_user is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         return
     user_id = update.effective_user.id
     chat_id = chat.id
     text = update.message.text.strip() if update.message.text else ""
+    
+    # [تحسين 1] if not context: return
+    if not context:
+        return
     
     if not await check_admin_access(update, context):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
@@ -10856,7 +12945,15 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
 
 # ===================== معالجات الكولباك لإضافة البوت =====================
 async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.new_chat_members:
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    if not update.message.new_chat_members:
         return
     bot_id = context.bot.id
     chat = update.effective_chat
@@ -10890,6 +12987,10 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
 async def track_chat_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     result = update.my_chat_member
     if not result:
         return
@@ -10914,6 +13015,10 @@ async def track_chat_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_addition_report(context.bot, adder, chat, chat_type_name)
 
 async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
     result = update.chat_member
     if not result or result.chat.type not in ['group', 'supergroup']:
         return
@@ -10966,8 +13071,14 @@ async def detect_owner_type(bot, chat_id):
 
 # ===================== [محسن] معالج الرسائل الرئيسي مع دعم الكاش والردود السريعة =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
     chat = update.effective_chat
     user = update.effective_user
     uid = user.id if user else 0
@@ -11692,8 +13803,22 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ===================== [محسن] فلتر الرسائل مع كشف NSFW وتحسين الأداء =====================
 async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_chat or not update.effective_user:
+    # [تحسين 6] if not update: return
+    if not update:
         return
+    
+    # [تحسين 7] if not update.message: return
+    if not update.message:
+        return
+    
+    # [تحسين 9] if not update.effective_chat: return
+    if not update.effective_chat:
+        return
+    
+    # [تحسين 2] if not update.effective_user: return
+    if not update.effective_user:
+        return
+    
     chat = update.effective_chat
     user = update.effective_user
     chat_id = chat.id
@@ -11821,22 +13946,27 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
 
+    # ===== [تحسين] البحث عن الردود باستخدام الكاش =====
     reply = None
     text_lower = text.lower()
 
     if text_lower:
+        # 1. البحث في الكاش أولاً
         cached_reply = await get_cached_reply(text_lower)
         if cached_reply:
             reply = cached_reply
         else:
+            # 2. البحث في قاعدة البيانات
             reply = await db_get_reply(text_lower)
             if reply:
                 await set_cached_reply(text_lower, reply)
 
+    # 3. البحث في الردود المدمجة
     if not reply and text_lower in ALL_REPLIES:
         reply = ALL_REPLIES[text_lower]
         await set_cached_reply(text_lower, reply)
 
+    # 4. البحث الجزئي
     if not reply:
         for keyword, response in ALL_REPLIES.items():
             if keyword in text_lower:
@@ -11861,6 +13991,7 @@ async def check_nsfw_cached(image_bytes: bytes, cache_key: str) -> dict:
 
     NSFW_CACHE[cache_key] = (result, time_module.time())
 
+    # [تحسين 28] تنظيف الكاش القديم عند الامتلاء
     if len(NSFW_CACHE) > 100:
         expired_keys = []
         for key, (_, timestamp) in NSFW_CACHE.items():
@@ -11889,7 +14020,7 @@ async def check_nsfw_image(image_bytes: bytes) -> dict:
                 "models": "nudity-2.0,wad",
                 "image_base64": image_b64
             }
-            async with session.get(url, params=params, timeout=10) as response:
+            async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as response:
                 data = await response.json()
 
                 if "error" in data:
@@ -12103,7 +14234,7 @@ async def dashboard_handler(request):
                     <span class="badge">🟢 البوت يعمل</span>
                 </div>
                 <div class="footer">
-                    <p>ريلاكس مانيجر v19.3.0 | © 2026</p>
+                    <p>ريلاكس مانيجر v19.3.1 | © 2026</p>
                 </div>
             </div>
             <script>
@@ -13459,18 +15590,17 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.0)")
-    print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.1)")
+    print("✅ جميع التصحيحات والتحسينات المطلوبة تم تطبيقها:")
+    print("   • ✅ 12 خطأ خطير تم تصحيحها")
+    print("   • ✅ 13 خطأ متوسط تم تصحيحها")
+    print("   • ✅ 5 أخطاء منخفضة تم تصحيحها")
+    print("   • ✅ 5 تحسينات إضافية تمت إضافتها")
     print("   • ✅ دعم كامل للمشرفين المخفيين (Anonymous) عبر sender_chat")
-    print("   • ✅ فصل ذكي للصلاحيات بين الخاص والمجموعة")
-    print("   • ✅ إزالة جميع رسائل 'تم تسجيل مالك مخفي' من المجموعات (تسجيل صامت)")
-    print("   • ✅ أمر جديد /update_admins لتحديث قائمة المشرفين")
-    print("   • ✅ تحديث جميع أوامر الإدارة لاستخدام check_admin_access")
-    print("   • ✅ صلاحية مطلقة لـ MAIN_ADMIN_ID في كل مكان")
-    print("   • ✅ تحسين أداء الكاش وتقليل استهلاك الذاكرة")
+    print("   • ✅ أمر /update_admins لتحديث قائمة المشرفين")
     print("   • ✅ نظام تنظيف الكاش التلقائي لتسريع الردود")
     print("   • ✅ كاش الردود المدمجة لتسريع الاستجابة")
-    print("   • ✅ تصليح جميع الأخطاء المتعلقة بالتعريفات (UserState, CallbackData)")
+    print("   • ✅ جميع الدوال والكولباك محفوظة بالكامل")
 
     try:
         await application.run_polling(
