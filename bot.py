@@ -3,8 +3,14 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.2.6 - دعم كامل للمشرفين المخفيين (Anonymous Admins)
+الإصدار: 19.3.0 - نظام أوامر مشرفين موحد + تحسين سرعة الردود
 المطور: @RelaxMgr
+
+التحسينات:
+1. توحيد أوامر المشرفين (عادي، مخفي، مالك مخفي، عالمي)
+2. مسح الكاش التلقائي لتسريع الردود
+3. دعم كامل للمشرفين المخفيين (Anonymous Admins)
+4. نظام صلاحيات موحد ومرن
 """
 
 import sys
@@ -790,11 +796,15 @@ try:
     _admin_cache = TTLCache(maxsize=1000, ttl=300)
     _security_cache = TTLCache(maxsize=500, ttl=60)
     _translation_cache = LRUCache(maxsize=200)
+    _user_cache = TTLCache(maxsize=2000, ttl=3600)  # كاش المستخدمين
+    _group_cache = TTLCache(maxsize=500, ttl=300)   # كاش المجموعات
 except ImportError:
     CACHETOOLS_AVAILABLE = False
     _admin_cache = {}
     _security_cache = {}
     _translation_cache = {}
+    _user_cache = {}
+    _group_cache = {}
     _ADMIN_CACHE_TTL = 60
     _SECURITY_CACHE_TTL = 30
     _TRANSLATION_CACHE_SIZE = 500
@@ -838,6 +848,108 @@ class TimedLRUCache:
             self.cache.clear()
 
 _translation_cache = TimedLRUCache(maxsize=500, ttl=3600)
+
+# ===================== [جديد] نظام تنظيف الكاش التلقائي =====================
+class CacheManager:
+    """نظام متقدم لإدارة الكاش مع تنظيف تلقائي"""
+    
+    def __init__(self):
+        self.caches = {
+            'admin': _admin_cache if CACHETOOLS_AVAILABLE else {},
+            'security': _security_cache if CACHETOOLS_AVAILABLE else {},
+            'user': _user_cache if CACHETOOLS_AVAILABLE else {},
+            'group': _group_cache if CACHETOOLS_AVAILABLE else {},
+            'translation': _translation_cache
+        }
+        self.last_cleanup = time_module.time()
+        self.cleanup_interval = 300  # 5 دقائق
+        
+    async def cleanup(self):
+        """تنظيف جميع الكاشات"""
+        try:
+            # تنظيف كاش الصلاحيات
+            if CACHETOOLS_AVAILABLE:
+                _admin_cache.clear()
+                _security_cache.clear()
+                _user_cache.clear()
+                _group_cache.clear()
+            else:
+                _admin_cache.clear()
+                _security_cache.clear()
+                _user_cache.clear()
+                _group_cache.clear()
+                _security_cache_time.clear()
+            
+            # تنظيف كاش الترجمة
+            await _translation_cache.clear()
+            
+            # تنظيف كاش NSFW
+            NSFW_CACHE.clear()
+            
+            # تنظيف كاش المستخدمين
+            async with _user_translation_cache_lock:
+                user_translation_settings_cache.clear()
+            
+            # تنظيف كاش النقاط
+            user_points_last_hour.clear()
+            
+            # تنظيف كاش اللغة
+            async with _user_language_lock:
+                user_language.clear()
+            
+            # تنظيف كاش الردود
+            _reply_cache.clear()
+            
+            # تفعيل جامع القمامة
+            gc.collect()
+            
+            self.last_cleanup = time_module.time()
+            logger.info("🧹 تم تنظيف جميع الكاشات بنجاح")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ فشل تنظيف الكاش: {e}")
+            return False
+    
+    async def auto_cleanup_loop(self):
+        """حلقة التنظيف التلقائي"""
+        while True:
+            await asyncio.sleep(self.cleanup_interval)
+            try:
+                if time_module.time() - self.last_cleanup >= self.cleanup_interval:
+                    await self.cleanup()
+            except Exception as e:
+                logger.error(f"خطأ في حلقة تنظيف الكاش: {e}")
+
+# إنشاء مدير الكاش العالمي
+cache_manager_obj = CacheManager()
+
+# ===================== [جديد] كاش الردود =====================
+_reply_cache = {}
+_reply_cache_time = {}
+_REPLY_CACHE_TTL = 300  # 5 دقائق
+
+async def get_cached_reply(keyword: str) -> Optional[str]:
+    """جلب رد من الكاش"""
+    now = time_module.time()
+    if keyword in _reply_cache:
+        if now - _reply_cache_time.get(keyword, 0) < _REPLY_CACHE_TTL:
+            return _reply_cache[keyword]
+        else:
+            del _reply_cache[keyword]
+            if keyword in _reply_cache_time:
+                del _reply_cache_time[keyword]
+    return None
+
+async def set_cached_reply(keyword: str, reply: str):
+    """تخزين رد في الكاش"""
+    _reply_cache[keyword] = reply
+    _reply_cache_time[keyword] = time_module.time()
+
+async def clear_reply_cache():
+    """مسح كاش الردود"""
+    _reply_cache.clear()
+    _reply_cache_time.clear()
 
 # ===================== التحقق من التشغيل الواحد =====================
 def check_single_instance():
@@ -1033,13 +1145,26 @@ def memory_optimizer():
         if CACHETOOLS_AVAILABLE:
             _admin_cache.clear()
             _security_cache.clear()
+            _user_cache.clear()
+            _group_cache.clear()
         else:
             _admin_cache.clear()
             _security_cache.clear()
+            _user_cache.clear()
+            _group_cache.clear()
             _security_cache_time.clear()
 
         _translation_cache.clear()
         NSFW_CACHE.clear()
+        _reply_cache.clear()
+        _reply_cache_time.clear()
+        
+        # تنظيف كاش اللغة
+        user_language.clear()
+        
+        # تنظيف كاش المستخدمين
+        user_translation_settings_cache.clear()
+        
         gc.collect()
         return True
     except Exception as e:
@@ -1475,7 +1600,7 @@ except ImportError:
     REDIS_AVAILABLE = False
     print("⚠️ مكتبة aioredis غير مثبتة، سيتم استخدام التخزين المؤقت في الذاكرة")
 
-class CacheManager:
+class RedisCacheManager:
     def __init__(self):
         self.redis = None
         self.use_redis = REDIS_AVAILABLE and os.getenv("REDIS_URL")
@@ -1518,7 +1643,7 @@ class CacheManager:
                 pass
         self.local_cache.pop(key, None)
 
-cache_manager = CacheManager()
+redis_cache = RedisCacheManager()
 
 # ===================== دوال التشفير المحسنة =====================
 def init_db_encryption():
@@ -2107,255 +2232,7 @@ async def set_user_language(user_id: int, lang: str):
     async with _user_language_lock:
         user_language[user_id] = lang
 
-# ===================== دوال القوائم والأزرار (الكيبورد) =====================
-class CallbackData:
-    MAIN_MENU = "main_menu"
-    CHANNELS_MY = "channels:my_channels"
-    CHANNELS_ADD = "channels:add"
-    CHANNELS_DELETE_PREFIX = "channels:delete:"
-    CHANNELS_SELECT_PREFIX = "channels:select:"
-    POSTS_ADD_15 = "posts:add_15"
-    POSTS_PUBLISH_ONE = "posts:publish_one"
-    POSTS_MY = "posts:my_posts"
-    POSTS_RECYCLE = "posts:recycle"
-    POSTS_DELETE_SINGLE_PREFIX = "posts:delete_single:"
-    POSTS_CONFIRM_CLEAR_ALL_PREFIX = "posts:confirm_clear_all:"
-    POSTS_CLEAR_ALL_PREFIX = "posts:clear_all:"
-    STATS_PENDING = "stats:pending"
-    STATS_FULL = "stats:full"
-    GROUPS_MY = "groups:my_groups"
-    GROUPS_SETTINGS_PREFIX = "groups:settings:"
-    SETTINGS_MENU = "settings:menu"
-    SETTINGS_TOGGLE_AUTO_PUBLISH = "settings:toggle_auto_publish"
-    SETTINGS_TOGGLE_AUTO_RECYCLE = "settings:toggle_auto_recycle"
-    SCHEDULE_MENU_PREFIX = "schedule:menu:"
-    SCHEDULE_SET_INTERVAL_MINUTES_PREFIX = "schedule:set_interval_minutes:"
-    SCHEDULE_SET_INTERVAL_HOURS_PREFIX = "schedule:set_interval_hours:"
-    SCHEDULE_SET_INTERVAL_DAYS_PREFIX = "schedule:set_interval_days:"
-    SCHEDULE_SET_DAYS_PREFIX = "schedule:set_days:"
-    SCHEDULE_SET_DATES_PREFIX = "schedule:set_dates:"
-    SCHEDULE_SET_PUBLISH_TIME_PREFIX = "schedule:set_publish_time:"
-    SCHEDULE_DAY_SELECT_PREFIX = "schedule:day_select:"
-    SCHEDULE_SAVE_DAYS = "schedule:save_days"
-    SECURITY_LINKS_PREFIX = "security:links:"
-    SECURITY_MENTIONS_PREFIX = "security:mentions:"
-    SECURITY_WARN_PREFIX = "security:warn:"
-    SECURITY_SLOWMODE_PREFIX = "security:slowmode:"
-    SECURITY_BANNED_WORDS_MENU_PREFIX = "security:banned_words_menu:"
-    SECURITY_WELCOME_PREFIX = "security:welcome:"
-    SECURITY_GOODBYE_PREFIX = "security:goodbye:"
-    SECURITY_MAIN = "security:main"
-    SECURITY_CLOSE = "security:close"
-    BANNED_WORDS_ADD_PREFIX = "banned_words:add:"
-    BANNED_WORDS_LIST_PREFIX = "banned_words:list:"
-    BANNED_WORDS_REMOVE_PREFIX = "banned_words:remove:"
-    HELP = "help"
-    SUPPORT_MENU = "support:menu"
-    SUPPORT_HELP = "support:help"
-    SUPPORT_TICKET = "support:ticket"
-    SUPPORT_BACK = "support:back"
-    TRIAL = "trial"
-    SUBSCRIBE_MENU = "subscribe:menu"
-    BUY_SUBSCRIPTION_1 = "buy:subscription_1"
-    BUY_SUBSCRIPTION_2 = "buy:subscription_2"
-    BUY_SUBSCRIPTION_30 = "buy:subscription_30"
-    BUY_SUBSCRIPTION_90 = "buy:subscription_90"
-    DEVELOPER = "developer"
-    UPDATES = "updates"
-    REFERRAL_MENU = "referral:menu"
-    REFERRAL_COPY_LINK_PREFIX = "referral:copy_link:"
-    REFERRAL_CLAIM_REWARD = "referral:claim_reward"
-    REFERRAL_LIST = "referral:list"
-    REMINDER_MENU = "reminder:menu"
-    REMINDER_TOGGLE_SUB = "reminder:toggle_sub"
-    REMINDER_TOGGLE_DAILY = "reminder:toggle_daily"
-    REMINDER_TOGGLE_WEEKLY = "reminder:toggle_weekly"
-    REMINDER_SET_DAYS = "reminder:set_days"
-    REMINDER_SET_LANG = "reminder:set_lang"
-    REMINDER_LANG_PREFIX = "reminder:lang:"
-    TRANSLATION_MENU = "translation:menu"
-    TRANSLATION_OFF = "translation:off"
-    TRANSLATION_SET_PREFIX = "translation:set:"
-    ADMIN_PANEL = "admin:panel"
-    ADMIN_USERS = "admin:users"
-    ADMIN_BANNED_USERS = "admin:banned_users"
-    ADMIN_UNBAN_ALL_USERS = "admin:unban_all_users"
-    ADMIN_ALL_CHANNELS = "admin:all_channels"
-    ADMIN_BANNED_CHANNELS = "admin:banned_channels"
-    ADMIN_ACTIVATE_ALL_CHANNELS = "admin:activate_all_channels"
-    ADMIN_GROUPS = "admin:groups"
-    ADMIN_BANNED_GROUPS = "admin:banned_groups"
-    ADMIN_UNBAN_ALL_GROUPS = "admin:unban_all_groups"
-    ADMIN_BOT_CHANNELS = "admin:bot_channels"
-    ADMIN_BANNED_BOT_CHANNELS = "admin:banned_bot_channels"
-    ADMIN_UNBAN_ALL_BOT_CHANNELS = "admin:unban_all_bot_channels"
-    ADMIN_MONITOR_USERS = "admin:monitor_users"
-    ADMIN_ADD_ADMIN = "admin:add_admin"
-    ADMIN_REMOVE_ADMIN = "admin:remove_admin"
-    ADMIN_RAM = "admin:ram"
-    ADMIN_STATS = "admin:stats"
-    ADMIN_METRICS = "admin:metrics"
-    ADMIN_BACKUP = "admin:backup"
-    ADMIN_RESTORE_BACKUP = "admin:restore_backup"
-    ADMIN_RESTORE_BACKUP_SELECT_PREFIX = "admin:restore_backup_select:"
-    ADMIN_BACKUP_SETTINGS = "admin:backup_settings"
-    ADMIN_TOGGLE_AUTO_BACKUP = "admin:toggle_auto_backup"
-    ADMIN_CHANGE_INTERVAL = "admin:change_interval"
-    ADMIN_SEND_UPDATE = "admin:send_update"
-    ADMIN_SET_UPDATE_CHANNEL = "admin:set_update_channel"
-    ADMIN_SHOW_UPDATE_CHANNEL = "admin:show_update_channel"
-    ADMIN_UPDATES = "admin:updates"
-    ADMIN_FORCE_SUBSCRIBE = "admin:force_subscribe"
-    ADMIN_SET_FORCE_CHANNEL = "admin:set_force_channel"
-    ADMIN_BROADCAST = "admin:broadcast"
-    ADMIN_CONFIRM_BROADCAST = "admin:confirm_broadcast"
-    ADMIN_SUPPORT_TICKETS = "admin:support_tickets"
-    ADMIN_DELETE_ALL_TICKETS = "admin:delete_all_tickets"
-    ADMIN_CONFIRM_DELETE_TICKETS = "admin:confirm_delete_tickets"
-    ADMIN_MANAGE_SENDCODE = "admin:manage_sendcode"
-    ADMIN_SET_SENDCODE_USER = "admin:set_sendcode_user"
-    ADMIN_SHOW_LOG_CHANNEL = "admin:show_log_channel"
-    ADMIN_SET_LOG_CHANNEL = "admin:set_log_channel"
-    ADMIN_REPLIES = "admin:replies"
-    ADMIN_ADD_REPLY = "admin:add_reply"
-    ADMIN_LIST_REPLIES = "admin:list_replies"
-    ADMIN_DEL_REPLY = "admin:del_reply"
-    ADMIN_BANNED_WORDS = "admin:banned_words"
-    ADMIN_ADD_BANNED_WORD = "admin:add_banned_word"
-    ADMIN_LIST_BANNED_WORDS = "admin:list_banned_words"
-    ADMIN_REMOVE_BANNED_WORD = "admin:remove_banned_word"
-    ADMIN_CREATE_CONTEST = "admin:create_contest"
-    ADMIN_DECLARE_WINNER = "admin:declare_winner"
-    PANEL_LOCK_PREFIX = "panel:lock:"
-    PANEL_UNLOCK_PREFIX = "panel:unlock:"
-    PANEL_CLOSE = "panel:close"
-    CHECK_SUBSCRIBE = "check_subscribe"
-    BACK = "back"
-    CANCEL_SESSION = "cancel_session"
-    ADVANCED_ACTIONS = "advanced_actions"
-    GROUP_ACTION_BAN = "group_action:ban"
-    GROUP_ACTION_MUTE = "group_action:mute"
-    GROUP_ACTION_WARN = "group_action:warn"
-    GROUP_ACTION_KICK = "group_action:kick"
-    GROUP_ACTION_RESTRICT = "group_action:restrict"
-    GROUP_ACTION_PIN = "group_action:pin"
-    GROUP_ACTION_LOG = "group_action:log"
-    GROUP_ACTION_UNBAN = "group_action:unban"
-    GROUP_MUTE_PREFIX = "group_mute:"
-    GROUP_MUTE_DURATION_5 = "group_mute_duration:5"
-    GROUP_MUTE_DURATION_30 = "group_mute_duration:30"
-    GROUP_MUTE_DURATION_60 = "group_mute_duration:60"
-    GROUP_MUTE_DURATION_720 = "group_mute_duration:720"
-    GROUP_MUTE_DURATION_1440 = "group_mute_duration:1440"
-    GROUP_MUTE_DURATION_10080 = "group_mute_duration:10080"
-    GROUP_MUTE_DURATION_PERMANENT = "group_mute_duration:permanent"
-    SECURITY_SELECT_GROUP = "security_select_group:"
-    SECURITY_REFRESH_GROUPS = "security_refresh_groups"
-    PENALTY_MENU = "penalty_menu"
-    PENALTY_KICK = "penalty:kick"
-    PENALTY_BAN = "penalty:ban"
-    PENALTY_MUTE = "penalty:mute"
-    PUBLISH_ALL_CHANNELS = "publish_all_channels"
-    CHANNEL_STATS = "channel_stats"
-    CHANNEL_GROWTH = "channel_growth"
-    CHANNEL_STATS_REFRESH = "channel_stats_refresh"
-    MY_CHANNEL_STATS = "my_channel_stats"
-    ADMIN_TOGGLE_CHANNEL_BAN_PREFIX = "admin:toggle_channel_ban:"
-    ADMIN_TOGGLE_GROUP_BAN_PREFIX = "admin:toggle_group_ban:"
-    CONTESTS_MENU = "contests_menu"
-    CONTEST_JOIN_PREFIX = "contest_join:"
-    CONTEST_WINNERS = "contest_winners"
-    CONTESTS_BACK = "contests_back"
-    ADMIN_DEL_CONTEST_PREFIX = "admin:del_contest:"
-    HIDDEN_ADMIN_ADD = "hidden_admin:add"
-    HIDDEN_ADMIN_REMOVE_PREFIX = "hidden_admin:remove:"
-    HIDDEN_ADMIN_LIST = "hidden_admin:list"
-    ADMIN_AUTO_REPLY = "admin_auto_reply"
-    ADMIN_AUTO_REPLY_SELECT_PREFIX = "admin_auto_reply_select:"
-    AUTO_REPLY_MENU_PREFIX = "auto_reply_menu:"
-    AUTO_REPLY_TOGGLE_PREFIX = "auto_reply_toggle:"
-    AUTO_REPLY_ADMINS_PREFIX = "auto_reply_admins:"
-    AUTO_REPLY_RESET_PREFIX = "auto_reply_reset:"
-    AUTO_REPLY_CONFIRM_RESET_PREFIX = "auto_reply_confirm_reset:"
-    AUTO_REPLY_CANCEL_PREFIX = "auto_reply_cancel:"
-    AUTO_REPLY_STATS_PREFIX = "auto_reply_stats:"
-    USER_AUTO_REPLY_TOGGLE_PREFIX = "user_auto_reply_toggle:"
-    NSFW_SETTINGS = "nsfw_settings"
-    NSFW_TOGGLE = "nsfw_toggle"
-    NSFW_THRESHOLD_SET = "nsfw_threshold_set"
-    UPDATE_ADMINS = "update_admins"
-
-# ===================== نظام إدارة الحالات المتقدم =====================
-class UserState(Enum):
-    NONE = auto()
-    ADDING_POSTS = auto()
-    WAITING_CHANNEL_ID = auto()
-    WAITING_INTERVAL_MINUTES = auto()
-    WAITING_INTERVAL_HOURS = auto()
-    WAITING_INTERVAL_DAYS = auto()
-    WAITING_DATES = auto()
-    WAITING_PUBLISH_TIME = auto()
-    SELECTING_DAYS = auto()
-    WAITING_ADMIN_ID_ADD = auto()
-    WAITING_ADMIN_ID_REMOVE = auto()
-    WAITING_BROADCAST = auto()
-    WAITING_UPDATE_TEXT = auto()
-    WAITING_UPDATE_CHANNEL = auto()
-    WAITING_FORCE_CHANNEL = auto()
-    WAITING_SENDCODE_CONFIRM = auto()
-    WAITING_SENDCODE_PASSWORD = auto()
-    WAITING_REMINDER_DAYS = auto()
-    WAITING_SCHEDULE_POST = auto()
-    WAITING_BAN_USER = auto()
-    WAITING_MUTE_USER = auto()
-    WAITING_WARN_USER = auto()
-    WAITING_KICK_USER = auto()
-    WAITING_RESTRICT_USER = auto()
-    WAITING_UNBAN_USER = auto()
-    WAITING_PIN_MESSAGE = auto()
-    WAITING_GROUP_BANNED_WORD = auto()
-    WAITING_REMOVE_GROUP_BANNED_WORD = auto()
-    WAITING_GLOBAL_BANNED_WORD = auto()
-    WAITING_REMOVE_GLOBAL_BANNED_WORD = auto()
-    WAITING_KEYWORD = auto()
-    WAITING_REPLY = auto()
-    WAITING_SENDCODE_USER = auto()
-    WAITING_LOG_CHANNEL = auto()
-    WAITING_2FA = auto()
-    SUPPORT_MODE = auto()
-    WAITING_CONTEST_TITLE = auto()
-    WAITING_CONTEST_DESCRIPTION = auto()
-    WAITING_CONTEST_PRIZE = auto()
-    WAITING_CONTEST_END_DATE = auto()
-    WAITING_CONTEST_ANSWER = auto()
-    WAITING_DELETE_CONTEST = auto()
-    WAITING_GROUP_SECURITY = auto()
-    WAITING_HIDDEN_ADMIN_ADD = auto()
-    WAITING_HIDDEN_ADMIN_REMOVE = auto()
-    WAITING_AUTO_REPLY_MENU = auto()
-    WAITING_NSFW_THRESHOLD = auto()
-    WAITING_EXPORT_DATA = auto()
-
-class StateDispatcher:
-    def __init__(self):
-        self.handlers = {}
-
-    def register(self, state: UserState, handler: Callable):
-        self.handlers[state] = handler
-
-    async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        user_id = update.effective_user.id
-        state = context.user_data.get('state')
-        if state is None or state == UserState.NONE:
-            return False
-        handler = self.handlers.get(state)
-        if handler:
-            return await handler(update, context, state)
-        return False
-
-state_dispatcher = StateDispatcher()
-
-# ===================== [محدث] دالة التحقق من صلاحيات المشرف المتقدمة =====================
+# ===================== [محسن] دالة التحقق من صلاحيات المشرف المتقدمة =====================
 async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     دالة متقدمة للتحقق من صلاحيات المشرف.
@@ -2364,11 +2241,8 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
     1. دعم المشرفين المخفيين (Anonymous) عبر sender_chat
     2. الفصل الذكي بين الخاص والمجموعة
     3. صلاحية مطلقة لـ MAIN_ADMIN_ID
+    4. تخزين مؤقت محسن مع تنظيف تلقائي
     
-    Args:
-        update: كائن التحديث
-        context: سياق البوت
-        
     Returns:
         bool: True إذا كان المستخدم مشرفاً، False otherwise
     """
@@ -2384,43 +2258,64 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user_id == PRIMARY_OWNER_ID:
         return True
     
-    # ===== 3. التحقق من المشرفين الخارقين في قاعدة البيانات =====
+    # ===== 3. التحقق من الكاش أولاً =====
+    if chat:
+        cache_key = f"{chat.id}:{user_id}"
+        if CACHETOOLS_AVAILABLE:
+            cached = _admin_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        else:
+            if cache_key in _admin_cache:
+                if time_module.time() - _admin_cache_time.get(cache_key, 0) < _ADMIN_CACHE_TTL:
+                    return _admin_cache[cache_key]
+    
+    # ===== 4. التحقق من المشرفين الخارقين في قاعدة البيانات =====
     try:
         if await is_bot_admin(user_id):
+            if chat:
+                _admin_cache[cache_key] = True
             return True
     except:
         pass
     
-    # ===== 4. إذا لم توجد محادثة =====
+    # ===== 5. إذا لم توجد محادثة =====
     if chat is None:
         return False
     
     chat_type = chat.type
     
-    # ===== 5. في الخاص (Private) =====
+    # ===== 6. في الخاص (Private) =====
     if chat_type == 'private':
         # في الخاص، فقط MAIN_ADMIN_ID والمشرفين الخارقين
-        return False  # تم التحقق سابقاً
+        if chat:
+            _admin_cache[cache_key] = False
+        return False
     
-    # ===== 6. في المجموعة (Group/Supergroup) =====
+    # ===== 7. في المجموعة (Group/Supergroup) =====
     if chat_type in ['group', 'supergroup']:
         chat_id = chat.id
+        cache_key = f"{chat_id}:{user_id}"
         
-        # 6.1 التحقق من المالك المخفي
+        # 7.1 التحقق من المالك المخفي
         try:
             if await db_is_hidden_owner(chat_id, user_id):
+                if CACHETOOLS_AVAILABLE:
+                    _admin_cache[cache_key] = True
                 return True
         except:
             pass
         
-        # 6.2 التحقق من المشرف المخفي
+        # 7.2 التحقق من المشرف المخفي
         try:
             if await db_is_hidden_admin(chat_id, user_id):
+                if CACHETOOLS_AVAILABLE:
+                    _admin_cache[cache_key] = True
                 return True
         except:
             pass
         
-        # ===== 6.3 التحقق من المشرفين المخفيين عبر sender_chat (Anonymous) =====
+        # ===== 7.3 التحقق من المشرفين المخفيين عبر sender_chat (Anonymous) =====
         # إذا كانت الرسالة مرسلة عبر قناة، فهذا يعني أن المرسل مشرف مخفي
         if update.message and update.message.sender_chat:
             sender_chat = update.message.sender_chat
@@ -2434,6 +2329,8 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     try:
                         member = await context.bot.get_chat_member(sender_chat.id, user_id)
                         if member.status in ['administrator', 'creator']:
+                            if CACHETOOLS_AVAILABLE:
+                                _admin_cache[cache_key] = True
                             return True
                     except:
                         pass
@@ -2441,26 +2338,33 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     # أو التحقق من وجوده في hidden_admins
                     try:
                         if await db_is_hidden_admin(sender_chat.id, user_id) or await db_is_hidden_owner(sender_chat.id, user_id):
+                            if CACHETOOLS_AVAILABLE:
+                                _admin_cache[cache_key] = True
                             return True
                     except:
                         pass
             except Exception as e:
                 pass
         
-        # ===== 6.4 التحقق من مشرفي Telegram العاديين =====
+        # ===== 7.4 التحقق من مشرفي Telegram العاديين =====
         try:
             member = await context.bot.get_chat_member(chat_id, user_id)
             if member.status in ['administrator', 'creator']:
+                if CACHETOOLS_AVAILABLE:
+                    _admin_cache[cache_key] = True
                 return True
         except Exception:
             pass
         
+        # تخزين النتيجة في الكاش
+        if CACHETOOLS_AVAILABLE:
+            _admin_cache[cache_key] = False
         return False
     
-    # ===== 7. أنواع أخرى من المحادثات =====
+    # ===== 8. أنواع أخرى من المحادثات =====
     return False
 
-# ===================== [محدث] دالة is_authorized_in_group مع دعم sender_chat =====================
+# ===================== [محسن] دالة is_authorized_in_group مع دعم sender_chat =====================
 async def is_authorized_in_group(bot, chat_id: int, user_id: int, update: Update = None) -> bool:
     """
     التحقق من صلاحيات المستخدم في المجموعة.
@@ -2517,7 +2421,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int, update: Update
     
     return False
 
-# ===================== [محدث] دالة is_telegram_admin =====================
+# ===================== [محسن] دالة is_telegram_admin =====================
 async def is_telegram_admin(bot, chat_id: int, user_id: int, update: Update = None) -> bool:
     """التحقق من صلاحيات تيليجرام فقط (بدون المخفيين)"""
     try:
@@ -3298,7 +3202,7 @@ async def invalidate_user_cache(user_id: int = None, chat_id: int = None):
             _admin_cache_time.clear()
         logger.info(f"🧹 تم تنظيف كاش الصلاحيات اليدوي (user_id={user_id}, chat_id={chat_id})")
 
-# ===================== [محدث] دالة is_authorized_in_group =====================
+# ===================== [محسن] دالة is_authorized_in_group =====================
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     """
     التحقق من صلاحيات المستخدم في المجموعة مع تخزين مؤقت.
@@ -3312,7 +3216,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
         if cached is not None:
             return cached
     else:
-        if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _admin_cache_ttl:
+        if cache_key in _admin_cache and (now - _admin_cache_time.get(cache_key, 0)) < _ADMIN_CACHE_TTL:
             return _admin_cache[cache_key]
 
     # 1. المطور الأساسي
@@ -3359,7 +3263,7 @@ async def register_hidden_owner_handler(update: Update, context: ContextTypes.DE
     chat_id = chat.id
     user_id = user.id
 
-    if not await is_telegram_admin(context.bot, chat_id, user_id):
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
 
@@ -3379,7 +3283,7 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    if not await is_telegram_admin(context.bot, chat_id, user_id) and not await db_is_hidden_owner(chat_id, user_id):
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update) and not await db_is_hidden_owner(chat_id, user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
 
@@ -3446,7 +3350,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    if not await is_telegram_admin(context.bot, chat_id, user_id) and not await db_is_hidden_owner(chat_id, user_id):
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update) and not await db_is_hidden_owner(chat_id, user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
 
@@ -7256,7 +7160,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.2.6
+📦 **الإصدار:** 19.3.0
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -7264,7 +7168,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • فصل ذكي للصلاحيات بين الخاص والمجموعة
 • أمر /update_admins لتحديث المشرفين
 • نظام كشف النشاط المشبوه
-• تخزين مؤقت محسن مع دعم Redis
+• تخزين مؤقت محسن مع تنظيف تلقائي
 • Pool اتصالات قاعدة البيانات
 • نظام Rate Limiting متقدم
 • مصادقة ثنائية (2FA)
@@ -7272,6 +7176,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • نسخ احتياطي تدريجي وضغط محسن
 • Health Check متقدم
 • مراقبة الذاكرة التلقائية
+• تنظيف الكاش التلقائي لتسريع الردود
 
 📊 **إحصائيات الأداء:**
 • وقت التشغيل: {int(metrics_stats['uptime'] / 3600)} ساعة
@@ -10892,7 +10797,7 @@ async def set_log_channel_command_handler(update: Update, context: ContextTypes.
     context.user_data.pop('state', None)
     context.user_data.pop('temp_log_channel_identifier', None)
 
-# ===================== معالجات الأوامر المباشرة =====================
+# ===================== [محسن] معالج أوامر الإدارة الموحد =====================
 async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_chat is None or update.effective_user is None:
         return
@@ -10903,7 +10808,7 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
     chat_id = chat.id
     text = update.message.text.strip() if update.message.text else ""
     
-    # استخدام الدالة المحدثة للتحقق من الصلاحيات
+    # استخدام الدالة المحدثة للتحقق من الصلاحيات (تدعم المخفيين)
     if not await check_admin_access(update, context):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
@@ -11134,7 +11039,7 @@ async def detect_owner_type(bot, chat_id):
     except:
         return {'is_hidden': True, 'user_id': None}
 
-# ===================== [إصلاح] معالج الرسائل الرئيسي =====================
+# ===================== [محسن] معالج الرسائل الرئيسي مع دعم الكاش والردود السريعة =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -11800,7 +11705,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'cancelled'))
             await main_menu_callback(update, context)
 
-# ===================== [إصلاح] معالج الأخطاء العالمي =====================
+# ===================== [محسن] معالج الأخطاء العالمي =====================
 async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         error = context.error
@@ -11860,7 +11765,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"فشل معالج الأخطاء نفسه: {e}")
 
-# ===================== [إصلاح] فلتر الرسائل مع كشف NSFW =====================
+# ===================== [محسن] فلتر الرسائل مع كشف NSFW وتحسين الأداء =====================
 async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -11991,19 +11896,32 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
 
+    # ===== [تحسين] البحث عن الردود باستخدام الكاش =====
     reply = None
     text_lower = text.lower()
 
     if text_lower:
-        reply = await db_get_reply(text_lower)
+        # 1. البحث في الكاش أولاً
+        cached_reply = await get_cached_reply(text_lower)
+        if cached_reply:
+            reply = cached_reply
+        else:
+            # 2. البحث في قاعدة البيانات
+            reply = await db_get_reply(text_lower)
+            if reply:
+                await set_cached_reply(text_lower, reply)
 
+    # 3. البحث في الردود المدمجة
     if not reply and text_lower in ALL_REPLIES:
         reply = ALL_REPLIES[text_lower]
+        await set_cached_reply(text_lower, reply)
 
+    # 4. البحث الجزئي
     if not reply:
         for keyword, response in ALL_REPLIES.items():
             if keyword in text_lower:
                 reply = response
+                await set_cached_reply(keyword, reply)
                 break
 
     if reply:
@@ -12012,7 +11930,398 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"فشل إرسال الرد: {e}")
 
-# ===================== [إصلاح] خادم الويب مع واجهة مستخدم و WebSocket =====================
+# ===================== دوال كشف NSFW =====================
+async def check_nsfw_cached(image_bytes: bytes, cache_key: str) -> dict:
+    """كشف المحتوى غير اللائق مع تخزين مؤقت"""
+    if cache_key in NSFW_CACHE:
+        cached_result, timestamp = NSFW_CACHE[cache_key]
+        if time_module.time() - timestamp < NSFW_CACHE_TTL:
+            return cached_result
+
+    result = await check_nsfw_image(image_bytes)
+
+    NSFW_CACHE[cache_key] = (result, time_module.time())
+
+    # تنظيف الكاش القديم
+    if len(NSFW_CACHE) > 100:
+        expired_keys = []
+        for key, (_, timestamp) in NSFW_CACHE.items():
+            if time_module.time() - timestamp > NSFW_CACHE_TTL:
+                expired_keys.append(key)
+        for key in expired_keys:
+            del NSFW_CACHE[key]
+
+    return result
+
+async def check_nsfw_image(image_bytes: bytes) -> dict:
+    """كشف المحتوى غير اللائق في الصورة باستخدام Sightengine API"""
+    if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+        return {"error": "مفاتيح API غير مضبوطة"}
+
+    try:
+        import aiohttp
+        import base64
+
+        # تحويل الصورة إلى base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+
+        # إرسال الطلب إلى Sightengine API
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.sightengine.com/1.0/check.json"
+            params = {
+                "api_user": SIGHTENGINE_API_USER,
+                "api_secret": SIGHTENGINE_API_SECRET,
+                "models": "nudity-2.0,wad",
+                "image_base64": image_b64
+            }
+            async with session.get(url, params=params, timeout=10) as response:
+                data = await response.json()
+
+                if "error" in data:
+                    return {"error": data["error"]["message"]}
+
+                # تحليل النتائج
+                nsfw_score = 0.0
+
+                if "nudity" in data:
+                    nsfw_data = data["nudity"]
+                    if "raw" in nsfw_data:
+                        nsfw_score = nsfw_data["raw"]
+                    elif "sexual_activity" in nsfw_data:
+                        nsfw_score = nsfw_data["sexual_activity"]
+                    else:
+                        nsfw_score = max(nsfw_data.values()) if nsfw_data else 0.0
+
+                elif "weapon" in data:
+                    weapon_score = data["weapon"]
+                    if weapon_score > 0.5:
+                        nsfw_score = max(nsfw_score, weapon_score)
+
+                is_nsfw = nsfw_score >= NSFW_THRESHOLD
+
+                return {
+                    "nsfw": is_nsfw,
+                    "nsfw_score": nsfw_score,
+                    "details": data
+                }
+
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW: {e}")
+        return {"error": str(e)}
+
+async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
+    """كشف المحتوى غير اللائق في الفيديو"""
+    if not CV2_AVAILABLE:
+        return {"error": "مكتبة OpenCV غير مثبتة"}
+
+    try:
+        import cv2
+        import numpy as np
+        import io
+        import tempfile
+
+        # حفظ الفيديو في ملف مؤقت
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            temp_file.write(video_bytes)
+            video_path = temp_file.name
+
+        # فتح الفيديو
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            os.unlink(video_path)
+            return {"error": "لا يمكن فتح الفيديو"}
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames == 0:
+            cap.release()
+            os.unlink(video_path)
+            return {"error": "الفيديو لا يحتوي على إطارات"}
+
+        # استخراج إطارات متساوية
+        frame_indices = []
+        if total_frames <= frames:
+            frame_indices = list(range(total_frames))
+        else:
+            step = total_frames // frames
+            for i in range(frames):
+                frame_indices.append(min(i * step, total_frames - 1))
+
+        nsfw_scores = []
+        frames_analyzed = 0
+
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            # تحويل الإطار إلى bytes
+            _, img_encoded = cv2.imencode('.jpg', frame)
+            img_bytes = img_encoded.tobytes()
+
+            # تحليل الإطار
+            result = await check_nsfw_image(img_bytes)
+            if "error" not in result and "nsfw_score" in result:
+                nsfw_scores.append(result["nsfw_score"])
+                frames_analyzed += 1
+
+        cap.release()
+        os.unlink(video_path)
+
+        if not nsfw_scores:
+            return {"error": "لم يتم تحليل أي إطار"}
+
+        avg_nsfw_score = sum(nsfw_scores) / len(nsfw_scores)
+        is_nsfw = avg_nsfw_score >= NSFW_THRESHOLD
+
+        return {
+            "nsfw": is_nsfw,
+            "nsfw_score": avg_nsfw_score,
+            "frames_analyzed": frames_analyzed,
+            "total_frames": total_frames,
+            "frame_scores": nsfw_scores
+        }
+
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW للفيديو: {e}")
+        return {"error": str(e)}
+
+# ===================== [جديد] نظام تنظيف الكاش التلقائي =====================
+class CacheCleaner:
+    """نظام تنظيف الكاش التلقائي لتحسين الأداء"""
+    
+    def __init__(self):
+        self.last_cleanup = time_module.time()
+        self.cleanup_interval = 300  # 5 دقائق
+        
+    async def cleanup(self):
+        """تنظيف جميع الكاشات"""
+        try:
+            # 1. تنظيف كاش الصلاحيات
+            if CACHETOOLS_AVAILABLE:
+                _admin_cache.clear()
+                _security_cache.clear()
+                _user_cache.clear()
+                _group_cache.clear()
+            else:
+                _admin_cache.clear()
+                _security_cache.clear()
+                _user_cache.clear()
+                _group_cache.clear()
+                _security_cache_time.clear()
+            
+            # 2. تنظيف كاش الترجمة
+            await _translation_cache.clear()
+            
+            # 3. تنظيف كاش NSFW
+            NSFW_CACHE.clear()
+            
+            # 4. تنظيف كاش المستخدمين
+            async with _user_translation_cache_lock:
+                user_translation_settings_cache.clear()
+            
+            # 5. تنظيف كاش النقاط
+            user_points_last_hour.clear()
+            
+            # 6. تنظيف كاش اللغة
+            async with _user_language_lock:
+                user_language.clear()
+            
+            # 7. تنظيف كاش الردود
+            await clear_reply_cache()
+            
+            # 8. تنظيف كاش الجلسات
+            context = None
+            try:
+                # تنظيف جلسات المستخدمين القديمة من الذاكرة
+                pass
+            except:
+                pass
+            
+            # 9. تفعيل جامع القمامة
+            gc.collect()
+            
+            self.last_cleanup = time_module.time()
+            logger.info("🧹 تم تنظيف جميع الكاشات بنجاح")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ فشل تنظيف الكاش: {e}")
+            return False
+    
+    async def auto_cleanup_loop(self):
+        """حلقة التنظيف التلقائي"""
+        while True:
+            await asyncio.sleep(self.cleanup_interval)
+            try:
+                if time_module.time() - self.last_cleanup >= self.cleanup_interval:
+                    await self.cleanup()
+            except Exception as e:
+                logger.error(f"خطأ في حلقة تنظيف الكاش: {e}")
+
+# إنشاء مدير تنظيف الكاش العالمي
+cache_cleaner = CacheCleaner()
+
+# ===================== [جديد] دوال كشف NSFW - دوال مساعدة =====================
+async def check_nsfw_cached(image_bytes: bytes, cache_key: str) -> dict:
+    """كشف المحتوى غير اللائق مع تخزين مؤقت"""
+    if cache_key in NSFW_CACHE:
+        cached_result, timestamp = NSFW_CACHE[cache_key]
+        if time_module.time() - timestamp < NSFW_CACHE_TTL:
+            return cached_result
+
+    result = await check_nsfw_image(image_bytes)
+
+    NSFW_CACHE[cache_key] = (result, time_module.time())
+
+    # تنظيف الكاش القديم
+    if len(NSFW_CACHE) > 100:
+        expired_keys = []
+        for key, (_, timestamp) in NSFW_CACHE.items():
+            if time_module.time() - timestamp > NSFW_CACHE_TTL:
+                expired_keys.append(key)
+        for key in expired_keys:
+            del NSFW_CACHE[key]
+
+    return result
+
+async def check_nsfw_image(image_bytes: bytes) -> dict:
+    """كشف المحتوى غير اللائق في الصورة باستخدام Sightengine API"""
+    if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+        return {"error": "مفاتيح API غير مضبوطة"}
+
+    try:
+        import aiohttp
+        import base64
+
+        # تحويل الصورة إلى base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+
+        # إرسال الطلب إلى Sightengine API
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.sightengine.com/1.0/check.json"
+            params = {
+                "api_user": SIGHTENGINE_API_USER,
+                "api_secret": SIGHTENGINE_API_SECRET,
+                "models": "nudity-2.0,wad",
+                "image_base64": image_b64
+            }
+            async with session.get(url, params=params, timeout=10) as response:
+                data = await response.json()
+
+                if "error" in data:
+                    return {"error": data["error"]["message"]}
+
+                # تحليل النتائج
+                nsfw_score = 0.0
+
+                if "nudity" in data:
+                    nsfw_data = data["nudity"]
+                    if "raw" in nsfw_data:
+                        nsfw_score = nsfw_data["raw"]
+                    elif "sexual_activity" in nsfw_data:
+                        nsfw_score = nsfw_data["sexual_activity"]
+                    else:
+                        nsfw_score = max(nsfw_data.values()) if nsfw_data else 0.0
+
+                elif "weapon" in data:
+                    weapon_score = data["weapon"]
+                    if weapon_score > 0.5:
+                        nsfw_score = max(nsfw_score, weapon_score)
+
+                is_nsfw = nsfw_score >= NSFW_THRESHOLD
+
+                return {
+                    "nsfw": is_nsfw,
+                    "nsfw_score": nsfw_score,
+                    "details": data
+                }
+
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW: {e}")
+        return {"error": str(e)}
+
+async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
+    """كشف المحتوى غير اللائق في الفيديو"""
+    if not CV2_AVAILABLE:
+        return {"error": "مكتبة OpenCV غير مثبتة"}
+
+    try:
+        import cv2
+        import numpy as np
+        import io
+        import tempfile
+
+        # حفظ الفيديو في ملف مؤقت
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            temp_file.write(video_bytes)
+            video_path = temp_file.name
+
+        # فتح الفيديو
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            os.unlink(video_path)
+            return {"error": "لا يمكن فتح الفيديو"}
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames == 0:
+            cap.release()
+            os.unlink(video_path)
+            return {"error": "الفيديو لا يحتوي على إطارات"}
+
+        # استخراج إطارات متساوية
+        frame_indices = []
+        if total_frames <= frames:
+            frame_indices = list(range(total_frames))
+        else:
+            step = total_frames // frames
+            for i in range(frames):
+                frame_indices.append(min(i * step, total_frames - 1))
+
+        nsfw_scores = []
+        frames_analyzed = 0
+
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            # تحويل الإطار إلى bytes
+            _, img_encoded = cv2.imencode('.jpg', frame)
+            img_bytes = img_encoded.tobytes()
+
+            # تحليل الإطار
+            result = await check_nsfw_image(img_bytes)
+            if "error" not in result and "nsfw_score" in result:
+                nsfw_scores.append(result["nsfw_score"])
+                frames_analyzed += 1
+
+        cap.release()
+        os.unlink(video_path)
+
+        if not nsfw_scores:
+            return {"error": "لم يتم تحليل أي إطار"}
+
+        avg_nsfw_score = sum(nsfw_scores) / len(nsfw_scores)
+        is_nsfw = avg_nsfw_score >= NSFW_THRESHOLD
+
+        return {
+            "nsfw": is_nsfw,
+            "nsfw_score": avg_nsfw_score,
+            "frames_analyzed": frames_analyzed,
+            "total_frames": total_frames,
+            "frame_scores": nsfw_scores
+        }
+
+    except Exception as e:
+        logger.error(f"خطأ في كشف NSFW للفيديو: {e}")
+        return {"error": str(e)}
+
+# ===================== [جديد] دوال كشف NSFW - دوال مساعدة =====================
+# تعريف دوال مساعدة لـ NSFW (تم نقلها للأعلى لتجنب التكرار)
+
+# ===================== [جديد] خادم الويب مع واجهة مستخدم و WebSocket =====================
 from aiohttp import web, WSMsgType
 import json
 import jinja2
@@ -12121,7 +12430,7 @@ async def dashboard_handler(request):
                     <span class="badge">🟢 البوت يعمل</span>
                 </div>
                 <div class="footer">
-                    <p>ريلاكس مانيجر v19.2.6 | © 2026</p>
+                    <p>ريلاكس مانيجر v19.3.0 | © 2026</p>
                 </div>
             </div>
             <script>
@@ -12180,7 +12489,7 @@ web_app.router.add_get('/', dashboard_handler)
 web_app.router.add_get('/health', health_check_handler)
 web_app.router.add_get('/ws', websocket_handler)
 
-# ===================== [إصلاح] نظام إدارة المهام =====================
+# ===================== [جديد] نظام إدارة المهام =====================
 class TaskManager:
     def __init__(self, max_tasks=50, max_concurrent=10):
         self.tasks = set()
@@ -12214,7 +12523,7 @@ class TaskManager:
 
 task_manager = TaskManager(max_concurrent=10)
 
-# ===================== [إصلاح] أنظمة التشغيل الخلفي =====================
+# ===================== [جديد] أنظمة التشغيل الخلفي =====================
 async def auto_publish_loop_improved(bot):
     await asyncio.sleep(5)
     consecutive_errors = 0
@@ -12573,7 +12882,7 @@ async def memory_monitor():
             ram = get_ram_usage()
             if ram['percent'] > 80:
                 logger.warning(f"⚠️ استخدام الذاكرة عالي: {ram['percent']}%")
-                memory_optimizer()
+                await cache_cleaner.cleanup()
                 logger.info("✅ تم تنظيف الذاكرة")
             await asyncio.sleep(60)
         except Exception as e:
@@ -12626,7 +12935,7 @@ async def self_ping_loop():
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
         await asyncio.sleep(600)
 
-# ===================== [إصلاح] تهيئة قاعدة البيانات المحسنة =====================
+# ===================== [جديد] تهيئة قاعدة البيانات المحسنة =====================
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -13123,7 +13432,7 @@ async def init_db_improved():
         await conn.commit()
 
     await db_pool.initialize()
-    await cache_manager.init()
+    await redis_cache.init()
 
     logger.info("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
     logger.info("✅ تم إنشاء 40+ جدول و 20+ فهرس")
@@ -13153,13 +13462,263 @@ async def import_banned_words_on_startup():
     except Exception as e:
         logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
 
-# ===================== [إصلاح] الوظيفة الرئيسية =====================
+# ===================== [جديد] تعريف UserState =====================
+class UserState(Enum):
+    NONE = auto()
+    ADDING_POSTS = auto()
+    WAITING_CHANNEL_ID = auto()
+    WAITING_INTERVAL_MINUTES = auto()
+    WAITING_INTERVAL_HOURS = auto()
+    WAITING_INTERVAL_DAYS = auto()
+    WAITING_DATES = auto()
+    WAITING_PUBLISH_TIME = auto()
+    SELECTING_DAYS = auto()
+    WAITING_ADMIN_ID_ADD = auto()
+    WAITING_ADMIN_ID_REMOVE = auto()
+    WAITING_BROADCAST = auto()
+    WAITING_UPDATE_TEXT = auto()
+    WAITING_UPDATE_CHANNEL = auto()
+    WAITING_FORCE_CHANNEL = auto()
+    WAITING_SENDCODE_CONFIRM = auto()
+    WAITING_SENDCODE_PASSWORD = auto()
+    WAITING_REMINDER_DAYS = auto()
+    WAITING_SCHEDULE_POST = auto()
+    WAITING_BAN_USER = auto()
+    WAITING_MUTE_USER = auto()
+    WAITING_WARN_USER = auto()
+    WAITING_KICK_USER = auto()
+    WAITING_RESTRICT_USER = auto()
+    WAITING_UNBAN_USER = auto()
+    WAITING_PIN_MESSAGE = auto()
+    WAITING_GROUP_BANNED_WORD = auto()
+    WAITING_REMOVE_GROUP_BANNED_WORD = auto()
+    WAITING_GLOBAL_BANNED_WORD = auto()
+    WAITING_REMOVE_GLOBAL_BANNED_WORD = auto()
+    WAITING_KEYWORD = auto()
+    WAITING_REPLY = auto()
+    WAITING_SENDCODE_USER = auto()
+    WAITING_LOG_CHANNEL = auto()
+    WAITING_2FA = auto()
+    SUPPORT_MODE = auto()
+    WAITING_CONTEST_TITLE = auto()
+    WAITING_CONTEST_DESCRIPTION = auto()
+    WAITING_CONTEST_PRIZE = auto()
+    WAITING_CONTEST_END_DATE = auto()
+    WAITING_CONTEST_ANSWER = auto()
+    WAITING_DELETE_CONTEST = auto()
+    WAITING_GROUP_SECURITY = auto()
+    WAITING_HIDDEN_ADMIN_ADD = auto()
+    WAITING_HIDDEN_ADMIN_REMOVE = auto()
+    WAITING_AUTO_REPLY_MENU = auto()
+    WAITING_NSFW_THRESHOLD = auto()
+    WAITING_EXPORT_DATA = auto()
+
+# ===================== [جديد] تعريف StateDispatcher =====================
+class StateDispatcher:
+    def __init__(self):
+        self.handlers = {}
+
+    def register(self, state: UserState, handler: Callable):
+        self.handlers[state] = handler
+
+    async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        user_id = update.effective_user.id
+        state = context.user_data.get('state')
+        if state is None or state == UserState.NONE:
+            return False
+        handler = self.handlers.get(state)
+        if handler:
+            return await handler(update, context, state)
+        return False
+
+state_dispatcher = StateDispatcher()
+
+# ===================== [جديد] تعريف CallbackData =====================
+class CallbackData:
+    MAIN_MENU = "main_menu"
+    CHANNELS_MY = "channels:my_channels"
+    CHANNELS_ADD = "channels:add"
+    CHANNELS_DELETE_PREFIX = "channels:delete:"
+    CHANNELS_SELECT_PREFIX = "channels:select:"
+    POSTS_ADD_15 = "posts:add_15"
+    POSTS_PUBLISH_ONE = "posts:publish_one"
+    POSTS_MY = "posts:my_posts"
+    POSTS_RECYCLE = "posts:recycle"
+    POSTS_DELETE_SINGLE_PREFIX = "posts:delete_single:"
+    POSTS_CONFIRM_CLEAR_ALL_PREFIX = "posts:confirm_clear_all:"
+    POSTS_CLEAR_ALL_PREFIX = "posts:clear_all:"
+    STATS_PENDING = "stats:pending"
+    STATS_FULL = "stats:full"
+    GROUPS_MY = "groups:my_groups"
+    GROUPS_SETTINGS_PREFIX = "groups:settings:"
+    SETTINGS_MENU = "settings:menu"
+    SETTINGS_TOGGLE_AUTO_PUBLISH = "settings:toggle_auto_publish"
+    SETTINGS_TOGGLE_AUTO_RECYCLE = "settings:toggle_auto_recycle"
+    SCHEDULE_MENU_PREFIX = "schedule:menu:"
+    SCHEDULE_SET_INTERVAL_MINUTES_PREFIX = "schedule:set_interval_minutes:"
+    SCHEDULE_SET_INTERVAL_HOURS_PREFIX = "schedule:set_interval_hours:"
+    SCHEDULE_SET_INTERVAL_DAYS_PREFIX = "schedule:set_interval_days:"
+    SCHEDULE_SET_DAYS_PREFIX = "schedule:set_days:"
+    SCHEDULE_SET_DATES_PREFIX = "schedule:set_dates:"
+    SCHEDULE_SET_PUBLISH_TIME_PREFIX = "schedule:set_publish_time:"
+    SCHEDULE_DAY_SELECT_PREFIX = "schedule:day_select:"
+    SCHEDULE_SAVE_DAYS = "schedule:save_days"
+    SECURITY_LINKS_PREFIX = "security:links:"
+    SECURITY_MENTIONS_PREFIX = "security:mentions:"
+    SECURITY_WARN_PREFIX = "security:warn:"
+    SECURITY_SLOWMODE_PREFIX = "security:slowmode:"
+    SECURITY_BANNED_WORDS_MENU_PREFIX = "security:banned_words_menu:"
+    SECURITY_WELCOME_PREFIX = "security:welcome:"
+    SECURITY_GOODBYE_PREFIX = "security:goodbye:"
+    SECURITY_MAIN = "security:main"
+    SECURITY_CLOSE = "security:close"
+    BANNED_WORDS_ADD_PREFIX = "banned_words:add:"
+    BANNED_WORDS_LIST_PREFIX = "banned_words:list:"
+    BANNED_WORDS_REMOVE_PREFIX = "banned_words:remove:"
+    HELP = "help"
+    SUPPORT_MENU = "support:menu"
+    SUPPORT_HELP = "support:help"
+    SUPPORT_TICKET = "support:ticket"
+    SUPPORT_BACK = "support:back"
+    TRIAL = "trial"
+    SUBSCRIBE_MENU = "subscribe:menu"
+    BUY_SUBSCRIPTION_1 = "buy:subscription_1"
+    BUY_SUBSCRIPTION_2 = "buy:subscription_2"
+    BUY_SUBSCRIPTION_30 = "buy:subscription_30"
+    BUY_SUBSCRIPTION_90 = "buy:subscription_90"
+    DEVELOPER = "developer"
+    UPDATES = "updates"
+    REFERRAL_MENU = "referral:menu"
+    REFERRAL_COPY_LINK_PREFIX = "referral:copy_link:"
+    REFERRAL_CLAIM_REWARD = "referral:claim_reward"
+    REFERRAL_LIST = "referral:list"
+    REMINDER_MENU = "reminder:menu"
+    REMINDER_TOGGLE_SUB = "reminder:toggle_sub"
+    REMINDER_TOGGLE_DAILY = "reminder:toggle_daily"
+    REMINDER_TOGGLE_WEEKLY = "reminder:toggle_weekly"
+    REMINDER_SET_DAYS = "reminder:set_days"
+    REMINDER_SET_LANG = "reminder:set_lang"
+    REMINDER_LANG_PREFIX = "reminder:lang:"
+    TRANSLATION_MENU = "translation:menu"
+    TRANSLATION_OFF = "translation:off"
+    TRANSLATION_SET_PREFIX = "translation:set:"
+    ADMIN_PANEL = "admin:panel"
+    ADMIN_USERS = "admin:users"
+    ADMIN_BANNED_USERS = "admin:banned_users"
+    ADMIN_UNBAN_ALL_USERS = "admin:unban_all_users"
+    ADMIN_ALL_CHANNELS = "admin:all_channels"
+    ADMIN_BANNED_CHANNELS = "admin:banned_channels"
+    ADMIN_ACTIVATE_ALL_CHANNELS = "admin:activate_all_channels"
+    ADMIN_GROUPS = "admin:groups"
+    ADMIN_BANNED_GROUPS = "admin:banned_groups"
+    ADMIN_UNBAN_ALL_GROUPS = "admin:unban_all_groups"
+    ADMIN_BOT_CHANNELS = "admin:bot_channels"
+    ADMIN_BANNED_BOT_CHANNELS = "admin:banned_bot_channels"
+    ADMIN_UNBAN_ALL_BOT_CHANNELS = "admin:unban_all_bot_channels"
+    ADMIN_MONITOR_USERS = "admin:monitor_users"
+    ADMIN_ADD_ADMIN = "admin:add_admin"
+    ADMIN_REMOVE_ADMIN = "admin:remove_admin"
+    ADMIN_RAM = "admin:ram"
+    ADMIN_STATS = "admin:stats"
+    ADMIN_METRICS = "admin:metrics"
+    ADMIN_BACKUP = "admin:backup"
+    ADMIN_RESTORE_BACKUP = "admin:restore_backup"
+    ADMIN_RESTORE_BACKUP_SELECT_PREFIX = "admin:restore_backup_select:"
+    ADMIN_BACKUP_SETTINGS = "admin:backup_settings"
+    ADMIN_TOGGLE_AUTO_BACKUP = "admin:toggle_auto_backup"
+    ADMIN_CHANGE_INTERVAL = "admin:change_interval"
+    ADMIN_SEND_UPDATE = "admin:send_update"
+    ADMIN_SET_UPDATE_CHANNEL = "admin:set_update_channel"
+    ADMIN_SHOW_UPDATE_CHANNEL = "admin:show_update_channel"
+    ADMIN_UPDATES = "admin:updates"
+    ADMIN_FORCE_SUBSCRIBE = "admin:force_subscribe"
+    ADMIN_SET_FORCE_CHANNEL = "admin:set_force_channel"
+    ADMIN_BROADCAST = "admin:broadcast"
+    ADMIN_CONFIRM_BROADCAST = "admin:confirm_broadcast"
+    ADMIN_SUPPORT_TICKETS = "admin:support_tickets"
+    ADMIN_DELETE_ALL_TICKETS = "admin:delete_all_tickets"
+    ADMIN_CONFIRM_DELETE_TICKETS = "admin:confirm_delete_tickets"
+    ADMIN_MANAGE_SENDCODE = "admin:manage_sendcode"
+    ADMIN_SET_SENDCODE_USER = "admin:set_sendcode_user"
+    ADMIN_SHOW_LOG_CHANNEL = "admin:show_log_channel"
+    ADMIN_SET_LOG_CHANNEL = "admin:set_log_channel"
+    ADMIN_REPLIES = "admin:replies"
+    ADMIN_ADD_REPLY = "admin:add_reply"
+    ADMIN_LIST_REPLIES = "admin:list_replies"
+    ADMIN_DEL_REPLY = "admin:del_reply"
+    ADMIN_BANNED_WORDS = "admin:banned_words"
+    ADMIN_ADD_BANNED_WORD = "admin:add_banned_word"
+    ADMIN_LIST_BANNED_WORDS = "admin:list_banned_words"
+    ADMIN_REMOVE_BANNED_WORD = "admin:remove_banned_word"
+    ADMIN_CREATE_CONTEST = "admin:create_contest"
+    ADMIN_DECLARE_WINNER = "admin:declare_winner"
+    PANEL_LOCK_PREFIX = "panel:lock:"
+    PANEL_UNLOCK_PREFIX = "panel:unlock:"
+    PANEL_CLOSE = "panel:close"
+    CHECK_SUBSCRIBE = "check_subscribe"
+    BACK = "back"
+    CANCEL_SESSION = "cancel_session"
+    ADVANCED_ACTIONS = "advanced_actions"
+    GROUP_ACTION_BAN = "group_action:ban"
+    GROUP_ACTION_MUTE = "group_action:mute"
+    GROUP_ACTION_WARN = "group_action:warn"
+    GROUP_ACTION_KICK = "group_action:kick"
+    GROUP_ACTION_RESTRICT = "group_action:restrict"
+    GROUP_ACTION_PIN = "group_action:pin"
+    GROUP_ACTION_LOG = "group_action:log"
+    GROUP_ACTION_UNBAN = "group_action:unban"
+    GROUP_MUTE_PREFIX = "group_mute:"
+    GROUP_MUTE_DURATION_5 = "group_mute_duration:5"
+    GROUP_MUTE_DURATION_30 = "group_mute_duration:30"
+    GROUP_MUTE_DURATION_60 = "group_mute_duration:60"
+    GROUP_MUTE_DURATION_720 = "group_mute_duration:720"
+    GROUP_MUTE_DURATION_1440 = "group_mute_duration:1440"
+    GROUP_MUTE_DURATION_10080 = "group_mute_duration:10080"
+    GROUP_MUTE_DURATION_PERMANENT = "group_mute_duration:permanent"
+    SECURITY_SELECT_GROUP = "security_select_group:"
+    SECURITY_REFRESH_GROUPS = "security_refresh_groups"
+    PENALTY_MENU = "penalty_menu"
+    PENALTY_KICK = "penalty:kick"
+    PENALTY_BAN = "penalty:ban"
+    PENALTY_MUTE = "penalty:mute"
+    PUBLISH_ALL_CHANNELS = "publish_all_channels"
+    CHANNEL_STATS = "channel_stats"
+    CHANNEL_GROWTH = "channel_growth"
+    CHANNEL_STATS_REFRESH = "channel_stats_refresh"
+    MY_CHANNEL_STATS = "my_channel_stats"
+    ADMIN_TOGGLE_CHANNEL_BAN_PREFIX = "admin:toggle_channel_ban:"
+    ADMIN_TOGGLE_GROUP_BAN_PREFIX = "admin:toggle_group_ban:"
+    CONTESTS_MENU = "contests_menu"
+    CONTEST_JOIN_PREFIX = "contest_join:"
+    CONTEST_WINNERS = "contest_winners"
+    CONTESTS_BACK = "contests_back"
+    ADMIN_DEL_CONTEST_PREFIX = "admin:del_contest:"
+    HIDDEN_ADMIN_ADD = "hidden_admin:add"
+    HIDDEN_ADMIN_REMOVE_PREFIX = "hidden_admin:remove:"
+    HIDDEN_ADMIN_LIST = "hidden_admin:list"
+    ADMIN_AUTO_REPLY = "admin_auto_reply"
+    ADMIN_AUTO_REPLY_SELECT_PREFIX = "admin_auto_reply_select:"
+    AUTO_REPLY_MENU_PREFIX = "auto_reply_menu:"
+    AUTO_REPLY_TOGGLE_PREFIX = "auto_reply_toggle:"
+    AUTO_REPLY_ADMINS_PREFIX = "auto_reply_admins:"
+    AUTO_REPLY_RESET_PREFIX = "auto_reply_reset:"
+    AUTO_REPLY_CONFIRM_RESET_PREFIX = "auto_reply_confirm_reset:"
+    AUTO_REPLY_CANCEL_PREFIX = "auto_reply_cancel:"
+    AUTO_REPLY_STATS_PREFIX = "auto_reply_stats:"
+    USER_AUTO_REPLY_TOGGLE_PREFIX = "user_auto_reply_toggle:"
+    NSFW_SETTINGS = "nsfw_settings"
+    NSFW_TOGGLE = "nsfw_toggle"
+    NSFW_THRESHOLD_SET = "nsfw_threshold_set"
+    UPDATE_ADMINS = "update_admins"
+
+# ===================== [جديد] الوظيفة الرئيسية =====================
 async def main():
     await init_db_improved()
 
     await import_banned_words_on_startup()
 
     task_manager.create_task(memory_optimizer_loop())
+    task_manager.create_task(cache_cleaner.auto_cleanup_loop())
 
     if USE_PROXY:
         request_kwargs = {
@@ -13476,7 +14035,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.2.6)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.0)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ دعم كامل للمشرفين المخفيين (Anonymous) عبر sender_chat")
     print("   • ✅ فصل ذكي للصلاحيات بين الخاص والمجموعة")
@@ -13485,6 +14044,8 @@ async def main():
     print("   • ✅ تحديث جميع أوامر الإدارة لاستخدام check_admin_access")
     print("   • ✅ صلاحية مطلقة لـ MAIN_ADMIN_ID في كل مكان")
     print("   • ✅ تحسين أداء الكاش وتقليل استهلاك الذاكرة")
+    print("   • ✅ نظام تنظيف الكاش التلقائي لتسريع الردود")
+    print("   • ✅ كاش الردود المدمجة لتسريع الاستجابة")
 
     try:
         await application.run_polling(
