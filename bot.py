@@ -14,7 +14,7 @@
 ├── banned_words.txt ← الكلمات المحظورة
 └── .env            ← متغيرات البيئة
 """
-
+from typing import Callable, List, Dict, Optional, Any
 import sys
 import os
 from pathlib import Path
