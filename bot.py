@@ -1477,7 +1477,7 @@ notification_system = NotificationSystem()
 async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
     if not text:
         return None
-    clean_text = sanitize_text(text)
+        Clean_text = sanitize_text(text)
     try:
         escaped = escape_markdown_v2(clean_text)
         if len(escaped) > 4096:
@@ -1487,9 +1487,12 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
             text=escaped,
             parse_mode='MarkdownV2',
             reply_markup=reply_markup,
-            timeout=REQUEST_TIMEOUT,
             **kwargs
         )
+    except BadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            try:
+
     except BadRequest as e:
         if "can't parse entities" in str(e).lower():
             try:
@@ -1501,7 +1504,6 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
                     text=html_text,
                     parse_mode='HTML',
                     reply_markup=reply_markup,
-                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
             except:
@@ -1512,7 +1514,6 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
                     chat_id=chat_id,
                     text=plain,
                     reply_markup=reply_markup,
-                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
         raise
@@ -1548,7 +1549,6 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
             text=escaped,
             parse_mode='MarkdownV2',
             reply_markup=reply_markup,
-            timeout=REQUEST_TIMEOUT,
             **kwargs
         )
     except BadRequest as e:
@@ -1562,7 +1562,6 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                     text=html_text,
                     parse_mode='HTML',
                     reply_markup=reply_markup,
-                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
             except:
@@ -1572,7 +1571,6 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                 return await query.edit_message_text(
                     text=plain,
                     reply_markup=reply_markup,
-                    timeout=REQUEST_TIMEOUT,
                     **kwargs
                 )
         elif "message is not modified" in error_msg:
