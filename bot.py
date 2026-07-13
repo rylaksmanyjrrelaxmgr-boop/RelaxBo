@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.1 - جميع التصحيحات والتحسينات
+الإصدار: 19.3.2 - جميع التصحيحات والتحسينات مع معالجة أخطاء محسنة
 المطور: @RelaxMgr
 """
 
@@ -5892,27 +5892,31 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
 
 # ===================== معالجات الكولباك الأساسية =====================
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # [تحسين 6] if not update: return
-    if not update:
-        return
-    
-    query = update.callback_query
-    if query:
-        await query.answer()
-    
-    # [تحسين 2] if not update.effective_user: return
-    if not update.effective_user:
-        return
-    
-    uid = update.effective_user.id
-    kb, title, active_channel = await get_main_keyboard(uid)
-    if active_channel:
-        context.user_data['active_channel'] = active_channel
-        await db_set_active_channel(uid, active_channel)
-    if query:
-        await safe_edit_markdown(query, title, reply_markup=kb)
-    else:
-        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
+    try:
+        # [تحسين 6] if not update: return
+        if not update:
+            return
+        
+        query = update.callback_query
+        if query:
+            await query.answer()
+        
+        # [تحسين 2] if not update.effective_user: return
+        if not update.effective_user:
+            return
+        
+        uid = update.effective_user.id
+        kb, title, active_channel = await get_main_keyboard(uid)
+        if active_channel:
+            context.user_data['active_channel'] = active_channel
+            await db_set_active_channel(uid, active_channel)
+        if query:
+            await safe_edit_markdown(query, title, reply_markup=kb)
+        else:
+            await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
+    except Exception as e:
+        error_id = log_error(e, {'user_id': uid, 'action': 'main_menu'})
+        await safe_send_markdown(context.bot, uid, f"❌ حدث خطأ في القائمة الرئيسية (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى.")
 
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu_callback(update, context)
@@ -7926,7 +7930,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.3.1
+📦 **الإصدار:** 19.3.2
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -12120,53 +12124,57 @@ async def is_user_subscribed(bot, user_id, channel):
         return False
 
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # [تحسين 6] if not update: return
-    if not update:
-        return
-    
-    # [تحسين 2] if not update.effective_user: return
-    if not update.effective_user:
-        return
-    
-    user = update.effective_user
-    if not user:
-        return
+    try:
+        # [تحسين 6] if not update: return
+        if not update:
+            return
+        
+        # [تحسين 2] if not update.effective_user: return
+        if not update.effective_user:
+            return
+        
+        user = update.effective_user
+        if not user:
+            return
 
-    user_id = user.id
-    username = user.username or ""
-    first_name = user.first_name or ""
+        user_id = user.id
+        username = user.username or ""
+        first_name = user.first_name or ""
 
-    await db_register_user(user_id)
-    await db_update_user_cache(user_id, username, first_name)
+        await db_register_user(user_id)
+        await db_update_user_cache(user_id, username, first_name)
 
-    if context.args and context.args[0].startswith('ref_'):
-        referral_code = context.args[0].replace('ref_', '')
-        referrer_id = await db_get_user_by_referral_code(referral_code)
-        if referrer_id and referrer_id != user_id:
-            success = await db_add_referral(referrer_id, user_id)
-            if success:
-                reward_days = await db_auto_reward_referral(referrer_id, user_id)
-                try:
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"🎉 **تهانينا!**\nقام {first_name} بالاشتراك باستخدام رابط إحالتك!\nتم إضافة {reward_days} أيام إلى اشتراكك 🎁",
-                        parse_mode="MarkdownV2"
-                    )
-                except:
-                    pass
-                welcome_points = await db_get_welcome_bonus_points()
-                if welcome_points > 0:
-                    level_data = await db_get_user_level(user_id)
-                    await db_update_user_level(user_id, level_data['points'] + welcome_points, level_data['level'])
-
-                achievement = await achievement_system(referrer_id, 'first_referral')
-                if achievement:
+        if context.args and context.args[0].startswith('ref_'):
+            referral_code = context.args[0].replace('ref_', '')
+            referrer_id = await db_get_user_by_referral_code(referral_code)
+            if referrer_id and referrer_id != user_id:
+                success = await db_add_referral(referrer_id, user_id)
+                if success:
+                    reward_days = await db_auto_reward_referral(referrer_id, user_id)
                     try:
-                        await context.bot.send_message(chat_id=referrer_id, text=f"🏅 {achievement}")
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"🎉 **تهانينا!**\nقام {first_name} بالاشتراك باستخدام رابط إحالتك!\nتم إضافة {reward_days} أيام إلى اشتراكك 🎁",
+                            parse_mode="MarkdownV2"
+                        )
                     except:
                         pass
+                    welcome_points = await db_get_welcome_bonus_points()
+                    if welcome_points > 0:
+                        level_data = await db_get_user_level(user_id)
+                        await db_update_user_level(user_id, level_data['points'] + welcome_points, level_data['level'])
 
-    await main_menu_callback(update, context)
+                    achievement = await achievement_system(referrer_id, 'first_referral')
+                    if achievement:
+                        try:
+                            await context.bot.send_message(chat_id=referrer_id, text=f"🏅 {achievement}")
+                        except:
+                            pass
+
+        await main_menu_callback(update, context)
+    except Exception as e:
+        error_id = log_error(e, {'user_id': update.effective_user.id if update and update.effective_user else None})
+        await safe_send_markdown(context.bot, user_id, f"❌ حدث خطأ أثناء بدء البوت (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى لاحقاً.")
 
 # ===================== [محسن] معالج /sendcode مع مهلة 10 دقائق =====================
 async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14120,8 +14128,6 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
         return {"error": str(e)}
 
 # ===================== دوال المالك والمشرفين المخفيين =====================
-
-# ===== register_hidden_owner_handler =====
 async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
     if not update:
@@ -14155,7 +14161,6 @@ async def register_hidden_owner_handler(update: Update, context: ContextTypes.DE
     await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
     await security_audit.log("HIDDEN_OWNER_REGISTERED", user_id, {"chat_id": chat_id}, "CRITICAL")
 
-# ===== add_hidden_admin_command =====
 async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
     if not update:
@@ -14210,7 +14215,6 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     else:
         await update.message.reply_text("❌ حدث خطأ أثناء إضافة المشرف المخفي.")
 
-# ===== remove_hidden_admin_command =====
 async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
     if not update:
@@ -14261,7 +14265,6 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     else:
         await update.message.reply_text("❌ حدث خطأ أثناء إزالة المشرف المخفي.")
 
-# ===== list_hidden_admins_command =====
 async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
     if not update:
@@ -14416,7 +14419,7 @@ async def dashboard_handler(request):
                     <span class="badge">🟢 البوت يعمل</span>
                 </div>
                 <div class="footer">
-                    <p>ريلاكس مانيجر v19.3.1 | © 2026</p>
+                    <p>ريلاكس مانيجر v19.3.2 | © 2026</p>
                 </div>
             </div>
             <script>
@@ -15772,7 +15775,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.1)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.2)")
     print("✅ جميع التصحيحات والتحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ 12 خطأ خطير تم تصحيحها")
     print("   • ✅ 13 خطأ متوسط تم تصحيحها")
@@ -15783,6 +15786,7 @@ async def main():
     print("   • ✅ نظام تنظيف الكاش التلقائي لتسريع الردود")
     print("   • ✅ كاش الردود المدمجة لتسريع الاستجابة")
     print("   • ✅ جميع الدوال والكولباك محفوظة بالكامل")
+    print("   • ✅ معالجة أخطاء محسنة في start_command_handler")
 
     try:
         await application.run_polling(
