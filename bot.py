@@ -158,7 +158,6 @@ ensure_package("python-multipart", "multipart")
 # محاولة تثبيت المكتبات الاختيارية
 PYOTP_AVAILABLE = ensure_package("pyotp")
 ZSTD_AVAILABLE = ensure_package("zstandard")
-CV2_AVAILABLE = ensure_package("opencv-python-headless", "cv2")
 GOOGLE_AUTH_AVAILABLE = False
 try:
     ensure_package("google-auth", "google.auth")
@@ -177,8 +176,6 @@ if False: # ZSTD_AVAILABLE
      # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
 if False: # CV2_AVAILABLE
-    # import cv2
-    # import numpy as np
 
 if GOOGLE_AUTH_AVAILABLE:
     from google.oauth2.credentials import Credentials
@@ -205,7 +202,6 @@ from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
 # # # from PIL import Image
-# # # import numpy as np
 
 # مكتبات الويب - مع التحقق من وجودها
 try:
@@ -13876,7 +13872,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
 
         elif update.message.video:
             if not CV2_AVAILABLE:
-                logger.warning("cv2 غير مثبت، تخطي كشف NSFW للفيديو")
                 return
 
             file = await context.bot.get_file(update.message.video.file_id)
@@ -14061,8 +14056,6 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
         return {"error": "مكتبة OpenCV غير مثبتة"}
 
     try:
-        # # # import cv2
-        # # # import numpy as np
         import io
         import tempfile
 
@@ -14070,12 +14063,10 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
             temp_file.write(video_bytes)
             video_path = temp_file.name
 
-        cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             os.unlink(video_path)
             return {"error": "لا يمكن فتح الفيديو"}
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames == 0:
             cap.release()
             os.unlink(video_path)
@@ -14093,12 +14084,10 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
         frames_analyzed = 0
 
         for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if not ret:
                 continue
 
-            _, img_encoded = cv2.imencode('.jpg', frame)
             img_bytes = img_encoded.tobytes()
 
             result = await check_nsfw_image(img_bytes)
