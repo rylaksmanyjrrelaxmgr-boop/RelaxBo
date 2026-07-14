@@ -15267,10 +15267,49 @@ async def import_banned_words_on_startup():
         else:
             logger.info(f"📭 لا توجد كلمات محظورة في {BANNED_WORDS_FILE} للاستيراد")
     except Exception as e:
-        logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+    
+   logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+
+# ===================== دعم أزرار ستار وهلب =====================
+async def star_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج زر ستار"""
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except:
+            pass
+    
+    try:
+        user_id = update.effective_user.id
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⭐ **مرحباً بك في ريلاكس مانيجر!**\n\n📌 استخدم /start للقائمة الرئيسية",
+            parse_mode="MarkdownV2"
+        )
+    except Exception as e:
+        print(f"خطأ في star_button: {e}")
+
+async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج زر هلب"""
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except:
+            pass
+    
+    try:
+        user_id = update.effective_user.id
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❓ **المساعدة**\n\n📌 استخدم /help للحصول على المساعدة الكاملة",
+            parse_mode="MarkdownV2"
+        )
+    except Exception as e:
+        print(f"خطأ في help_button: {e}")
 
 # ===================== الوظيفة الرئيسية =====================
-
 async def main():
     await init_db_improved()
 
@@ -15625,3 +15664,157 @@ async def main():
         await task_manager.cancel_all()
         await db_pool.close()
         logger.info("✅ تم تنظيف الموارد بنجاح")
+
+# ===================== دوال إضافية =====================
+async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+
+    if await db_is_hidden_owner(chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'hidden_owner_already'))
+        return
+
+    await db_register_hidden_owner_group(chat_id, user_id)
+    await invalidate_user_cache(user_id=user_id, chat_id=chat_id)
+    await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
+
+async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("📝 **الاستخدام:**\n`/add_hidden_admin user_id`")
+        return
+
+    try:
+        admin_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح.")
+        return
+
+    if admin_id == user_id:
+        await update.message.reply_text("❌ لا يمكن إضافة نفسك كمشرف مخفي.")
+        return
+
+    if await db_is_hidden_admin(chat_id, admin_id):
+        await update.message.reply_text("⚠️ هذا المستخدم مشرف مخفي بالفعل.")
+        return
+
+    if await db_add_hidden_admin(chat_id, admin_id, user_id):
+        await invalidate_user_cache(user_id=admin_id, chat_id=chat_id)
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(admin_id))
+    else:
+        await update.message.reply_text("❌ فشل إضافة المشرف المخفي.")
+
+async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("📝 **الاستخدام:**\n`/remove_hidden_admin user_id`")
+        return
+
+    try:
+        admin_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح.")
+        return
+
+    if not await db_is_hidden_admin(chat_id, admin_id):
+        await update.message.reply_text("⚠️ هذا المستخدم ليس مشرفاً مخفياً.")
+        return
+
+    if await db_remove_hidden_admin(chat_id, admin_id):
+        await invalidate_user_cache(user_id=admin_id, chat_id=chat_id)
+        await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(admin_id))
+    else:
+        await update.message.reply_text("❌ فشل إزالة المشرف المخفي.")
+
+async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [تحسين 6] if not update: return
+    if not update:
+        return
+    
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_telegram_admin(context.bot, chat_id, user_id, update):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+
+    admins = await db_get_hidden_admins(chat_id)
+
+    if not admins:
+        await update.message.reply_text(get_text(user_id, 'no_hidden_admins'))
+        return
+
+    text = get_text(user_id, 'hidden_admin_list').format("")
+    for admin in admins:
+        admin_id = admin['admin_id']
+        added_by = admin['added_by']
+        added_at = admin['added_at']
+        try:
+            dt = datetime.fromisoformat(added_at)
+            dt_mecca = utc_to_mecca(dt)
+            date_str = dt_mecca.strftime("%Y-%m-%d %H:%M")
+        except:
+            date_str = added_at or "غير معروف"
+        text += f"• `{admin_id}` (أضيف بواسطة `{added_by}`)\n   🕐 {date_str}\n"
+
+    await safe_send_markdown(context.bot, user_id, text)
+
+# ===================== بدء التشغيل =====================
+if __name__ == "__main__":
+    try:
+        os.environ["WEB_CONCURRENCY"] = "1"
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البوت")
+    except Exception as e:
+        logger.error(f"❌ خطأ فادح: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
