@@ -222,20 +222,32 @@ DEFAULT_RULES = """
 # إذا لم يتم تحميل الردود من الملف، استخدم الردود الافتراضية
 DEFAULT_REPLIES = {
     "مرحباً": "أهلاً وسهلاً بك في مجموعتنا 🤍",
+    "مرحبا": "أهلاً وسهلاً بك في مجموعتنا 🤍",
     "السلام عليكم": "وعليكم السلام ورحمة الله وبركاته 🌹",
+    "السلام عليكم ورحمة الله": "وعليكم السلام ورحمة الله وبركاته 🌹",
     "كيف حالك": "الحمد لله، بخير وأنت؟ ❤️",
+    "كيف الحال": "الحمد لله، بخير وأنت؟ ❤️",
+    "شو اخبارك": "كل الخير، كيفك أنت؟ 🌹",
+    "اخبارك": "كل الخير، كيفك أنت؟ 🌹",
     "شكراً": "العفو، تحت أمرك دائماً ❤️",
+    "شكرا": "العفو، تحت أمرك دائماً ❤️",
+    "تسلم": "الله يسلمك 🌹",
     "ما شاء الله": "تبارك الرحمن 🤍",
     "الحمد لله": "الحمد لله دائماً وأبداً 🙏",
     "الله اكبر": "الله أكبر كبيراً 🌹",
-    "شو اخبارك": "كل الخير، كيفك أنت؟ 🌹",
-    "وينك": "أنا هنا، شنو تحتاج؟ 🤖",
+    "سبحان الله": "سبحان الله وبحمده 🌹",
+    "استغفر الله": "ربي اغفر لي ولوالديّ 🙏",
+    "لا اله الا الله": "لا إله إلا الله محمد رسول الله 🙏",
+    "ان شاء الله": "إن شاء الله خير 🌹",
     "شنو اسمك": "أنا البوت، تحت أمرك 🙏",
     "منو انت": "أنا البوت، مساعد المجموعة 🛡️",
+    "وينك": "أنا هنا، شنو تحتاج؟ 🤖",
     "ممنوع": "تم التنبيه، يرجى احترام قوانين المجموعة 🚫",
     "قوانين": "قوانين المجموعة موجودة في الوصف 📋",
+    "القوانين": "قوانين المجموعة موجودة في الوصف 📋",
     "بليز": "حاضر، أرسل طلبك بالتفصيل 📝",
     "مساعدة": "كيف أقدر أساعدك؟ 🤖",
+    "مساعده": "كيف أقدر أساعدك؟ 🤖",
     "تمام": "تمام يا غالي 🌸",
     "مع السلامة": "مع السلامة، تشرفنا بك 🌸",
     "باي": "باي، نورت 🌹",
@@ -244,10 +256,12 @@ DEFAULT_REPLIES = {
     "تصبح على خير": "وأنت من أهله 🌙",
     "حاضر": "حاضر، أنا جاهز 💪",
     "اوك": "أوكي، تحت أمرك 🙏",
-    "ان شاء الله": "إن شاء الله خير 🌹",
-    "استغفر الله": "ربي اغفر لي ولوالديّ 🙏",
-    "سبحان الله": "سبحان الله وبحمده 🌹",
-    "لا اله الا الله": "لا إله إلا الله محمد رسول الله 🙏",
+    "اوكي": "أوكي، تحت أمرك 🙏",
+    "هلا": "هلا وغلا 🌹",
+    "هلا بيك": "هلا بك 🌹",
+    "نورت": "نورك الله 🌹",
+    "الله يوفقك": "آمين وإياك 🤍",
+    "ربي يوفقك": "آمين وإياك 🤍",
 }
 
 # استخدام الردود المحملة أو الافتراضية
@@ -324,7 +338,17 @@ def load_translations():
             "trial": "🎁 **تم تفعيل التجربة المجانية!**\n✅ لديك 30 يوماً مجاناً",
             "trial_used": "❌ لقد استخدمت التجربة المجانية مسبقاً",
             "already_subscribed": "✅ لديك اشتراك فعال بالفعل",
-            "subscribe": "💎 **الاشتراك**\nاختر الباقة:"
+            "subscribe": "💎 **الاشتراك**\nاختر الباقة:",
+            "support_welcome": "📞 **مرحباً بك في قسم الدعم**\nاختر أحد الخيارات:",
+            "support_help": "❓ **المساعدة**\n\nيمكنك التواصل مع المطور: @RelaxMgr",
+            "referral_title": "🔗 **الإحالات**\n\n📌 كود الإحالة الخاص بك:\n`{0}`\n\n👥 عدد الإحالات: {3}\n🎁 الأيام المتاحة: {4} يوم\n\n📤 شارك الرابط:\n`https://t.me/{1}?start=ref_{2}`\n\n💎 كل إحالة تمنحك {5} أيام اشتراك إضافية!",
+            "no_reward_available": "❌ لا توجد مكافآت متاحة حالياً.",
+            "reward_claimed": "✅ تم صرف {0} يوم اشتراك إضافي!",
+            "no_referrals": "📭 لا توجد إحالات حتى الآن.",
+            "referral_list": "قائمة الإحالات",
+            "claim_reward": "🎁 صرف المكافأة",
+            "copy_link": "📋 نسخ الرابط",
+            "reminder_title": "🔔 **إعدادات التذكيرات**\n\n📌 تذكير الاشتراك: {0}\n📊 تذكير إحصائيات يومي: {1}\n📈 تقرير أسبوعي: {2}\n⏰ التذكير قبل: {3} أيام"
         },
         "en": {
             "welcome": "🌿 **Welcome to Relax Manager**",
@@ -349,7 +373,17 @@ def load_translations():
             "trial": "🎁 **Free Trial Activated!**\n✅ You have 30 days free",
             "trial_used": "❌ You have already used the free trial",
             "already_subscribed": "✅ You already have an active subscription",
-            "subscribe": "💎 **Subscription**\nChoose your plan:"
+            "subscribe": "💎 **Subscription**\nChoose your plan:",
+            "support_welcome": "📞 **Welcome to Support**\nChoose an option:",
+            "support_help": "❓ **Help**\n\nContact the developer: @RelaxMgr",
+            "referral_title": "🔗 **Referrals**\n\n📌 Your referral code:\n`{0}`\n\n👥 Total referrals: {3}\n🎁 Available days: {4} day\n\n📤 Share the link:\n`https://t.me/{1}?start=ref_{2}`\n\n💎 Each referral gives you {5} extra subscription days!",
+            "no_reward_available": "❌ No rewards available.",
+            "reward_claimed": "✅ Claimed {0} extra subscription days!",
+            "no_referrals": "📭 No referrals yet.",
+            "referral_list": "Referral List",
+            "claim_reward": "🎁 Claim Reward",
+            "copy_link": "📋 Copy Link",
+            "reminder_title": "🔔 **Reminder Settings**\n\n📌 Subscription reminder: {0}\n📊 Daily stats reminder: {1}\n📈 Weekly report: {2}\n⏰ Remind before: {3} days"
         }
     }
     if not TRANSLATIONS_FILE.exists():
@@ -1101,7 +1135,7 @@ async def execute_db(func):
     return await func(db_pool)
 
 # ====================================================================
-# ===================== الدوال الأساسية (مختصرة) =====================
+# ===================== الدوال الأساسية =====================
 # ====================================================================
 
 # دوال المستخدمين
@@ -1271,7 +1305,34 @@ async def db_set_active_channel(user_id: int, channel_db_id: int):
         await conn.commit()
     return await execute_db(_set)
 
-# دوال المنشورات (مختصرة)
+async def db_get_user_channels_count(user_id: int) -> int:
+    async def _get(conn):
+        cur = await conn.execute("SELECT COUNT(*) FROM user_channels WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else 0
+    return await execute_db(_get)
+
+async def db_get_user_unpublished_posts(user_id: int) -> int:
+    async def _get(conn):
+        cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=? AND p.published=0", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else 0
+    return await execute_db(_get)
+
+async def db_get_user_total_posts(user_id: int) -> int:
+    async def _get(conn):
+        cur = await conn.execute("SELECT COUNT(*) FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE uc.user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else 0
+    return await execute_db(_get)
+
+async def db_get_user_posts_for_channel(channel_db_id: int, limit=15):
+    async def _get(conn):
+        cur = await conn.execute("SELECT id, text, media_type FROM posts WHERE channel_db_id=? AND published=0 ORDER BY id LIMIT ?", (channel_db_id, limit))
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+# دوال المنشورات
 async def db_save_posts(channel_db_id: int, posts: list) -> int:
     async def _save(conn):
         values = []
@@ -1322,6 +1383,16 @@ async def db_unpublished_count(channel_db_id: int) -> int:
         return row[0] if row else 0
     return await execute_db(_count)
 
+async def db_delete_single_post(post_id: int, user_id: int, channel_db_id: int) -> bool:
+    async def _delete(conn):
+        cur = await conn.execute("SELECT 1 FROM posts p JOIN user_channels uc ON p.channel_db_id=uc.id WHERE p.id=? AND uc.user_id=?", (post_id, user_id))
+        if not await cur.fetchone():
+            return False
+        await conn.execute("DELETE FROM posts WHERE id=?", (post_id,))
+        await conn.commit()
+        return True
+    return await execute_db(_delete)
+
 # دوال المجموعات
 async def db_register_group(chat_id: int, chat_name: str, added_by: int, username: str = None) -> bool:
     async def _register(conn):
@@ -1351,222 +1422,42 @@ async def db_get_user_groups_count(user_id: int) -> int:
     groups = await db_get_user_groups(user_id)
     return len(groups)
 
-# دوال الجدولة (مختصرة)
-async def db_save_schedule(channel_db_id: int, schedule_type: str, interval_minutes: int = None, 
-                           interval_hours: int = None, interval_days: int = None, 
-                           days_of_week: str = None, specific_dates: str = None, 
-                           publish_time: str = None):
-    async def _save(conn):
-        await conn.execute("""
-            INSERT OR REPLACE INTO schedule (
-                channel_db_id, schedule_type, interval_minutes, interval_hours,
-                interval_days, days_of_week, specific_dates, publish_time, next_publish_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        """, (channel_db_id, schedule_type, interval_minutes, interval_hours,
-              interval_days, days_of_week, specific_dates, publish_time or "00:00"))
-        await conn.commit()
-    return await execute_db(_save)
-
-async def db_get_schedule(channel_db_id: int):
+async def db_get_group_rules(chat_id: int) -> Optional[str]:
     async def _get(conn):
-        cur = await conn.execute("""
-            SELECT schedule_type, interval_minutes, interval_hours, interval_days,
-                   days_of_week, specific_dates, publish_time, next_publish_date
-            FROM schedule WHERE channel_db_id=?
-        """, (channel_db_id,))
+        cur = await conn.execute("SELECT rules_text FROM group_rules WHERE chat_id = ?", (chat_id,))
         row = await cur.fetchone()
-        if row:
-            return {
-                'type': row[0] or 'interval_minutes',
-                'interval_minutes': row[1] or 12,
-                'interval_hours': row[2] or 0,
-                'interval_days': row[3] or 0,
-                'days_of_week': row[4] or '[]',
-                'specific_dates': row[5] or '[]',
-                'publish_time': row[6] or '00:00',
-                'next_publish_date': row[7]
-            }
-        return {
-            'type': 'interval_minutes',
-            'interval_minutes': 12,
-            'interval_hours': 0,
-            'interval_days': 0,
-            'days_of_week': '[]',
-            'specific_dates': '[]',
-            'publish_time': '00:00',
-            'next_publish_date': None
-        }
+        return row[0] if row else None
     return await execute_db(_get)
 
-async def db_set_next_publish_date(channel_db_id: int, next_date: datetime):
+async def db_set_group_rules(chat_id: int, rules_text: str, updated_by: int) -> bool:
     async def _set(conn):
-        if next_date:
-            await conn.execute("UPDATE schedule SET next_publish_date=? WHERE channel_db_id=?", (next_date.isoformat(), channel_db_id))
+        await conn.execute("INSERT OR REPLACE INTO group_rules (chat_id, rules_text, updated_by, updated_at) VALUES (?, ?, ?, ?)", (chat_id, rules_text, updated_by, utc_now_iso()))
+        await conn.commit()
+        return True
+    return await execute_db(_set)
+
+async def db_delete_group_rules(chat_id: int) -> bool:
+    async def _delete(conn):
+        await conn.execute("DELETE FROM group_rules WHERE chat_id = ?", (chat_id,))
+        await conn.commit()
+        return True
+    return await execute_db(_delete)
+
+async def db_set_chat_lock(chat_id: int, locked: bool, locked_by: int = None):
+    async def _set(conn):
+        if locked:
+            await conn.execute("INSERT OR REPLACE INTO chat_locks (chat_id, locked, locked_at, locked_by) VALUES (?, 1, ?, ?)", (chat_id, utc_now_iso(), locked_by))
         else:
-            await conn.execute("UPDATE schedule SET next_publish_date=NULL WHERE channel_db_id=?", (channel_db_id,))
+            await conn.execute("DELETE FROM chat_locks WHERE chat_id=?", (chat_id,))
         await conn.commit()
     return await execute_db(_set)
 
-# دوال الإحصائيات (مختصرة)
-async def db_stats():
-    async def _stats(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM users")
-        total = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM users WHERE banned=1")
-        banned = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")
-        posts = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM bot_groups")
-        groups = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT COUNT(*) FROM user_channels")
-        channels = (await cur.fetchone())[0]
-        return total, banned, posts, groups, channels
-    return await execute_db(_stats)
-
-async def db_get_channel_stats(channel_db_id: int) -> dict:
-    async def _get_stats(conn):
-        cur = await conn.execute("""
-            SELECT
-                COUNT(*) as total_posts,
-                SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) as published_posts,
-                SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END) as unpublished_posts,
-                SUM(views_count) as total_views,
-                AVG(views_count) as avg_views,
-                MAX(created_at) as last_post_time,
-                MIN(created_at) as first_post_time
-            FROM posts
-            WHERE channel_db_id = ?
-        """, (channel_db_id,))
+async def is_chat_locked(chat_id: int) -> bool:
+    async def _check(conn):
+        cur = await conn.execute("SELECT locked FROM chat_locks WHERE chat_id=?", (chat_id,))
         row = await cur.fetchone()
-        if not row or row[0] == 0:
-            return {
-                'total_posts': 0,
-                'published_posts': 0,
-                'unpublished_posts': 0,
-                'total_views': 0,
-                'avg_views': 0,
-                'last_post_time': None,
-                'first_post_time': None
-            }
-        return {
-            'total_posts': row[0] or 0,
-            'published_posts': row[1] or 0,
-            'unpublished_posts': row[2] or 0,
-            'total_views': row[3] or 0,
-            'avg_views': round(row[4], 2) if row[4] else 0,
-            'last_post_time': row[5],
-            'first_post_time': row[6]
-        }
-    return await execute_db(_get_stats)
-
-async def db_get_channel_growth(channel_db_id: int, days: int = 30) -> dict:
-    async def _get_growth(conn):
-        start_date = (utc_now() - timedelta(days=days)).isoformat()
-        cur = await conn.execute("""
-            SELECT
-                date(created_at) as post_date,
-                COUNT(*) as count,
-                SUM(views_count) as views
-            FROM posts
-            WHERE channel_db_id = ? AND created_at >= ?
-            GROUP BY date(created_at)
-            ORDER BY post_date
-        """, (channel_db_id, start_date))
-        rows = await cur.fetchall()
-        dates = []
-        counts = []
-        views = []
-        total_posts = 0
-        total_views = 0
-        for row in rows:
-            dates.append(row[0])
-            counts.append(row[1] or 0)
-            views.append(row[2] or 0)
-            total_posts += row[1] or 0
-            total_views += row[2] or 0
-        return {'dates': dates, 'counts': counts, 'views': views, 'total_posts': total_posts, 'total_views': total_views}
-    return await execute_db(_get_growth)
-
-# دوال الإعدادات العامة (مختصرة)
-async def db_get_publish_interval() -> int:
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='publish_interval'")
-        row = await cur.fetchone()
-        return int(row[0]) if row else DEFAULT_PUBLISH_INTERVAL_SECONDS
-    return await execute_db(_get)
-
-async def db_set_publish_interval_seconds(seconds: int, admin_id: int, is_admin: bool = False):
-    if not is_admin and admin_id != PRIMARY_OWNER_ID:
-        return False
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(seconds),))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_updates_channel():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_updates_channel(channel: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('updates_channel', ?)", (channel,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_force_subscribe_status() -> bool:
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_enabled'")
-        row = await cur.fetchone()
-        return row and row[0] == '1'
-    return await execute_db(_get)
-
-async def db_set_force_subscribe_status(enabled: bool):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_enabled', ?)", ('1' if enabled else '0',))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_force_subscribe_channel():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_channel'")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_force_subscribe_channel(channel: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_channel', ?)", (channel,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_log_channel_id():
-    async def _get(conn):
-        cur = await conn.execute("SELECT value FROM settings WHERE key='log_channel_id'")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_log_channel_id(channel_id: str):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_channel_id', ?)", (channel_id,))
-        await conn.commit()
-    return await execute_db(_set)
-
-async def db_get_allowed_sendcode_user() -> int | None:
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
-        row = await cur.fetchone()
-        return row[0] if row else None
-    return await execute_db(_get)
-
-async def db_set_allowed_sendcode_user(user_id: int):
-    async def _set(conn):
-        await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
-        await conn.commit()
-    return await execute_db(_set)
+        return row and row[0] == 1
+    return await execute_db(_check)
 
 # دوال الكلمات المحظورة
 async def db_add_banned_word(word: str, chat_id: int, added_by: int) -> bool:
@@ -1591,6 +1482,14 @@ async def db_get_banned_words(chat_id: int):
         cur = await conn.execute("SELECT word, added_by, added_at FROM banned_words WHERE chat_id=? OR chat_id=-1 ORDER BY word", (chat_id,))
         return await cur.fetchall()
     return await execute_db(_get)
+
+async def db_contains_banned_word(text: str, chat_id: int) -> str:
+    words = await db_get_banned_words(chat_id)
+    text_lower = text.lower()
+    for word, _, _ in words:
+        if word in text_lower:
+            return word
+    return None
 
 # دوال الأمان
 async def db_get_security_settings(chat_id: int):
@@ -1715,6 +1614,729 @@ async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
         await conn.commit()
         return True
     return await execute_db(_check)
+
+# دوال الردود
+async def db_add_reply(keyword, reply):
+    async def _add(conn):
+        await conn.execute("INSERT OR REPLACE INTO group_replies (keyword, reply) VALUES (?,?)", (keyword.lower(), reply))
+        await conn.commit()
+    return await execute_db(_add)
+
+async def db_del_reply(keyword):
+    async def _del(conn):
+        await conn.execute("DELETE FROM group_replies WHERE keyword=?", (keyword.lower(),))
+        await conn.commit()
+    return await execute_db(_del)
+
+async def db_get_reply(keyword):
+    async def _get(conn):
+        cur = await conn.execute("SELECT reply FROM group_replies WHERE keyword=?", (keyword.lower(),))
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+async def db_get_all_replies():
+    async def _get(conn):
+        cur = await conn.execute("SELECT keyword, reply FROM group_replies ORDER BY keyword")
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+# دوال الردود المتقدمة
+async def db_get_auto_reply_settings(chat_id: int) -> dict:
+    async def _get(conn):
+        cur = await conn.execute("SELECT enabled, only_admins, ignore_bots FROM auto_reply_settings WHERE chat_id=?", (chat_id,))
+        row = await cur.fetchone()
+        if row:
+            return {
+                'enabled': row[0] == 1,
+                'only_admins': row[1] == 1,
+                'ignore_bots': row[2] == 1
+            }
+        return {'enabled': True, 'only_admins': False, 'ignore_bots': True}
+    return await execute_db(_get)
+
+async def db_set_auto_reply_enabled(chat_id: int, enabled: bool) -> None:
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO auto_reply_settings (chat_id, enabled) VALUES (?, ?)", (chat_id, 1 if enabled else 0))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_set_auto_reply_only_admins(chat_id: int, only_admins: bool) -> None:
+    async def _set(conn):
+        await conn.execute("UPDATE auto_reply_settings SET only_admins=? WHERE chat_id=?", (1 if only_admins else 0, chat_id))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_toggle_auto_reply(chat_id: int) -> bool:
+    settings = await db_get_auto_reply_settings(chat_id)
+    new_status = not settings['enabled']
+    await db_set_auto_reply_enabled(chat_id, new_status)
+    return new_status
+
+# دوال التذاكر
+async def db_get_next_ticket_number():
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='last_ticket_number'")
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+    return await execute_db(_get)
+
+async def db_save_ticket(user_id, username, message, ticket_num):
+    async def _save(conn):
+        created_at = utc_now_iso()
+        await conn.execute("INSERT INTO support_tickets (user_id, username, message, ticket_number, status, created_at) VALUES (?,?,?,?,?,?)", (user_id, username, sanitize_text(message), ticket_num, 'pending', created_at))
+        await conn.commit()
+        return True
+    return await execute_db(_save)
+
+async def db_get_all_tickets(limit=20):
+    async def _get(conn):
+        cur = await conn.execute("SELECT id, user_id, username, message, ticket_number, status, created_at FROM support_tickets ORDER BY id DESC LIMIT ?", (limit,))
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+async def db_mark_ticket_replied(ticket_id):
+    async def _mark(conn):
+        await conn.execute("UPDATE support_tickets SET status='replied', replied=1 WHERE id=?", (ticket_id,))
+        await conn.commit()
+    return await execute_db(_mark)
+
+async def db_delete_all_tickets() -> int:
+    async def _delete(conn):
+        cur = await conn.execute("DELETE FROM support_tickets")
+        count = cur.rowcount
+        await conn.execute("UPDATE settings SET value='0' WHERE key='last_ticket_number'")
+        await conn.commit()
+        return count
+    return await execute_db(_delete)
+
+# دوال الجدولة
+async def db_save_schedule(channel_db_id: int, schedule_type: str, interval_minutes: int = None, 
+                           interval_hours: int = None, interval_days: int = None, 
+                           days_of_week: str = None, specific_dates: str = None, 
+                           publish_time: str = None):
+    async def _save(conn):
+        await conn.execute("""
+            INSERT OR REPLACE INTO schedule (
+                channel_db_id, schedule_type, interval_minutes, interval_hours,
+                interval_days, days_of_week, specific_dates, publish_time, next_publish_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        """, (channel_db_id, schedule_type, interval_minutes, interval_hours,
+              interval_days, days_of_week, specific_dates, publish_time or "00:00"))
+        await conn.commit()
+    return await execute_db(_save)
+
+async def db_get_schedule(channel_db_id: int):
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT schedule_type, interval_minutes, interval_hours, interval_days,
+                   days_of_week, specific_dates, publish_time, next_publish_date
+            FROM schedule WHERE channel_db_id=?
+        """, (channel_db_id,))
+        row = await cur.fetchone()
+        if row:
+            return {
+                'type': row[0] or 'interval_minutes',
+                'interval_minutes': row[1] or 12,
+                'interval_hours': row[2] or 0,
+                'interval_days': row[3] or 0,
+                'days_of_week': row[4] or '[]',
+                'specific_dates': row[5] or '[]',
+                'publish_time': row[6] or '00:00',
+                'next_publish_date': row[7]
+            }
+        return {
+            'type': 'interval_minutes',
+            'interval_minutes': 12,
+            'interval_hours': 0,
+            'interval_days': 0,
+            'days_of_week': '[]',
+            'specific_dates': '[]',
+            'publish_time': '00:00',
+            'next_publish_date': None
+        }
+    return await execute_db(_get)
+
+async def db_set_next_publish_date(channel_db_id: int, next_date: datetime):
+    async def _set(conn):
+        if next_date:
+            await conn.execute("UPDATE schedule SET next_publish_date=? WHERE channel_db_id=?", (next_date.isoformat(), channel_db_id))
+        else:
+            await conn.execute("UPDATE schedule SET next_publish_date=NULL WHERE channel_db_id=?", (channel_db_id,))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_set_last_publish(channel_db_id: int, publish_time: datetime):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)", (channel_db_id, publish_time.isoformat()))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_update_next_publish_date(channel_db_id: int):
+    async def _update(conn):
+        schedule = await db_get_schedule(channel_db_id)
+        last_publish_cur = await conn.execute("SELECT last_publish_time FROM last_publish WHERE channel_db_id=?", (channel_db_id,))
+        last_row = await last_publish_cur.fetchone()
+        last_time = datetime.fromisoformat(last_row[0]) if last_row else utc_now()
+        schedule_type = schedule['type']
+        publish_time_str = schedule.get('publish_time', '00:00')
+        if ':' not in publish_time_str:
+            publish_time_str = '00:00'
+        try:
+            hour, minute = map(int, publish_time_str.split(':'))
+        except:
+            hour, minute = 0, 0
+        next_date = None
+        if schedule_type == 'interval_minutes':
+            minutes = schedule.get('interval_minutes', 12)
+            next_date = last_time + timedelta(minutes=minutes)
+        elif schedule_type == 'interval_hours':
+            hours = schedule.get('interval_hours', 1)
+            next_date = last_time + timedelta(hours=hours)
+        elif schedule_type == 'interval_days':
+            days = schedule.get('interval_days', 1)
+            next_date = last_time + timedelta(days=days)
+        elif schedule_type == 'days':
+            days_of_week = json.loads(schedule.get('days_of_week', '[]'))
+            if days_of_week:
+                target_date = last_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                for i in range(1, 8):
+                    check_date = target_date + timedelta(days=i)
+                    if check_date.weekday() in days_of_week:
+                        next_date = check_date
+                        break
+                if not next_date:
+                    next_date = target_date + timedelta(days=7)
+                    while next_date.weekday() not in days_of_week:
+                        next_date += timedelta(days=1)
+            else:
+                next_date = last_time + timedelta(days=1)
+        elif schedule_type == 'dates':
+            specific_dates = json.loads(schedule.get('specific_dates', '[]'))
+            if specific_dates:
+                target_date = last_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                for date_str in sorted(specific_dates):
+                    try:
+                        date_obj = datetime.strptime(date_str, '%Y-%m-%d').replace(
+                            hour=hour, minute=minute, second=0, microsecond=0
+                        )
+                        if date_obj > last_time:
+                            next_date = date_obj
+                            break
+                    except:
+                        continue
+                if not next_date:
+                    try:
+                        next_date = datetime.strptime(specific_dates[0], '%Y-%m-%d').replace(
+                            hour=hour, minute=minute, second=0, microsecond=0
+                        ) + timedelta(days=365)
+                    except:
+                        next_date = utc_now() + timedelta(days=1)
+            else:
+                next_date = utc_now() + timedelta(days=1)
+        else:
+            next_date = utc_now() + timedelta(minutes=schedule.get('interval_minutes', 12))
+        if next_date:
+            await conn.execute("UPDATE schedule SET next_publish_date=? WHERE channel_db_id=?", (next_date.isoformat(), channel_db_id))
+            await conn.commit()
+    return await execute_db(_update)
+
+async def db_set_publish_time(channel_db_id: int, time_str: str):
+    async def _set(conn):
+        await conn.execute("UPDATE schedule SET publish_time=? WHERE channel_db_id=?", (time_str, channel_db_id))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_add_scheduled_post(chat_id: int, text: str, publish_time: datetime) -> int:
+    async def _add(conn):
+        cur = await conn.execute(
+            "INSERT INTO scheduled_posts (chat_id, text, publish_time) VALUES (?, ?, ?) RETURNING id",
+            (chat_id, text, publish_time.isoformat())
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+        return row[0] if row else None
+    return await execute_db(_add)
+
+async def db_get_due_scheduled_posts() -> list:
+    async def _get(conn):
+        now = utc_now().isoformat()
+        cur = await conn.execute(
+            "SELECT id, chat_id, text, publish_time FROM scheduled_posts WHERE publish_time <= ? AND fail_count < 3 ORDER BY publish_time ASC",
+            (now,)
+        )
+        rows = await cur.fetchall()
+        return [{'id': row[0], 'chat_id': row[1], 'text': row[2], 'publish_time': row[3]} for row in rows]
+    return await execute_db(_get)
+
+async def db_update_scheduled_post_fail(post_id: int) -> None:
+    async def _update(conn):
+        await conn.execute("UPDATE scheduled_posts SET fail_count = fail_count + 1 WHERE id=?", (post_id,))
+        await conn.commit()
+    return await execute_db(_update)
+
+async def db_delete_scheduled_post(post_id: int) -> None:
+    async def _delete(conn):
+        await conn.execute("DELETE FROM scheduled_posts WHERE id=?", (post_id,))
+        await conn.commit()
+    return await execute_db(_delete)
+
+# دوال الإحالات
+async def db_get_referral_settings() -> dict:
+    async def _get(conn):
+        settings = {}
+        cur = await conn.execute("SELECT key, value FROM referral_settings")
+        rows = await cur.fetchall()
+        for key, value in rows:
+            settings[key] = value
+        return settings
+    return await execute_db(_get)
+
+async def db_get_referral_code(user_id: int) -> str:
+    async def _get(conn):
+        cur = await conn.execute("SELECT referral_code FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else None
+    return await execute_db(_get)
+
+async def db_generate_referral_code(user_id: int) -> str:
+    async def _generate(conn):
+        code_hash = hashlib.md5(f"{user_id}{time_module.time()}".encode()).hexdigest()[:8]
+        referral_code = f"REF{code_hash.upper()}"
+        await conn.execute("UPDATE users SET referral_code=? WHERE user_id=?", (referral_code, user_id))
+        await conn.commit()
+        return referral_code
+    return await execute_db(_generate)
+
+async def db_add_referral(referrer_id: int, referred_id: int) -> bool:
+    async def _add(conn):
+        if referrer_id == referred_id:
+            return False
+        cur = await conn.execute("SELECT 1 FROM referrals WHERE referred_id=?", (referred_id,))
+        if await cur.fetchone():
+            return False
+        await conn.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", (referrer_id, referred_id))
+        await conn.commit()
+        return True
+    return await execute_db(_add)
+
+async def db_get_referral_stats(user_id: int) -> dict:
+    async def _get(conn):
+        cur = await conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
+        total_referrals = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT referral_count, total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return {
+            'total_referrals': total_referrals,
+            'referral_count': row[0] if row else 0,
+            'total_reward_days': row[1] if row else 0,
+            'claimed_reward_days': row[2] if row else 0,
+            'available_days': (row[1] if row else 0) - (row[2] if row else 0)
+        }
+    return await execute_db(_get)
+
+async def db_claim_referral_reward(user_id: int) -> int:
+    async def _claim(conn):
+        cur = await conn.execute("SELECT total_reward_days, claimed_reward_days FROM referral_rewards WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row:
+            return 0
+        total = row[0]
+        claimed = row[1]
+        available = total - claimed
+        if available <= 0:
+            return 0
+        current_sub = await db_get_subscription_days_left(user_id)
+        new_sub_days = current_sub + available
+        end_date = (utc_now() + timedelta(days=new_sub_days)).isoformat()
+        await conn.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (end_date, user_id))
+        await conn.execute("UPDATE referral_rewards SET claimed_reward_days = claimed_reward_days + ? WHERE user_id=?", (available, user_id))
+        await conn.commit()
+        return available
+    return await execute_db(_claim)
+
+# دوال التذكيرات
+async def db_get_user_reminder_settings(user_id: int) -> dict:
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT subscription_reminder, daily_stats_reminder, weekly_report,
+                   reminder_days_before, last_reminder_sent, notification_lang
+            FROM user_reminder_settings WHERE user_id=?
+        """, (user_id,))
+        row = await cur.fetchone()
+        if row:
+            return {
+                'subscription_reminder': row[0] == 1,
+                'daily_stats_reminder': row[1] == 1,
+                'weekly_report': row[2] == 1,
+                'reminder_days_before': row[3] if row[3] is not None else 3,
+                'last_reminder_sent': row[4] if row[4] else 0,
+                'notification_lang': row[5] if row[5] else 'ar'
+            }
+        else:
+            await conn.execute("""
+                INSERT INTO user_reminder_settings (
+                    user_id, subscription_reminder, daily_stats_reminder,
+                    weekly_report, reminder_days_before, last_reminder_sent,
+                    notification_lang
+                ) VALUES (?, 1, 0, 1, 3, 0, 'ar')
+            """, (user_id,))
+            await conn.commit()
+            return {
+                'subscription_reminder': True,
+                'daily_stats_reminder': False,
+                'weekly_report': True,
+                'reminder_days_before': 3,
+                'last_reminder_sent': 0,
+                'notification_lang': 'ar'
+            }
+    return await execute_db(_get)
+
+async def db_update_reminder_settings(user_id: int, **kwargs):
+    async def _update(conn):
+        fields, values = [], []
+        for key, value in kwargs.items():
+            if key == 'subscription_reminder':
+                fields.append("subscription_reminder=?")
+                values.append(1 if value else 0)
+            elif key == 'daily_stats_reminder':
+                fields.append("daily_stats_reminder=?")
+                values.append(1 if value else 0)
+            elif key == 'weekly_report':
+                fields.append("weekly_report=?")
+                values.append(1 if value else 0)
+            elif key == 'reminder_days_before':
+                fields.append("reminder_days_before=?")
+                values.append(value)
+            elif key == 'notification_lang':
+                fields.append("notification_lang=?")
+                values.append(value)
+        if fields:
+            query = f"UPDATE user_reminder_settings SET {', '.join(fields)} WHERE user_id=?"
+            values.append(user_id)
+            await conn.execute(query, values)
+            await conn.commit()
+    return await execute_db(_update)
+
+# دوال الإحصائيات
+async def db_stats():
+    async def _stats(conn):
+        cur = await conn.execute("SELECT COUNT(*) FROM users")
+        total = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM users WHERE banned=1")
+        banned = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")
+        posts = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM bot_groups")
+        groups = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM user_channels")
+        channels = (await cur.fetchone())[0]
+        return total, banned, posts, groups, channels
+    return await execute_db(_stats)
+
+async def db_get_channel_stats(channel_db_id: int) -> dict:
+    async def _get_stats(conn):
+        cur = await conn.execute("""
+            SELECT
+                COUNT(*) as total_posts,
+                SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) as published_posts,
+                SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END) as unpublished_posts,
+                SUM(views_count) as total_views,
+                AVG(views_count) as avg_views,
+                MAX(created_at) as last_post_time,
+                MIN(created_at) as first_post_time
+            FROM posts
+            WHERE channel_db_id = ?
+        """, (channel_db_id,))
+        row = await cur.fetchone()
+        if not row or row[0] == 0:
+            return {
+                'total_posts': 0,
+                'published_posts': 0,
+                'unpublished_posts': 0,
+                'total_views': 0,
+                'avg_views': 0,
+                'last_post_time': None,
+                'first_post_time': None
+            }
+        return {
+            'total_posts': row[0] or 0,
+            'published_posts': row[1] or 0,
+            'unpublished_posts': row[2] or 0,
+            'total_views': row[3] or 0,
+            'avg_views': round(row[4], 2) if row[4] else 0,
+            'last_post_time': row[5],
+            'first_post_time': row[6]
+        }
+    return await execute_db(_get_stats)
+
+async def db_get_channel_growth(channel_db_id: int, days: int = 30) -> dict:
+    async def _get_growth(conn):
+        start_date = (utc_now() - timedelta(days=days)).isoformat()
+        cur = await conn.execute("""
+            SELECT
+                date(created_at) as post_date,
+                COUNT(*) as count,
+                SUM(views_count) as views
+            FROM posts
+            WHERE channel_db_id = ? AND created_at >= ?
+            GROUP BY date(created_at)
+            ORDER BY post_date
+        """, (channel_db_id, start_date))
+        rows = await cur.fetchall()
+        dates = []
+        counts = []
+        views = []
+        total_posts = 0
+        total_views = 0
+        for row in rows:
+            dates.append(row[0])
+            counts.append(row[1] or 0)
+            views.append(row[2] or 0)
+            total_posts += row[1] or 0
+            total_views += row[2] or 0
+        return {'dates': dates, 'counts': counts, 'views': views, 'total_posts': total_posts, 'total_views': total_views}
+    return await execute_db(_get_growth)
+
+async def db_get_channel_stats_summary(user_id: int) -> dict:
+    async def _get_summary(conn):
+        channels = await db_get_channels(user_id)
+        if not channels:
+            return None
+        total_posts = 0
+        total_published = 0
+        total_views = 0
+        total_channels = len(channels)
+        active_channels = 0
+        best_channel = None
+        best_channel_views = 0
+        for ch_db_id, ch_tele_id, ch_name, banned in channels:
+            if not banned:
+                active_channels += 1
+            stats = await db_get_channel_stats(ch_db_id)
+            if stats and stats['total_posts'] > 0:
+                total_posts += stats['total_posts']
+                total_published += stats['published_posts']
+                total_views += stats['total_views']
+                if stats['total_views'] > best_channel_views:
+                    best_channel_views = stats['total_views']
+                    best_channel = {
+                        'name': ch_name,
+                        'views': stats['total_views'],
+                        'posts': stats['published_posts'],
+                        'avg_views': stats['avg_views']
+                    }
+        return {
+            'total_channels': total_channels,
+            'active_channels': active_channels,
+            'total_posts': total_posts,
+            'total_published': total_published,
+            'total_views': total_views,
+            'avg_views_per_channel': round(total_views / total_channels, 2) if total_channels > 0 else 0,
+            'best_channel': best_channel
+        }
+    return await execute_db(_get_summary)
+
+# دوال الإعدادات العامة
+async def db_get_publish_interval() -> int:
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='publish_interval'")
+        row = await cur.fetchone()
+        return int(row[0]) if row else DEFAULT_PUBLISH_INTERVAL_SECONDS
+    return await execute_db(_get)
+
+async def db_set_publish_interval_seconds(seconds: int, admin_id: int, is_admin: bool = False):
+    if not is_admin and admin_id != PRIMARY_OWNER_ID:
+        return False
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(seconds),))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_updates_channel():
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+async def db_set_updates_channel(channel: str):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('updates_channel', ?)", (channel,))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_force_subscribe_status() -> bool:
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_enabled'")
+        row = await cur.fetchone()
+        return row and row[0] == '1'
+    return await execute_db(_get)
+
+async def db_set_force_subscribe_status(enabled: bool):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_enabled', ?)", ('1' if enabled else '0',))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_force_subscribe_channel():
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='force_subscribe_channel'")
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+async def db_set_force_subscribe_channel(channel: str):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_subscribe_channel', ?)", (channel,))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_log_channel_id():
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='log_channel_id'")
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+async def db_set_log_channel_id(channel_id: str):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_channel_id', ?)", (channel_id,))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_allowed_sendcode_user() -> int | None:
+    async def _get(conn):
+        cur = await conn.execute("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+async def db_set_allowed_sendcode_user(user_id: int):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
+        await conn.commit()
+    return await execute_db(_set)
+
+async def db_get_auto_backup() -> bool:
+    async def _get(conn):
+        cur = await conn.execute("SELECT value FROM settings WHERE key='auto_backup'")
+        row = await cur.fetchone()
+        return row and row[0] == '1'
+    return await execute_db(_get)
+
+async def db_set_auto_backup(enabled: bool):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_backup', ?)", ('1' if enabled else '0',))
+        await conn.commit()
+    return await execute_db(_set)
+
+# دوال المستويات
+LEVEL_REQUIREMENTS = {
+    1: 0, 2: 100, 3: 250, 4: 500, 5: 1000,
+    6: 2000, 7: 3500, 8: 5000, 9: 7500, 10: 10000
+}
+
+async def db_get_user_level(user_id: int):
+    async def _get(conn):
+        cur = await conn.execute("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if row:
+            return {'points': row[0], 'level': row[1]}
+        return {'points': 0, 'level': 1}
+    return await execute_db(_get)
+
+async def db_update_user_level(user_id: int, points: int, level: int):
+    async def _update(conn):
+        await conn.execute("INSERT OR REPLACE INTO user_levels (user_id, points, level) VALUES (?,?,?)", (user_id, points, level))
+        await conn.commit()
+    return await execute_db(_update)
+
+async def get_top_users(limit: int = 10):
+    async def _get(conn):
+        cur = await conn.execute("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+# دوال المسابقات
+async def db_get_active_contests(limit: int = 10) -> list:
+    async def _get(conn):
+        now = utc_now().isoformat()
+        cur = await conn.execute("""
+            SELECT id, title, description, prize, end_date, contest_type
+            FROM contests
+            WHERE status = 'active' AND end_date > ?
+            ORDER BY end_date ASC LIMIT ?
+        """, (now, limit))
+        return await cur.fetchall()
+    return await execute_db(_get)
+
+async def db_create_contest(creator_id: int, title: str, description: str, prize: str, end_date: datetime, contest_type: str = 'raffle') -> int:
+    async def _create(conn):
+        end_date_str = end_date.isoformat()
+        cur = await conn.execute("""
+            INSERT INTO contests (
+                creator_id, title, description, prize, end_date,
+                status, created_at, contest_type
+            ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?) RETURNING id
+        """, (creator_id, title, description, prize, end_date_str, utc_now_iso(), contest_type))
+        row = await cur.fetchone()
+        await conn.commit()
+        return row[0] if row else None
+    return await execute_db(_create)
+
+async def db_get_contest(contest_id: int) -> dict | None:
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT id, title, description, prize, end_date, status,
+                   winner_id, creator_id, contest_type
+            FROM contests WHERE id = ?
+        """, (contest_id,))
+        row = await cur.fetchone()
+        if row:
+            return {
+                'id': row[0], 'title': row[1], 'description': row[2],
+                'prize': row[3], 'end_date': row[4], 'status': row[5],
+                'winner_id': row[6], 'creator_id': row[7],
+                'contest_type': row[8] if len(row) > 8 else 'raffle'
+            }
+        return None
+    return await execute_db(_get)
+
+async def db_participate_in_contest(user_id: int, contest_id: int) -> bool:
+    async def _participate(conn):
+        try:
+            await conn.execute("INSERT INTO contest_participants (user_id, contest_id, joined_at) VALUES (?, ?, ?)", (user_id, contest_id, utc_now_iso()))
+            await conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+    return await execute_db(_participate)
+
+async def db_get_user_participation(user_id: int, contest_id: int) -> bool:
+    async def _get(conn):
+        cur = await conn.execute("SELECT 1 FROM contest_participants WHERE user_id = ? AND contest_id = ?", (user_id, contest_id))
+        return await cur.fetchone() is not None
+    return await execute_db(_get)
+
+async def db_set_contest_winner(contest_id: int, winner_id: int) -> bool:
+    async def _set(conn):
+        await conn.execute("UPDATE contests SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, contest_id))
+        await conn.execute("INSERT INTO contest_winners (contest_id, winner_id, announced_at) VALUES (?, ?, ?)", (contest_id, winner_id, utc_now_iso()))
+        await conn.commit()
+        return True
+    return await execute_db(_set)
+
+async def db_get_contest_winners(limit: int = 10) -> list:
+    async def _get(conn):
+        cur = await conn.execute("""
+            SELECT c.id, c.title, c.prize, cw.winner_id, cw.announced_at
+            FROM contest_winners cw
+            JOIN contests c ON cw.contest_id = c.id
+            ORDER BY cw.announced_at DESC LIMIT ?
+        """, (limit,))
+        return await cur.fetchall()
+    return await execute_db(_get)
 
 # دوال الصلاحيات
 _admin_cache = {}
@@ -1903,6 +2525,21 @@ async def execute_unmute(bot, chat_id: int, user_id: int, moderator_id: int = No
     except Exception as e:
         return False, f"❌ فشل إلغاء الكتم: {str(e)[:100]}"
 
+async def apply_penalty(bot, chat_id, user_id, settings):
+    penalty = settings.get('auto_penalty', 'none')
+    if penalty == 'none':
+        return
+    # تحقق من صلاحيات المستخدم
+    if await is_telegram_admin(bot, chat_id, user_id):
+        return
+    if penalty == 'kick':
+        await execute_kick(bot, chat_id, user_id, "مخالفة قواعد المجموعة")
+    elif penalty == 'ban':
+        await execute_ban(bot, chat_id, user_id, reason="مخالفة قواعد المجموعة")
+    elif penalty == 'mute':
+        duration = settings.get('auto_mute_duration', 60)
+        await execute_mute(bot, chat_id, user_id, duration, "مخالفة قواعد المجموعة")
+
 async def get_moderation_log(chat_id: int, limit: int = 20) -> str:
     async def _get_log(conn):
         cur = await conn.execute("""
@@ -1938,32 +2575,87 @@ async def get_moderation_log(chat_id: int, limit: int = 20) -> str:
         text += f"• `{user_id}` → {action}{duration_text}{reason_text}\n   🕐 {time_str}\n\n"
     return text
 
-# دوال المستويات
-LEVEL_REQUIREMENTS = {
-    1: 0, 2: 100, 3: 250, 4: 500, 5: 1000,
-    6: 2000, 7: 3500, 8: 5000, 9: 7500, 10: 10000
-}
-
-async def db_get_user_level(user_id: int):
+# دوال الترجمة
+async def get_user_translation_language(user_id: int) -> str:
     async def _get(conn):
-        cur = await conn.execute("SELECT points, level FROM user_levels WHERE user_id=?", (user_id,))
+        cur = await conn.execute("SELECT lang FROM user_translation WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
-        if row:
-            return {'points': row[0], 'level': row[1]}
-        return {'points': 0, 'level': 1}
+        return row[0] if row else 'off'
     return await execute_db(_get)
 
-async def db_update_user_level(user_id: int, points: int, level: int):
-    async def _update(conn):
-        await conn.execute("INSERT OR REPLACE INTO user_levels (user_id, points, level) VALUES (?,?,?)", (user_id, points, level))
+async def set_user_translation_language(user_id: int, lang: str):
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO user_translation (user_id, lang) VALUES (?, ?)", (user_id, lang))
         await conn.commit()
-    return await execute_db(_update)
+    return await execute_db(_set)
 
-async def get_top_users(limit: int = 10):
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id, points, level FROM user_levels ORDER BY points DESC LIMIT ?", (limit,))
-        return await cur.fetchall()
-    return await execute_db(_get)
+async def translate_text(text: str, target_lang: str) -> str:
+    if target_lang == 'off' or not text:
+        return text
+    try:
+        translator = GoogleTranslator(target=target_lang)
+        return translator.translate(text)
+    except:
+        return text
+
+# دوال النسخ الاحتياطي
+async def create_backup():
+    try:
+        backup_file = BACKUP_DIR / f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copy2(DB_PATH, backup_file)
+        backups = sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+        for old_backup in backups[MAX_BACKUPS:]:
+            old_backup.unlink()
+        return backup_file
+    except Exception as e:
+        print(f"❌ فشل إنشاء النسخة الاحتياطية: {e}")
+        return None
+
+async def list_backups():
+    return sorted(BACKUP_DIR.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+
+async def restore_backup(backup_path: Path):
+    try:
+        current_backup = BACKUP_DIR / f"pre_restore_{mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copy2(DB_PATH, current_backup)
+        shutil.copy2(backup_path, DB_PATH)
+        return True
+    except Exception as e:
+        print(f"❌ فشل استعادة النسخة: {e}")
+        return False
+
+# دوال الصحة والنظام
+async def check_database_health() -> bool:
+    try:
+        async def _check(conn):
+            cur = await conn.execute("SELECT 1")
+            row = await cur.fetchone()
+            return row is not None
+        return await execute_db(_check)
+    except:
+        return False
+
+async def check_telegram_health() -> bool:
+    try:
+        from telegram.ext import Application
+        app = Application.builder().token(TOKEN).build()
+        me = await app.bot.get_me()
+        return me is not None
+    except:
+        return False
+
+def get_ram_usage():
+    try:
+        if PSUTIL_AVAILABLE:
+            mem = psutil.virtual_memory()
+            return {
+                'total': round(mem.total / (1024**3), 1),
+                'used': round(mem.used / (1024**3), 1),
+                'percent': mem.percent
+            }
+    except:
+        pass
+    return {'total': 0, 'used': 0, 'percent': 0}
 
 # دوال الكيبورد الأساسية
 async def get_main_keyboard(user_id: int):
@@ -2789,6 +3481,54 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ فشل معالج الأخطاء نفسه: {e}")
 
 # ====================================================================
+# ===================== مهام الخلفية =====================
+# ====================================================================
+
+async def auto_publish_loop(bot):
+    await asyncio.sleep(5)
+    while True:
+        try:
+            now_iso = utc_now().isoformat()
+            async def _get_due_channels(conn):
+                cur = await conn.execute("""
+                    SELECT uc.id, uc.channel_id, u.user_id
+                    FROM user_channels uc
+                    JOIN users u ON uc.user_id = u.user_id
+                    LEFT JOIN schedule s ON uc.id = s.channel_db_id
+                    WHERE u.auto_publish = 1
+                      AND u.banned = 0
+                      AND uc.banned = 0
+                      AND (s.next_publish_date IS NULL OR s.next_publish_date <= ?)
+                    ORDER BY COALESCE(s.next_publish_date, '1970-01-01') ASC
+                    LIMIT 20
+                """, (now_iso,))
+                return await cur.fetchall()
+            rows = await execute_db(_get_due_channels)
+            for row in rows:
+                ch_db_id, ch_tele_id, user_id = row
+                if not await db_has_active_subscription(user_id) and not await db_has_used_trial(user_id):
+                    continue
+                post = await db_get_next_post(ch_db_id)
+                if not post:
+                    continue
+                ch_info = await db_get_channel_info(ch_db_id)
+                try:
+                    if post['media_type'] == 'photo' and post['media_file_id']:
+                        await bot.send_photo(ch_info[0], post['media_file_id'], caption=post['text'] if post['text'] else None)
+                    else:
+                        await bot.send_message(ch_info[0], post['text'])
+                    await db_mark_published(post['id'])
+                    await db_set_last_publish(ch_db_id, utc_now())
+                    await db_update_next_publish_date(ch_db_id)
+                except Exception as e:
+                    print(f"⚠️ فشل النشر: {e}")
+                await asyncio.sleep(1)
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"⚠️ خطأ في الناشر التلقائي: {e}")
+            await asyncio.sleep(60)
+
+# ====================================================================
 # ===================== الوظيفة الرئيسية =====================
 # ====================================================================
 
@@ -2880,6 +3620,9 @@ async def main():
         BotCommand("top", "أفضل 10"),
     ]
     await app.bot.set_my_commands(commands)
+    
+    # تشغيل مهام الخلفية
+    asyncio.create_task(auto_publish_loop(app.bot))
     
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.4.0)")
     print("✅ جميع التصحيحات والتحسينات تم تطبيقها")
