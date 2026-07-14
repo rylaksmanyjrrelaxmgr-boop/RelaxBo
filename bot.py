@@ -175,7 +175,6 @@ if False: # ZSTD_AVAILABLE
      # ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
      # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
-if False: # CV2_AVAILABLE
 
 if GOOGLE_AUTH_AVAILABLE:
     from google.oauth2.credentials import Credentials
@@ -15810,3 +15809,4 @@ if __name__ == "__main__":
         traceback.print_exc()
         sys.exit(1)
 
+# CV2_AVAILABLE = False
