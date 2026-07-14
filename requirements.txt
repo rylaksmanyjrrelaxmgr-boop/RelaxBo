@@ -1,13 +1,12 @@
 # ============================================================
-# متطلبات البوت - متوافقة مع Python 3.14
-# تم تعطيل Pillow و opencv-python-headless لحين دعمهما
+# متطلبات البوت - إصدارات متوافقة مع Python 3.14
 # ============================================================
 
 # الأساسيات
 python-telegram-bot==20.7
-httpx==0.27.0
-httpcore==1.0.5
-anyio==4.3.0
+httpx==0.25.2
+httpcore==1.0.2
+anyio==3.7.1
 aiohttp==3.9.0
 aiosqlite==0.19.0
 python-dotenv==1.0.0
@@ -24,7 +23,7 @@ deep-translator==1.11.0
 # تنظيف النصوص
 bleach==6.1.0
 
-# QR codes (يعمل بدون Pillow؟ - اختياري)
+# QR codes
 qrcode==7.4.2
 
 # الرسوم البيانية
@@ -48,8 +47,8 @@ python-multipart==0.0.9
 # 2FA
 pyotp==2.9.0
 
-# ضغط zstd
-#zstandard==0.22.0
+# zstandard معطل مؤقتاً
+# zstandard==0.22.0
 
 # Google APIs
 google-auth==2.28.1
@@ -74,10 +73,13 @@ frozenlist==1.4.1
 aiosignal==1.3.1
 propcache==0.2.0
 
+# Pillow و opencv معطلان مؤقتاً
+# Pillow==10.2.0
+# opencv-python-headless==4.9.0.80
+
 # ============================================================
 # ملاحظات:
-# - تم إزالة Pillow و opencv-python-headless (غير متوافقين مع 3.14)
-# - إذا أردت تفعيل ميزات الصور مستقبلاً، انتظر تحديث المكتبات ثم أضف:
-#   Pillow>=10.3.0
-#   opencv-python-headless>=4.10.0
+# - تم تعديل إصدارات httpx و httpcore و anyio لتتوافق مع python-telegram-bot
+# - Pillow و opencv-python-headless معطلان (غير متوافقين مع Python 3.14)
+# - zstandard معطل (غير متوافق مع Python 3.14)
 # ============================================================
