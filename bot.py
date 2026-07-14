@@ -172,13 +172,13 @@ if PYOTP_AVAILABLE:
     import pyotp
 
 if ZSTD_AVAILABLE:
-    # # import zstandard
-    # ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
-    # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
+      import zstandard
+     ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
+     ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
 if CV2_AVAILABLE:
-    # # import cv2
-    # # import numpy as np
+    import cv2
+    import numpy as np
 
 if GOOGLE_AUTH_AVAILABLE:
     from google.oauth2.credentials import Credentials
