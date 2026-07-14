@@ -172,13 +172,13 @@ if PYOTP_AVAILABLE:
     import pyotp
 
 if ZSTD_AVAILABLE:
-    # import zstandard
+    # # import zstandard
     # ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
     # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
 if CV2_AVAILABLE:
-    # import cv2
-    # import numpy as np
+    # # import cv2
+    # # import numpy as np
 
 if GOOGLE_AUTH_AVAILABLE:
     from google.oauth2.credentials import Credentials
@@ -204,8 +204,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
-# from PIL import Image
-# import numpy as np
+# # from PIL import Image
+# # import numpy as np
 
 # مكتبات الويب - مع التحقق من وجودها
 try:
@@ -14061,8 +14061,8 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
         return {"error": "مكتبة OpenCV غير مثبتة"}
 
     try:
-        # import cv2
-        # import numpy as np
+        # # import cv2
+        # # import numpy as np
         import io
         import tempfile
 
