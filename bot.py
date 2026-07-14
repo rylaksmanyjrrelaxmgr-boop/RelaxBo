@@ -15810,3 +15810,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
 # تم تعطيل CV2_AVAILABLE بسبب عدم التوافق
+# تم تعطيل CV2_AVAILABLE
