@@ -197,7 +197,6 @@ load_dotenv()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ChatMemberHandler
 from telegram.error import TimedOut, NetworkError, BadRequest, Forbidden, Conflict
-from telegram.request import HTTPXRequest
 import httpx
 from deep_translator import GoogleTranslator
 from cryptography.fernet import Fernet
@@ -15327,7 +15326,6 @@ async def main():
             'pool_timeout': 10.0,
             'connection_pool_size': MAX_CONNECTIONS
         }
-        request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
     else:
         request_kwargs = {
@@ -15337,7 +15335,6 @@ async def main():
             'pool_timeout': 10.0,
             'connection_pool_size': MAX_CONNECTIONS
         }
-        request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
 
     application.add_error_handler(global_error_handler)
@@ -15623,7 +15620,10 @@ async def main():
         BotCommand("declare_winner", "إعلان فائز"),
         BotCommand("update_admins", "تحديث المشرفين"),
     ]
+    try:
     await application.bot.set_my_commands(commands)
+except Exception as e:
+    logger.error(f"فشل تعيين الأوامر: {e}")
 
     task_manager.create_task(auto_publish_loop_improved(application.bot))
     task_manager.create_task(auto_backup())
