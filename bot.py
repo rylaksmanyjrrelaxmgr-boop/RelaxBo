@@ -15621,7 +15621,10 @@ async def main():
         BotCommand("update_admins", "تحديث المشرفين"),
     ]
     try:
+    try:
     await application.bot.set_my_commands(commands)
+except Exception as e:
+    logger.error(f"فشل تعيين الأوامر: {e}")
 except Exception as e:
     logger.error(f"فشل تعيين الأوامر: {e}")
 
