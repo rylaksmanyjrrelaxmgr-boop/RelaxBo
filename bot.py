@@ -2055,7 +2055,7 @@ class AsyncTranslator:
                 "dt": "t",
                 "q": text
             }
-            async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as resp:
+            async with session.get(url, params=params) as resp:
                 data = await resp.json()
                 translated = data[0][0][0] if data and data[0] and data[0][0] else text
                 await _translation_cache.set(cache_key, translated)
@@ -6820,9 +6820,9 @@ async def set_cron_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['schedule_cron'] = True
     msg = "⏱️ **إعداد CRON**\n\nأرسل تعبير CRON (مثال: `0 12 * * *` للنشر يومياً الساعة 12:00)\n\nالشرح:\n• دقيقة (0-59)\n• ساعة (0-23)\n• يوم (1-31)\n• شهر (1-12)\n• يوم أسبوع (0-6)"
     if query:
-        await query.edit_message_text(msg, parse_mode="MarkdownV2")
+        await query.edit_message_text(msg)
     else:
-        await update.message.reply_text(msg, parse_mode="MarkdownV2")
+        await update.message.reply_text(msg)
 
 async def set_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
@@ -10758,7 +10758,7 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"📝 نوع المسابقة: {contest.get('contest_type', 'raffle')}"
         )
         try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
+            await query.edit_message_text(msg)
         except:
             await query.edit_message_text(msg)
 
@@ -10933,15 +10933,15 @@ async def admin_create_contest_callback(update: Update, context: ContextTypes.DE
 
     if query:
         try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
+            await query.edit_message_text(msg)
         except:
             try:
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
+                await context.bot.send_message(chat_id=user_id, text=msg)
             except:
                 pass
     else:
         try:
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
+            await context.bot.send_message(chat_id=user_id, text=msg)
         except:
             pass
 
@@ -10975,15 +10975,15 @@ async def admin_declare_winner_callback(update: Update, context: ContextTypes.DE
 
     if query:
         try:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2")
+            await query.edit_message_text(msg)
         except:
             try:
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
+                await context.bot.send_message(chat_id=user_id, text=msg)
             except:
                 pass
     else:
         try:
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
+            await context.bot.send_message(chat_id=user_id, text=msg)
         except:
             pass
 
@@ -11093,9 +11093,9 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         msg = "📝 **جدولة منشور جديد**\n\nأرسل المنشور بالصيغة التالية:\n`YYYY-MM-DD HH:MM نص المنشور`\n\nمثال: `2024-12-31 20:00 مرحباً بالجميع!`\n\n🕐 الوقت بتوقيت مكة المكرمة"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.BACK)]])
         if query:
-            await query.edit_message_text(msg, parse_mode="MarkdownV2", reply_markup=kb)
+            await query.edit_message_text(msg, reply_markup=kb)
         else:
-            await update.message.reply_text(msg, parse_mode="MarkdownV2", reply_markup=kb)
+            await update.message.reply_text(msg, reply_markup=kb)
     elif data == "language":
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"),
@@ -12085,7 +12085,7 @@ async def successful_payment_callback_handler(update: Update, context: ContextTy
     except:
         days = 30
     await db_activate_subscription(uid, days)
-    await update.message.reply_text(f"✅ **تم تفعيل اشتراكك لمدة {days} يوماً!**\nشكراً لدعمك ❤️", parse_mode="MarkdownV2")
+    await update.message.reply_text(f"✅ **تم تفعيل اشتراكك لمدة {days} يوماً!**\nشكراً لدعمك ❤️")
 
 async def ensure_force_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id=None) -> bool:
     if user_id is None:
@@ -12386,7 +12386,7 @@ async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     user_id = update.effective_user.id
-    await update.message.reply_text(get_text(user_id, 'help'), parse_mode="MarkdownV2")
+    await update.message.reply_text(get_text(user_id, 'help'))
 
 async def support_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [تحسين 6] if not update: return
@@ -12420,7 +12420,7 @@ async def support_reply_command_handler(update: Update, context: ContextTypes.DE
         return
     args = context.args or []  # [تحسين 10] استخدام context.args or []
     if len(args) < 2:
-        await update.message.reply_text("📝 **الاستخدام:**\n`/support_reply user_id نص الرد`", parse_mode="MarkdownV2")
+        await update.message.reply_text("📝 **الاستخدام:**\n`/support_reply user_id نص الرد`")
         return
     try:
         target_user_id = int(args[0])
@@ -12428,7 +12428,7 @@ async def support_reply_command_handler(update: Update, context: ContextTypes.DE
         ticket_id = await db_get_last_ticket_id_for_user(target_user_id)
         if ticket_id:
             await db_mark_ticket_replied(ticket_id)
-        await context.bot.send_message(chat_id=target_user_id, text=f"📬 **رد على تذكرتك:**\n━━━━━━━━━━━━━━━━━━━━━━\n{reply_text}", parse_mode="MarkdownV2")
+        await context.bot.send_message(chat_id=target_user_id, text=f"📬 **رد على تذكرتك:**\n━━━━━━━━━━━━━━━━━━━━━━\n{reply_text}")
         await update.message.reply_text(f"✅ تم إرسال الرد إلى المستخدم {target_user_id}")
     except Exception as e:
         await update.message.reply_text(f"❌ فشل الإرسال: {e}")
@@ -12532,7 +12532,7 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(get_text(user_id, 'admin_only'))
             return
         await db_set_chat_lock(chat_id, True, user_id)
-        await update.message.reply_text(get_text(user_id, 'locked'), parse_mode="MarkdownV2")
+        await update.message.reply_text(get_text(user_id, 'locked'))
         return
 
     args = context.args or []  # [تحسين 10] استخدام context.args or []
@@ -12540,7 +12540,7 @@ async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAUL
         chat_id = int(args[0])
         if await is_authorized_in_group(context.bot, chat_id, user_id):
             await db_set_chat_lock(chat_id, True, user_id)
-            await update.message.reply_text(get_text(user_id, 'locked'), parse_mode="MarkdownV2")
+            await update.message.reply_text(get_text(user_id, 'locked'))
             return
         else:
             await update.message.reply_text("❌ غير مصرح أو البوت ليس في المجموعة.")
@@ -12579,7 +12579,7 @@ async def unlock_chat_command_handler(update: Update, context: ContextTypes.DEFA
             await update.message.reply_text(get_text(user_id, 'admin_only'))
             return
         await db_set_chat_lock(chat_id, False)
-        await update.message.reply_text(get_text(user_id, 'unlocked'), parse_mode="MarkdownV2")
+        await update.message.reply_text(get_text(user_id, 'unlocked'))
         return
 
     args = context.args or []  # [تحسين 10] استخدام context.args or []
@@ -12587,7 +12587,7 @@ async def unlock_chat_command_handler(update: Update, context: ContextTypes.DEFA
         chat_id = int(args[0])
         if await is_authorized_in_group(context.bot, chat_id, user_id):
             await db_set_chat_lock(chat_id, False)
-            await update.message.reply_text(get_text(user_id, 'unlocked'), parse_mode="MarkdownV2")
+            await update.message.reply_text(get_text(user_id, 'unlocked'))
             return
         else:
             await update.message.reply_text("❌ غير مصرح أو البوت ليس في المجموعة.")
@@ -12636,7 +12636,7 @@ async def panel_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}"),
              InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data=CallbackData.PANEL_CLOSE)]
         ])
-        await update.message.reply_text(f"🔧 **لوحة تحكم المجموعة**\n━━━━━━━━━━━━━━\n📌 **المجموعة:** {chat.title}\n🔐 **الحالة:** {lock_status_text}\n━━━━━━━━━━━━━━\n\nاستخدم الأزرار للتحكم في قفل وفتح المجموعة والإجراءات المتقدمة", reply_markup=kb, parse_mode="MarkdownV2")
+        await update.message.reply_text(f"🔧 **لوحة تحكم المجموعة**\n━━━━━━━━━━━━━━\n📌 **المجموعة:** {chat.title}\n🔐 **الحالة:** {lock_status_text}\n━━━━━━━━━━━━━━\n\nاستخدم الأزرار للتحكم في قفل وفتح المجموعة والإجراءات المتقدمة", reply_markup=kb)
         return
 
     groups = await db_get_user_groups(user_id)
@@ -12676,7 +12676,7 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
             await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
             return
         if len(args) < 3:
-            await update.message.reply_text("📝 **الاستخدام:**\n`/schedule YYYY-MM-DD HH:MM نص المنشور`", parse_mode="MarkdownV2")
+            await update.message.reply_text("📝 **الاستخدام:**\n`/schedule YYYY-MM-DD HH:MM نص المنشور`")
             return
         try:
             date_str = args[0]
@@ -12684,14 +12684,14 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
             text = " ".join(args[2:])
             mecca_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
             if mecca_dt <= mecca_now():
-                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**", parse_mode="MarkdownV2")
+                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**")
                 return
             utc_dt = mecca_to_utc(mecca_dt)
             await db_add_scheduled_post(chat_id, text, utc_dt)
-            await update.message.reply_text(f"✅ **تم جدولة المنشور!**\n📅 {date_str} 🕐 {time_str} (بتوقيت مكة)", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"✅ **تم جدولة المنشور!**\n📅 {date_str} 🕐 {time_str} (بتوقيت مكة)")
             return
         except ValueError:
-            await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!")
             return
 
     if len(args) >= 4:
@@ -12709,14 +12709,14 @@ async def schedule_post_command_handler(update: Update, context: ContextTypes.DE
         try:
             mecca_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
             if mecca_dt <= mecca_now():
-                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**", parse_mode="MarkdownV2")
+                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**")
                 return
             utc_dt = mecca_to_utc(mecca_dt)
             await db_add_scheduled_post(chat_id, text, utc_dt)
-            await update.message.reply_text(f"✅ **تم جدولة المنشور!**\n📅 {date_str} 🕐 {time_str} (بتوقيت مكة)", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"✅ **تم جدولة المنشور!**\n📅 {date_str} 🕐 {time_str} (بتوقيت مكة)")
             return
         except ValueError:
-            await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ صيغة التاريخ أو الوقت غير صحيحة!")
             return
 
     groups = await db_get_user_groups(user_id)
@@ -12768,7 +12768,7 @@ async def set_log_channel_command_handler(update: Update, context: ContextTypes.
         if identifier:
             args = [identifier]
     if not args:
-        await update.message.reply_text("📝 **الاستخدام:**\n`/set_log_channel معرف_القناة`\n\nمثال: `/set_log_channel -1001234567890`\nأو `/set_log_channel @username`", parse_mode="MarkdownV2")
+        await update.message.reply_text("📝 **الاستخدام:**\n`/set_log_channel معرف_القناة`\n\nمثال: `/set_log_channel -1001234567890`\nأو `/set_log_channel @username`")
         return
     identifier = args[0].strip()
     if identifier.startswith('@'):
@@ -12780,21 +12780,21 @@ async def set_log_channel_command_handler(update: Update, context: ContextTypes.
             chat = await context.bot.get_chat(f"@{identifier}")
             chat_id = chat.id
     except Exception as e:
-        await update.message.reply_text(f"❌ لا يمكن العثور على القناة: {e}", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"❌ لا يمكن العثور على القناة: {e}")
         return
     try:
         bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
         if bot_member.status not in ['administrator', 'creator']:
-            await update.message.reply_text("❌ **البوت ليس مشرفاً في هذه القناة.**", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **البوت ليس مشرفاً في هذه القناة.**")
             return
         if not bot_member.can_post_messages:
-            await update.message.reply_text("❌ **البوت لا يملك صلاحية الإرسال.**", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **البوت لا يملك صلاحية الإرسال.**")
             return
     except Exception as e:
-        await update.message.reply_text(f"❌ لا يمكن الوصول للقناة: {e}", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"❌ لا يمكن الوصول للقناة: {e}")
         return
     await db_set_log_channel_id(str(chat_id))
-    await update.message.reply_text(f"✅ **تم تعيين قناة التقارير بنجاح!**\nمعرف القناة: `{chat_id}`", parse_mode="MarkdownV2")
+    await update.message.reply_text(f"✅ **تم تعيين قناة التقارير بنجاح!**\nمعرف القناة: `{chat_id}`")
     try:
         await context.bot.send_message(chat_id, "✅ **تم تفعيل نظام التقارير**")
     except:
@@ -12928,9 +12928,9 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text("❌ الكلمة قصيرة جداً.")
             return
         if await db_add_banned_word(word, -1, user_id):
-            await update.message.reply_text(f"✅ تم إضافة `{word}` ككلمة محظورة عامة.", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"✅ تم إضافة `{word}` ككلمة محظورة عامة.")
         else:
-            await update.message.reply_text(f"⚠️ الكلمة `{word}` موجودة مسبقاً.", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"⚠️ الكلمة `{word}` موجودة مسبقاً.")
         return
 
     if text.startswith("/remove_banned_word"):
@@ -12943,7 +12943,7 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
             await conn.execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word, -1))
             await conn.commit()
         await execute_db(_remove_global)
-        await update.message.reply_text(f"✅ تم حذف `{word}` من الكلمات المحظورة العامة.", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"✅ تم حذف `{word}` من الكلمات المحظورة العامة.")
         return
 
 # ===================== معالجات الكولباك لإضافة البوت =====================
@@ -13230,7 +13230,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop('state', None)
         channel_id = text.strip()
         if not channel_id.startswith('@') and not channel_id.startswith('-100'):
-            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)\n\nتأكد من أن البوت مشرف في القناة.", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)\n\nتأكد من أن البوت مشرف في القناة.")
             context.user_data['state'] = UserState.WAITING_CHANNEL_ID
             return
         new_id = await db_add_channel(uid, channel_id, channel_id)
@@ -13357,7 +13357,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         args = text.split()
         if len(args) < 3:
-            await update.message.reply_text("❌ **صيغة غير صحيحة!**\n\nالاستخدام الصحيح:\n`YYYY-MM-DD HH:MM نص المنشور`\n\nمثال: `2024-12-31 20:00 مرحباً بالجميع!`", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **صيغة غير صحيحة!**\n\nالاستخدام الصحيح:\n`YYYY-MM-DD HH:MM نص المنشور`\n\nمثال: `2024-12-31 20:00 مرحباً بالجميع!`")
             return
         try:
             date_str = args[0]
@@ -13365,13 +13365,13 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             post_text = " ".join(args[2:])
             mecca_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
             if mecca_dt <= mecca_now():
-                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**", parse_mode="MarkdownV2")
+                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**")
                 return
             utc_dt = mecca_to_utc(mecca_dt)
             await db_add_scheduled_post(chat_id, post_text, utc_dt)
-            await update.message.reply_text(f"✅ **تم جدولة المنشور بنجاح!**\n\n📅 التاريخ: {date_str}\n🕐 الوقت: {time_str} (بتوقيت مكة)\n📝 المنشور: {post_text[:100]}{'...' if len(post_text) > 100 else ''}", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"✅ **تم جدولة المنشور بنجاح!**\n\n📅 التاريخ: {date_str}\n🕐 الوقت: {time_str} (بتوقيت مكة)\n📝 المنشور: {post_text[:100]}{'...' if len(post_text) > 100 else ''}")
         except ValueError:
-            await update.message.reply_text("❌ **صيغة التاريخ أو الوقت غير صحيحة!**\n\nتأكد من الصيغة:\n• التاريخ: YYYY-MM-DD (مثال: 2024-12-31)\n• الوقت: HH:MM (مثال: 20:00)", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **صيغة التاريخ أو الوقت غير صحيحة!**\n\nتأكد من الصيغة:\n• التاريخ: YYYY-MM-DD (مثال: 2024-12-31)\n• الوقت: HH:MM (مثال: 20:00)")
         await main_menu_callback(update, context)
         return
 
@@ -13455,7 +13455,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.ADMIN_PANEL)]
         ])
         context.user_data['broadcast_text'] = text
-        await update.message.reply_text(f"📨 **تأكيد الإرسال الجماعي**\n\nالنص المرسل:\n━━━━━━━━━━━━━━\n{text[:500]}\n━━━━━━━━━━━━━━\n\n⚠️ سيتم إرسال هذه الرسالة إلى **جميع مستخدمي البوت**\nهل أنت متأكد؟", reply_markup=confirm_kb, parse_mode="MarkdownV2")
+        await update.message.reply_text(f"📨 **تأكيد الإرسال الجماعي**\n\nالنص المرسل:\n━━━━━━━━━━━━━━\n{text[:500]}\n━━━━━━━━━━━━━━\n\n⚠️ سيتم إرسال هذه الرسالة إلى **جميع مستخدمي البوت**\nهل أنت متأكد؟", reply_markup=confirm_kb)
         return
 
     if state == UserState.WAITING_SENDCODE_USER:
@@ -13467,7 +13467,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         await db_set_allowed_sendcode_user(target_user_id)
         await security_audit.log("SENDCODE_PERMISSION_GRANTED", uid, {"target": target_user_id}, "CRITICAL")
-        await update.message.reply_text(get_text(uid, 'sendcode_user_set').format(target_user_id), parse_mode="MarkdownV2")
+        await update.message.reply_text(get_text(uid, 'sendcode_user_set').format(target_user_id))
         await admin_panel_callback(update, context)
         return
 
@@ -13475,7 +13475,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop('state', None)
         identifier = text.strip()
         if not identifier.startswith('@') and not identifier.startswith('-100'):
-            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)", parse_mode="MarkdownV2")
+            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)")
             context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
             return
         try:
@@ -13487,21 +13487,21 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 chat_id = chat_obj.id
             bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
-                await update.message.reply_text("❌ **البوت ليس مشرفاً في هذه القناة.**", parse_mode="MarkdownV2")
+                await update.message.reply_text("❌ **البوت ليس مشرفاً في هذه القناة.**")
                 context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
                 return
             if not bot_member.can_post_messages:
-                await update.message.reply_text("❌ **البوت لا يملك صلاحية الإرسال في هذه القناة.**", parse_mode="MarkdownV2")
+                await update.message.reply_text("❌ **البوت لا يملك صلاحية الإرسال في هذه القناة.**")
                 context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
                 return
             await db_set_log_channel_id(str(chat_id))
-            await update.message.reply_text(f"✅ **تم تعيين قناة التقارير بنجاح!**\nمعرف القناة: `{chat_id}`", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"✅ **تم تعيين قناة التقارير بنجاح!**\nمعرف القناة: `{chat_id}`")
             try:
                 await context.bot.send_message(chat_id, "✅ **تم تفعيل نظام التقارير**")
             except:
                 pass
         except Exception as e:
-            await update.message.reply_text(f"❌ **لا يمكن الوصول إلى القناة:**\n{str(e)[:200]}", parse_mode="MarkdownV2")
+            await update.message.reply_text(f"❌ **لا يمكن الوصول إلى القناة:**\n{str(e)[:200]}")
             context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
             return
         await admin_panel_callback(update, context)
@@ -13516,7 +13516,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         context.user_data['state'] = UserState.WAITING_REPLY
         context.user_data['admin_keyword'] = keyword
-        await update.message.reply_text(f"📝 **إضافة رد للكلمة:** `{keyword}`\n\nأرسل الرد الذي تريده لهذه الكلمة:", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"📝 **إضافة رد للكلمة:** `{keyword}`\n\nأرسل الرد الذي تريده لهذه الكلمة:")
         return
 
     if state == UserState.WAITING_REPLY:
@@ -13548,7 +13548,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 await add_bot_admin(target_id)
                 await security_audit.log("ADMIN_ADDED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(get_text(uid, 'add_admin_success').format(target_id), parse_mode="MarkdownV2")
+                await update.message.reply_text(get_text(uid, 'add_admin_success').format(target_id))
         except ValueError:
             await update.message.reply_text(get_text(uid, 'invalid_user_id'))
         context.user_data.pop('state', None)
@@ -13563,7 +13563,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 await remove_bot_admin(target_id)
                 await security_audit.log("ADMIN_REMOVED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(get_text(uid, 'remove_admin_success').format(target_id), parse_mode="MarkdownV2")
+                await update.message.reply_text(get_text(uid, 'remove_admin_success').format(target_id))
         except ValueError:
             await update.message.reply_text(get_text(uid, 'invalid_user_id'))
         context.user_data.pop('state', None)
@@ -13730,9 +13730,9 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         now_mecca = mecca_now()
         now_str = now_mecca.strftime("%Y-%m-%d %H:%M:%S")
         reply_text = f"✅ **تم استلام رسالتك!**\n📋 رقم التذكرة: #{ticket_num}\n🕐 {now_str}\n\nسيتم الرد عليك في أقرب وقت ممكن."
-        await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
+        await update.message.reply_text(reply_text)
         notification_text = f"📬 **تذكرة دعم جديدة**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المستخدم: {username}\n🆔 المعرف: `{uid}`\n📋 رقم التذكرة: #{ticket_num}\n🕐 الوقت: {now_str}\n━━━━━━━━━━━━━━━━━━━━━━\n📝 **الرسالة:**\n{clean_text[:500]}\n━━━━━━━━━━━━━━━━━━━━━━\nللرد استخدم:\n`/support_reply {uid} نص الرد`"
-        await context.bot.send_message(chat_id=PRIMARY_OWNER_ID, text=notification_text, parse_mode="MarkdownV2")
+        await context.bot.send_message(chat_id=PRIMARY_OWNER_ID, text=notification_text)
         context.user_data['support_mode'] = False
         return
 
@@ -13798,7 +13798,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 error_text += f"⚠️ الخطأ: `{str(error)[:300]}`\n"
                 if update and update.effective_message and update.effective_message.text:
                     error_text += f"📝 الرسالة: `{update.effective_message.text[:100]}`\n"
-                await context.bot.send_message(PRIMARY_OWNER_ID, error_text, parse_mode="MarkdownV2")
+                await context.bot.send_message(PRIMARY_OWNER_ID, error_text)
             except Exception as e:
                 logger.error(f"فشل إرسال إشعار الخطأ للمطور: {e}")
     except Exception as e:
@@ -14023,7 +14023,7 @@ async def check_nsfw_image(image_bytes: bytes) -> dict:
                 "models": "nudity-2.0,wad",
                 "image_base64": image_b64
             }
-            async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as response:
+            async with session.get(url, params=params) as response:
                 data = await response.json()
 
                 if "error" in data:
