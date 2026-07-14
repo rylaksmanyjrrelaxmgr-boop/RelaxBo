@@ -1798,7 +1798,7 @@ class DatabasePool:
     async def initialize(self):
         async with self._lock:
             if self._pool is None:
-                self._pool = await aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT)
+                self._pool = await aiosqlite.connect(str(DB_PATH))
                 await self._pool.execute("PRAGMA journal_mode=WAL")
                 await self._pool.execute("PRAGMA synchronous=NORMAL")
                 await self._pool.execute("PRAGMA foreign_keys=ON")
@@ -14736,7 +14736,7 @@ async def self_ping_loop():
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
+                async with session.get(url) as resp:
                     logger.info(f"💓 نبض داخلي ناجح: {resp.status}")
         except Exception as e:
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
@@ -14744,7 +14744,7 @@ async def self_ping_loop():
 
 # ===================== تهيئة قاعدة البيانات المحسنة =====================
 async def init_db_improved():
-    async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
+    async with aiosqlite.connect(str(DB_PATH)) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA synchronous=NORMAL")
         await conn.execute("PRAGMA foreign_keys=ON")
