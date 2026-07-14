@@ -15268,7 +15268,7 @@ async def import_banned_words_on_startup():
             logger.info(f"📭 لا توجد كلمات محظورة في {BANNED_WORDS_FILE} للاستيراد")
     except Exception as e:
     
-   logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+         logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
 
 # ===================== دعم أزرار ستار وهلب =====================
 async def star_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
