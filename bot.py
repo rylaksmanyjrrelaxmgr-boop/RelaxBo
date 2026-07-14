@@ -15809,4 +15809,4 @@ if __name__ == "__main__":
         traceback.print_exc()
         sys.exit(1)
 
-# CV2_AVAILABLE = False
+# تم تعطيل CV2_AVAILABLE بسبب عدم التوافق
