@@ -172,13 +172,13 @@ if PYOTP_AVAILABLE:
     import pyotp
 
 if ZSTD_AVAILABLE:
-    import zstandard
-    ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
-    ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
+    # # import zstandard
+    # ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
+    # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
 if CV2_AVAILABLE:
-    import cv2
-    import numpy as np
+    # # import cv2
+    # # import numpy as np
 
 if GOOGLE_AUTH_AVAILABLE:
     from google.oauth2.credentials import Credentials
@@ -197,7 +197,6 @@ load_dotenv()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, BotCommand, LabeledPrice, ChatPermissions
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ChatMemberHandler
 from telegram.error import TimedOut, NetworkError, BadRequest, Forbidden, Conflict
-from telegram.request import HTTPXRequest
 import httpx
 from deep_translator import GoogleTranslator
 from cryptography.fernet import Fernet
@@ -205,8 +204,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
-from PIL import Image
-import numpy as np
+# # from PIL import Image
+# # import numpy as np
 
 # مكتبات الويب - مع التحقق من وجودها
 try:
@@ -1958,7 +1957,7 @@ def decrypt_db_backup(encrypted_path: Path) -> bytes:
 def compress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-            return ZSTD_COMPRESSOR.compress(data)
+            return # ZSTD_COMPRESSOR.compress(data)
         except:
             pass
     return gzip.compress(data)
@@ -1966,7 +1965,7 @@ def compress_backup(data: bytes) -> bytes:
 def decompress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-            return ZSTD_DECOMPRESSOR.decompress(data)
+            return # ZSTD_DECOMPRESSOR.decompress(data)
         except:
             pass
     return gzip.decompress(data)
@@ -14062,8 +14061,8 @@ async def check_nsfw_video(video_bytes: bytes, frames: int = 5) -> dict:
         return {"error": "مكتبة OpenCV غير مثبتة"}
 
     try:
-        import cv2
-        import numpy as np
+        # # import cv2
+        # # import numpy as np
         import io
         import tempfile
 
@@ -15327,7 +15326,6 @@ async def main():
             'pool_timeout': 10.0,
             'connection_pool_size': MAX_CONNECTIONS
         }
-        request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
     else:
         request_kwargs = {
@@ -15337,7 +15335,6 @@ async def main():
             'pool_timeout': 10.0,
             'connection_pool_size': MAX_CONNECTIONS
         }
-        request = HTTPXRequest(**request_kwargs)
         application = Application.builder().token(TOKEN).request(request).build()
 
     application.add_error_handler(global_error_handler)
@@ -15623,7 +15620,13 @@ async def main():
         BotCommand("declare_winner", "إعلان فائز"),
         BotCommand("update_admins", "تحديث المشرفين"),
     ]
+    try:
+    try:
     await application.bot.set_my_commands(commands)
+except Exception as e:
+    logger.error(f"فشل تعيين الأوامر: {e}")
+except Exception as e:
+    logger.error(f"فشل تعيين الأوامر: {e}")
 
     task_manager.create_task(auto_publish_loop_improved(application.bot))
     task_manager.create_task(auto_backup())
