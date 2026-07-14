@@ -172,9 +172,9 @@ if PYOTP_AVAILABLE:
     import pyotp
 
 if ZSTD_AVAILABLE:
-    import zstandard
-    ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
-    ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
+    # import zstandard
+    # ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
+    # ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 
 if CV2_AVAILABLE:
     # import cv2
@@ -1957,7 +1957,7 @@ def decrypt_db_backup(encrypted_path: Path) -> bytes:
 def compress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-            return ZSTD_COMPRESSOR.compress(data)
+            return # ZSTD_COMPRESSOR.compress(data)
         except:
             pass
     return gzip.compress(data)
@@ -1965,7 +1965,7 @@ def compress_backup(data: bytes) -> bytes:
 def decompress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-            return ZSTD_DECOMPRESSOR.decompress(data)
+            return # ZSTD_DECOMPRESSOR.decompress(data)
         except:
             pass
     return gzip.decompress(data)
