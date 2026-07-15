@@ -7913,8 +7913,8 @@ async def auto_backup():
 async def main():
     await init_db_improved()
     
-   # if USE_PROXY:
-        request_kwargs = {
+       # if USE_PROXY:
+       request_kwargs = {
             'proxy_url': PROXY_URL,
             'read_timeout': 60.0,
             'write_timeout': 30.0,
