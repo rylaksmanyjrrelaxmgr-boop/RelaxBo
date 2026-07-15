@@ -358,7 +358,7 @@ def load_translations() -> dict:
             "update_admins_success": "✅ **تم تحديث المشرفين بنجاح!**\n\nتم تحديث {0} مشرف في هذه المجموعة.",
             "update_admins_no_changes": "ℹ️ **لا توجد تغييرات في المشرفين.**\nجميع المشرفين محدثون بالفعل.",
             "update_admins_error": "❌ **فشل تحديث المشرفين.**\nالرجاء التأكد من أن البوت مشرف في المجموعة."
-        },
+    },
         "en": {
             "welcome": "🌿 **Welcome to Relax Manager**\nChoose your language",
             "main_title": "🌿 **{0}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: `{1}`\n👥 My Groups: {2}\n💎 Subscription: {3}\n📡 Active Channel: {4}\n📝 Unpublished Posts: {5}\n⚙️ Auto Publish: {6}",
@@ -537,7 +537,7 @@ def load_translations() -> dict:
             "update_admins_success": "✅ **Admins updated successfully!**\n\nUpdated {0} admins in this group.",
             "update_admins_no_changes": "ℹ️ **No changes in admins.**\nAll admins are already up to date.",
             "update_admins_error": "❌ **Failed to update admins.**\nPlease make sure the bot is an admin in the group."
-        }
+    }
     }
     
     if not translations_file.exists():
@@ -1214,7 +1214,7 @@ async def db_get_security_settings(chat_id: int):
             'slow_mode_seconds': 5, 'welcome_enabled': False, 'welcome_text': "مرحباً {user} في {chat} 🤍",
             'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋", 'delete_banned_words': False,
             'auto_penalty': 'none', 'auto_mute_duration': 60
-        }
+    }
         _security_cache[chat_id] = default_settings
         return default_settings
     return await execute_db(_get)
@@ -1908,7 +1908,7 @@ async def check_bot_admin_permissions(bot, chat_id: int) -> dict:
             'can_ban': getattr(me, 'can_restrict_members', False),
             'can_pin': getattr(me, 'can_pin_messages', False),
             'can_delete': getattr(me, 'can_delete_messages', False),
-        }
+    }
         missing = [k for k, v in permissions.items() if not v]
         if missing:
             return {'can_act': False, 'reason': f'البوت يحتاج صلاحيات: {", ".join(missing)}'}
@@ -7910,6 +7910,17 @@ async def auto_backup():
             logger.error(f"❌ فشل النسخ الاحتياطي: {e}")
 
 # ===================== الوظيفة الرئيسية =====================
+    await init_db_improved()
+
+    # if USE_PROXY:
+    request_kwargs = {
+        'read_timeout': 60.0,
+        'write_timeout': 30.0,
+        'connect_timeout': 30.0,
+        'pool_timeout': 10.0,
+    }
+    request = HTTPXRequest(**request_kwargs)
+    application = Application.builder().token(TOKEN).request(request).build()
 async def main():
     await init_db_improved()
 
@@ -7923,14 +7934,14 @@ async def main():
     request = HTTPXRequest(**request_kwargs)
     application = Application.builder().token(TOKEN).request(request).build()
     else:
-        request_kwargs = {
-            'read_timeout': 60.0,
-            'write_timeout': 30.0,
-            'connect_timeout': 30.0,
-            'pool_timeout': 10.0,
-        }
-        request = HTTPXRequest(**request_kwargs)
-        application = Application.builder().token(TOKEN).request(request).build()
+    request_kwargs = {
+        'read_timeout': 60.0,
+        'write_timeout': 30.0,
+        'connect_timeout': 30.0,
+        'pool_timeout': 10.0,
+    }
+    request = HTTPXRequest(**request_kwargs)
+    application = Application.builder().token(TOKEN).request(request).build()
     
     application.add_error_handler(global_error_handler)
     
