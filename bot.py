@@ -12250,3 +12250,58 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+# ===================== Pool اتصالات قاعدة البيانات =====================
+class DatabasePool:
+    def __init__(self, max_connections: int = 10):
+        self._pool = None
+        self._max_connections = max_connections
+        self._lock = asyncio.Lock()
+        self._connections = []
+
+    async def initialize(self):
+        async with self._lock:
+            if self._pool is None:
+                self._pool = await aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT)
+                await self._pool.execute("PRAGMA journal_mode=WAL")
+                await self._pool.execute("PRAGMA synchronous=NORMAL")
+                await self._pool.execute("PRAGMA foreign_keys=ON")
+                await self._pool.execute("PRAGMA cache_size=-64000")
+                await self._pool.execute("PRAGMA max_page_count=1000000")
+                await self._pool.execute("PRAGMA secure_delete=ON")
+                self._pool.row_factory = aiosqlite.Row
+
+    async def get_connection(self):
+        if self._pool is None:
+            await self.initialize()
+        return self._pool
+
+    async def execute(self, query: str, params: tuple = None):
+        conn = await self.get_connection()
+        async with conn.execute(query, params or ()) as cursor:
+            return await cursor.fetchall()
+
+    async def execute_many(self, queries: List[Tuple[str, tuple]]):
+        conn = await self.get_connection()
+        async with conn:
+            for query, params in queries:
+                await conn.execute(query, params)
+            await conn.commit()
+
+    async def close(self):
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+
+db_pool = DatabasePool(max_connections=MAX_CONNECTIONS)
+
+async def execute_db(func: Callable):
+    conn = await db_pool.get_connection()
+    try:
+        return await func(conn)
+    except Exception as e:
+        logger.error(f"خطأ في قاعدة البيانات: {e}")
+        raise
+    finally:
+        pass
+
