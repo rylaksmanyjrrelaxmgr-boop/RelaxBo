@@ -4297,16 +4297,24 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
 
 # ===================== الأوامر الرئيسية =====================
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /start"""
+    print("🚀 تم استقبال أمر /start")
     if not update or not update.effective_user:
+        print("❌ لا يوجد مستخدم")
         return
     user = update.effective_user
     user_id = user.id
+    print(f"👤 المستخدم: {user_id}")
     username = user.username or ""
     first_name = user.first_name or ""
     await db_register_user(user_id)
+    print("✅ تم تسجيل المستخدم")
     if not await ensure_force_subscribe(update, context, user_id):
+        print("❌ فشل التحقق من الاشتراك الإجباري")
         return
+    print("✅ تم التحقق من الاشتراك")
     await main_menu_callback(update, context)
+    print("✅ تم عرض القائمة الرئيسية")
 
 async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update or not update.effective_user or not update.effective_chat:
@@ -5823,7 +5831,7 @@ async def main():
     application.add_error_handler(global_error_handler)
     
     # الأوامر
-    application.add_handler(CommandHandler("start", start_command_handler))
+    application.add_handler(CommandHandler("start", start_command_handler_simple))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
     application.add_handler(CommandHandler("security", security_command_handler))
@@ -6113,3 +6121,23 @@ async def db_get_all_user_channels() -> List[Dict]:
         return [dict(row) for row in rows]
     return await execute_db(_get)
 
+
+# ===================== إصلاح /start =====================
+async def start_command_handler_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج بسيط لأمر /start"""
+    if not update or not update.effective_user:
+        return
+    user_id = update.effective_user.id
+    await db_register_user(user_id)
+    await update.message.reply_text(
+        f"🌿 **مرحباً بك في {BOT_NAME}**\n\n"
+        f"👤 معرفك: `{user_id}`\n\n"
+        f"📌 استخدم الأوامر التالية:\n"
+        f"/help - المساعدة\n"
+        f"/trial - تجربة مجانية\n"
+        f"/subscribe - الاشتراك\n"
+        f"/support - الدعم\n"
+        f"/language - تغيير اللغة\n\n"
+        f"🔗 للتواصل مع المطور: @RelaxMgr",
+        parse_mode="Markdown"
+    )
