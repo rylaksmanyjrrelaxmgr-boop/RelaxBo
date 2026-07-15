@@ -698,3 +698,4 @@ async def set_user_translation_language(user_id: int, lang: str):
         await conn.commit()
     await execute_db(_set)
     user_translation_settings_cache[user_id] = lang
+
