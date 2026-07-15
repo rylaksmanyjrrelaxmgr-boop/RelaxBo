@@ -1,15 +1,41 @@
-.env
-*.db
-*.enc
-*.key
-*.salt
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
 data/
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
 logs/
+
+# Backups
 backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
 temp/
-static/
-templates/
-credentials.json
-token.json
+tmp/
+*.tmp
