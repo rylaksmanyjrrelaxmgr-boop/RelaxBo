@@ -7912,17 +7912,16 @@ async def auto_backup():
 # ===================== الوظيفة الرئيسية =====================
 async def main():
     await init_db_improved()
-    
-       # if USE_PROXY:
-       request_kwargs = {
-            'proxy_url': PROXY_URL,
-            'read_timeout': 60.0,
-            'write_timeout': 30.0,
-            'connect_timeout': 30.0,
-            'pool_timeout': 10.0,
-        }
-        request = HTTPXRequest(**request_kwargs)
-        application = Application.builder().token(TOKEN).request(request).build()
+
+    # if USE_PROXY:
+    request_kwargs = {
+        'read_timeout': 60.0,
+        'write_timeout': 30.0,
+        'connect_timeout': 30.0,
+        'pool_timeout': 10.0,
+    }
+    request = HTTPXRequest(**request_kwargs)
+    application = Application.builder().token(TOKEN).request(request).build()
     else:
         request_kwargs = {
             'read_timeout': 60.0,
