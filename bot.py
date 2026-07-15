@@ -6141,3 +6141,23 @@ async def start_command_handler_simple(update: Update, context: ContextTypes.DEF
         f"🔗 للتواصل مع المطور: @RelaxMgr",
         parse_mode="Markdown"
     )
+
+# ===================== دالة /start البسيطة =====================
+async def start_command_handler_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج بسيط لأمر /start"""
+    if not update or not update.effective_user:
+        return
+    user_id = update.effective_user.id
+    await db_register_user(user_id)
+    await update.message.reply_text(
+        f"🌿 **مرحباً بك في {BOT_NAME}**\n\n"
+        f"👤 معرفك: `{user_id}`\n\n"
+        f"📌 استخدم الأوامر التالية:\n"
+        f"/help - المساعدة\n"
+        f"/trial - تجربة مجانية\n"
+        f"/subscribe - الاشتراك\n"
+        f"/support - الدعم\n"
+        f"/language - تغيير اللغة\n\n"
+        f"🔗 للتواصل مع المطور: @RelaxMgr",
+        parse_mode="Markdown"
+    )
