@@ -1,11 +1,9 @@
 services:
   - type: web
     name: relax-bot
-    runtime: python
-    plan: free
-    autoDeploy: true
+    env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
         sync: false
@@ -15,15 +13,9 @@ services:
         value: ريلاكس مانيجر
       - key: BOT_USERNAME
         value: Reelaaaxbot
-      - key: USE_PROXY
-        value: false
-      - key: NSFW_ENABLED
-        value: true
-      - key: NSFW_THRESHOLD
-        value: 0.7
       - key: MAX_FILE_SIZE
         value: 20971520
-      - key: MAX_BACKUPS
-        value: 10
+      - key: PORT
+        value: 10000
       - key: PYTHON_VERSION
         value: 3.11.0
