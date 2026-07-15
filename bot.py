@@ -7970,7 +7970,7 @@ async def main():
         BotCommand("set_rules", "تعيين قوانين المجموعة (للمشرفين)"),
         BotCommand("reset_rules", "إعادة تعيين القوانين (للمشرفين)"),
     ]
-    await application.bot.set_my_commands(commands)
+    await safe_set_commands(application)
     
     # ===== مهام خلفية =====
     asyncio.create_task(auto_publish_loop_improved(application.bot))
@@ -8326,3 +8326,34 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+# ===================== تجاوز أخطاء set_my_commands =====================
+try:
+    import asyncio
+    from telegram.error import NetworkError
+except:
+    pass
+
+async def safe_set_commands(application):
+    """تعيين الأوامر مع تجنب الأخطاء"""
+    try:
+        commands = [
+            BotCommand("start", "بدء البوت"),
+            BotCommand("trial", "تجربة مجانية"),
+            BotCommand("subscribe", "الاشتراك"),
+            BotCommand("syncgroup", "تفعيل المجموعة"),
+            BotCommand("security", "إعدادات الأمان"),
+            BotCommand("help", "المساعدة"),
+            BotCommand("support", "مركز الدعم"),
+            BotCommand("language", "تغيير اللغة"),
+            BotCommand("panel", "لوحة التحكم"),
+            BotCommand("stats", "إحصائيات القناة"),
+            BotCommand("rank", "رتبتك"),
+            BotCommand("top", "أفضل 10"),
+            BotCommand("contests", "المسابقات"),
+            BotCommand("rules", "قوانين المجموعة"),
+        ]
+        await safe_set_commands(application)
+        logger.info("✅ تم تعيين الأوامر بنجاح")
+    except Exception as e:
+        logger.warning(f"⚠️ فشل تعيين الأوامر: {e}")
