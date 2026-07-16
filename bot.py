@@ -7,11 +7,13 @@
 المطور: @RelaxMgr
 
 تم تحديث هذا الإصدار ليحتوي على جميع الإصلاحات المطلوبة:
-- إضافة دالة is_authorized_in_group مع تخزين مؤقت
-- تحسين تخزين المفاتيح (استخدام متغيرات البيئة بشكل آمن)
-- إصلاح مشاكل الأداء والذاكرة
-- تحسين الأمان العام
-- نظام لغات من ملفات منفصلة (JSON)
+- نظام اللغات من ملفات منفصلة (JSON)
+- إضافة أوامر /set_rules و /rules
+- إصلاح auto_reply_cancel_callback
+- إصلاح auto_reply_stats_callback
+- إصلاح auto_reply_admins_callback
+- إصلاح مشكلة ERR_INVALID_RESPONSE في واجهة الويب
+- دعم كامل للمشرفين المتعددين
 """
 
 import sys
@@ -102,6 +104,7 @@ ACCESS_LOG = get_writable_path(BASE_PATH, "logs") / "access.log"
 TEMP_PATH = get_temp_path()
 STATIC_PATH = get_writable_path(BASE_PATH, "static")
 TEMPLATES_PATH = get_writable_path(BASE_PATH, "templates")
+LANG_PATH = BASE_PATH / "lang"
 
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 DATA_PATH.mkdir(parents=True, exist_ok=True)
@@ -109,6 +112,7 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 TEMP_PATH.mkdir(parents=True, exist_ok=True)
 STATIC_PATH.mkdir(parents=True, exist_ok=True)
 TEMPLATES_PATH.mkdir(parents=True, exist_ok=True)
+LANG_PATH.mkdir(parents=True, exist_ok=True)
 
 # ===================== التثبيت التلقائي للمكتبات =====================
 def ensure_package(package_name: str, import_name: str = None) -> bool:
@@ -206,30 +210,7 @@ import aiohttp
 from PIL import Image
 import numpy as np
 
-# مكتبات الويب - مع التحقق من وجودها
-try:
-    import jinja2
-    JINJA2_AVAILABLE = True
-except ImportError:
-    JINJA2_AVAILABLE = False
-    print("⚠️ jinja2 غير مثبت - سيتم استخدام HTML النقي")
-
-try:
-    import markdown
-    MARKDOWN_AVAILABLE = True
-except ImportError:
-    MARKDOWN_AVAILABLE = False
-
-try:
-    import aiofiles
-    AIOFILES_AVAILABLE = True
-except ImportError:
-    AIOFILES_AVAILABLE = False
-
 # ===================== نظام اللغات من ملفات منفصلة =====================
-LANG_PATH = BASE_PATH / "lang"
-LANG_PATH.mkdir(parents=True, exist_ok=True)
-
 _lang_data = {}
 _lang_cache_time = {}
 LANG_CACHE_TTL = 300
@@ -339,7 +320,7 @@ def create_default_lang_files():
             "unlocked": "🔓 تم فتح المجموعة",
             "cancelled": "❌ تم الإلغاء",
             "error": "⚠️ حدث خطأ، حاول مرة أخرى",
-            "help": "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/add_hidden_admin - إضافة مشرف مخفي\n/remove_hidden_admin - إزالة مشرف مخفي\n/list_hidden_admins - عرض المشرفين المخفيين\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز",
+            "help": "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **الأوامر المتاحة:**\n/start - القائمة الرئيسية\n/trial - تجربة مجانية\n/subscribe - الاشتراك\n/syncgroup - تفعيل المجموعة\n/security - إعدادات الأمان\n/register_hidden_owner - تسجيل مالك مخفي\n/add_hidden_admin - إضافة مشرف مخفي\n/remove_hidden_admin - إزالة مشرف مخفي\n/list_hidden_admins - عرض المشرفين المخفيين\n/rank - رتبتك\n/top - أفضل 10\n/stats - إحصائيات القناة\n/lock - قفل المجموعة\n/unlock - فتح المجموعة\n/schedule - جدولة منشور\n/panel - لوحة التحكم\n/language - تغيير اللغة\n/support - مركز الدعم\n/help - هذه المساعدة\n/developer - المطور\n/updates - التحديثات\n/contests - المسابقات\n/create_contest - إنشاء مسابقة\n/declare_winner - إعلان فائز\n/set_rules - تعيين قوانين المجموعة\n/rules - عرض قوانين المجموعة",
             "support_welcome": "📞 **مركز الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الخدمة المطلوبة:",
             "support_help": "❓ **المساعدة**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 للتواصل مع الدعم:\n• استخدم /support\n• اكتب رسالتك\n• ستصلك تذكرة برقم\n• سنرد عليك بأسرع وقت\n\n📌 للمشاكل التقنية:\n• تأكد من أن البوت مشرف\n• تأكد من صلاحيات البوت\n• راجع إعدادات الأمان",
             "trial_used": "❌ لقد استخدمت التجربة المجانية مسبقاً",
@@ -470,7 +451,7 @@ def create_default_lang_files():
             "unlocked": "🔓 Group unlocked",
             "cancelled": "❌ Cancelled",
             "error": "⚠️ An error occurred, try again",
-            "help": "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/add_hidden_admin - Add Hidden Admin\n/remove_hidden_admin - Remove Hidden Admin\n/list_hidden_admins - List Hidden Admins\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner",
+            "help": "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 **Available Commands:**\n/start - Main Menu\n/trial - Free Trial\n/subscribe - Subscribe\n/syncgroup - Activate Group\n/security - Security Settings\n/register_hidden_owner - Register Hidden Owner\n/add_hidden_admin - Add Hidden Admin\n/remove_hidden_admin - Remove Hidden Admin\n/list_hidden_admins - List Hidden Admins\n/rank - Your Rank\n/top - Top 10\n/stats - Channel Stats\n/lock - Lock Group\n/unlock - Unlock Group\n/schedule - Schedule Post\n/panel - Control Panel\n/language - Change Language\n/support - Support Center\n/help - This Help\n/developer - Developer\n/updates - Updates\n/contests - Contests\n/create_contest - Create Contest\n/declare_winner - Declare Winner\n/set_rules - Set Group Rules\n/rules - View Group Rules",
             "support_welcome": "📞 **Support Center**\n━━━━━━━━━━━━━━━━━━━━━━\nSelect the required service:",
             "support_help": "❓ **Help**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 To contact support:\n• Use /support\n• Write your message\n• You'll get a ticket number\n• We'll reply ASAP\n\n📌 For technical issues:\n• Make sure bot is admin\n• Check bot permissions\n• Review security settings",
             "trial_used": "❌ You have already used the free trial",
@@ -524,8 +505,8 @@ def create_default_lang_files():
                 json.dump(texts, f, ensure_ascii=False, indent=2)
             print(f"✅ تم إنشاء ملف {lang_file}")
 
-# تحميل اللغات عند بدء التشغيل
-user_language = {}  # تخزين لغة كل مستخدم
+# تحميل اللغات
+user_language = {}
 
 def get_text(user_id: int, key: str) -> str:
     """الحصول على نص مترجم من ملف اللغة"""
@@ -542,6 +523,9 @@ def get_text(user_id: int, key: str) -> str:
 async def set_user_language(user_id: int, lang: str):
     """تعيين لغة المستخدم"""
     user_language[user_id] = lang
+
+# تحميل اللغات
+load_all_languages()
 
 # ===================== متغيرات NSFW =====================
 SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "")
@@ -1165,7 +1149,7 @@ else:
     REMINDERS_SLEEP = 3600
     AUTO_BACKUP_SLEEP = 24 * 60 * 60
 
-# ===================== التشفير المعتمد على كلمة المرور (محسن لـ Render) =====================
+# ===================== التشفير المعتمد على كلمة المرور =====================
 def derive_key_from_password(password: str, salt: bytes) -> bytes:
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -1725,10 +1709,14 @@ async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **
         raise
 
 async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
+    """تعديل رسالة بأمان مع دعم MarkdownV2 وتجنب خطأ 'message is not modified'"""
     if not query or not query.message:
         return None
+    
+    # تحقق إذا كانت الرسالة نفسها
     current_text = query.message.text or ""
     current_reply_markup = query.message.reply_markup
+    
     if current_text == text:
         if reply_markup is None and current_reply_markup is None:
             try:
@@ -1743,8 +1731,10 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
                 except:
                     pass
                 return None
+    
     if not text:
         return None
+    
     clean_text = sanitize_text(text)
     try:
         escaped = escape_markdown_v2(clean_text)
@@ -11152,8 +11142,15 @@ async def auto_reply_cancel_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     chat_id = int(query.data.split(":")[-1])
+    user_id = update.effective_user.id
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await query.answer("❌ غير مصرح", show_alert=True)
+        return
     settings = await db_get_auto_reply_settings(chat_id)
-    await query.edit_message_text("❌ تم إلغاء إعادة التعيين", reply_markup=get_auto_reply_keyboard(chat_id, settings))
+    await query.edit_message_text(
+        "❌ تم إلغاء إعادة التعيين",
+        reply_markup=get_auto_reply_keyboard(chat_id, settings)
+    )
 
 async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -12825,8 +12822,14 @@ async def subscribe_command_handler(update: Update, context: ContextTypes.DEFAUL
     await subscribe_menu_callback(update, context)
 
 async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /help"""
+    if update.message is None:
+        return
     user_id = update.effective_user.id
-    await update.message.reply_text(get_text(user_id, 'help'), parse_mode="MarkdownV2")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
+    ])
+    await safe_send_markdown(context.bot, user_id, get_text(user_id, 'help'), reply_markup=keyboard)
 
 async def support_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -15209,7 +15212,7 @@ async def main():
     application.add_handler(CommandHandler("list_hidden_admins", list_hidden_admins_command))
     application.add_handler(CommandHandler("trial", trial_command_handler))
     application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
-    application.add_handler(CommandHandler("help", help_command_handler))
+    application.add_handler(CommandHandler("help", help_command_handler))  # ✅ تم الإضافة
     application.add_handler(CommandHandler("support", support_command_handler))
     application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
     application.add_handler(CommandHandler("rank", rank_command_handler))
@@ -15233,6 +15236,8 @@ async def main():
     application.add_handler(CommandHandler("contests", contests_command_handler))
     application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
     application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
+    application.add_handler(CommandHandler("set_rules", set_rules_command_handler))
+    application.add_handler(CommandHandler("rules", rules_command_handler))
 
     # ========== CallbackQuery Handlers ==========
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
@@ -15467,6 +15472,8 @@ async def main():
         BotCommand("contests", "المسابقات"),
         BotCommand("create_contest", "إنشاء مسابقة"),
         BotCommand("declare_winner", "إعلان فائز"),
+        BotCommand("set_rules", "تعيين قوانين المجموعة"),
+        BotCommand("rules", "عرض قوانين المجموعة"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -15522,6 +15529,11 @@ async def main():
     print("   • ✅ **إصلاح group_settings_callback مع معالجة شاملة للأخطاء**")
     print("   • ✅ **تحسين db_get_security_settings لإنشاء سجل افتراضي تلقائياً**")
     print("   • ✅ **نظام اللغات من ملفات منفصلة (JSON)**")
+    print("   • ✅ **أوامر /set_rules و /rules**")
+    print("   • ✅ **إصلاح auto_reply_cancel_callback**")
+    print("   • ✅ **إصلاح auto_reply_stats_callback**")
+    print("   • ✅ **إصلاح auto_reply_admins_callback**")
+    print("   • ✅ **إصلاح مشكلة ERR_INVALID_RESPONSE في واجهة الويب**")
 
     try:
         await application.run_polling(
