@@ -3,7 +3,7 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.0 - دعم كامل للمشرفين المتعددين، إضافة check_admin_access، وتحسينات الأداء
+الإصدار: 19.3.1 - إصلاح أخطاء الكولباك وتحسين الاستقرار
 المطور: @RelaxMgr
 """
 
@@ -1140,6 +1140,15 @@ class AdvancedLogger:
         self.loggers['security'].warning(log_msg)
 
 advanced_logger = AdvancedLogger()
+
+# ===================================================================
+# ===================== إضافة دالة log_error =====================
+# ===================================================================
+def log_error(error: Exception, context: dict = None) -> str:
+    """تسجيل الأخطاء وإرجاع معرف فريد"""
+    return advanced_logger.log_error("حدث خطأ غير متوقع", error, context)
+
+# ===================================================================
 
 # ===================== نظام إدارة الأخطاء =====================
 class ErrorHandler:
@@ -2781,7 +2790,7 @@ def create_web_templates():
 <body>
 
 <!-- Render Badge -->
-<div class="render-badge">🚀 ريلاكس مانيجر v19.3.0</div>
+<div class="render-badge">🚀 ريلاكس مانيجر v19.3.1</div>
 
 <!-- Sidebar -->
 <div class="sidebar">
@@ -2930,7 +2939,7 @@ def create_web_templates():
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>الإصدار</span>
-                            <span>19.3.0</span>
+                            <span>19.3.1</span>
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>وقت التشغيل</span>
@@ -4321,7 +4330,7 @@ async def api_system_info_handler(request):
             'memory': f"{ram['percent']}%",
             'db_status': '✅ سليمة' if db_healthy else '❌ تالفة',
             'telegram_status': '✅ متصل' if tg_healthy else '❌ غير متصل',
-            'version': '19.3.0',
+            'version': '19.3.1',
             'platform': platform.platform()
         })
     except Exception as e:
@@ -4432,7 +4441,7 @@ async def login_handler(request):
                     <button type="submit" class="btn btn-primary w-100">دخول</button>
                 </form>
                 <hr>
-                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.0</p>
+                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.1</p>
             </div>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
         </body>
@@ -5096,6 +5105,7 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
         await conn.execute("INSERT INTO bot_groups (chat_id, chat_name, username, added_by, added_at) VALUES (?, ?, ?, ?, ?)",
                           (chat_id, chat_name, username, added_by, utc_now_iso()))
         await conn.execute("INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?, ?)", (added_by, chat_id))
+        await conn.execute("INSERT OR IGNORE INTO group_admins (chat_id, user_id) VALUES (?, ?)", (chat_id, added_by))
         await conn.commit()
         return True
     return await execute_db(_register)
@@ -5103,14 +5113,9 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
 async def db_get_user_groups(user_id: int):
     """
     ترجع جميع المجموعات التي يظهرها البوت للمستخدم، مع تصفية المخفية.
-    - يعرض للمالك المخفي مجموعاته
-    - يخفي عن المشرفين المخفيين المجموعات التي هم مشرفون فيها (ما عدا المالك)
-    - يعرض للمستخدمين العاديين المجموعات التي أضافوها أو مرتبطون بها
-    - بالإضافة إلى المجموعات التي يكون فيها المستخدم مشرفاً حقيقياً (من جدول group_admins)
     """
     async def _get(conn):
         try:
-            # 1. جلب جميع المجموعات التي أضيف إليها البوت (من جدول bot_groups)
             cur = await conn.execute("""
                 SELECT chat_id, chat_name, username, banned
                 FROM bot_groups
@@ -5118,21 +5123,21 @@ async def db_get_user_groups(user_id: int):
             """)
             all_groups = await cur.fetchall()
 
-            # 2. جلب المجموعات التي فيها المالك المخفي لهذا المستخدم
+            # جلب المجموعات التي فيها المالك المخفي
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_owner_groups WHERE owner_id=?
             """, (user_id,))
             hidden_owner_rows = await cur.fetchall()
             hidden_owner_groups = {row[0] for row in hidden_owner_rows}
 
-            # 3. جلب المجموعات التي فيها المستخدم مشرف مخفي
+            # جلب المجموعات التي فيها المستخدم مشرف مخفي
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_admins WHERE admin_id=?
             """, (user_id,))
             hidden_admin_rows = await cur.fetchall()
             hidden_admin_groups = {row[0] for row in hidden_admin_rows}
 
-            # 4. جلب المجموعات التي أضافها المستخدم أو مرتبط بها
+            # جلب المجموعات التي أضافها المستخدم أو مرتبط بها
             cur = await conn.execute("""
                 SELECT chat_id FROM bot_groups WHERE added_by=?
                 UNION
@@ -5141,30 +5146,24 @@ async def db_get_user_groups(user_id: int):
             linked_rows = await cur.fetchall()
             linked_groups = {row[0] for row in linked_rows}
 
-            # 5. جلب المجموعات التي يكون فيها المستخدم مشرفاً حقيقياً (من جدول group_admins)
+            # جلب المجموعات التي يكون فيها المستخدم مشرفاً حقيقياً
             cur = await conn.execute("""
                 SELECT chat_id FROM group_admins WHERE user_id=?
             """, (user_id,))
             admin_rows = await cur.fetchall()
             admin_groups = {row[0] for row in admin_rows}
 
-            # 6. تصفية النتائج:
             visible_groups = []
             for group in all_groups:
                 chat_id = group[0]
-                # المالك المخفي يرى مجموعاته
                 if chat_id in hidden_owner_groups:
                     visible_groups.append(group)
-                # المشرف المخفي لا يرى المجموعات التي هو مشرف فيها (إلا إذا كان مالكاً)
                 elif chat_id in hidden_admin_groups:
                     continue
-                # المشرف الحقيقي (من group_admins) يرى مجموعته
                 elif chat_id in admin_groups:
                     visible_groups.append(group)
-                # المستخدم العادي: يرى فقط المجموعات التي أضافها أو مرتبط بها
                 elif chat_id in linked_groups:
                     visible_groups.append(group)
-                # إذا لم يكن مرتبطاً ولا مالكاً ولا مشرفاً مخفياً ولا مشرفاً حقيقياً - لا يظهرها
                 else:
                     continue
 
@@ -5211,40 +5210,65 @@ async def is_chat_locked(chat_id: int) -> bool:
 
 # ===================== دوال الأمان =====================
 async def db_get_security_settings(chat_id: int):
-    if CACHETOOLS_AVAILABLE:
-        if chat_id in _security_cache:
-            return _security_cache[chat_id]
-    async def _get(conn):
-        cur = await conn.execute("SELECT delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration FROM group_security WHERE chat_id=?", (chat_id,))
-        row = await cur.fetchone()
-        if row:
-            settings = {
-                'links': row[0] == 1,
-                'mentions': row[1] == 1,
-                'warn': row[2] == 1,
-                'slow_mode': row[3] == 1,
-                'slow_mode_seconds': row[4] if row[4] is not None else 5,
-                'welcome_enabled': row[5] == 1,
-                'welcome_text': row[6] if row[6] else "مرحباً {user} في {chat} 🤍",
-                'goodbye_enabled': row[7] == 1,
-                'goodbye_text': row[8] if row[8] else "وداعاً {user} 👋",
-                'delete_banned_words': row[9] == 1,
-                'auto_penalty': row[10] if row[10] else 'none',
-                'auto_mute_duration': row[11] if row[11] is not None else 60
-            }
+    default_settings = {
+        'links': False, 'mentions': False, 'warn': True, 'slow_mode': False,
+        'slow_mode_seconds': 5, 'welcome_enabled': False,
+        'welcome_text': "مرحباً {user} في {chat} 🤍",
+        'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋",
+        'delete_banned_words': False, 'auto_penalty': 'none', 'auto_mute_duration': 60
+    }
+
+    if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
+        return _security_cache[chat_id]
+
+    try:
+        async def _get(conn):
+            cur = await conn.execute(
+                """SELECT delete_links, delete_mentions, warn_message, slow_mode,
+                          slow_mode_seconds, welcome_enabled, welcome_text,
+                          goodbye_enabled, goodbye_text, delete_banned_words,
+                          auto_penalty, auto_mute_duration
+                   FROM group_security WHERE chat_id=?""",
+                (chat_id,)
+            )
+            row = await cur.fetchone()
+            if row:
+                settings = {
+                    'links': row[0] == 1,
+                    'mentions': row[1] == 1,
+                    'warn': row[2] == 1,
+                    'slow_mode': row[3] == 1,
+                    'slow_mode_seconds': row[4] if row[4] is not None else 5,
+                    'welcome_enabled': row[5] == 1,
+                    'welcome_text': row[6] if row[6] else default_settings['welcome_text'],
+                    'goodbye_enabled': row[7] == 1,
+                    'goodbye_text': row[8] if row[8] else default_settings['goodbye_text'],
+                    'delete_banned_words': row[9] == 1,
+                    'auto_penalty': row[10] if row[10] else 'none',
+                    'auto_mute_duration': row[11] if row[11] is not None else 60
+                }
+                if CACHETOOLS_AVAILABLE:
+                    _security_cache[chat_id] = settings
+                return settings
+
+            # إنشاء سجل افتراضي
+            await conn.execute(
+                """INSERT INTO group_security
+                   (chat_id, delete_links, delete_mentions, warn_message, slow_mode,
+                    slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled,
+                    goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chat_id, 0, 0, 1, 0, 5, 0, default_settings['welcome_text'],
+                 0, default_settings['goodbye_text'], 0, 'none', 60)
+            )
+            await conn.commit()
             if CACHETOOLS_AVAILABLE:
-                _security_cache[chat_id] = settings
-            return settings
-        default_settings = {
-            'links': False, 'mentions': False, 'warn': True, 'slow_mode': False,
-            'slow_mode_seconds': 5, 'welcome_enabled': False, 'welcome_text': "مرحباً {user} في {chat} 🤍",
-            'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋", 'delete_banned_words': False,
-            'auto_penalty': 'none', 'auto_mute_duration': 60
-        }
-        if CACHETOOLS_AVAILABLE:
-            _security_cache[chat_id] = default_settings
+                _security_cache[chat_id] = default_settings
+            return default_settings
+        return await execute_db(_get)
+    except Exception as e:
+        advanced_logger.log_error("خطأ في db_get_security_settings", e, {"chat_id": chat_id})
         return default_settings
-    return await execute_db(_get)
 
 async def db_set_security_settings(chat_id: int, **kwargs):
     async def _set(conn):
@@ -5363,14 +5387,12 @@ async def db_contains_banned_word(text: str, chat_id: int) -> str:
     for word, _, _ in words:
         if word in text_lower:
             return word
-    # التحقق من الأنماط النمطية
     for pattern in BANNED_PATTERNS:
         if pattern.search(text_lower):
             return pattern.pattern
     return None
 
 async def add_banned_pattern(pattern: str) -> bool:
-    """إضافة نمط Regex للكلمات المحظورة"""
     try:
         compiled = re.compile(pattern.lower())
         BANNED_PATTERNS.append(compiled)
@@ -5379,7 +5401,6 @@ async def add_banned_pattern(pattern: str) -> bool:
         return False
 
 async def check_banned_patterns(text: str) -> bool:
-    """التحقق من الأنماط النمطية المحظورة"""
     text_lower = text.lower()
     for pattern in BANNED_PATTERNS:
         if pattern.search(text_lower):
@@ -5456,14 +5477,7 @@ async def db_get_hidden_admins(chat_id: int) -> List[Dict]:
             ORDER BY added_at DESC
         """, (chat_id,))
         rows = await cur.fetchall()
-        return [
-            {
-                'admin_id': row[0],
-                'added_by': row[1],
-                'added_at': row[2]
-            }
-            for row in rows
-        ]
+        return [{'admin_id': row[0], 'added_by': row[1], 'added_at': row[2]} for row in rows]
     return await execute_db(_get)
 
 async def db_get_all_hidden_admins(user_id: int) -> List[Dict]:
@@ -5474,13 +5488,7 @@ async def db_get_all_hidden_admins(user_id: int) -> List[Dict]:
             WHERE admin_id=?
         """, (user_id,))
         rows = await cur.fetchall()
-        return [
-            {
-                'chat_id': row[0],
-                'added_at': row[1]
-            }
-            for row in rows
-        ]
+        return [{'chat_id': row[0], 'added_at': row[1]} for row in rows]
     return await execute_db(_get)
 
 async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
@@ -5492,30 +5500,19 @@ async def db_should_hide_group_from_user(chat_id: int, user_id: int) -> bool:
         return False
     return await execute_db(_check)
 
-# ===================== دوال المشرفين الحقيقيين (group_admins) =====================
+# ===================== دوال المشرفين الحقيقيين =====================
 async def db_sync_group_admins(chat_id: int, bot, owner_id: int = None) -> int:
-    """
-    جلب قائمة المشرفين الحقيقيين من تيليجرام وتحديث جدول group_admins.
-    إذا تم تمرير owner_id، يتم إضافته أيضاً.
-    """
     try:
         admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in admins]
-
-        # إضافة المالك إذا لم يكن موجوداً
         if owner_id and owner_id not in admin_ids:
             admin_ids.append(owner_id)
 
         async def _update(conn):
-            # حذف القديم
             await conn.execute("DELETE FROM group_admins WHERE chat_id=?", (chat_id,))
-            # إدراج الجديد
             if admin_ids:
                 values = [(chat_id, uid) for uid in admin_ids]
-                await conn.executemany(
-                    "INSERT INTO group_admins (chat_id, user_id) VALUES (?, ?)",
-                    values
-                )
+                await conn.executemany("INSERT INTO group_admins (chat_id, user_id) VALUES (?, ?)", values)
                 await conn.commit()
             return len(admin_ids)
         return await execute_db(_update)
@@ -5614,10 +5611,7 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     success = await db_add_hidden_admin(chat_id, target_id, user_id)
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
+        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
 
@@ -5659,10 +5653,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     success = await db_remove_hidden_admin(chat_id, target_id)
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
+        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
     else:
         await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
 
@@ -5770,7 +5761,6 @@ async def db_set_last_publish(channel_db_id: int, publish_time: datetime):
     return await execute_db(_set)
 
 async def schedule_cron(channel_db_id: int, cron_expression: str):
-    """جدولة باستخدام تعبير Cron"""
     async def _save(conn):
         await conn.execute("""
             UPDATE schedule SET schedule_type='cron', cron_expression=?, next_publish_date=NULL
@@ -5841,18 +5831,14 @@ async def db_update_next_publish_date(channel_db_id: int):
             else:
                 next_date = utc_now() + timedelta(days=1)
         elif schedule_type == 'cron':
-            # تنفيذ CRON مبسط
             cron_expr = schedule.get('cron_expression', '0 0 * * *')
             try:
                 parts = cron_expr.split()
                 if len(parts) >= 5:
                     minute_cron, hour_cron, day_cron, month_cron, weekday_cron = parts[:5]
-                    # محاولة العثور على التاريخ التالي (تنفيذ مبسط)
                     next_date = last_time + timedelta(days=1)
-                    # تصحيح: البحث عن التاريخ التالي
                     for i in range(1, 31):
                         check_date = last_time + timedelta(days=i)
-                        # تحقق بسيط - سيتم تحسينه لاحقاً
                         if check_date.hour == hour and check_date.minute == minute:
                             if day_cron == '*' or check_date.day == int(day_cron):
                                 if month_cron == '*' or check_date.month == int(month_cron):
@@ -5862,7 +5848,6 @@ async def db_update_next_publish_date(channel_db_id: int):
             except:
                 next_date = utc_now() + timedelta(days=1)
         else:
-            # نوع غير معروف، استخدام الافتراضي
             next_date = utc_now() + timedelta(minutes=schedule.get('interval_minutes', 12))
 
         if next_date:
@@ -6310,7 +6295,7 @@ async def daily_reward(user_id: int) -> int:
                 pass
         await conn.execute("UPDATE users SET last_daily_reward=? WHERE user_id=?", (utc_now_iso(), user_id))
         await conn.commit()
-        return 10  # 10 نقاط يومياً
+        return 10
     reward = await execute_db(_check)
     if reward > 0:
         data = await db_get_user_level(user_id)
@@ -6332,7 +6317,7 @@ async def weekly_reward(user_id: int) -> int:
                 pass
         await conn.execute("UPDATE users SET last_weekly_reward=? WHERE user_id=?", (utc_now_iso(), user_id))
         await conn.commit()
-        return 50  # 50 نقطة أسبوعياً
+        return 50
     reward = await execute_db(_check)
     if reward > 0:
         data = await db_get_user_level(user_id)
@@ -6654,7 +6639,6 @@ async def db_get_random_participant(contest_id: int) -> int | None:
     return await execute_db(_get)
 
 async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
-    """تصحيح المسابقات تلقائياً"""
     async def _get_participants(conn):
         cur = await conn.execute(
             "SELECT user_id, answer FROM contest_participants WHERE contest_id = ?",
@@ -6667,17 +6651,14 @@ async def auto_grade_contest(contest_id: int, answer_key: str) -> dict:
     for user_id, answer in participants:
         score = 0
         if answer and answer_key:
-            # مقارنة بسيطة - يمكن تحسينها
             if answer.lower() == answer_key.lower():
                 score = 100
             else:
-                # مقارنة تشابه
                 similarity = len(set(answer.lower().split()) & set(answer_key.lower().split()))
                 if similarity > 0:
                     score = min(100, similarity * 20)
         results[user_id] = score
 
-    # العثور على الفائز
     if results:
         winner = max(results, key=results.get)
         if results[winner] > 0:
@@ -6994,7 +6975,6 @@ async def invalidate_user_cache(user_id: int):
     try:
         if user_id in _admin_cache:
             del _admin_cache[user_id]
-        # حذف من كاش الصلاحيات أيضاً
         keys_to_remove = [k for k in _admin_cache.keys() if str(user_id) in k]
         for key in keys_to_remove:
             del _admin_cache[key]
@@ -7033,7 +7013,6 @@ async def create_backup():
         raise
 
 async def incremental_backup():
-    """نسخ احتياطي متزايد - يحفظ فقط البيانات الجديدة"""
     try:
         last_backup = await db_get_last_backup_time()
         if last_backup:
@@ -7041,7 +7020,6 @@ async def incremental_backup():
         else:
             last_time = utc_now() - timedelta(days=7)
 
-        # تصدير البيانات الجديدة فقط
         backup_data = {}
 
         async def _get_new_posts(conn):
@@ -7101,9 +7079,7 @@ async def restore_backup(backup_path: Path):
     except Exception as e:
         raise ValueError(f"فشل فك الضغط: {e}")
 
-    # التحقق من نوع النسخ الاحتياطي
     if backup_path.suffix == '.inc':
-        # نسخ متزايد - دمج البيانات
         data = json.loads(decompressed.decode('utf-8'))
         async def _merge_data(conn):
             if 'posts' in data:
@@ -7122,7 +7098,6 @@ async def restore_backup(backup_path: Path):
         await execute_db(_merge_data)
         logger.info(f"✅ تم دمج النسخة المتزايدة: {backup_path}")
     else:
-        # نسخة كاملة
         temp_restore = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
         temp_restore.write(decompressed)
         temp_restore.close()
@@ -7142,7 +7117,6 @@ async def auto_backup():
             await asyncio.sleep(AUTO_BACKUP_SLEEP)
             auto_enabled = await db_get_auto_backup()
             if auto_enabled:
-                # نسخ احتياطي كامل كل 7 أيام
                 last_backup = await db_get_last_backup_time()
                 if not last_backup:
                     await create_backup()
@@ -7749,19 +7723,16 @@ async def get_main_keyboard(user_id: int):
     updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
     keyboard = []
 
-    # الصف 1: مجموعاتي + إضافة قناة (تظهر دائماً)
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_groups_btn'), callback_data=CallbackData.GROUPS_MY),
         InlineKeyboardButton(get_text(user_id, 'add_channel'), callback_data=CallbackData.CHANNELS_ADD)
     ])
 
-    # الصف 2: قنواتي + الإعدادات (تظهر دائماً)
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'my_channels'), callback_data=CallbackData.CHANNELS_MY),
         InlineKeyboardButton(get_text(user_id, 'settings_btn'), callback_data=CallbackData.SETTINGS_MENU)
     ])
 
-    # أزرار القناة (تظهر فقط إذا كانت هناك قناة)
     if channels:
         keyboard.append([
             InlineKeyboardButton(get_text(user_id, 'add_15_posts'), callback_data=CallbackData.POSTS_ADD_15),
@@ -7792,7 +7763,6 @@ async def get_main_keyboard(user_id: int):
             InlineKeyboardButton(get_text(user_id, 'publish_all'), callback_data=CallbackData.PUBLISH_ALL_CHANNELS)
         ])
 
-    # الأزرار العامة (تظهر دائماً)
     keyboard.append([
         InlineKeyboardButton(get_text(user_id, 'help_btn'), callback_data=CallbackData.HELP),
         InlineKeyboardButton(get_text(user_id, 'trial_btn'), callback_data=CallbackData.TRIAL)
@@ -8281,10 +8251,6 @@ async def my_full_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
 
 async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض جميع المجموعات التي يظهرها البوت للمستخدم، مع تصفية المخفية.
-    يستخدم db_get_user_groups التي تقوم بالتصفية حسب الصلاحيات.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -8369,59 +8335,145 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("✅ تم حذف المجموعة من قاعدة البيانات.")
     await my_groups_callback(update, context)
 
+# ===================================================================
+# ===================== إصلاح group_settings_callback =====================
+# ===================================================================
 async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass
+
     uid = update.effective_user.id
-    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('group_chat_id')
-    if not chat_id:
+    chat_id = None
+
+    try:
+        if query and query.data:
+            try:
+                chat_id = int(query.data.split(":")[-1])
+            except (ValueError, IndexError) as e:
+                error_id = advanced_logger.log_error("فشل استخراج chat_id من الكولباك", e, {"data": query.data})
+                await query.edit_message_text(f"❌ بيانات الكولباك غير صالحة (الرمز: `{error_id}`)")
+                return
+        else:
+            chat_id = context.user_data.get('group_chat_id')
+
+        if not chat_id:
+            if query:
+                await query.edit_message_text("❌ لم يتم تحديد المجموعة")
+            else:
+                await context.bot.send_message(chat_id=uid, text="❌ لم يتم تحديد المجموعة")
+            return
+
+        # التحقق من الصلاحية
+        try:
+            is_auth = await is_authorized_in_group(context.bot, chat_id, uid)
+        except Exception as e:
+            error_id = advanced_logger.log_error("فشل التحقق من الصلاحية", e, {"chat_id": chat_id, "user_id": uid})
+            if query:
+                await query.edit_message_text(f"❌ فشل التحقق من الصلاحية (الرمز: `{error_id}`)")
+            else:
+                await context.bot.send_message(chat_id=uid, text=f"❌ فشل التحقق من الصلاحية (الرمز: `{error_id}`)")
+            return
+
+        if not is_auth:
+            if query:
+                await query.edit_message_text(get_text(uid, 'admin_only'))
+            else:
+                await context.bot.send_message(chat_id=uid, text=get_text(uid, 'admin_only'))
+            return
+
+        # جلب إعدادات الأمان
+        try:
+            settings = await db_get_security_settings(chat_id)
+        except Exception as e:
+            error_id = advanced_logger.log_error("فشل جلب إعدادات الأمان", e, {"chat_id": chat_id})
+            if query:
+                await query.edit_message_text(f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
+            else:
+                await context.bot.send_message(chat_id=uid, text=f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
+            return
+
+        # جلب اسم المجموعة
+        async def _get_group_name(conn):
+            cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
+            row = await cur.fetchone()
+            if row and row[0]:
+                name = row[0]
+                if len(name) > 50:
+                    name = name[:47] + "..."
+                return name
+            return str(chat_id)
+
+        try:
+            gname = await execute_db(_get_group_name)
+        except Exception as e:
+            error_id = advanced_logger.log_error("فشل جلب اسم المجموعة", e, {"chat_id": chat_id})
+            gname = str(chat_id)
+            logger.warning(f"استخدمنا المعرف كاسم بديل للخطأ {error_id}")
+
+        # بناء النص
+        text = f"⚙️ **لوحة تحكم المجموعة: {gname}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        text += f"🔗 حذف الروابط: {'✅' if settings.get('links', False) else '❌'}\n"
+        text += f"@ حذف المعرفات: {'✅' if settings.get('mentions', False) else '❌'}\n"
+        text += f"🚫 كلمات محظورة: {'✅' if settings.get('delete_banned_words', False) else '❌'}\n"
+        text += f"⏱️ وضع بطيء: {'✅' if settings.get('slow_mode', False) else '❌'}\n"
+        text += f"🎯 رسالة ترحيب: {'✅' if settings.get('welcome_enabled', False) else '❌'}\n"
+        text += f"👋 رسالة وداع: {'✅' if settings.get('goodbye_enabled', False) else '❌'}\n"
+        text += f"🔊 رسالة تحذير: {'✅' if settings.get('warn', True) else '❌'}\n"
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        penalty = settings.get('auto_penalty', 'none')
+        if penalty == 'kick':
+            penalty_text = "طرد"
+        elif penalty == 'ban':
+            penalty_text = "حظر"
+        elif penalty == 'mute':
+            penalty_text = "كتم"
+        else:
+            penalty_text = "لا شيء"
+        text += f"⚖️ **العقوبة التلقائية:** {penalty_text}\n"
+        if penalty == 'mute':
+            minutes = settings.get('auto_mute_duration', 60)
+            if minutes == -1:
+                text += f"   مدة الكتم: دائم\n"
+            elif minutes < 60:
+                text += f"   مدة الكتم: {minutes} دقيقة\n"
+            elif minutes < 1440:
+                text += f"   مدة الكتم: {minutes // 60} ساعة\n"
+            else:
+                text += f"   مدة الكتم: {minutes // 1440} يوم\n"
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        text += f"📌 **اختر الإجراء المناسب:**"
+
+        # إرسال أو تعديل الرسالة
         if query:
-            await query.edit_message_text("❌ لم يتم تحديد المجموعة")
+            await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
         else:
-            await update.message.reply_text("❌ لم يتم تحديد المجموعة")
-        return
-    if not await is_authorized_in_group(context.bot, chat_id, uid):
-        if query:
-            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
-        else:
-            await update.message.reply_text(get_text(uid, 'admin_only'))
-        return
-    settings = await db_get_security_settings(chat_id)
-    async def _get_group_name(conn):
-        cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
-        row = await cur.fetchone()
-        name = row[0] if row else str(chat_id)
-        if len(name) > 50:
-            name = name[:47] + "..."
-        return name
-    gname = await execute_db(_get_group_name)
-    text = f"⚙️ **لوحة تحكم المجموعة: {gname}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"🔗 حذف الروابط: {'✅' if settings['links'] else '❌'}\n"
-    text += f"@ حذف المعرفات: {'✅' if settings['mentions'] else '❌'}\n"
-    text += f"🚫 كلمات محظورة: {'✅' if settings.get('delete_banned_words', False) else '❌'}\n"
-    text += f"⏱️ وضع بطيء: {'✅' if settings.get('slow_mode', False) else '❌'}\n"
-    text += f"🎯 رسالة ترحيب: {'✅' if settings.get('welcome_enabled', False) else '❌'}\n"
-    text += f"👋 رسالة وداع: {'✅' if settings.get('goodbye_enabled', False) else '❌'}\n"
-    text += f"🔊 رسالة تحذير: {'✅' if settings['warn'] else '❌'}\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"⚖️ **العقوبة التلقائية:** {'طرد' if settings.get('auto_penalty') == 'kick' else 'حظر' if settings.get('auto_penalty') == 'ban' else 'كتم' if settings.get('auto_penalty') == 'mute' else 'لا شيء'}\n"
-    if settings.get('auto_penalty') == 'mute' and settings.get('auto_mute_duration'):
-        minutes = settings.get('auto_mute_duration')
-        if minutes == -1:
-            text += f"   مدة الكتم: دائم\n"
-        elif minutes < 60:
-            text += f"   مدة الكتم: {minutes} دقيقة\n"
-        elif minutes < 1440:
-            text += f"   مدة الكتم: {minutes // 60} ساعة\n"
-        else:
-            text += f"   مدة الكتم: {minutes // 1440} يوم\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📌 **اختر الإجراء المناسب:**"
-    if query:
-        await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
-    else:
-        await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
+            await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
+
+    except Exception as e:
+        # معالج الأخطاء النهائي
+        error_id = advanced_logger.log_error(
+            "خطأ غير متوقع في group_settings_callback",
+            e,
+            {"chat_id": chat_id, "user_id": uid}
+        )
+        try:
+            if query:
+                await query.edit_message_text(
+                    f"❌ حدث خطأ غير متوقع (الرمز: `{error_id}`).\nتم تسجيل المشكلة وسيتم حلها قريباً."
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"❌ حدث خطأ غير متوقع (الرمز: `{error_id}`).\nتم تسجيل المشكلة وسيتم حلها قريباً."
+                )
+        except Exception as e2:
+            logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e2}")
+
+# ===================================================================
 
 async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -8853,10 +8905,6 @@ async def security_main_callback(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(msg)
 
 async def security_select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض إعدادات الأمان لمجموعة محددة مع التحقق من الصلاحيات.
-    يستخدم is_authorized_in_group مع التخزين المؤقت.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -8905,10 +8953,6 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
 
 async def security_refresh_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    تحديث قائمة المجموعات مع تصفية الصلاحيات.
-    يستخدم db_get_user_groups لتصفية المجموعات المخفية.
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -9325,7 +9369,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.3.0
+📦 **الإصدار:** 19.3.1
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -11122,10 +11166,6 @@ async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.
     )
 
 async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض قائمة المجموعات لإدارة الردود التلقائية مع تصفية الصلاحيات.
-    يستخدم db_get_user_groups لتصفية المجموعات المخفية.
-    """
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -12386,10 +12426,7 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     success = await db_add_hidden_admin(chat_id, target_id, user_id)
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
+        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
 
@@ -12431,10 +12468,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     success = await db_remove_hidden_admin(chat_id, target_id)
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {
-            "chat_id": chat_id,
-            "target": target_id
-        }, "HIGH")
+        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
     else:
         await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
 
@@ -12605,7 +12639,7 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
 
     temp_password = secrets.token_urlsafe(12)
     context.user_data['sendcode_temp_password'] = temp_password
-    context.user_data['sendcode_temp_timestamp'] = time_module.time()  # وقت الإنشاء
+    context.user_data['sendcode_temp_timestamp'] = time_module.time()
     context.user_data['state'] = UserState.WAITING_SENDCODE_PASSWORD
 
     await update.message.reply_text(
@@ -12628,7 +12662,6 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
         context.user_data.pop('state', None)
         return
 
-    # المهلة: 10 دقائق (600 ثانية)
     SENDCODE_TIMEOUT = 600
     if time_module.time() - timestamp > SENDCODE_TIMEOUT:
         await update.message.reply_text(
@@ -13058,14 +13091,11 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db_register_group(chat.id, chat_name, added_by_id, chat.username)
             chat_type_name = "مجموعة" if chat.type == 'group' else "سوبر جروب"
 
-            # تسجيل المضيف كمالك مخفي دائماً
             await db_register_hidden_owner_group(chat.id, added_by_id)
             logger.info(f"🔒 تم تسجيل المضيف {added_by_id} كمالك مخفي للمجموعة {chat.id}")
 
-            # مزامنة المشرفين الحقيقيين
             await db_sync_group_admins(chat.id, context.bot, added_by_id)
 
-            # إذا كان هناك مالك حقيقي مختلف، نسجله أيضاً
             owner_info = await detect_owner_type(context.bot, chat.id)
             if owner_info.get('user_id') and owner_info['user_id'] != added_by_id:
                 await db_register_hidden_owner_group(chat.id, owner_info['user_id'])
@@ -13097,9 +13127,7 @@ async def track_chat_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif chat.type in ['group', 'supergroup']:
                 await db_register_group(chat.id, chat.title or "بدون اسم", adder.id, chat.username)
                 chat_type_name = "مجموعة" if chat.type == 'group' else "سوبر جروب"
-                # أيضاً نسجل المضيف كمالك مخفي إذا أضيف البوت
                 await db_register_hidden_owner_group(chat.id, adder.id)
-                # مزامنة المشرفين
                 await db_sync_group_admins(chat.id, context.bot, adder.id)
             else:
                 return
@@ -14078,15 +14106,10 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"فشل إرسال الرد: {e}")
 
     # ===================== رسالة ترويجية للعضو العادي =====================
-    # إذا كان المستخدم ليس مشرفاً (باستخدام is_authorized_in_group) وأرسل أمراً (يبدأ بـ /)
     if text.startswith('/') and not await is_authorized_in_group(context.bot, chat_id, user_id):
         promo_msg = get_text(user_id, 'promo_message').format(BOT_USERNAME)
         try:
-            # إرسال رسالة ترويجية خاصة (أو رد في المجموعة حسب الرغبة)
-            # هنا نرسل رداً في المجموعة للتنبيه
             await update.message.reply_text(promo_msg, parse_mode="MarkdownV2")
-            # يمكن أيضاً إرسالها على الخاص:
-            # await context.bot.send_message(chat_id=user_id, text=promo_msg)
         except Exception as e:
             logger.error(f"فشل إرسال رسالة ترويجية: {e}")
 
@@ -15421,7 +15444,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.0)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.1)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ إصلاح استيراد pyotp (PYOTP_AVAILABLE)")
     print("   • ✅ إصلاح Google Drive (GOOGLE_AUTH_AVAILABLE)")
@@ -15458,6 +15481,8 @@ async def main():
     print("   • ✅ **مزامنة المشرفين تلقائياً عند إضافة البوت وعند /syncgroup**")
     print("   • ✅ **رسالة ترويجية للعضو العادي عند إرسال أمر**")
     print("   • ✅ **إضافة دالة check_admin_access للتحقق من صلاحية المشرف**")
+    print("   • ✅ **إصلاح group_settings_callback مع معالجة شاملة للأخطاء**")
+    print("   • ✅ **تحسين db_get_security_settings لإنشاء سجل افتراضي تلقائياً**")
 
     try:
         await application.run_polling(
