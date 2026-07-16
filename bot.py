@@ -3,17 +3,8 @@
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.1 - إصلاح أخطاء الكولباك وتحسين الاستقرار
+الإصدار: 19.3.2 - إصلاح شامل لجميع الأخطاء
 المطور: @RelaxMgr
-
-تم تحديث هذا الإصدار ليحتوي على جميع الإصلاحات المطلوبة:
-- نظام اللغات من ملفات منفصلة (JSON)
-- إضافة أوامر /set_rules و /rules
-- إصلاح auto_reply_cancel_callback
-- إصلاح auto_reply_stats_callback
-- إصلاح auto_reply_admins_callback
-- إصلاح مشكلة ERR_INVALID_RESPONSE في واجهة الويب
-- دعم كامل للمشرفين المتعددين
 """
 
 import sys
@@ -63,6 +54,14 @@ def check_python_version():
         sys.exit(1)
 
 check_python_version()
+
+# ===================== تعريف JINJA2_AVAILABLE قبل الاستخدام =====================
+JINJA2_AVAILABLE = False
+try:
+    import jinja2
+    JINJA2_AVAILABLE = True
+except ImportError:
+    print("⚠️ Jinja2 غير متاح - سيتم استخدام HTML النقي")
 
 # ===================== المسارات الأساسية =====================
 def get_base_path() -> Path:
@@ -2530,7 +2529,10 @@ class StateDispatcher:
 
 state_dispatcher = StateDispatcher()
 
+# ===================== واجهة الويب المحسّنة (مع دعم Render) =====================
+
 # ===== تكوين Jinja2 =====
+template_env = None
 if JINJA2_AVAILABLE:
     try:
         template_loader = jinja2.FileSystemLoader(str(TEMPLATES_PATH))
@@ -2540,12 +2542,12 @@ if JINJA2_AVAILABLE:
         print(f"⚠️ فشل تحميل Jinja2: {e}")
         JINJA2_AVAILABLE = False
 else:
-    template_env = None
     print("⚠️ Jinja2 غير متاح - سيتم استخدام HTML النقي")
+
+# ===== إنشاء ملفات HTML =====
 def create_web_templates():
     """إنشاء ملفات HTML لواجهة الويب (متوافق مع Render)"""
 
-    # ===== index.html =====
     index_html = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -2804,11 +2806,7 @@ def create_web_templates():
     </style>
 </head>
 <body>
-
-<!-- Render Badge -->
-<div class="render-badge">🚀 ريلاكس مانيجر v19.3.1</div>
-
-<!-- Sidebar -->
+<div class="render-badge">🚀 ريلاكس مانيجر v19.3.2</div>
 <div class="sidebar">
     <div class="brand text-center">
         <i class="bi bi-robot"></i> ريلاكس مانيجر
@@ -2853,10 +2851,7 @@ def create_web_templates():
         </a>
     </nav>
 </div>
-
-<!-- Main Content -->
 <div class="main-content">
-    <!-- Header -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h2 id="page-title">لوحة التحكم</h2>
         <div class="d-flex align-items-center">
@@ -2870,18 +2865,13 @@ def create_web_templates():
             <div class="profile-img" id="user-profile">A</div>
         </div>
     </div>
-
-    <!-- Loading Spinner -->
     <div class="loading-spinner" id="loading-spinner">
         <div class="spinner-border text-primary" role="status">
             <span class="visually-hidden">جاري التحميل...</span>
         </div>
         <p class="mt-2">جاري تحميل البيانات...</p>
     </div>
-
-    <!-- Pages -->
     <div id="page-dashboard" class="page-content">
-        <!-- Stats Cards -->
         <div class="row" id="stats-cards">
             <div class="col-md-3">
                 <div class="stat-card primary">
@@ -2912,8 +2902,6 @@ def create_web_templates():
                 </div>
             </div>
         </div>
-
-        <!-- Charts -->
         <div class="row">
             <div class="col-md-6">
                 <div class="card">
@@ -2940,8 +2928,6 @@ def create_web_templates():
                 </div>
             </div>
         </div>
-
-        <!-- System Info -->
         <div class="row">
             <div class="col-md-6">
                 <div class="card">
@@ -2955,7 +2941,7 @@ def create_web_templates():
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>الإصدار</span>
-                            <span>19.3.1</span>
+                            <span>19.3.2</span>
                         </div>
                         <div class="d-flex justify-content-between border-bottom py-2">
                             <span>وقت التشغيل</span>
@@ -2984,7 +2970,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-users" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -2999,15 +2984,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="users-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المعرف</th>
-                                <th>الاسم</th>
-                                <th>الحالة</th>
-                                <th>النقاط</th>
-                                <th>المستوى</th>
-                                <th>الإجراءات</th>
-                            </tr>
+                            <tr><th>#</th><th>المعرف</th><th>الاسم</th><th>الحالة</th><th>النقاط</th><th>المستوى</th><th>الإجراءات</th></tr>
                         </thead>
                         <tbody id="users-tbody">
                             <tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3017,7 +2994,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-channels" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3028,13 +3004,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="channels-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المستخدم</th>
-                                <th>القناة</th>
-                                <th>الاسم</th>
-                                <th>الحالة</th>
-                            </tr>
+                            <tr><th>#</th><th>المستخدم</th><th>القناة</th><th>الاسم</th><th>الحالة</th></tr>
                         </thead>
                         <tbody id="channels-tbody">
                             <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3044,7 +3014,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-groups" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3055,13 +3024,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="groups-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>المعرف</th>
-                                <th>الاسم</th>
-                                <th>المستخدم</th>
-                                <th>الحالة</th>
-                            </tr>
+                            <tr><th>#</th><th>المعرف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th></tr>
                         </thead>
                         <tbody id="groups-tbody">
                             <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3071,7 +3034,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-posts" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3082,13 +3044,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="posts-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>القناة</th>
-                                <th>النص</th>
-                                <th>النوع</th>
-                                <th>التاريخ</th>
-                            </tr>
+                            <tr><th>#</th><th>القناة</th><th>النص</th><th>النوع</th><th>التاريخ</th></tr>
                         </thead>
                         <tbody id="posts-tbody">
                             <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3098,7 +3054,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-contests" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3109,14 +3064,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="contests-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>العنوان</th>
-                                <th>الجائزة</th>
-                                <th>المشاركون</th>
-                                <th>التاريخ</th>
-                                <th>الحالة</th>
-                            </tr>
+                            <tr><th>#</th><th>العنوان</th><th>الجائزة</th><th>المشاركون</th><th>التاريخ</th><th>الحالة</th></tr>
                         </thead>
                         <tbody id="contests-tbody">
                             <tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3126,7 +3074,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-logs" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3140,11 +3087,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="logs-table">
                         <thead>
-                            <tr>
-                                <th>الوقت</th>
-                                <th>المستوى</th>
-                                <th>الرسالة</th>
-                            </tr>
+                            <tr><th>الوقت</th><th>المستوى</th><th>الرسالة</th></tr>
                         </thead>
                         <tbody id="logs-tbody">
                             <tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3154,7 +3097,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-backups" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -3168,13 +3110,7 @@ def create_web_templates():
                 <div class="table-responsive">
                     <table class="table table-hover" id="backups-table">
                         <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>الملف</th>
-                                <th>الحجم</th>
-                                <th>التاريخ</th>
-                                <th>الإجراءات</th>
-                            </tr>
+                            <tr><th>#</th><th>الملف</th><th>الحجم</th><th>التاريخ</th><th>الإجراءات</th></tr>
                         </thead>
                         <tbody id="backups-tbody">
                             <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
@@ -3184,7 +3120,6 @@ def create_web_templates():
             </div>
         </div>
     </div>
-
     <div id="page-settings" class="page-content" style="display:none;">
         <div class="card">
             <div class="card-header">
@@ -3238,8 +3173,6 @@ def create_web_templates():
         </div>
     </div>
 </div>
-
-<!-- Toast Container -->
 <div class="toast-container">
     <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
         <div class="toast-header">
@@ -3249,53 +3182,38 @@ def create_web_templates():
         <div class="toast-body" id="toast-body">رسالة</div>
     </div>
 </div>
-
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// ===== Theme Toggle =====
 let currentTheme = localStorage.getItem('theme') || 'light';
-
 function toggleTheme() {
     currentTheme = currentTheme === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', currentTheme);
     localStorage.setItem('theme', currentTheme);
     document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
 }
-
-// تطبيق الثيم عند التحميل
 document.addEventListener('DOMContentLoaded', function() {
     document.documentElement.setAttribute('data-theme', currentTheme);
     document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
 });
-
-// ===== Export Data =====
 function exportData(type) {
     let url = '/api/export';
-    if (type) {
-        url += '?type=' + type;
-    }
+    if (type) { url += '?type=' + type; }
     window.location.href = url;
 }
-
-// ===== WebSocket Connection =====
 let ws = null;
 let wsReconnectAttempts = 0;
 const MAX_WS_RECONNECT = 5;
-
 function connectWebSocket() {
     const token = '{{ WEB_SECRET_KEY }}';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws_extended?token=${encodeURIComponent(token)}`;
-
     ws = new WebSocket(wsUrl);
-
     ws.onopen = function() {
         console.log('✅ WebSocket متصل');
         document.getElementById('ws-status').className = 'webhook-status online';
         document.getElementById('ws-status-text').textContent = 'متصل';
         wsReconnectAttempts = 0;
     };
-
     ws.onmessage = function(event) {
         try {
             const data = JSON.parse(event.data);
@@ -3304,39 +3222,27 @@ function connectWebSocket() {
             console.error('خطأ في تحليل رسالة WebSocket:', e);
         }
     };
-
     ws.onclose = function() {
         console.log('❌ WebSocket مغلق');
         document.getElementById('ws-status').className = 'webhook-status offline';
         document.getElementById('ws-status-text').textContent = 'غير متصل';
-
         if (wsReconnectAttempts < MAX_WS_RECONNECT) {
             wsReconnectAttempts++;
             setTimeout(connectWebSocket, 3000 * wsReconnectAttempts);
         }
     };
-
     ws.onerror = function(error) {
         console.error('خطأ في WebSocket:', error);
     };
 }
-
 function handleWebSocketMessage(data) {
     switch(data.type) {
-        case 'stats':
-            updateStats(data.data);
-            break;
-        case 'broadcast':
-            showToast(data.data.message || 'تم استلام تحديث جديد');
-            break;
-        case 'pong':
-            break;
-        default:
-            console.log('رسالة غير معروفة:', data);
+        case 'stats': updateStats(data.data); break;
+        case 'broadcast': showToast(data.data.message || 'تم استلام تحديث جديد'); break;
+        case 'pong': break;
+        default: console.log('رسالة غير معروفة:', data);
     }
 }
-
-// ===== Toast Notification =====
 function showToast(message, type = 'info') {
     const toast = document.getElementById('liveToast');
     const body = document.getElementById('toast-body');
@@ -3344,86 +3250,28 @@ function showToast(message, type = 'info') {
     const bsToast = new bootstrap.Toast(toast, { delay: 3000 });
     bsToast.show();
 }
-
-// ===== Update Stats =====
 function updateStats(data) {
     document.getElementById('stat-users').textContent = data.total_users || 0;
     document.getElementById('stat-channels').textContent = data.channels || 0;
     document.getElementById('stat-groups').textContent = data.groups || 0;
     document.getElementById('stat-posts').textContent = data.pending_posts || 0;
 }
-
-// ===== Charts =====
 let userGrowthChart = null;
 let postsDistributionChart = null;
-
 function initCharts() {
     const ctx1 = document.getElementById('userGrowthChart').getContext('2d');
     userGrowthChart = new Chart(ctx1, {
         type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: 'المستخدمين',
-                data: [],
-                borderColor: '#0984e3',
-                backgroundColor: 'rgba(9, 132, 227, 0.1)',
-                fill: true,
-                tension: 0.4
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    labels: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    ticks: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                },
-                x: {
-                    ticks: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            }
-        }
+        data: { labels: [], datasets: [{ label: 'المستخدمين', data: [], borderColor: '#0984e3', backgroundColor: 'rgba(9, 132, 227, 0.1)', fill: true, tension: 0.4 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } }, scales: { y: { beginAtZero: true, ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } }, x: { ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
     });
-
     const ctx2 = document.getElementById('postsDistributionChart').getContext('2d');
     postsDistributionChart = new Chart(ctx2, {
         type: 'doughnut',
-        data: {
-            labels: ['منشورة', 'غير منشورة'],
-            datasets: [{
-                data: [0, 0],
-                backgroundColor: ['#00b894', '#e17055'],
-                borderWidth: 2,
-                borderColor: currentTheme === 'dark' ? '#2d3436' : '#ffffff'
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    labels: {
-                        color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436'
-                    }
-                }
-            }
-        }
+        data: { labels: ['منشورة', 'غير منشورة'], datasets: [{ data: [0, 0], backgroundColor: ['#00b894', '#e17055'], borderWidth: 2, borderColor: currentTheme === 'dark' ? '#2d3436' : '#ffffff' }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
     });
 }
-
 function updateCharts(userGrowth, postsDistribution) {
     if (userGrowthChart) {
         userGrowthChart.data.labels = userGrowth.labels || [];
@@ -3435,22 +3283,17 @@ function updateCharts(userGrowth, postsDistribution) {
         postsDistributionChart.update();
     }
 }
-
-// ===== Page Navigation =====
 document.querySelectorAll('.sidebar .nav-link').forEach(link => {
     link.addEventListener('click', function(e) {
         e.preventDefault();
         document.querySelectorAll('.sidebar .nav-link').forEach(l => l.classList.remove('active'));
         this.classList.add('active');
-
         const page = this.dataset.page;
         document.querySelectorAll('.page-content').forEach(p => p.style.display = 'none');
-
         const targetPage = document.getElementById(`page-${page}`);
         if (targetPage) {
             targetPage.style.display = 'block';
             document.getElementById('page-title').textContent = this.textContent.trim();
-
             switch(page) {
                 case 'dashboard': refreshDashboard(); break;
                 case 'users': refreshUsers(); break;
@@ -3465,318 +3308,95 @@ document.querySelectorAll('.sidebar .nav-link').forEach(link => {
         }
     });
 });
-
-// ===== Dashboard =====
 function refreshDashboard() {
-    fetch('/api/stats')
-        .then(res => res.json())
-        .then(data => {
-            updateStats(data);
-            // تحديث الرسوم البيانية
-            fetch('/api/charts')
-                .then(res => res.json())
-                .then(chartData => {
-                    updateCharts(chartData.user_growth, chartData.posts_distribution);
-                })
-                .catch(err => console.error('خطأ في تحميل الرسوم البيانية:', err));
-        })
-        .catch(err => console.error('خطأ في تحميل الإحصائيات:', err));
-
-    fetch('/api/system-info')
-        .then(res => res.json())
-        .then(data => {
-            document.getElementById('uptime').textContent = data.uptime || '0 ساعة';
-            document.getElementById('memory-usage').textContent = data.memory || '0%';
-        })
-        .catch(err => console.error('خطأ في تحميل معلومات النظام:', err));
+    fetch('/api/stats').then(res => res.json()).then(data => { updateStats(data); fetch('/api/charts').then(res => res.json()).then(chartData => { updateCharts(chartData.user_growth, chartData.posts_distribution); }).catch(err => console.error('خطأ في تحميل الرسوم البيانية:', err)); }).catch(err => console.error('خطأ في تحميل الإحصائيات:', err));
+    fetch('/api/system-info').then(res => res.json()).then(data => { document.getElementById('uptime').textContent = data.uptime || '0 ساعة'; document.getElementById('memory-usage').textContent = data.memory || '0%'; }).catch(err => console.error('خطأ في تحميل معلومات النظام:', err));
 }
-
-// ===== Users =====
 function refreshUsers() {
     const tbody = document.getElementById('users-tbody');
     tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/users')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد مستخدمين</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((user, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${user.user_id}</code></td>
-                    <td>${user.first_name || 'غير معروف'}</td>
-                    <td><span class="status-badge ${user.banned ? 'danger' : 'success'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td>
-                    <td>${user.points || 0}</td>
-                    <td>${user.level || 1}</td>
-                    <td>
-                        <button class="btn btn-sm btn-${user.banned ? 'success' : 'danger'}" onclick="toggleBan(${user.user_id})">
-                            ${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المستخدمين:', err);
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/users').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد مستخدمين</td></tr>'; return; }
+        tbody.innerHTML = data.map((user, i) => `<tr><td>${i+1}</td><td><code>${user.user_id}</code></td><td>${user.first_name || 'غير معروف'}</td><td><span class="status-badge ${user.banned ? 'danger' : 'success'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td><td>${user.points || 0}</td><td>${user.level || 1}</td><td><button class="btn btn-sm btn-${user.banned ? 'success' : 'danger'}" onclick="toggleBan(${user.user_id})">${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}</button></td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل المستخدمين:', err); tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
 function toggleBan(userId) {
-    fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || 'تم تغيير الحالة');
-            refreshUsers();
-        })
-        .catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
+    fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || 'تم تغيير الحالة'); refreshUsers(); }).catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
 }
-
-// ===== Channels =====
 function refreshChannels() {
     const tbody = document.getElementById('channels-tbody');
     tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/channels')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد قنوات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((ch, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${ch.user_id}</code></td>
-                    <td><code>${ch.channel_id}</code></td>
-                    <td>${ch.channel_name || ch.channel_id}</td>
-                    <td><span class="status-badge ${ch.banned ? 'danger' : 'success'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل القنوات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/channels').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد قنوات</td></tr>'; return; }
+        tbody.innerHTML = data.map((ch, i) => `<tr><td>${i+1}</td><td><code>${ch.user_id}</code></td><td><code>${ch.channel_id}</code></td><td>${ch.channel_name || ch.channel_id}</td><td><span class="status-badge ${ch.banned ? 'danger' : 'success'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل القنوات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
-// ===== Groups =====
 function refreshGroups() {
     const tbody = document.getElementById('groups-tbody');
     tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/groups')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد مجموعات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((g, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${g.chat_id}</code></td>
-                    <td>${g.chat_name || g.chat_id}</td>
-                    <td><code>${g.added_by}</code></td>
-                    <td><span class="status-badge ${g.banned ? 'danger' : 'success'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المجموعات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/groups').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد مجموعات</td></tr>'; return; }
+        tbody.innerHTML = data.map((g, i) => `<tr><td>${i+1}</td><td><code>${g.chat_id}</code></td><td>${g.chat_name || g.chat_id}</td><td><code>${g.added_by}</code></td><td><span class="status-badge ${g.banned ? 'danger' : 'success'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل المجموعات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
-// ===== Posts =====
 function refreshPosts() {
     const tbody = document.getElementById('posts-tbody');
     tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/posts')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد منشورات غير منشورة</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((p, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${p.channel_name || p.channel_id}</td>
-                    <td>${(p.text || '').substring(0, 50)}${(p.text || '').length > 50 ? '...' : ''}</td>
-                    <td><span class="badge bg-secondary">${p.media_type || 'text'}</span></td>
-                    <td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المنشورات:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/posts').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد منشورات غير منشورة</td></tr>'; return; }
+        tbody.innerHTML = data.map((p, i) => `<tr><td>${i+1}</td><td>${p.channel_name || p.channel_id}</td><td>${(p.text || '').substring(0, 50)}${(p.text || '').length > 50 ? '...' : ''}</td><td><span class="badge bg-secondary">${p.media_type || 'text'}</span></td><td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل المنشورات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
-// ===== Contests =====
 function refreshContests() {
     const tbody = document.getElementById('contests-tbody');
     tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/contests')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">لا توجد مسابقات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((c, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${c.title || 'بدون عنوان'}</td>
-                    <td>${c.prize || 'غير محددة'}</td>
-                    <td>${c.participants || 0}</td>
-                    <td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td>
-                    <td><span class="status-badge ${c.status === 'active' ? 'success' : 'secondary'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل المسابقات:', err);
-            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/contests').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">لا توجد مسابقات</td></tr>'; return; }
+        tbody.innerHTML = data.map((c, i) => `<tr><td>${i+1}</td><td>${c.title || 'بدون عنوان'}</td><td>${c.prize || 'غير محددة'}</td><td>${c.participants || 0}</td><td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td><td><span class="status-badge ${c.status === 'active' ? 'success' : 'secondary'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل المسابقات:', err); tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
-// ===== Logs =====
 function refreshLogs() {
     const tbody = document.getElementById('logs-tbody');
     tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/logs')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">لا توجد سجلات</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map(log => {
-                const level = log.level || 'INFO';
-                const levelClass = {
-                    'ERROR': 'danger',
-                    'WARNING': 'warning',
-                    'INFO': 'info',
-                    'DEBUG': 'secondary'
-                }[level] || 'info';
-                return `
-                    <tr>
-                        <td>${log.time || '-'}</td>
-                        <td><span class="badge bg-${levelClass}">${level}</span></td>
-                        <td>${log.message || ''}</td>
-                    </tr>
-                `;
-            }).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل السجلات:', err);
-            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/logs').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">لا توجد سجلات</td></tr>'; return; }
+        tbody.innerHTML = data.map(log => { const level = log.level || 'INFO'; const levelClass = { 'ERROR': 'danger', 'WARNING': 'warning', 'INFO': 'info', 'DEBUG': 'secondary' }[level] || 'info'; return `<tr><td>${log.time || '-'}</td><td><span class="badge bg-${levelClass}">${level}</span></td><td>${log.message || ''}</td></tr>`; }).join('');
+    }).catch(err => { console.error('خطأ في تحميل السجلات:', err); tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
 function clearLogs() {
     if (!confirm('هل أنت متأكد من مسح جميع السجلات؟')) return;
-    fetch('/api/logs', { method: 'DELETE' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || 'تم مسح السجلات');
-            refreshLogs();
-        })
-        .catch(err => showToast('❌ فشل مسح السجلات', 'error'));
+    fetch('/api/logs', { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || 'تم مسح السجلات'); refreshLogs(); }).catch(err => showToast('❌ فشل مسح السجلات', 'error'));
 }
-
-// ===== Backups =====
 function refreshBackups() {
     const tbody = document.getElementById('backups-tbody');
     tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-
-    fetch('/api/backups')
-        .then(res => res.json())
-        .then(data => {
-            if (!data || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد نسخ احتياطية</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map((b, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td>${b.name || 'غير معروف'}</td>
-                    <td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td>
-                    <td>${b.date || '-'}</td>
-                    <td>
-                        <button class="btn btn-sm btn-success" onclick="restoreBackup('${b.name}')">
-                            <i class="bi bi-arrow-counterclockwise"></i> استعادة
-                        </button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')">
-                            <i class="bi bi-trash"></i> حذف
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => {
-            console.error('خطأ في تحميل النسخ الاحتياطية:', err);
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>';
-        });
+    fetch('/api/backups').then(res => res.json()).then(data => {
+        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد نسخ احتياطية</td></tr>'; return; }
+        tbody.innerHTML = data.map((b, i) => `<tr><td>${i+1}</td><td>${b.name || 'غير معروف'}</td><td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td><td>${b.date || '-'}</td><td><button class="btn btn-sm btn-success" onclick="restoreBackup('${b.name}')"><i class="bi bi-arrow-counterclockwise"></i> استعادة</button> <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')"><i class="bi bi-trash"></i> حذف</button></td></tr>`).join('');
+    }).catch(err => { console.error('خطأ في تحميل النسخ الاحتياطية:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
 }
-
 function createBackup() {
-    fetch('/api/backups', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم إنشاء نسخة احتياطية');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل إنشاء النسخة', 'error'));
+    fetch('/api/backups', { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم إنشاء نسخة احتياطية'); refreshBackups(); }).catch(err => showToast('❌ فشل إنشاء النسخة', 'error'));
 }
-
 function restoreBackup(name) {
     if (!confirm(`هل أنت متأكد من استعادة النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم استعادة النسخة');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل استعادة النسخة', 'error'));
+    fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم استعادة النسخة'); refreshBackups(); }).catch(err => showToast('❌ فشل استعادة النسخة', 'error'));
 }
-
 function deleteBackup(name) {
     if (!confirm(`هل أنت متأكد من حذف النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم حذف النسخة');
-            refreshBackups();
-        })
-        .catch(err => showToast('❌ فشل حذف النسخة', 'error'));
+    fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم حذف النسخة'); refreshBackups(); }).catch(err => showToast('❌ فشل حذف النسخة', 'error'));
 }
-
-// ===== Settings =====
 function loadSettings() {
-    fetch('/api/settings')
-        .then(res => res.json())
-        .then(data => {
-            if (data.bot_name) document.getElementById('setting-bot-name').value = data.bot_name;
-            if (data.bot_username) document.getElementById('setting-bot-username').value = data.bot_username;
-            if (data.publish_interval) document.getElementById('setting-publish-interval').value = data.publish_interval;
-            if (data.updates_channel) document.getElementById('setting-updates-channel').value = data.updates_channel;
-            document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
-            document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
-            document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
-        })
-        .catch(err => console.error('خطأ في تحميل الإعدادات:', err));
+    fetch('/api/settings').then(res => res.json()).then(data => {
+        if (data.bot_name) document.getElementById('setting-bot-name').value = data.bot_name;
+        if (data.bot_username) document.getElementById('setting-bot-username').value = data.bot_username;
+        if (data.publish_interval) document.getElementById('setting-publish-interval').value = data.publish_interval;
+        if (data.updates_channel) document.getElementById('setting-updates-channel').value = data.updates_channel;
+        document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
+        document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
+        document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
+    }).catch(err => console.error('خطأ في تحميل الإعدادات:', err));
 }
-
 document.getElementById('settings-form').addEventListener('submit', function(e) {
     e.preventDefault();
     const data = {
@@ -3788,28 +3408,14 @@ document.getElementById('settings-form').addEventListener('submit', function(e) 
         auto_backup: document.getElementById('setting-auto-backup').checked,
         nsfw_enabled: document.getElementById('setting-nsfw').checked
     };
-
-    fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    })
-    .then(res => res.json())
-    .then(data => {
-        showToast(data.message || '✅ تم حفظ الإعدادات');
-    })
-    .catch(err => showToast('❌ فشل حفظ الإعدادات', 'error'));
+    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم حفظ الإعدادات'); }).catch(err => showToast('❌ فشل حفظ الإعدادات', 'error'));
 });
-
-// ===== Logout =====
 function logout() {
     if (confirm('هل أنت متأكد من تسجيل الخروج؟')) {
         document.cookie = 'session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
         window.location.href = '/logout';
     }
 }
-
-// ===== User Search =====
 document.getElementById('user-search').addEventListener('input', function() {
     const query = this.value.toLowerCase();
     const rows = document.querySelectorAll('#users-tbody tr');
@@ -3818,15 +3424,11 @@ document.getElementById('user-search').addEventListener('input', function() {
         row.style.display = text.includes(query) ? '' : 'none';
     });
 });
-
-// ===== WebSocket ping =====
 setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
     }
 }, 30000);
-
-// ===== Auto Refresh =====
 setInterval(() => {
     const activePage = document.querySelector('.sidebar .nav-link.active');
     if (activePage) {
@@ -3843,8 +3445,6 @@ setInterval(() => {
         }
     }
 }, 30000);
-
-// ===== Initialize =====
 document.addEventListener('DOMContentLoaded', function() {
     connectWebSocket();
     initCharts();
@@ -3855,7 +3455,6 @@ document.addEventListener('DOMContentLoaded', function() {
 </body>
 </html>"""
 
-    # ===== إنشاء الملفات =====
     try:
         with open(TEMPLATES_PATH / "index.html", "w", encoding="utf-8") as f:
             f.write(index_html)
@@ -3945,9 +3544,7 @@ async def auth_middleware(request, handler):
 web_app.middlewares.append(auth_middleware)
 
 # ===== API Handlers =====
-
 async def api_stats_handler(request):
-    """الحصول على إحصائيات البوت"""
     try:
         total, banned, posts, groups, channels = await db_stats()
         return web.json_response({
@@ -3962,9 +3559,7 @@ async def api_stats_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_charts_handler(request):
-    """الحصول على بيانات الرسوم البيانية"""
     try:
-        # نمو المستخدمين (آخر 30 يوم)
         user_growth = {'labels': [], 'data': []}
         try:
             async def _get_user_growth(conn):
@@ -3983,7 +3578,6 @@ async def api_charts_handler(request):
         except:
             pass
 
-        # توزيع المنشورات
         posts_distribution = {'published': 0, 'unpublished': 0}
         try:
             async def _get_posts_dist(conn):
@@ -4006,11 +3600,8 @@ async def api_charts_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_export_handler(request):
-    """تصدير البيانات كـ CSV"""
     try:
         export_type = request.query.get('type', 'all')
-
-        # إنشاء ملف CSV مؤقت
         import csv
         temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8')
 
@@ -4049,8 +3640,6 @@ async def api_export_handler(request):
                 writer.writerow([post[0], post[1][:100] if post[1] else '', post[2], post[3], post[4], post[5]])
 
         temp_file.close()
-
-        # إرسال الملف
         with open(temp_file.name, 'rb') as f:
             data = f.read()
         os.unlink(temp_file.name)
@@ -4064,7 +3653,6 @@ async def api_export_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_users_handler(request):
-    """الحصول على قائمة المستخدمين"""
     try:
         users = await db_get_all_users()
         result = []
@@ -4082,14 +3670,12 @@ async def api_users_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_user_toggle_ban_handler(request):
-    """تبديل حالة حظر المستخدم"""
     try:
         user_id = int(request.match_info['user_id'])
         users = await db_get_all_users()
         user_exists = any(u[0] == user_id for u in users)
         if not user_exists:
             return web.json_response({'error': 'المستخدم غير موجود'}, status=404)
-
         current_ban = await db_is_banned(user_id)
         await db_set_ban(user_id, not current_ban)
         return web.json_response({
@@ -4102,7 +3688,6 @@ async def api_user_toggle_ban_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_channels_handler(request):
-    """الحصول على قائمة القنوات"""
     try:
         channels = await db_get_all_user_channels_no_limit()
         result = []
@@ -4118,7 +3703,6 @@ async def api_channels_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_groups_handler(request):
-    """الحصول على قائمة المجموعات"""
     try:
         groups = await db_get_all_groups()
         result = []
@@ -4136,7 +3720,6 @@ async def api_groups_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_posts_handler(request):
-    """الحصول على قائمة المنشورات غير المنشورة"""
     try:
         async def _get_posts(conn):
             cur = await conn.execute("""
@@ -4149,7 +3732,6 @@ async def api_posts_handler(request):
                 LIMIT 100
             """)
             return await cur.fetchall()
-
         posts = await execute_db(_get_posts)
         result = []
         for post in posts:
@@ -4167,7 +3749,6 @@ async def api_posts_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_contests_handler(request):
-    """الحصول على قائمة المسابقات"""
     try:
         contests = await db_get_active_contests_with_participants(limit=20)
         result = []
@@ -4186,7 +3767,6 @@ async def api_contests_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_logs_handler(request):
-    """الحصول على سجلات النظام"""
     try:
         limit = int(request.query.get('limit', 50))
         logs = []
@@ -4219,7 +3799,6 @@ async def api_logs_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_logs_delete_handler(request):
-    """مسح سجلات النظام"""
     try:
         if LOG_PATH.exists():
             with open(LOG_PATH, 'w', encoding='utf-8') as f:
@@ -4229,7 +3808,6 @@ async def api_logs_delete_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_backups_handler(request):
-    """الحصول على قائمة النسخ الاحتياطية"""
     try:
         backups = await list_backups()
         result = []
@@ -4245,7 +3823,6 @@ async def api_backups_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_backup_create_handler(request):
-    """إنشاء نسخة احتياطية جديدة"""
     try:
         backup_path = await create_backup()
         return web.json_response({
@@ -4257,7 +3834,6 @@ async def api_backup_create_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_backup_restore_handler(request):
-    """استعادة نسخة احتياطية"""
     try:
         name = request.match_info['name']
         backup_path = BACKUP_DIR / name
@@ -4269,7 +3845,6 @@ async def api_backup_restore_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_backup_delete_handler(request):
-    """حذف نسخة احتياطية"""
     try:
         name = request.match_info['name']
         backup_path = BACKUP_DIR / name
@@ -4281,7 +3856,6 @@ async def api_backup_delete_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_settings_handler(request):
-    """الحصول على إعدادات البوت"""
     try:
         publish_interval = await db_get_publish_interval()
         updates_channel = await db_get_updates_channel()
@@ -4300,62 +3874,50 @@ async def api_settings_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_settings_update_handler(request):
-    """تحديث إعدادات البوت"""
     try:
         data = await request.json()
-
         if 'publish_interval' in data:
             seconds = int(data['publish_interval']) * 60
             await db_set_publish_interval_seconds(seconds, PRIMARY_OWNER_ID, is_admin=True)
-
         if 'updates_channel' in data:
             channel = data['updates_channel'].strip()
             if channel:
                 if channel.startswith('@'):
                     channel = channel[1:]
                 await db_set_updates_channel(channel)
-
         if 'force_subscribe' in data:
             await db_set_force_subscribe_status(data['force_subscribe'])
-
         if 'auto_backup' in data:
             await db_set_auto_backup(data['auto_backup'])
-
         if 'nsfw_enabled' in data:
             global NSFW_ENABLED
             NSFW_ENABLED = data['nsfw_enabled']
             os.environ["NSFW_ENABLED"] = "True" if NSFW_ENABLED else "False"
-
         return web.json_response({'success': True, 'message': '✅ تم حفظ الإعدادات'})
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
 async def api_system_info_handler(request):
-    """الحصول على معلومات النظام"""
     try:
         ram = get_ram_usage()
         uptime = time_module.time() - getattr(api_system_info_handler, 'start_time', time_module.time())
         uptime_hours = int(uptime / 3600)
         uptime_minutes = int((uptime % 3600) / 60)
-
         db_healthy = await check_database_health()
         tg_healthy = await check_telegram_health()
-
         return web.json_response({
             'uptime': f'{uptime_hours} ساعة {uptime_minutes} دقيقة',
             'memory': f"{ram['percent']}%",
             'db_status': '✅ سليمة' if db_healthy else '❌ تالفة',
             'telegram_status': '✅ متصل' if tg_healthy else '❌ غير متصل',
-            'version': '19.3.1',
+            'version': '19.3.2',
             'platform': platform.platform()
         })
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
 # ===== Web Routes =====
-
 async def root_handler(request):
-    """الصفحة الرئيسية"""
     try:
         if check_web_auth(request):
             session_id = request.cookies.get('session_id')
@@ -4370,8 +3932,6 @@ async def root_handler(request):
                     return web.Response(text=html, content_type='text/html')
                 except Exception as e:
                     logger.error(f"خطأ في عرض القالب: {e}")
-
-            # استخدام HTML المباشر إذا فشل Jinja2
             try:
                 with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
                     html = f.read()
@@ -4389,7 +3949,6 @@ async def root_handler(request):
         return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
 
 async def login_handler(request):
-    """تسجيل الدخول"""
     try:
         if request.method == 'POST':
             data = await request.post()
@@ -4401,8 +3960,6 @@ async def login_handler(request):
                 response.set_cookie('session_id', session_id, httponly=True, max_age=WEB_SESSION_TIMEOUT)
                 return response
             return web.Response(text='❌ اسم المستخدم أو كلمة المرور غير صحيحة', status=401)
-
-        # عرض صفحة تسجيل الدخول
         html = """
         <!DOCTYPE html>
         <html lang="ar" dir="rtl">
@@ -4412,52 +3969,22 @@ async def login_handler(request):
             <title>تسجيل الدخول - ريلاكس مانيجر</title>
             <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
             <style>
-                body {
-                    background: #f5f6fa;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    min-height: 100vh;
-                }
-                .login-card {
-                    background: white;
-                    border-radius: 20px;
-                    padding: 40px;
-                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-                    width: 100%;
-                    max-width: 400px;
-                }
-                .login-card .brand {
-                    font-size: 28px;
-                    font-weight: bold;
-                    color: #2d3436;
-                    margin-bottom: 30px;
-                    text-align: center;
-                }
-                .login-card .brand i {
-                    color: #0984e3;
-                }
+                body { background: #f5f6fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+                .login-card { background: white; border-radius: 20px; padding: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+                .login-card .brand { font-size: 28px; font-weight: bold; color: #2d3436; margin-bottom: 30px; text-align: center; }
+                .login-card .brand i { color: #0984e3; }
             </style>
         </head>
         <body>
             <div class="login-card">
-                <div class="brand">
-                    <i class="bi bi-robot"></i> ريلاكس مانيجر
-                </div>
+                <div class="brand"><i class="bi bi-robot"></i> ريلاكس مانيجر</div>
                 <h5 class="text-center mb-4">🔐 تسجيل الدخول</h5>
                 <form method="POST">
-                    <div class="mb-3">
-                        <label class="form-label">اسم المستخدم</label>
-                        <input type="text" name="username" class="form-control" required autofocus>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">كلمة المرور</label>
-                        <input type="password" name="password" class="form-control" required>
-                    </div>
+                    <div class="mb-3"><label class="form-label">اسم المستخدم</label><input type="text" name="username" class="form-control" required autofocus></div>
+                    <div class="mb-3"><label class="form-label">كلمة المرور</label><input type="password" name="password" class="form-control" required></div>
                     <button type="submit" class="btn btn-primary w-100">دخول</button>
                 </form>
-                <hr>
-                <p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.1</p>
+                <hr><p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.2</p>
             </div>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
         </body>
@@ -4469,7 +3996,6 @@ async def login_handler(request):
         return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
 
 async def logout_handler(request):
-    """تسجيل الخروج"""
     session_id = request.cookies.get('session_id')
     if session_id:
         delete_session(session_id)
@@ -4478,7 +4004,6 @@ async def logout_handler(request):
     return response
 
 async def health_check_handler(request):
-    """فحص صحة البوت"""
     try:
         db_healthy = await check_database_health()
         tg_healthy = await check_telegram_health()
@@ -4617,119 +4142,45 @@ class WebSocketExtendedHandler:
             'channels': channels
         }
 
-    async def get_logs(self, limit: int = 50) -> list:
-        logs = []
-        try:
-            with open(LOG_PATH, 'r') as f:
-                lines = f.readlines()
-                for line in lines[-limit:]:
-                    logs.append(line.strip())
-        except:
-            pass
-        return logs
-
-    async def get_users(self, limit: int = 50) -> list:
-        users = await db_get_all_users()
-        return users[:limit]
-
-    async def get_channels(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_channels(user_id)
-        return await db_get_all_user_channels_no_limit()
-
-    async def get_groups(self, user_id: int = None) -> list:
-        if user_id:
-            return await db_get_user_groups(user_id)
-        return await db_get_all_groups()
-
-    async def get_contests(self, limit: int = 10) -> list:
-        return await db_get_active_contests_with_participants(limit)
-
-    async def notify(self, user_id: int, message: str):
-        try:
-            from telegram import Bot
-            bot = Bot(token=TOKEN)
-            await bot.send_message(chat_id=user_id, text=message)
-        except:
-            pass
-
 ws_extended = WebSocketExtendedHandler()
 
 async def websocket_extended_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-
     token = request.query.get('token')
     if not token:
         await ws.close()
         return ws
-
     authenticated = await ws_extended.handle_auth(ws, token)
     if not authenticated:
         await ws.close()
         return ws
-
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
                     action = data.get('action')
-
                     if action == 'subscribe':
                         channel = data.get('channel')
                         if channel:
                             await ws_extended.handle_subscribe(ws, channel)
-
                     elif action == 'unsubscribe':
                         channel = data.get('channel')
                         if channel:
                             await ws_extended.handle_unsubscribe(ws, channel)
-
                     elif action == 'get_stats':
                         stats = await ws_extended.get_stats()
                         await ws.send_str(json.dumps({'type': 'response', 'action': 'get_stats', 'data': stats}))
-
-                    elif action == 'get_logs':
-                        logs = await ws_extended.get_logs(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_logs', 'data': logs}))
-
-                    elif action == 'get_users':
-                        users = await ws_extended.get_users(limit=data.get('limit', 50))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_users', 'data': users}))
-
-                    elif action == 'get_channels':
-                        channels = await ws_extended.get_channels(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_channels', 'data': channels}))
-
-                    elif action == 'get_groups':
-                        groups = await ws_extended.get_groups(user_id=data.get('user_id'))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_groups', 'data': groups}))
-
-                    elif action == 'get_contests':
-                        contests = await ws_extended.get_contests(limit=data.get('limit', 10))
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_contests', 'data': contests}))
-
-                    elif action == 'notify':
-                        user_id = data.get('user_id')
-                        message = data.get('message')
-                        if user_id and message:
-                            await ws_extended.notify(user_id, message)
-                            await ws.send_str(json.dumps({'type': 'response', 'action': 'notify', 'status': 'sent'}))
-
                     elif action == 'ping':
                         await ws.send_str(json.dumps({'type': 'pong'}))
-
                 except Exception as e:
                     await ws.send_str(json.dumps({'type': 'error', 'message': str(e)}))
-
     except Exception as e:
         logger.error(f"خطأ في WebSocket: {e}")
-
     finally:
         for channel in list(ws_extended.subscriptions):
             ws_extended.subscriptions[channel].discard(ws)
-
     return ws
 
 web_app.router.add_get('/ws_extended', websocket_extended_handler)
@@ -5127,9 +4578,6 @@ async def db_register_group(chat_id: int, chat_name: str, added_by: int, usernam
     return await execute_db(_register)
 
 async def db_get_user_groups(user_id: int):
-    """
-    ترجع جميع المجموعات التي يظهرها البوت للمستخدم، مع تصفية المخفية.
-    """
     async def _get(conn):
         try:
             cur = await conn.execute("""
@@ -5139,21 +4587,18 @@ async def db_get_user_groups(user_id: int):
             """)
             all_groups = await cur.fetchall()
 
-            # جلب المجموعات التي فيها المالك المخفي
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_owner_groups WHERE owner_id=?
             """, (user_id,))
             hidden_owner_rows = await cur.fetchall()
             hidden_owner_groups = {row[0] for row in hidden_owner_rows}
 
-            # جلب المجموعات التي فيها المستخدم مشرف مخفي
             cur = await conn.execute("""
                 SELECT chat_id FROM hidden_admins WHERE admin_id=?
             """, (user_id,))
             hidden_admin_rows = await cur.fetchall()
             hidden_admin_groups = {row[0] for row in hidden_admin_rows}
 
-            # جلب المجموعات التي أضافها المستخدم أو مرتبط بها
             cur = await conn.execute("""
                 SELECT chat_id FROM bot_groups WHERE added_by=?
                 UNION
@@ -5162,7 +4607,6 @@ async def db_get_user_groups(user_id: int):
             linked_rows = await cur.fetchall()
             linked_groups = {row[0] for row in linked_rows}
 
-            # جلب المجموعات التي يكون فيها المستخدم مشرفاً حقيقياً
             cur = await conn.execute("""
                 SELECT chat_id FROM group_admins WHERE user_id=?
             """, (user_id,))
@@ -5267,7 +4711,6 @@ async def db_get_security_settings(chat_id: int):
                     _security_cache[chat_id] = settings
                 return settings
 
-            # إنشاء سجل افتراضي
             await conn.execute(
                 """INSERT INTO group_security
                    (chat_id, delete_links, delete_mentions, warn_message, slow_mode,
@@ -5628,7 +5071,6 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
-        # إبطال التخزين المؤقت للصلاحيات
         invalidate_auth_cache(chat_id, target_id)
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
@@ -8386,7 +7828,6 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=uid, text="❌ لم يتم تحديد المجموعة")
             return
 
-        # التحقق من الصلاحية
         try:
             is_auth = await is_authorized_in_group(context.bot, chat_id, uid)
         except Exception as e:
@@ -8404,7 +7845,6 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=uid, text=get_text(uid, 'admin_only'))
             return
 
-        # جلب إعدادات الأمان
         try:
             settings = await db_get_security_settings(chat_id)
         except Exception as e:
@@ -8415,7 +7855,6 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=uid, text=f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
             return
 
-        # جلب اسم المجموعة
         async def _get_group_name(conn):
             cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
             row = await cur.fetchone()
@@ -8433,7 +7872,6 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
             gname = str(chat_id)
             logger.warning(f"استخدمنا المعرف كاسم بديل للخطأ {error_id}")
 
-        # بناء النص
         text = f"⚙️ **لوحة تحكم المجموعة: {gname}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         text += f"🔗 حذف الروابط: {'✅' if settings.get('links', False) else '❌'}\n"
         text += f"@ حذف المعرفات: {'✅' if settings.get('mentions', False) else '❌'}\n"
@@ -8466,14 +7904,12 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         text += f"📌 **اختر الإجراء المناسب:**"
 
-        # إرسال أو تعديل الرسالة
         if query:
             await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
         else:
             await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
 
     except Exception as e:
-        # معالج الأخطاء النهائي
         error_id = advanced_logger.log_error(
             "خطأ غير متوقع في group_settings_callback",
             e,
@@ -9388,7 +8824,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.3.1
+📦 **الإصدار:** 19.3.2
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -15160,7 +14596,104 @@ async def import_banned_words_on_startup():
     except Exception as e:
         logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
 
-# ===================== الوظيفة الرئيسية =====================
+# ===================================================================
+# ===================== إضافة أوامر /set_rules و /rules =====================
+# ===================================================================
+
+async def set_rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعيين قوانين المجموعة"""
+    if update.message is None:
+        return
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = chat.id
+    user_id = user.id
+
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📝 **تعيين قوانين المجموعة**\n\n"
+            "استخدم الأمر مع النص المراد تعيينه كقوانين:\n"
+            "`/set_rules نص القوانين`\n\n"
+            "📌 مثال:\n"
+            "`/set_rules 1- احترام الأعضاء\n2- عدم إرسال روابط\n3- الالتزام بالآداب العامة`"
+        )
+        return
+
+    rules_text = " ".join(args)
+    rules_text = sanitize_text(rules_text, max_length=4000)
+
+    async def _set_rules(conn):
+        await conn.execute(
+            "INSERT OR REPLACE INTO group_rules (chat_id, rules_text, set_by, set_at) VALUES (?, ?, ?, ?)",
+            (chat_id, rules_text, user_id, utc_now_iso())
+        )
+        await conn.commit()
+
+    await execute_db(_set_rules)
+
+    await update.message.reply_text(
+        f"✅ **تم تعيين قوانين المجموعة بنجاح!**\n\n"
+        f"📌 لعرض القوانين استخدم الأمر `/rules`",
+        parse_mode="MarkdownV2"
+    )
+
+async def rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قوانين المجموعة"""
+    if update.message is None:
+        return
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
+        return
+
+    chat_id = chat.id
+
+    async def _get_rules(conn):
+        cur = await conn.execute(
+            "SELECT rules_text, set_by, set_at FROM group_rules WHERE chat_id=?",
+            (chat_id,)
+        )
+        return await cur.fetchone()
+
+    rules_data = await execute_db(_get_rules)
+
+    if not rules_data or not rules_data[0]:
+        await update.message.reply_text(
+            "📜 **لا توجد قوانين مسجلة لهذه المجموعة.**\n\n"
+            "يمكن للمشرفين تعيين القوانين باستخدام:\n"
+            "`/set_rules نص القوانين`"
+        )
+        return
+
+    rules_text = rules_data[0]
+    set_by = rules_data[1]
+    set_at = rules_data[2]
+
+    try:
+        set_at_dt = datetime.fromisoformat(set_at)
+        set_at_mecca = utc_to_mecca(set_at_dt)
+        set_at_str = set_at_mecca.strftime("%Y-%m-%d %H:%M")
+    except:
+        set_at_str = set_at[:16] if set_at else "تاريخ غير معروف"
+
+    message = f"📜 **قوانين المجموعة**\n━━━━━━━━━━━━━━━━━━━━━━\n\n{rules_text}\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📌 تم التعيين بواسطة: `{set_by}`\n"
+    message += f"🕐 التاريخ: {set_at_str}"
+
+    await safe_send_markdown(context.bot, chat_id, message)
+
+# ===================================================================
+
+# ===== الوظيفة الرئيسية =====
 async def main():
     await init_db_improved()
 
@@ -15208,7 +14741,7 @@ async def main():
     application.add_handler(CommandHandler("list_hidden_admins", list_hidden_admins_command))
     application.add_handler(CommandHandler("trial", trial_command_handler))
     application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
-    application.add_handler(CommandHandler("help", help_command_handler))  # ✅ تم الإضافة
+    application.add_handler(CommandHandler("help", help_command_handler))
     application.add_handler(CommandHandler("support", support_command_handler))
     application.add_handler(CommandHandler("support_reply", support_reply_command_handler))
     application.add_handler(CommandHandler("rank", rank_command_handler))
@@ -15485,7 +15018,7 @@ async def main():
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.1)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.2)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
     print("   • ✅ إصلاح استيراد pyotp (PYOTP_AVAILABLE)")
     print("   • ✅ إصلاح Google Drive (GOOGLE_AUTH_AVAILABLE)")
