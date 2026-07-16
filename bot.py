@@ -11190,25 +11190,68 @@ async def auto_reply_cancel_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     chat_id = int(query.data.split(":")[-1])
     settings = await db_get_auto_reply_settings(chat_id)
-    await query.edit_message_text("❌ تم إلغاء إعادة التعيين", reply_markup=get_auto_reply_keyboard(chat_id, settings))
-
+    await query.edit_message_text("❌ تم إلغاء إعادة التعيين", reply_markup=get_auto_reply_keyboard(chat_id, settings)
+# ============================================================
+# إصلاحات الردود التلقائية - الإصدار 19.3.1
+# ============================================================
 async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    عرض إحصائيات الردود التلقائية للمجموعة
+    تم إصلاح مشكلة الضغط المتكرر (message is not modified)
+    """
     query = update.callback_query
-    await query.answer()
-    chat_id = int(query.data.split(":")[-1])
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    
+    try:
+        # استخراج chat_id من callback_data بشكل آمن
+        data = query.data
+        parts = data.split(":")
+        if len(parts) < 2:
+            await query.answer("❌ بيانات غير صالحة", show_alert=True)
+            return
+        
+        # استخراج chat_id مع تجاهل أي معرف إضافي (مثل timestamp)
+        chat_id_str = parts[1].split("_")[0]
+        chat_id = int(chat_id_str)
+        
+    except (ValueError, IndexError) as e:
+        logger.error(f"خطأ في استخراج chat_id: {e}")
+        await query.answer("❌ بيانات غير صالحة", show_alert=True)
+        return
+    
     user_id = update.effective_user.id
+    
+    # التحقق من صلاحية المستخدم
     if not await is_authorized_in_group(context.bot, chat_id, user_id):
         await query.answer("❌ غير مصرح", show_alert=True)
         return
-    async def _get_stats(conn):
-        cur = await conn.execute("SELECT COUNT(*) FROM group_replies WHERE keyword LIKE ?", (f"{chat_id}:%",))
-        custom_count = (await cur.fetchone())[0]
-        return {'custom_replies': custom_count, 'embedded_replies': len(ALL_REPLIES), 'total_replies': custom_count + len(ALL_REPLIES)}
-    stats = await execute_db(_get_stats)
-    settings = await db_get_auto_reply_settings(chat_id)
-    status_text = "🟢 مفعل" if settings['enabled'] else "🔴 معطل"
-    admin_text = "👑 مشرفين فقط" if settings['only_admins'] else "👥 الجميع"
-    text = f"""📊 **إحصائيات الردود التلقائية**
+    
+    try:
+        # جلب عدد الردود المخصصة للمجموعة
+        async def _get_stats(conn):
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM group_replies WHERE keyword LIKE ?",
+                (f"{chat_id}:%",)
+            )
+            custom_count = (await cur.fetchone())[0]
+            return {
+                'custom_replies': custom_count,
+                'embedded_replies': len(ALL_REPLIES),
+                'total_replies': custom_count + len(ALL_REPLIES)
+            }
+        
+        stats = await execute_db(_get_stats)
+        settings = await db_get_auto_reply_settings(chat_id)
+        
+        # بناء النص
+        status_text = "🟢 مفعل" if settings.get('enabled', True) else "🔴 معطل"
+        admin_text = "👑 مشرفين فقط" if settings.get('only_admins', False) else "👥 الجميع"
+        
+        text = f"""📊 **إحصائيات الردود التلقائية**
 
 ━━━━━━━━━━━━━━━━━━━━━━
 📝 **الحالة:** {status_text}
@@ -11219,55 +11262,295 @@ async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAUL
 📚 **إجمالي الردود:** {stats['total_replies']}
 ━━━━━━━━━━━━━━━━━━━━━━
 
-📌 **ملاحظة:** الردود المدمجة (200 رد) لا يمكن حذفها، ولكن يمكن تعطيلها."""
-    await query.edit_message_text(text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
+📌 **ملاحظة:** الردود المدمجة (200 رد) لا يمكن حذفها، 
+   ولكن يمكن تعطيلها من الإعدادات."""
+        
+        # ✅ استخدام safe_edit_markdown التي تتعامل مع خطأ "message is not modified"
+        await safe_edit_markdown(
+            query,
+            text,
+            reply_markup=get_auto_reply_keyboard(chat_id, settings)
+        )
+        
+    except BadRequest as e:
+        # ✅ معالجة خطأ "message is not modified" بشكل خاص
+        if "message is not modified" in str(e).lower():
+            await query.answer("✅ تم التحديث", show_alert=False)
+        else:
+            raise
+            
+    except Exception as e:
+        error_id = log_error(e, {
+            'user_id': user_id,
+            'chat_id': chat_id,
+            'action': 'auto_reply_stats'
+        })
+        try:
+            await query.edit_message_text(
+                f"❌ حدث خطأ (الرمز: `{error_id}`)\nيرجى المحاولة مرة أخرى."
+            )
+        except Exception:
+            pass
 
-async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = int(query.data.split(":")[-1])
-    current_status = await db_get_user_auto_reply_status(user_id)
-    new_status = not current_status
-    await db_set_user_auto_reply_status(user_id, new_status)
-    status_text = "🟢 مفعل" if new_status else "🔴 معطل"
-    await query.edit_message_text(
-        f"✅ تم تغيير حالة الردود التلقائية إلى: {status_text}",
-        reply_markup=get_user_auto_reply_keyboard(user_id, new_status)
-    )
 
-async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def auto_reply_admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    تبديل وضع الردود بين المشرفين فقط والجميع
+    تم إصلاح مشكلة التبديل المتكرر
+    """
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    groups = await db_get_user_groups(user_id)
-    if not groups:
-        await query.edit_message_text("📭 لا توجد مجموعات مسجلة.\nأضف البوت إلى مجموعة واجعلها نشطة.")
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    
+    try:
+        # استخراج chat_id من callback_data بشكل آمن
+        data = query.data
+        parts = data.split(":")
+        if len(parts) < 2:
+            await query.answer("❌ بيانات غير صالحة", show_alert=True)
+            return
+        
+        # استخراج chat_id مع تجاهل أي معرف إضافي
+        chat_id_str = parts[1].split("_")[0]
+        chat_id = int(chat_id_str)
+        
+    except (ValueError, IndexError) as e:
+        logger.error(f"خطأ في استخراج chat_id: {e}")
+        await query.answer("❌ بيانات غير صالحة", show_alert=True)
         return
-    keyboard = []
-    for chat_id, chat_name, username, banned in groups:
+    
+    user_id = update.effective_user.id
+    
+    # التحقق من صلاحية المستخدم
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await query.answer("❌ غير مصرح", show_alert=True)
+        return
+    
+    try:
+        # جلب الإعدادات الحالية
         settings = await db_get_auto_reply_settings(chat_id)
-        status = "🟢" if settings['enabled'] else "🔴"
-        keyboard.append([InlineKeyboardButton(f"{status} {chat_name[:30]}", callback_data=f"admin_auto_reply_select:{chat_id}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)])
-    await query.edit_message_text(
-        "📝 **إدارة الردود التلقائية**\n\nاختر مجموعة للتحكم في إعدادات الردود:\n🟢 = مفعل  |  🔴 = معطل",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        
+        # تبديل الوضع
+        new_status = not settings.get('only_admins', False)
+        
+        # تحديث قاعدة البيانات
+        await db_set_auto_reply_only_admins(chat_id, new_status)
+        
+        # إبطال التخزين المؤقت إذا كان موجوداً
+        if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
+            del _security_cache[chat_id]
+        
+        # جلب الإعدادات الجديدة
+        settings = await db_get_auto_reply_settings(chat_id)
+        admin_text = "👑 مشرفين فقط" if new_status else "👥 الجميع"
+        
+        # ✅ استخدام safe_edit_markdown لتجنب الأخطاء
+        await safe_edit_markdown(
+            query,
+            f"✅ تم تغيير وضع الردود إلى: {admin_text}",
+            reply_markup=get_auto_reply_keyboard(chat_id, settings)
+        )
+        
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await query.answer("✅ تم التحديث", show_alert=False)
+        else:
+            raise
+            
+    except Exception as e:
+        error_id = log_error(e, {
+            'user_id': user_id,
+            'chat_id': chat_id,
+            'action': 'auto_reply_admins'
+        })
+        try:
+            await query.edit_message_text(
+                f"❌ حدث خطأ (الرمز: `{error_id}`)\nيرجى المحاولة مرة أخرى."
+            )
+        except Exception:
+            pass
 
-async def admin_auto_reply_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    تشغيل/إيقاف الردود التلقائية
+    """
     query = update.callback_query
-    await query.answer()
-    chat_id = int(query.data.split(":")[-1])
-    settings = await db_get_auto_reply_settings(chat_id)
-    async def _get_name(conn):
-        cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
-        row = await cur.fetchone()
-        return row[0] if row else str(chat_id)
-    group_name = await execute_db(_get_name)
-    await query.edit_message_text(
-        f"📝 **إعدادات الردود: {group_name}**\n\nاختر الإعداد المطلوب:",
-        reply_markup=get_auto_reply_keyboard(chat_id, settings)
-    )
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    
+    try:
+        # استخراج chat_id من callback_data بشكل آمن
+        data = query.data
+        parts = data.split(":")
+        if len(parts) < 2:
+            await query.answer("❌ بيانات غير صالحة", show_alert=True)
+            return
+        
+        chat_id_str = parts[1].split("_")[0]
+        chat_id = int(chat_id_str)
+        
+    except (ValueError, IndexError) as e:
+        logger.error(f"خطأ في استخراج chat_id: {e}")
+        await query.answer("❌ بيانات غير صالحة", show_alert=True)
+        return
+    
+    user_id = update.effective_user.id
+    
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await query.answer("❌ غير مصرح", show_alert=True)
+        return
+    
+    try:
+        # تبديل الحالة
+        new_status = await db_toggle_auto_reply(chat_id)
+        settings = await db_get_auto_reply_settings(chat_id)
+        status_text = "🟢 مفعل" if new_status else "🔴 معطل"
+        
+        await safe_edit_markdown(
+            query,
+            f"✅ تم تغيير حالة الردود التلقائية إلى: {status_text}",
+            reply_markup=get_auto_reply_keyboard(chat_id, settings)
+        )
+        
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await query.answer("✅ تم التحديث", show_alert=False)
+        else:
+            raise
+            
+    except Exception as e:
+        error_id = log_error(e, {
+            'user_id': user_id,
+            'chat_id': chat_id,
+            'action': 'auto_reply_toggle'
+        })
+        try:
+            await query.edit_message_text(
+                f"❌ حدث خطأ (الرمز: `{error_id}`)\nيرجى المحاولة مرة أخرى."
+            )
+        except Exception:
+            pass
+
+
+async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
+    """
+    تعديل رسالة بأمان مع دعم Markdown والتحقق من عدم التكرار
+    تم إصلاح مشكلة "message is not modified"
+    """
+    if not query or not query.message:
+        return None
+    
+    # ✅ التحقق من تكرار المحتوى لتجنب خطأ "message is not modified"
+    current_text = query.message.text or ""
+    current_reply_markup = query.message.reply_markup
+    
+    # إذا كان النص والكيبورد متطابقين، فقط أظهر إشعار
+    if current_text == text:
+        if reply_markup is None and current_reply_markup is None:
+            try:
+                await query.answer("✅ تم التحديث")
+            except:
+                pass
+            return None
+        elif reply_markup is not None and current_reply_markup is not None:
+            if str(reply_markup) == str(current_reply_markup):
+                try:
+                    await query.answer("✅ تم التحديث")
+                except:
+                    pass
+                return None
+    
+    if not text:
+        return None
+    
+    clean_text = sanitize_text(text)
+    
+    try:
+        escaped = escape_markdown_v2(clean_text)
+        if len(escaped) > 4096:
+            escaped = escaped[:4093] + "..."
+        return await query.edit_message_text(
+            text=escaped,
+            parse_mode='MarkdownV2',
+            reply_markup=reply_markup,
+            **kwargs
+        )
+    except BadRequest as e:
+        error_msg = str(e).lower()
+        
+        # ✅ معالجة خطأ "message is not modified" بشكل خاص
+        if "message is not modified" in error_msg:
+            try:
+                await query.answer("✅ تم التحديث")
+            except:
+                pass
+            return None
+        
+        # معالجة خطأ "can't parse entities"
+        if "can't parse entities" in error_msg:
+            try:
+                html_text = clean_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if len(html_text) > 4096:
+                    html_text = html_text[:4093] + "..."
+                return await query.edit_message_text(
+                    text=html_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup,
+                    **kwargs
+                )
+            except:
+                plain = re.sub(r'[*_`\[\]()~>#+\-=|{}.!\\]', '', clean_text)
+                if len(plain) > 4096:
+                    plain = plain[:4093] + "..."
+                return await query.edit_message_text(
+                    text=plain,
+                    reply_markup=reply_markup,
+                    **kwargs
+                )
+        raise
+
+
+def get_auto_reply_keyboard(chat_id: int, settings: dict) -> InlineKeyboardMarkup:
+    """
+    بناء لوحة التحكم للردود التلقائية
+    تم تحسينها لتجنب تكرار callback_data
+    """
+    status_text = "🟢 مفعل" if settings.get('enabled', True) else "🔴 معطل"
+    admin_text = "👑 مشرفين فقط" if settings.get('only_admins', False) else "👥 الجميع"
+    
+    # ✅ إضافة معرف فريد لكل زر لمنع التكرار
+    import time
+    unique_id = int(time.time() * 1000) % 100000
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"📝 الردود التلقائية: {status_text}",
+            callback_data=f"{CallbackData.AUTO_REPLY_TOGGLE_PREFIX}{chat_id}_{unique_id}"
+        )],
+        [InlineKeyboardButton(
+            f"👥 المستخدمون: {admin_text}",
+            callback_data=f"{CallbackData.AUTO_REPLY_ADMINS_PREFIX}{chat_id}_{unique_id}"
+        )],
+        [InlineKeyboardButton(
+            "🔄 إعادة تعيين الردود",
+            callback_data=f"{CallbackData.AUTO_REPLY_RESET_PREFIX}{chat_id}_{unique_id}"
+        )],
+        [InlineKeyboardButton(
+            "📊 إحصائيات الردود",
+            callback_data=f"{CallbackData.AUTO_REPLY_STATS_PREFIX}{chat_id}_{unique_id}"
+        )],
+        [InlineKeyboardButton(
+            "🔙 رجوع",
+            callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}"
+        )]
+    ]) 
 
 # ===================== معالجات الكولباك لإعدادات NSFW =====================
 async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
