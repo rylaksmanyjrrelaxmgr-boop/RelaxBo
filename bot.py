@@ -2533,8 +2533,13 @@ state_dispatcher = StateDispatcher()
 # ===================== واجهة الويب المحسّنة (مع دعم Render) =====================
 
 # ===== تكوين Jinja2 =====
-if JINJA2_AVAILABLE:
-    try:
+   # في بداية الملف، بعد استيراد المكتبات
+JINJA2_AVAILABLE = False
+try:
+    import jinja2
+    JINJA2_AVAILABLE = True
+except ImportError:
+    pass
         template_loader = jinja2.FileSystemLoader(str(TEMPLATES_PATH))
         template_env = jinja2.Environment(loader=template_loader, autoescape=True)
         print("✅ تم تحميل Jinja2 بنجاح")
