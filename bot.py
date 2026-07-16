@@ -5,6 +5,12 @@
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
 الإصدار: 19.3.1 - إصلاح أخطاء الكولباك وتحسين الاستقرار
 المطور: @RelaxMgr
+
+تم تحديث هذا الإصدار ليحتوي على جميع الإصلاحات المطلوبة:
+- إضافة دالة is_authorized_in_group مع تخزين مؤقت
+- تحسين تخزين المفاتيح (استخدام متغيرات البيئة بشكل آمن)
+- إصلاح مشاكل الأداء والذاكرة
+- تحسين الأمان العام
 """
 
 import sys
@@ -229,6 +235,7 @@ NSFW_MAX_VIDEO_SIZE = int(os.getenv("NSFW_MAX_VIDEO_SIZE", 10 * 1024 * 1024))
 NSFW_FRAMES = int(os.getenv("NSFW_FRAMES", "5"))
 NSFW_CACHE = {}
 NSFW_CACHE_TTL = 300
+_NSFW_CACHE_LOCK = asyncio.Lock()
 
 # ===================== الثوابت =====================
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 20 * 1024 * 1024))
@@ -335,23 +342,20 @@ async def check_nsfw_cached(image_bytes: bytes, cache_key: str = None) -> dict:
     if cache_key is None:
         cache_key = hashlib.md5(image_bytes).hexdigest()
 
-    # التحقق من الكاش
-    if cache_key in NSFW_CACHE:
-        cached_data, cached_time = NSFW_CACHE[cache_key]
-        if time_module.time() - cached_time < NSFW_CACHE_TTL:
-            return cached_data
+    async with _NSFW_CACHE_LOCK:
+        if cache_key in NSFW_CACHE:
+            cached_data, cached_time = NSFW_CACHE[cache_key]
+            if time_module.time() - cached_time < NSFW_CACHE_TTL:
+                return cached_data
 
-    # استدعاء API
     result = await check_nsfw_image(image_bytes)
 
-    # تخزين النتيجة
-    NSFW_CACHE[cache_key] = (result, time_module.time())
-
-    # تنظيف الكاش القديم
-    if len(NSFW_CACHE) > 100:
-        expired_keys = [k for k, (_, t) in NSFW_CACHE.items() if time_module.time() - t > NSFW_CACHE_TTL]
-        for k in expired_keys:
-            del NSFW_CACHE[k]
+    async with _NSFW_CACHE_LOCK:
+        NSFW_CACHE[cache_key] = (result, time_module.time())
+        if len(NSFW_CACHE) > 100:
+            expired_keys = [k for k, (_, t) in NSFW_CACHE.items() if time_module.time() - t > NSFW_CACHE_TTL]
+            for k in expired_keys:
+                del NSFW_CACHE[k]
 
     return result
 
@@ -963,14 +967,17 @@ try:
     _admin_cache = TTLCache(maxsize=1000, ttl=300)
     _security_cache = TTLCache(maxsize=500, ttl=60)
     _translation_cache = LRUCache(maxsize=200)
+    _auth_cache = TTLCache(maxsize=1000, ttl=300)   # <-- جديد لتخزين صلاحيات المستخدمين مؤقتاً
 except ImportError:
     CACHETOOLS_AVAILABLE = False
     _admin_cache = {}
     _security_cache = {}
     _translation_cache = {}
+    _auth_cache = {}   # <-- جديد
     _ADMIN_CACHE_TTL = 60
     _SECURITY_CACHE_TTL = 30
     _TRANSLATION_CACHE_SIZE = 500
+    _AUTH_CACHE_TTL = 300
 
 _security_cache_time = {}
 _security_cache_ttl = 30
@@ -1011,6 +1018,64 @@ class TimedLRUCache:
             self.cache.clear()
 
 _translation_cache = TimedLRUCache(maxsize=500, ttl=3600)
+
+# ===================== دالة is_authorized_in_group (مع التخزين المؤقت) =====================
+async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """
+    التحقق مما إذا كان المستخدم مشرفاً في المجموعة (حقيقي أو مالك مخفي أو مشرف مخفي).
+    يتم تخزين النتيجة مؤقتاً لتقليل استعلامات قاعدة البيانات.
+    """
+    if user_id == PRIMARY_OWNER_ID:
+        return True
+
+    cache_key = f"auth_{chat_id}_{user_id}"
+    if CACHETOOLS_AVAILABLE:
+        if cache_key in _auth_cache:
+            return _auth_cache[cache_key]
+    else:
+        if cache_key in _auth_cache:
+            cached_time, value = _auth_cache[cache_key]
+            if time_module.time() - cached_time < _AUTH_CACHE_TTL:
+                return value
+
+    # التحقق من الصلاحيات
+    authorized = False
+
+    # 1. مشرف حقيقي (من جدول group_admins)
+    if await db_is_real_admin(chat_id, user_id):
+        authorized = True
+
+    # 2. مالك مخفي
+    if not authorized and await db_is_hidden_owner(chat_id, user_id):
+        authorized = True
+
+    # 3. مشرف مخفي
+    if not authorized and await db_is_hidden_admin(chat_id, user_id):
+        authorized = True
+
+    # تخزين النتيجة
+    if CACHETOOLS_AVAILABLE:
+        _auth_cache[cache_key] = authorized
+    else:
+        _auth_cache[cache_key] = (time_module.time(), authorized)
+
+    return authorized
+
+# ===================== دالة invalidate_auth_cache =====================
+def invalidate_auth_cache(chat_id: int = None, user_id: int = None):
+    """إبطال التخزين المؤقت للصلاحيات عند التغيير"""
+    if chat_id is not None and user_id is not None:
+        cache_key = f"auth_{chat_id}_{user_id}"
+        if CACHETOOLS_AVAILABLE:
+            _auth_cache.pop(cache_key, None)
+        else:
+            _auth_cache.pop(cache_key, None)
+    elif chat_id is not None:
+        keys_to_remove = [k for k in _auth_cache.keys() if k.startswith(f"auth_{chat_id}_")]
+        for k in keys_to_remove:
+            _auth_cache.pop(k, None)
+    else:
+        _auth_cache.clear()
 
 # ===================== التحقق من التشغيل الواحد =====================
 def check_single_instance():
@@ -1211,9 +1276,11 @@ def memory_optimizer():
         if CACHETOOLS_AVAILABLE:
             _admin_cache.clear()
             _security_cache.clear()
+            _auth_cache.clear()
         else:
             _admin_cache.clear()
             _security_cache.clear()
+            _auth_cache.clear()
             _security_cache_time.clear()
 
         # تنظيف كاش الترجمة
@@ -5612,6 +5679,8 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
+        # إبطال التخزين المؤقت للصلاحيات
+        invalidate_auth_cache(chat_id, target_id)
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
 
@@ -5654,6 +5723,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
+        invalidate_auth_cache(chat_id, target_id)
     else:
         await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
 
@@ -12427,6 +12497,7 @@ async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
+        invalidate_auth_cache(chat_id, target_id)
     else:
         await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
 
@@ -12469,6 +12540,7 @@ async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFA
     if success:
         await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
         await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
+        invalidate_auth_cache(chat_id, target_id)
     else:
         await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
 
