@@ -4,15 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ريلاكس مانيجر - لوحة تحكم متطورة</title>
-    <!-- Bootstrap 5 & Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet" />
-    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <!-- Animate.css للحركات -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css" />
     <style>
-        /* ===== متغيرات الألوان ===== */
         :root {
             --bg-body: #f0f2f5;
             --bg-sidebar: #1a1a2e;
@@ -29,7 +25,6 @@
             --gradient-danger: linear-gradient(135deg, #eb3349, #f45c43);
             --gradient-warning: linear-gradient(135deg, #f7971e, #ffd200);
         }
-
         [data-theme="dark"] {
             --bg-body: #0f0f1a;
             --bg-card: #1e1e2f;
@@ -39,14 +34,7 @@
             --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
             --shadow-hover: 0 15px 40px rgba(0, 0, 0, 0.6);
         }
-
-        /* ===== عام ===== */
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             background: var(--bg-body);
             color: var(--text-primary);
@@ -55,8 +43,6 @@
             min-height: 100vh;
             display: flex;
         }
-
-        /* ===== شريط جانبي ===== */
         .sidebar {
             width: 280px;
             min-height: 100vh;
@@ -66,7 +52,7 @@
             top: 0;
             height: 100vh;
             overflow-y: auto;
-            box-shadow: 4px 0 20px rgba(0, 0, 0, 0.2);
+            box-shadow: 4px 0 20px rgba(0,0,0,0.2);
             z-index: 1000;
             transition: transform 0.3s ease, width 0.3s ease;
             flex-shrink: 0;
@@ -78,7 +64,7 @@
             text-align: center;
             color: #fff;
             letter-spacing: 1px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
         }
         .sidebar .brand i {
             background: var(--gradient-main);
@@ -87,7 +73,7 @@
             margin-left: 8px;
         }
         .sidebar .nav-link {
-            color: rgba(255, 255, 255, 0.6);
+            color: rgba(255,255,255,0.6);
             padding: 12px 18px;
             border-radius: 12px;
             margin: 4px 0;
@@ -97,48 +83,26 @@
             gap: 12px;
             font-weight: 500;
         }
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            background: rgba(255, 255, 255, 0.08);
+        .sidebar .nav-link:hover, .sidebar .nav-link.active {
+            background: rgba(255,255,255,0.08);
             color: #fff;
             transform: translateX(-4px);
         }
-        .sidebar .nav-link i {
-            font-size: 20px;
-            width: 28px;
-            text-align: center;
-        }
+        .sidebar .nav-link i { font-size: 20px; width: 28px; text-align: center; }
         .sidebar .theme-toggle-side {
             display: flex;
             justify-content: space-between;
             align-items: center;
             padding: 15px 18px;
             margin-top: 20px;
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
-            color: rgba(255, 255, 255, 0.5);
+            border-top: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.5);
             cursor: pointer;
         }
-        .sidebar .theme-toggle-side:hover {
-            color: #fff;
-        }
-        .sidebar .logout-btn {
-            margin-top: 10px;
-            color: #f44336;
-            font-weight: 600;
-        }
-        .sidebar .logout-btn:hover {
-            background: rgba(244, 67, 54, 0.15);
-            color: #ff6b6b;
-        }
-
-        /* ===== المحتوى ===== */
-        .main-content {
-            flex: 1;
-            padding: 25px 30px 30px 30px;
-            overflow-x: hidden;
-        }
-
-        /* ===== رأس الصفحة ===== */
+        .sidebar .theme-toggle-side:hover { color: #fff; }
+        .sidebar .logout-btn { margin-top: 10px; color: #f44336; font-weight: 600; }
+        .sidebar .logout-btn:hover { background: rgba(244,67,54,0.15); color: #ff6b6b; }
+        .main-content { flex: 1; padding: 25px 30px 30px 30px; overflow-x: hidden; }
         .page-header {
             display: flex;
             justify-content: space-between;
@@ -161,21 +125,9 @@
             gap: 15px;
             flex-wrap: wrap;
         }
-        .header-actions .btn {
-            border-radius: 30px;
-            padding: 8px 20px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .header-actions .btn-outline-primary {
-            border-color: var(--border-color);
-            color: var(--text-primary);
-        }
-        .header-actions .btn-outline-primary:hover {
-            background: var(--gradient-main);
-            color: #fff;
-            border-color: transparent;
-        }
+        .header-actions .btn { border-radius: 30px; padding: 8px 20px; font-weight: 600; transition: all 0.2s; }
+        .header-actions .btn-outline-primary { border-color: var(--border-color); color: var(--text-primary); }
+        .header-actions .btn-outline-primary:hover { background: var(--gradient-main); color: #fff; border-color: transparent; }
         .webhook-badge {
             display: flex;
             align-items: center;
@@ -186,26 +138,10 @@
             box-shadow: var(--shadow);
             font-size: 14px;
         }
-        .webhook-badge .dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        .webhook-badge .dot.online {
-            background: #00b894;
-            animation: pulse 1.5s infinite;
-        }
-        .webhook-badge .dot.offline {
-            background: #e17055;
-        }
-        @keyframes pulse {
-            0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(0.9); }
-            100% { opacity: 1; transform: scale(1); }
-        }
-
-        /* ===== بطاقات الإحصاء ===== */
+        .webhook-badge .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .webhook-badge .dot.online { background: #00b894; animation: pulse 1.5s infinite; }
+        .webhook-badge .dot.offline { background: #e17055; }
+        @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -222,39 +158,12 @@
             position: relative;
             overflow: hidden;
         }
-        .stat-card:hover {
-            transform: translateY(-6px);
-            box-shadow: var(--shadow-hover);
-        }
-        .stat-card .stat-icon {
-            font-size: 32px;
-            margin-bottom: 8px;
-            opacity: 0.7;
-        }
-        .stat-card .stat-number {
-            font-size: 32px;
-            font-weight: 800;
-            letter-spacing: -0.5px;
-        }
-        .stat-card .stat-label {
-            font-size: 14px;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }
-        .stat-card .stat-trend {
-            font-size: 12px;
-            font-weight: 600;
-            margin-top: 8px;
-            display: inline-block;
-            padding: 2px 12px;
-            border-radius: 20px;
-            background: rgba(0, 184, 148, 0.15);
-            color: #00b894;
-        }
-        .stat-card .stat-trend.down {
-            background: rgba(225, 112, 85, 0.15);
-            color: #e17055;
-        }
+        .stat-card:hover { transform: translateY(-6px); box-shadow: var(--shadow-hover); }
+        .stat-card .stat-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.7; }
+        .stat-card .stat-number { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; }
+        .stat-card .stat-label { font-size: 14px; color: var(--text-secondary); margin-top: 4px; }
+        .stat-card .stat-trend { font-size: 12px; font-weight: 600; margin-top: 8px; display: inline-block; padding: 2px 12px; border-radius: 20px; background: rgba(0,184,148,0.15); color: #00b894; }
+        .stat-card .stat-trend.down { background: rgba(225,112,85,0.15); color: #e17055; }
         .stat-card::after {
             content: '';
             position: absolute;
@@ -267,20 +176,8 @@
             border-radius: 50%;
             pointer-events: none;
         }
-
-        /* ===== الصفوف والبطاقات ===== */
-        .row-cards {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 25px;
-            margin-bottom: 30px;
-        }
-        @media (max-width: 992px) {
-            .row-cards {
-                grid-template-columns: 1fr;
-            }
-        }
-
+        .row-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; margin-bottom: 30px; }
+        @media (max-width: 992px) { .row-cards { grid-template-columns: 1fr; } }
         .card-modern {
             background: var(--bg-card);
             border-radius: var(--radius);
@@ -289,9 +186,7 @@
             transition: all var(--transition);
             border: none;
         }
-        .card-modern:hover {
-            box-shadow: var(--shadow-hover);
-        }
+        .card-modern:hover { box-shadow: var(--shadow-hover); }
         .card-modern .card-header-custom {
             padding: 18px 24px;
             background: transparent;
@@ -302,25 +197,10 @@
             align-items: center;
             gap: 10px;
         }
-        .card-modern .card-body-custom {
-            padding: 20px 24px 24px;
-        }
-
-        .chart-container {
-            position: relative;
-            height: 280px;
-        }
-
-        /* ===== جدول ===== */
-        .table-wrapper {
-            overflow-x: auto;
-            border-radius: var(--radius);
-        }
-        .table-modern {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-        }
+        .card-modern .card-body-custom { padding: 20px 24px 24px; }
+        .chart-container { position: relative; height: 280px; }
+        .table-wrapper { overflow-x: auto; border-radius: var(--radius); }
+        .table-modern { width: 100%; border-collapse: collapse; font-size: 14px; }
         .table-modern th {
             background: var(--bg-body);
             color: var(--text-secondary);
@@ -329,45 +209,15 @@
             border-bottom: 2px solid var(--border-color);
             text-align: right;
         }
-        .table-modern td {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: middle;
-        }
-        .table-modern tr:hover td {
-            background: rgba(102, 126, 234, 0.04);
-        }
-        .table-modern .badge-status {
-            padding: 4px 14px;
-            border-radius: 30px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .badge-status.active {
-            background: #d4edda;
-            color: #155724;
-        }
-        .badge-status.banned {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        .badge-status.pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-        [data-theme="dark"] .badge-status.active {
-            background: #1a3a2a;
-            color: #00b894;
-        }
-        [data-theme="dark"] .badge-status.banned {
-            background: #3a1a1a;
-            color: #e17055;
-        }
-        [data-theme="dark"] .badge-status.pending {
-            background: #3a3a1a;
-            color: #fdcb6e;
-        }
-
+        .table-modern td { padding: 12px 16px; border-bottom: 1px solid var(--border-color); vertical-align: middle; }
+        .table-modern tr:hover td { background: rgba(102,126,234,0.04); }
+        .table-modern .badge-status { padding: 4px 14px; border-radius: 30px; font-size: 12px; font-weight: 600; }
+        .badge-status.active { background: #d4edda; color: #155724; }
+        .badge-status.banned { background: #f8d7da; color: #721c24; }
+        .badge-status.pending { background: #fff3cd; color: #856404; }
+        [data-theme="dark"] .badge-status.active { background: #1a3a2a; color: #00b894; }
+        [data-theme="dark"] .badge-status.banned { background: #3a1a1a; color: #e17055; }
+        [data-theme="dark"] .badge-status.pending { background: #3a3a1a; color: #fdcb6e; }
         .table-search {
             display: flex;
             gap: 12px;
@@ -386,9 +236,7 @@
             outline: none;
             transition: border 0.2s;
         }
-        .table-search input:focus {
-            border-color: #667eea;
-        }
+        .table-search input:focus { border-color: #667eea; }
         .table-search .btn-icon {
             border-radius: 30px;
             padding: 8px 18px;
@@ -398,11 +246,7 @@
             font-weight: 600;
             transition: opacity 0.2s;
         }
-        .table-search .btn-icon:hover {
-            opacity: 0.85;
-        }
-
-        /* ===== Toast ===== */
+        .table-search .btn-icon:hover { opacity: 0.85; }
         .toast-container-custom {
             position: fixed;
             bottom: 30px;
@@ -417,7 +261,7 @@
             color: var(--text-primary);
             border-radius: 16px;
             padding: 14px 22px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             border-right: 5px solid #667eea;
             min-width: 280px;
             max-width: 450px;
@@ -437,162 +281,76 @@
             color: inherit;
             font-size: 18px;
         }
-        .toast-custom .toast-close:hover {
-            opacity: 1;
-        }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateX(30px); }
-            to { opacity: 1; transform: translateX(0); }
-        }
-
-        /* ===== لوحة التحميل ===== */
+        .toast-custom .toast-close:hover { opacity: 1; }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(30px); } to { opacity: 1; transform: translateX(0); } }
         .loading-overlay {
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.4);
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.4);
             backdrop-filter: blur(4px);
             z-index: 9998;
             justify-content: center;
             align-items: center;
         }
-        .loading-overlay.active {
-            display: flex;
-        }
+        .loading-overlay.active { display: flex; }
         .loading-spinner-custom {
-            width: 60px;
-            height: 60px;
-            border: 5px solid rgba(255, 255, 255, 0.2);
+            width: 60px; height: 60px;
+            border: 5px solid rgba(255,255,255,0.2);
             border-top-color: #667eea;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        /* ===== وسائل الإعلام ===== */
+        @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 768px) {
-            .sidebar {
-                width: 100%;
-                min-height: auto;
-                height: auto;
-                position: relative;
-                padding: 15px;
-            }
-            .main-content {
-                padding: 15px;
-            }
-            .stats-grid {
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            }
-            .page-header h2 {
-                font-size: 22px;
-            }
+            .sidebar { width: 100%; min-height: auto; height: auto; position: relative; padding: 15px; }
+            .main-content { padding: 15px; }
+            .stats-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+            .page-header h2 { font-size: 22px; }
         }
-        @media (max-width: 576px) {
-            .stats-grid {
-                grid-template-columns: 1fr 1fr;
-            }
-            .stat-card .stat-number {
-                font-size: 24px;
-            }
-        }
-
-        /* ===== أزرار الإجراءات ===== */
+        @media (max-width: 576px) { .stats-grid { grid-template-columns: 1fr 1fr; } .stat-card .stat-number { font-size: 24px; } }
         .action-btn {
-            border: none;
-            background: none;
-            padding: 6px 12px;
-            border-radius: 8px;
-            transition: all 0.2s;
-            font-weight: 600;
-            font-size: 13px;
+            border: none; background: none; padding: 6px 12px; border-radius: 8px;
+            transition: all 0.2s; font-weight: 600; font-size: 13px;
         }
-        .action-btn.ban {
-            color: #e17055;
-        }
-        .action-btn.ban:hover {
-            background: rgba(225, 112, 85, 0.12);
-        }
-        .action-btn.unban {
-            color: #00b894;
-        }
-        .action-btn.unban:hover {
-            background: rgba(0, 184, 148, 0.12);
-        }
-        .action-btn.delete {
-            color: #e17055;
-        }
-        .action-btn.delete:hover {
-            background: rgba(225, 112, 85, 0.12);
-        }
-        .action-btn.restore {
-            color: #0984e3;
-        }
-        .action-btn.restore:hover {
-            background: rgba(9, 132, 227, 0.12);
-        }
+        .action-btn.ban { color: #e17055; }
+        .action-btn.ban:hover { background: rgba(225,112,85,0.12); }
+        .action-btn.unban { color: #00b894; }
+        .action-btn.unban:hover { background: rgba(0,184,148,0.12); }
+        .action-btn.delete { color: #e17055; }
+        .action-btn.delete:hover { background: rgba(225,112,85,0.12); }
+        .action-btn.restore { color: #0984e3; }
+        .action-btn.restore:hover { background: rgba(9,132,227,0.12); }
     </style>
 </head>
 <body>
 
-<!-- ===== شريط جانبي ===== -->
 <nav class="sidebar" id="sidebar">
-    <div class="brand">
-        <i class="bi bi-robot"></i> ريلاكس
-    </div>
+    <div class="brand"><i class="bi bi-robot"></i> ريلاكس</div>
     <div class="nav flex-column">
-        <a class="nav-link active" href="#" data-page="dashboard">
-            <i class="bi bi-speedometer2"></i> لوحة التحكم
-        </a>
-        <a class="nav-link" href="#" data-page="users">
-            <i class="bi bi-people"></i> المستخدمين
-        </a>
-        <a class="nav-link" href="#" data-page="channels">
-            <i class="bi bi-broadcast"></i> القنوات
-        </a>
-        <a class="nav-link" href="#" data-page="groups">
-            <i class="bi bi-chat-dots"></i> المجموعات
-        </a>
-        <a class="nav-link" href="#" data-page="posts">
-            <i class="bi bi-file-post"></i> المنشورات
-        </a>
-        <a class="nav-link" href="#" data-page="contests">
-            <i class="bi bi-trophy"></i> المسابقات
-        </a>
-        <a class="nav-link" href="#" data-page="logs">
-            <i class="bi bi-journal-text"></i> السجلات
-        </a>
-        <a class="nav-link" href="#" data-page="backups">
-            <i class="bi bi-archive"></i> النسخ الاحتياطية
-        </a>
-        <a class="nav-link" href="#" data-page="settings">
-            <i class="bi bi-gear"></i> الإعدادات
-        </a>
+        <a class="nav-link active" href="#" data-page="dashboard"><i class="bi bi-speedometer2"></i> لوحة التحكم</a>
+        <a class="nav-link" href="#" data-page="users"><i class="bi bi-people"></i> المستخدمين</a>
+        <a class="nav-link" href="#" data-page="channels"><i class="bi bi-broadcast"></i> القنوات</a>
+        <a class="nav-link" href="#" data-page="groups"><i class="bi bi-chat-dots"></i> المجموعات</a>
+        <a class="nav-link" href="#" data-page="posts"><i class="bi bi-file-post"></i> المنشورات</a>
+        <a class="nav-link" href="#" data-page="contests"><i class="bi bi-trophy"></i> المسابقات</a>
+        <a class="nav-link" href="#" data-page="logs"><i class="bi bi-journal-text"></i> السجلات</a>
+        <a class="nav-link" href="#" data-page="backups"><i class="bi bi-archive"></i> النسخ الاحتياطية</a>
+        <a class="nav-link" href="#" data-page="settings"><i class="bi bi-gear"></i> الإعدادات</a>
         <div class="theme-toggle-side" onclick="toggleTheme()">
             <span><i class="bi bi-moon-fill" id="theme-icon"></i> الوضع</span>
             <span id="theme-label">داكن</span>
         </div>
-        <a class="nav-link logout-btn" href="#" onclick="logout()">
-            <i class="bi bi-box-arrow-left"></i> تسجيل الخروج
-        </a>
+        <a class="nav-link logout-btn" href="#" onclick="logout()"><i class="bi bi-box-arrow-left"></i> تسجيل الخروج</a>
     </div>
 </nav>
 
-<!-- ===== المحتوى ===== -->
 <div class="main-content">
-
-    <!-- رأس الصفحة -->
     <div class="page-header">
         <h2 id="page-title">لوحة التحكم</h2>
         <div class="header-actions">
-            <button class="btn btn-outline-primary" onclick="exportData()">
-                <i class="bi bi-download"></i> تصدير
-            </button>
+            <button class="btn btn-outline-primary" onclick="exportData()"><i class="bi bi-download"></i> تصدير</button>
             <div class="webhook-badge">
                 <span class="dot online" id="ws-dot"></span>
                 <span id="ws-text">متصل</span>
@@ -601,231 +359,99 @@
         </div>
     </div>
 
-    <!-- ===== لوحة التحكم ===== -->
     <div id="page-dashboard" class="page-content">
         <div class="stats-grid" id="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon"><i class="bi bi-people text-primary"></i></div>
-                <div class="stat-number" id="stat-users">0</div>
-                <div class="stat-label">إجمالي المستخدمين</div>
-                <div class="stat-trend" id="trend-users">+0%</div>
-            </div>
-            <div class="stat-card" style="border-right-color:#00b894;">
-                <div class="stat-icon"><i class="bi bi-broadcast text-success"></i></div>
-                <div class="stat-number" id="stat-channels">0</div>
-                <div class="stat-label">القنوات النشطة</div>
-                <div class="stat-trend" id="trend-channels">+0%</div>
-            </div>
-            <div class="stat-card" style="border-right-color:#fdcb6e;">
-                <div class="stat-icon"><i class="bi bi-chat-dots text-warning"></i></div>
-                <div class="stat-number" id="stat-groups">0</div>
-                <div class="stat-label">المجموعات</div>
-                <div class="stat-trend" id="trend-groups">+0%</div>
-            </div>
-            <div class="stat-card" style="border-right-color:#e17055;">
-                <div class="stat-icon"><i class="bi bi-file-post text-danger"></i></div>
-                <div class="stat-number" id="stat-posts">0</div>
-                <div class="stat-label">منشورات غير منشورة</div>
-                <div class="stat-trend down" id="trend-posts">-0%</div>
-            </div>
+            <div class="stat-card"><div class="stat-icon"><i class="bi bi-people text-primary"></i></div><div class="stat-number" id="stat-users">0</div><div class="stat-label">إجمالي المستخدمين</div><div class="stat-trend" id="trend-users">+0%</div></div>
+            <div class="stat-card" style="border-right-color:#00b894;"><div class="stat-icon"><i class="bi bi-broadcast text-success"></i></div><div class="stat-number" id="stat-channels">0</div><div class="stat-label">القنوات النشطة</div><div class="stat-trend" id="trend-channels">+0%</div></div>
+            <div class="stat-card" style="border-right-color:#fdcb6e;"><div class="stat-icon"><i class="bi bi-chat-dots text-warning"></i></div><div class="stat-number" id="stat-groups">0</div><div class="stat-label">المجموعات</div><div class="stat-trend" id="trend-groups">+0%</div></div>
+            <div class="stat-card" style="border-right-color:#e17055;"><div class="stat-icon"><i class="bi bi-file-post text-danger"></i></div><div class="stat-number" id="stat-posts">0</div><div class="stat-label">منشورات غير منشورة</div><div class="stat-trend down" id="trend-posts">-0%</div></div>
         </div>
 
         <div class="row-cards">
-            <div class="card-modern">
-                <div class="card-header-custom"><i class="bi bi-graph-up-arrow" style="color:#667eea;"></i> نمو المستخدمين</div>
-                <div class="card-body-custom">
-                    <div class="chart-container"><canvas id="userGrowthChart"></canvas></div>
-                </div>
-            </div>
-            <div class="card-modern">
-                <div class="card-header-custom"><i class="bi bi-pie-chart" style="color:#38ef7d;"></i> توزيع المنشورات</div>
-                <div class="card-body-custom">
-                    <div class="chart-container"><canvas id="postsDistributionChart"></canvas></div>
-                </div>
-            </div>
+            <div class="card-modern"><div class="card-header-custom"><i class="bi bi-graph-up-arrow" style="color:#667eea;"></i> نمو المستخدمين</div><div class="card-body-custom"><div class="chart-container"><canvas id="userGrowthChart"></canvas></div></div></div>
+            <div class="card-modern"><div class="card-header-custom"><i class="bi bi-pie-chart" style="color:#38ef7d;"></i> توزيع المنشورات</div><div class="card-body-custom"><div class="chart-container"><canvas id="postsDistributionChart"></canvas></div></div></div>
         </div>
 
         <div class="row-cards">
-            <div class="card-modern">
-                <div class="card-header-custom"><i class="bi bi-info-circle" style="color:#0984e3;"></i> معلومات النظام</div>
-                <div class="card-body-custom" id="system-info">
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);">
-                        <span>حالة البوت</span>
-                        <span class="badge-status active">🟢 يعمل</span>
-                    </div>
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);">
-                        <span>الإصدار</span>
-                        <span><strong>19.3.2</strong></span>
-                    </div>
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);">
-                        <span>وقت التشغيل</span>
-                        <span id="uptime">0 ساعة</span>
-                    </div>
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);">
-                        <span>استخدام الذاكرة</span>
-                        <span id="memory-usage">0%</span>
-                    </div>
-                    <div style="display:flex;justify-content:space-between;padding:8px 0;">
-                        <span>قاعدة البيانات</span>
-                        <span class="badge-status active" id="db-status">✅ سليمة</span>
-                    </div>
-                </div>
-            </div>
-            <div class="card-modern">
-                <div class="card-header-custom"><i class="bi bi-activity" style="color:#fdcb6e;"></i> النشاطات الأخيرة</div>
-                <div class="card-body-custom" id="recent-activity">
-                    <div style="color:var(--text-secondary);">لا توجد نشاطات حديثة</div>
-                </div>
-            </div>
+            <div class="card-modern"><div class="card-header-custom"><i class="bi bi-info-circle" style="color:#0984e3;"></i> معلومات النظام</div><div class="card-body-custom" id="system-info">
+                <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);"><span>حالة البوت</span><span class="badge-status active">🟢 يعمل</span></div>
+                <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);"><span>الإصدار</span><span><strong>19.3.2</strong></span></div>
+                <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);"><span>وقت التشغيل</span><span id="uptime">0 ساعة</span></div>
+                <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-color);"><span>استخدام الذاكرة</span><span id="memory-usage">0%</span></div>
+                <div style="display:flex;justify-content:space-between;padding:8px 0;"><span>قاعدة البيانات</span><span class="badge-status active" id="db-status">✅ سليمة</span></div>
+            </div></div>
+            <div class="card-modern"><div class="card-header-custom"><i class="bi bi-activity" style="color:#fdcb6e;"></i> النشاطات الأخيرة</div><div class="card-body-custom" id="recent-activity"><div style="color:var(--text-secondary);">لا توجد نشاطات حديثة</div></div></div>
         </div>
     </div>
 
-    <!-- ===== صفحة المستخدمين ===== -->
     <div id="page-users" class="page-content" style="display:none;">
         <div class="card-modern">
-            <div class="card-header-custom">
-                <i class="bi bi-people"></i> قائمة المستخدمين
-                <span style="margin-right:auto;font-weight:400;font-size:14px;color:var(--text-secondary);" id="users-count">0</span>
-            </div>
+            <div class="card-header-custom"><i class="bi bi-people"></i> قائمة المستخدمين <span style="margin-right:auto;font-weight:400;font-size:14px;color:var(--text-secondary);" id="users-count">0</span></div>
             <div class="card-body-custom">
                 <div class="table-search">
                     <input type="text" id="user-search" placeholder="🔍 بحث باسم أو معرف..." />
                     <button class="btn-icon" onclick="refreshUsers()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
                     <button class="btn-icon" style="background:var(--gradient-success);" onclick="exportData('users')"><i class="bi bi-download"></i> تصدير</button>
                 </div>
-                <div class="table-wrapper">
-                    <table class="table-modern" id="users-table">
-                        <thead>
-                            <tr><th>#</th><th>المعرف</th><th>الاسم</th><th>الحالة</th><th>النقاط</th><th>المستوى</th><th>الإجراءات</th></tr>
-                        </thead>
-                        <tbody id="users-tbody">
-                            <tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+                <div class="table-wrapper"><table class="table-modern" id="users-table"><thead><tr><th>#</th><th>المعرف</th><th>الاسم</th><th>الحالة</th><th>النقاط</th><th>المستوى</th><th>الإجراءات</th></tr></thead><tbody id="users-tbody"><tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div>
             </div>
         </div>
     </div>
 
-    <!-- ===== صفحة القنوات ===== -->
     <div id="page-channels" class="page-content" style="display:none;">
         <div class="card-modern">
             <div class="card-header-custom"><i class="bi bi-broadcast"></i> قنوات المستخدمين</div>
             <div class="card-body-custom">
-                <div class="table-search">
-                    <input type="text" id="channel-search" placeholder="🔍 بحث..." />
-                    <button class="btn-icon" onclick="refreshChannels()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-                <div class="table-wrapper">
-                    <table class="table-modern" id="channels-table">
-                        <thead><tr><th>#</th><th>المستخدم</th><th>القناة</th><th>الاسم</th><th>الحالة</th></tr></thead>
-                        <tbody id="channels-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
+                <div class="table-search"><input type="text" id="channel-search" placeholder="🔍 بحث..." /><button class="btn-icon" onclick="refreshChannels()"><i class="bi bi-arrow-clockwise"></i> تحديث</button></div>
+                <div class="table-wrapper"><table class="table-modern" id="channels-table"><thead><tr><th>#</th><th>المستخدم</th><th>القناة</th><th>الاسم</th><th>الحالة</th></tr></thead><tbody id="channels-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div>
             </div>
         </div>
     </div>
 
-    <!-- ===== صفحة المجموعات ===== -->
     <div id="page-groups" class="page-content" style="display:none;">
         <div class="card-modern">
             <div class="card-header-custom"><i class="bi bi-chat-dots"></i> المجموعات</div>
             <div class="card-body-custom">
-                <div class="table-search">
-                    <input type="text" id="group-search" placeholder="🔍 بحث..." />
-                    <button class="btn-icon" onclick="refreshGroups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-                <div class="table-wrapper">
-                    <table class="table-modern" id="groups-table">
-                        <thead><tr><th>#</th><th>المعرف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th></tr></thead>
-                        <tbody id="groups-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
+                <div class="table-search"><input type="text" id="group-search" placeholder="🔍 بحث..." /><button class="btn-icon" onclick="refreshGroups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button></div>
+                <div class="table-wrapper"><table class="table-modern" id="groups-table"><thead><tr><th>#</th><th>المعرف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th></tr></thead><tbody id="groups-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div>
             </div>
         </div>
     </div>
 
-    <!-- ===== صفحة المنشورات ===== -->
     <div id="page-posts" class="page-content" style="display:none;">
         <div class="card-modern">
             <div class="card-header-custom"><i class="bi bi-file-post"></i> المنشورات غير المنشورة</div>
             <div class="card-body-custom">
-                <div class="table-search">
-                    <input type="text" id="post-search" placeholder="🔍 بحث..." />
-                    <button class="btn-icon" onclick="refreshPosts()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-                <div class="table-wrapper">
-                    <table class="table-modern" id="posts-table">
-                        <thead><tr><th>#</th><th>القناة</th><th>النص</th><th>النوع</th><th>التاريخ</th></tr></thead>
-                        <tbody id="posts-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
+                <div class="table-search"><input type="text" id="post-search" placeholder="🔍 بحث..." /><button class="btn-icon" onclick="refreshPosts()"><i class="bi bi-arrow-clockwise"></i> تحديث</button></div>
+                <div class="table-wrapper"><table class="table-modern" id="posts-table"><thead><tr><th>#</th><th>القناة</th><th>النص</th><th>النوع</th><th>التاريخ</th></tr></thead><tbody id="posts-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div>
             </div>
         </div>
     </div>
 
-    <!-- ===== صفحة المسابقات ===== -->
     <div id="page-contests" class="page-content" style="display:none;">
         <div class="card-modern">
             <div class="card-header-custom"><i class="bi bi-trophy"></i> المسابقات</div>
             <div class="card-body-custom">
-                <div class="table-search">
-                    <input type="text" id="contest-search" placeholder="🔍 بحث..." />
-                    <button class="btn-icon" onclick="refreshContests()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-                <div class="table-wrapper">
-                    <table class="table-modern" id="contests-table">
-                        <thead><tr><th>#</th><th>العنوان</th><th>الجائزة</th><th>المشاركون</th><th>التاريخ</th><th>الحالة</th></tr></thead>
-                        <tbody id="contests-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
+                <div class="table-search"><input type="text" id="contest-search" placeholder="🔍 بحث..." /><button class="btn-icon" onclick="refreshContests()"><i class="bi bi-arrow-clockwise"></i> تحديث</button></div>
+                <div class="table-wrapper"><table class="table-modern" id="contests-table"><thead><tr><th>#</th><th>العنوان</th><th>الجائزة</th><th>المشاركون</th><th>التاريخ</th><th>الحالة</th></tr></thead><tbody id="contests-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div>
             </div>
         </div>
     </div>
 
-    <!-- ===== صفحة السجلات ===== -->
     <div id="page-logs" class="page-content" style="display:none;">
         <div class="card-modern">
-            <div class="card-header-custom">
-                <i class="bi bi-journal-text"></i> سجلات النظام
-                <span style="margin-right:auto;display:flex;gap:8px;">
-                    <button class="btn-icon" style="background:var(--gradient-main);" onclick="refreshLogs()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                    <button class="btn-icon" style="background:var(--gradient-danger);" onclick="clearLogs()"><i class="bi bi-trash"></i> مسح</button>
-                </span>
-            </div>
-            <div class="card-body-custom">
-                <div class="table-wrapper">
-                    <table class="table-modern" id="logs-table">
-                        <thead><tr><th>الوقت</th><th>المستوى</th><th>الرسالة</th></tr></thead>
-                        <tbody id="logs-tbody"><tr><td colspan="3" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
-            </div>
+            <div class="card-header-custom"><i class="bi bi-journal-text"></i> سجلات النظام <span style="margin-right:auto;display:flex;gap:8px;"><button class="btn-icon" style="background:var(--gradient-main);" onclick="refreshLogs()"><i class="bi bi-arrow-clockwise"></i> تحديث</button><button class="btn-icon" style="background:var(--gradient-danger);" onclick="clearLogs()"><i class="bi bi-trash"></i> مسح</button></span></div>
+            <div class="card-body-custom"><div class="table-wrapper"><table class="table-modern" id="logs-table"><thead><tr><th>الوقت</th><th>المستوى</th><th>الرسالة</th></tr></thead><tbody id="logs-tbody"><tr><td colspan="3" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div></div>
         </div>
     </div>
 
-    <!-- ===== صفحة النسخ الاحتياطية ===== -->
     <div id="page-backups" class="page-content" style="display:none;">
         <div class="card-modern">
-            <div class="card-header-custom">
-                <i class="bi bi-archive"></i> النسخ الاحتياطية
-                <span style="margin-right:auto;display:flex;gap:8px;">
-                    <button class="btn-icon" style="background:var(--gradient-success);" onclick="createBackup()"><i class="bi bi-plus"></i> نسخة جديدة</button>
-                    <button class="btn-icon" onclick="refreshBackups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </span>
-            </div>
-            <div class="card-body-custom">
-                <div class="table-wrapper">
-                    <table class="table-modern" id="backups-table">
-                        <thead><tr><th>#</th><th>الملف</th><th>الحجم</th><th>التاريخ</th><th>الإجراءات</th></tr></thead>
-                        <tbody id="backups-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody>
-                    </table>
-                </div>
-            </div>
+            <div class="card-header-custom"><i class="bi bi-archive"></i> النسخ الاحتياطية <span style="margin-right:auto;display:flex;gap:8px;"><button class="btn-icon" style="background:var(--gradient-success);" onclick="createBackup()"><i class="bi bi-plus"></i> نسخة جديدة</button><button class="btn-icon" onclick="refreshBackups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button></span></div>
+            <div class="card-body-custom"><div class="table-wrapper"><table class="table-modern" id="backups-table"><thead><tr><th>#</th><th>الملف</th><th>الحجم</th><th>التاريخ</th><th>الإجراءات</th></tr></thead><tbody id="backups-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr></tbody></table></div></div>
         </div>
     </div>
 
-    <!-- ===== صفحة الإعدادات ===== -->
     <div id="page-settings" class="page-content" style="display:none;">
         <div class="card-modern">
             <div class="card-header-custom"><i class="bi bi-gear"></i> إعدادات البوت</div>
@@ -833,36 +459,15 @@
                 <form id="settings-form">
                     <div class="row g-4">
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">اسم البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-name" value="ريلاكس مانيجر" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">معرف البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-username" value="Reelaaaxbot" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">وقت النشر (ثانية)</label>
-                                <input type="number" class="form-control" id="setting-publish-interval" value="720" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;">
-                            </div>
+                            <div class="mb-3"><label class="form-label fw-bold">اسم البوت</label><input type="text" class="form-control" id="setting-bot-name" value="ريلاكس مانيجر" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;"></div>
+                            <div class="mb-3"><label class="form-label fw-bold">معرف البوت</label><input type="text" class="form-control" id="setting-bot-username" value="Reelaaaxbot" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;"></div>
+                            <div class="mb-3"><label class="form-label fw-bold">وقت النشر (ثانية)</label><input type="number" class="form-control" id="setting-publish-interval" value="720" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;"></div>
                         </div>
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">قناة التحديثات</label>
-                                <input type="text" class="form-control" id="setting-updates-channel" placeholder="@channel" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;">
-                            </div>
-                            <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="setting-force-subscribe" style="width:2.5rem;height:1.5rem;">
-                                <label class="form-check-label fw-bold">الاشتراك الإجباري</label>
-                            </div>
-                            <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="setting-auto-backup" style="width:2.5rem;height:1.5rem;">
-                                <label class="form-check-label fw-bold">النسخ الاحتياطي التلقائي</label>
-                            </div>
-                            <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="setting-nsfw" style="width:2.5rem;height:1.5rem;">
-                                <label class="form-check-label fw-bold">كشف NSFW</label>
-                            </div>
+                            <div class="mb-3"><label class="form-label fw-bold">قناة التحديثات</label><input type="text" class="form-control" id="setting-updates-channel" placeholder="@channel" style="background:var(--bg-body);border-color:var(--border-color);color:var(--text-primary);border-radius:12px;padding:10px 16px;"></div>
+                            <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="setting-force-subscribe" style="width:2.5rem;height:1.5rem;"><label class="form-check-label fw-bold">الاشتراك الإجباري</label></div>
+                            <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="setting-auto-backup" style="width:2.5rem;height:1.5rem;"><label class="form-check-label fw-bold">النسخ الاحتياطي التلقائي</label></div>
+                            <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="setting-nsfw" style="width:2.5rem;height:1.5rem;"><label class="form-check-label fw-bold">كشف NSFW</label></div>
                         </div>
                     </div>
                     <button type="submit" class="btn" style="background:var(--gradient-main);color:#fff;border:none;border-radius:30px;padding:10px 40px;font-weight:700;margin-top:10px;">حفظ الإعدادات</button>
@@ -870,22 +475,12 @@
             </div>
         </div>
     </div>
-
 </div>
 
-<!-- ===== Toast Container ===== -->
 <div class="toast-container-custom" id="toast-container"></div>
+<div class="loading-overlay" id="loading-overlay"><div class="loading-spinner-custom"></div></div>
 
-<!-- ===== Loading Overlay ===== -->
-<div class="loading-overlay" id="loading-overlay">
-    <div class="loading-spinner-custom"></div>
-</div>
-
-<!-- ===== JavaScript ===== -->
 <script>
-    // =====================================================
-    // 1. الثيم (Dark/Light)
-    // =====================================================
     let currentTheme = localStorage.getItem('theme') || 'light';
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-theme', theme);
@@ -893,7 +488,6 @@
         document.getElementById('theme-label').textContent = theme === 'dark' ? 'فاتح' : 'داكن';
         localStorage.setItem('theme', theme);
         currentTheme = theme;
-        // تحديث ألوان الرسوم البيانية إذا كانت موجودة
         if (userGrowthChart) {
             const color = theme === 'dark' ? '#dfe6e9' : '#2d3436';
             userGrowthChart.options.plugins.legend.labels.color = color;
@@ -907,20 +501,10 @@
             postsDistributionChart.update();
         }
     }
-    function toggleTheme() {
-        const newTheme = currentTheme === 'light' ? 'dark' : 'light';
-        applyTheme(newTheme);
-    }
-    // تطبيق الثيم عند التحميل
+    function toggleTheme() { applyTheme(currentTheme === 'light' ? 'dark' : 'light'); }
     document.addEventListener('DOMContentLoaded', () => applyTheme(currentTheme));
 
-    // =====================================================
-    // 2. WebSocket
-    // =====================================================
-    let ws = null;
-    let wsReconnectAttempts = 0;
-    const MAX_WS_RECONNECT = 5;
-
+    let ws = null, wsReconnectAttempts = 0, MAX_WS_RECONNECT = 5;
     function connectWebSocket() {
         const token = '{{ WEB_SECRET_KEY }}';
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -933,159 +517,61 @@
             wsReconnectAttempts = 0;
         };
         ws.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                handleWSMessage(data);
-            } catch(e) {
-                console.error('خطأ في تحليل رسالة WebSocket:', e);
-            }
+            try { const data = JSON.parse(event.data); handleWSMessage(data); } catch(e) { console.error('خطأ في تحليل رسالة WebSocket:', e); }
         };
         ws.onclose = function() {
             console.log('❌ WebSocket مغلق');
             document.getElementById('ws-dot').className = 'dot offline';
             document.getElementById('ws-text').textContent = 'غير متصل';
-            if (wsReconnectAttempts < MAX_WS_RECONNECT) {
-                wsReconnectAttempts++;
-                setTimeout(connectWebSocket, 3000 * wsReconnectAttempts);
-            }
+            if (wsReconnectAttempts < MAX_WS_RECONNECT) { wsReconnectAttempts++; setTimeout(connectWebSocket, 3000 * wsReconnectAttempts); }
         };
-        ws.onerror = function(error) {
-            console.error('خطأ في WebSocket:', error);
-        };
+        ws.onerror = function(error) { console.error('خطأ في WebSocket:', error); };
     }
-
     function handleWSMessage(data) {
         switch(data.type) {
-            case 'stats':
-                updateStats(data.data);
-                break;
-            case 'broadcast':
-                showToast(data.data.message || '📢 تحديث جديد');
-                break;
-            case 'pong':
-                break;
-            default:
-                console.log('رسالة غير معروفة:', data);
+            case 'stats': updateStats(data.data); break;
+            case 'broadcast': showToast(data.data.message || '📢 تحديث جديد'); break;
+            case 'pong': break;
+            default: console.log('رسالة غير معروفة:', data);
         }
     }
-
-    // =====================================================
-    // 3. Toast
-    // =====================================================
     function showToast(message, type = 'info') {
         const container = document.getElementById('toast-container');
-        const colors = {
-            info: '#667eea',
-            success: '#00b894',
-            error: '#e17055',
-            warning: '#fdcb6e'
-        };
+        const colors = { info: '#667eea', success: '#00b894', error: '#e17055', warning: '#fdcb6e' };
         const toast = document.createElement('div');
         toast.className = 'toast-custom';
         toast.style.borderRightColor = colors[type] || colors.info;
-        toast.innerHTML = `
-            <span>${message}</span>
-            <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
-        `;
+        toast.innerHTML = `<span>${message}</span><button class="toast-close" onclick="this.parentElement.remove()">✕</button>`;
         container.appendChild(toast);
-        setTimeout(() => {
-            if (toast.parentElement) toast.remove();
-        }, 5000);
+        setTimeout(() => { if (toast.parentElement) toast.remove(); }, 5000);
     }
-
-    // =====================================================
-    // 4. تحديث الإحصائيات
-    // =====================================================
     function updateStats(data) {
         document.getElementById('stat-users').textContent = data.total_users || 0;
         document.getElementById('stat-channels').textContent = data.channels || 0;
         document.getElementById('stat-groups').textContent = data.groups || 0;
         document.getElementById('stat-posts').textContent = data.pending_posts || 0;
-        // تحديث الاتجاهات (افتراضي)
-        // يمكنك إضافة منطق لحساب النسبة المئوية من البيانات السابقة
     }
 
-    // =====================================================
-    // 5. الرسوم البيانية
-    // =====================================================
-    let userGrowthChart = null;
-    let postsDistributionChart = null;
-
+    let userGrowthChart = null, postsDistributionChart = null;
     function initCharts() {
         const ctx1 = document.getElementById('userGrowthChart').getContext('2d');
         userGrowthChart = new Chart(ctx1, {
             type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'المستخدمين',
-                    data: [],
-                    borderColor: '#667eea',
-                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                    fill: true,
-                    tension: 0.4,
-                    pointBackgroundColor: '#667eea',
-                    pointBorderColor: '#fff',
-                    borderWidth: 3
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' }
-                    }
-                },
-                scales: {
-                    y: { beginAtZero: true, ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } },
-                    x: { ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } }
-                }
-            }
+            data: { labels: [], datasets: [{ label: 'المستخدمين', data: [], borderColor: '#667eea', backgroundColor: 'rgba(102,126,234,0.1)', fill: true, tension: 0.4, pointBackgroundColor: '#667eea', pointBorderColor: '#fff', borderWidth: 3 }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } }, scales: { y: { beginAtZero: true, ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } }, x: { ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
         });
-
         const ctx2 = document.getElementById('postsDistributionChart').getContext('2d');
         postsDistributionChart = new Chart(ctx2, {
             type: 'doughnut',
-            data: {
-                labels: ['منشورة', 'غير منشورة'],
-                datasets: [{
-                    data: [0, 0],
-                    backgroundColor: ['#00b894', '#e17055'],
-                    borderWidth: 3,
-                    borderColor: currentTheme === 'dark' ? '#1e1e2f' : '#ffffff'
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' }
-                    }
-                }
-            }
+            data: { labels: ['منشورة', 'غير منشورة'], datasets: [{ data: [0, 0], backgroundColor: ['#00b894', '#e17055'], borderWidth: 3, borderColor: currentTheme === 'dark' ? '#1e1e2f' : '#ffffff' }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
         });
     }
-
     function updateCharts(userGrowth, postsDistribution) {
-        if (userGrowthChart) {
-            userGrowthChart.data.labels = userGrowth.labels || [];
-            userGrowthChart.data.datasets[0].data = userGrowth.data || [];
-            userGrowthChart.update();
-        }
-        if (postsDistributionChart) {
-            postsDistributionChart.data.datasets[0].data = [
-                postsDistribution.published || 0,
-                postsDistribution.unpublished || 0
-            ];
-            postsDistributionChart.update();
-        }
+        if (userGrowthChart) { userGrowthChart.data.labels = userGrowth.labels || []; userGrowthChart.data.datasets[0].data = userGrowth.data || []; userGrowthChart.update(); }
+        if (postsDistributionChart) { postsDistributionChart.data.datasets[0].data = [postsDistribution.published || 0, postsDistribution.unpublished || 0]; postsDistributionChart.update(); }
     }
 
-    // =====================================================
-    // 6. التنقل بين الصفحات
-    // =====================================================
     document.querySelectorAll('.sidebar .nav-link').forEach(link => {
         link.addEventListener('click', function(e) {
             e.preventDefault();
@@ -1112,237 +598,71 @@
         });
     });
 
-    // =====================================================
-    // 7. دوال التحديث
-    // =====================================================
     function refreshDashboard() {
         showLoading(true);
-        Promise.all([
-            fetch('/api/stats').then(r => r.json()),
-            fetch('/api/charts').then(r => r.json()),
-            fetch('/api/system-info').then(r => r.json())
-        ])
+        Promise.all([fetch('/api/stats').then(r=>r.json()), fetch('/api/charts').then(r=>r.json()), fetch('/api/system-info').then(r=>r.json())])
         .then(([stats, charts, sysInfo]) => {
-            updateStats(stats);
-            updateCharts(charts.user_growth, charts.posts_distribution);
+            updateStats(stats); updateCharts(charts.user_growth, charts.posts_distribution);
             document.getElementById('uptime').textContent = sysInfo.uptime || '0 ساعة';
             document.getElementById('memory-usage').textContent = sysInfo.memory || '0%';
             document.getElementById('db-status').textContent = sysInfo.db_status || '✅ سليمة';
             showLoading(false);
         })
-        .catch(err => {
-            console.error('خطأ في تحميل لوحة التحكم:', err);
-            showToast('❌ فشل تحميل البيانات', 'error');
-            showLoading(false);
-        });
+        .catch(err => { console.error('خطأ في تحميل لوحة التحكم:', err); showToast('❌ فشل تحميل البيانات', 'error'); showLoading(false); });
     }
 
-    // دالة عامة لجلب البيانات وعرضها في جدول
     function fetchTable(endpoint, tbodyId, renderFn, searchId = null) {
         const tbody = document.getElementById(tbodyId);
         tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);">جاري التحميل...</td></tr>';
-        fetch(endpoint)
-            .then(res => res.json())
-            .then(data => {
-                if (!data || data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);">📭 لا توجد بيانات</td></tr>';
-                    return;
+        fetch(endpoint).then(res => res.json()).then(data => {
+            if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);">📭 لا توجد بيانات</td></tr>'; return; }
+            tbody.innerHTML = renderFn(data);
+            if (searchId) {
+                const searchInput = document.getElementById(searchId);
+                if (searchInput) {
+                    searchInput.oninput = function() {
+                        const query = this.value.toLowerCase();
+                        const rows = tbody.querySelectorAll('tr');
+                        rows.forEach(row => { const text = row.textContent.toLowerCase(); row.style.display = text.includes(query) ? '' : 'none'; });
+                    };
                 }
-                tbody.innerHTML = renderFn(data);
-                // تفعيل البحث إذا وجد
-                if (searchId) {
-                    const searchInput = document.getElementById(searchId);
-                    if (searchInput) {
-                        searchInput.oninput = function() {
-                            const query = this.value.toLowerCase();
-                            const rows = tbody.querySelectorAll('tr');
-                            rows.forEach(row => {
-                                const text = row.textContent.toLowerCase();
-                                row.style.display = text.includes(query) ? '' : 'none';
-                            });
-                        };
-                    }
-                }
-            })
-            .catch(err => {
-                console.error(`خطأ في تحميل ${endpoint}:`, err);
-                tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:#e17055;">❌ فشل التحميل</td></tr>`;
-            });
+            }
+        }).catch(err => { console.error(`خطأ في تحميل ${endpoint}:`, err); tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:#e17055;">❌ فشل التحميل</td></tr>`; });
     }
 
-    // ===== المستخدمين =====
     function refreshUsers() {
         fetchTable('/api/users', 'users-tbody', (data) => {
             document.getElementById('users-count').textContent = data.length;
-            return data.map((user, i) => `
-                <tr>
-                    <td>${i+1}</td>
-                    <td><code>${user.user_id}</code></td>
-                    <td>${user.first_name || 'غير معروف'}</td>
-                    <td><span class="badge-status ${user.banned ? 'banned' : 'active'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td>
-                    <td>${user.points || 0}</td>
-                    <td>${user.level || 1}</td>
-                    <td>
-                        <button class="action-btn ${user.banned ? 'unban' : 'ban'}" onclick="toggleBan(${user.user_id})">
-                            ${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
+            return data.map((user, i) => `<tr><td>${i+1}</td><td><code>${user.user_id}</code></td><td>${user.first_name || 'غير معروف'}</td><td><span class="badge-status ${user.banned ? 'banned' : 'active'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td><td>${user.points || 0}</td><td>${user.level || 1}</td><td><button class="action-btn ${user.banned ? 'unban' : 'ban'}" onclick="toggleBan(${user.user_id})">${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}</button></td></tr>`).join('');
         }, 'user-search');
     }
-
     function toggleBan(userId) {
         if (!confirm('هل أنت متأكد؟')) return;
-        fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                showToast(data.message || 'تم تغيير الحالة', 'success');
-                refreshUsers();
-            })
-            .catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
+        fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || 'تم تغيير الحالة', 'success'); refreshUsers(); }).catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
     }
-
-    // ===== القنوات =====
-    function refreshChannels() {
-        fetchTable('/api/channels', 'channels-tbody', (data) => data.map((ch, i) => `
-            <tr>
-                <td>${i+1}</td>
-                <td><code>${ch.user_id}</code></td>
-                <td><code>${ch.channel_id}</code></td>
-                <td>${ch.channel_name || ch.channel_id}</td>
-                <td><span class="badge-status ${ch.banned ? 'banned' : 'active'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-            </tr>
-        `).join(''), 'channel-search');
-    }
-
-    // ===== المجموعات =====
-    function refreshGroups() {
-        fetchTable('/api/groups', 'groups-tbody', (data) => data.map((g, i) => `
-            <tr>
-                <td>${i+1}</td>
-                <td><code>${g.chat_id}</code></td>
-                <td>${g.chat_name || g.chat_id}</td>
-                <td><code>${g.added_by}</code></td>
-                <td><span class="badge-status ${g.banned ? 'banned' : 'active'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td>
-            </tr>
-        `).join(''), 'group-search');
-    }
-
-    // ===== المنشورات =====
-    function refreshPosts() {
-        fetchTable('/api/posts', 'posts-tbody', (data) => data.map((p, i) => `
-            <tr>
-                <td>${i+1}</td>
-                <td>${p.channel_name || p.channel_id}</td>
-                <td>${(p.text || '').substring(0, 50)}${(p.text || '').length > 50 ? '...' : ''}</td>
-                <td><span class="badge-status pending">${p.media_type || 'text'}</span></td>
-                <td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td>
-            </tr>
-        `).join(''), 'post-search');
-    }
-
-    // ===== المسابقات =====
-    function refreshContests() {
-        fetchTable('/api/contests', 'contests-tbody', (data) => data.map((c, i) => `
-            <tr>
-                <td>${i+1}</td>
-                <td>${c.title || 'بدون عنوان'}</td>
-                <td>${c.prize || 'غير محددة'}</td>
-                <td>${c.participants || 0}</td>
-                <td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td>
-                <td><span class="badge-status ${c.status === 'active' ? 'active' : 'banned'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td>
-            </tr>
-        `).join(''), 'contest-search');
-    }
-
-    // ===== السجلات =====
-    function refreshLogs() {
-        fetchTable('/api/logs?limit=100', 'logs-tbody', (data) => data.map(log => {
-            const level = log.level || 'INFO';
-            const cls = level === 'ERROR' ? 'banned' : level === 'WARNING' ? 'pending' : 'active';
-            return `<tr>
-                <td>${log.time || '-'}</td>
-                <td><span class="badge-status ${cls}">${level}</span></td>
-                <td>${log.message || ''}</td>
-            </tr>`;
-        }).join(''));
-    }
-
-    function clearLogs() {
-        if (!confirm('هل أنت متأكد من مسح جميع السجلات؟')) return;
-        fetch('/api/logs', { method: 'DELETE' })
-            .then(res => res.json())
-            .then(data => { showToast(data.message || '✅ تم مسح السجلات', 'success'); refreshLogs(); })
-            .catch(err => showToast('❌ فشل مسح السجلات', 'error'));
-    }
-
-    // ===== النسخ الاحتياطية =====
+    function refreshChannels() { fetchTable('/api/channels', 'channels-tbody', (data) => data.map((ch,i) => `<tr><td>${i+1}</td><td><code>${ch.user_id}</code></td><td><code>${ch.channel_id}</code></td><td>${ch.channel_name || ch.channel_id}</td><td><span class="badge-status ${ch.banned ? 'banned' : 'active'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join(''), 'channel-search'); }
+    function refreshGroups() { fetchTable('/api/groups', 'groups-tbody', (data) => data.map((g,i) => `<tr><td>${i+1}</td><td><code>${g.chat_id}</code></td><td>${g.chat_name || g.chat_id}</td><td><code>${g.added_by}</code></td><td><span class="badge-status ${g.banned ? 'banned' : 'active'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join(''), 'group-search'); }
+    function refreshPosts() { fetchTable('/api/posts', 'posts-tbody', (data) => data.map((p,i) => `<tr><td>${i+1}</td><td>${p.channel_name || p.channel_id}</td><td>${(p.text || '').substring(0,50)}${(p.text||'').length>50?'...':''}</td><td><span class="badge-status pending">${p.media_type || 'text'}</span></td><td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td></tr>`).join(''), 'post-search'); }
+    function refreshContests() { fetchTable('/api/contests', 'contests-tbody', (data) => data.map((c,i) => `<tr><td>${i+1}</td><td>${c.title || 'بدون عنوان'}</td><td>${c.prize || 'غير محددة'}</td><td>${c.participants || 0}</td><td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td><td><span class="badge-status ${c.status === 'active' ? 'active' : 'banned'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td></tr>`).join(''), 'contest-search'); }
+    function refreshLogs() { fetchTable('/api/logs?limit=100', 'logs-tbody', (data) => data.map(log => { const level = log.level || 'INFO'; const cls = level === 'ERROR' ? 'banned' : level === 'WARNING' ? 'pending' : 'active'; return `<tr><td>${log.time || '-'}</td><td><span class="badge-status ${cls}">${level}</span></td><td>${log.message || ''}</td></tr>`; }).join('')); }
+    function clearLogs() { if (!confirm('هل أنت متأكد من مسح جميع السجلات؟')) return; fetch('/api/logs', { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم مسح السجلات', 'success'); refreshLogs(); }).catch(err => showToast('❌ فشل مسح السجلات', 'error')); }
     function refreshBackups() {
-        fetchTable('/api/backups', 'backups-tbody', (data) => data.map((b, i) => `
-            <tr>
-                <td>${i+1}</td>
-                <td>${b.name || 'غير معروف'}</td>
-                <td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td>
-                <td>${b.date ? new Date(b.date).toLocaleString('ar-EG') : '-'}</td>
-                <td>
-                    <button class="action-btn restore" onclick="restoreBackup('${b.name}')"><i class="bi bi-arrow-counterclockwise"></i> استعادة</button>
-                    <button class="action-btn delete" onclick="deleteBackup('${b.name}')"><i class="bi bi-trash"></i> حذف</button>
-                </td>
-            </tr>
-        `).join(''));
+        fetchTable('/api/backups', 'backups-tbody', (data) => data.map((b,i) => `<tr><td>${i+1}</td><td>${b.name || 'غير معروف'}</td><td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td><td>${b.date ? new Date(b.date).toLocaleString('ar-EG') : '-'}</td><td><button class="action-btn restore" onclick="restoreBackup('${b.name}')"><i class="bi bi-arrow-counterclockwise"></i> استعادة</button> <button class="action-btn delete" onclick="deleteBackup('${b.name}')"><i class="bi bi-trash"></i> حذف</button></td></tr>`).join(''));
     }
+    function createBackup() { showLoading(true); fetch('/api/backups', { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم إنشاء نسخة احتياطية', 'success'); refreshBackups(); showLoading(false); }).catch(err => { showToast('❌ فشل إنشاء النسخة', 'error'); showLoading(false); }); }
+    function restoreBackup(name) { if (!confirm(`هل أنت متأكد من استعادة النسخة ${name}؟`)) return; showLoading(true); fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم استعادة النسخة', 'success'); refreshBackups(); showLoading(false); }).catch(err => { showToast('❌ فشل استعادة النسخة', 'error'); showLoading(false); }); }
+    function deleteBackup(name) { if (!confirm(`هل أنت متأكد من حذف النسخة ${name}؟`)) return; fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم حذف النسخة', 'success'); refreshBackups(); }).catch(err => showToast('❌ فشل حذف النسخة', 'error')); }
 
-    function createBackup() {
-        showLoading(true);
-        fetch('/api/backups', { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                showToast(data.message || '✅ تم إنشاء نسخة احتياطية', 'success');
-                refreshBackups();
-                showLoading(false);
-            })
-            .catch(err => { showToast('❌ فشل إنشاء النسخة', 'error'); showLoading(false); });
-    }
-
-    function restoreBackup(name) {
-        if (!confirm(`هل أنت متأكد من استعادة النسخة ${name}؟`)) return;
-        showLoading(true);
-        fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                showToast(data.message || '✅ تم استعادة النسخة', 'success');
-                refreshBackups();
-                showLoading(false);
-            })
-            .catch(err => { showToast('❌ فشل استعادة النسخة', 'error'); showLoading(false); });
-    }
-
-    function deleteBackup(name) {
-        if (!confirm(`هل أنت متأكد من حذف النسخة ${name}؟`)) return;
-        fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' })
-            .then(res => res.json())
-            .then(data => {
-                showToast(data.message || '✅ تم حذف النسخة', 'success');
-                refreshBackups();
-            })
-            .catch(err => showToast('❌ فشل حذف النسخة', 'error'));
-    }
-
-    // ===== الإعدادات =====
     function loadSettings() {
-        fetch('/api/settings')
-            .then(res => res.json())
-            .then(data => {
-                document.getElementById('setting-bot-name').value = data.bot_name || '';
-                document.getElementById('setting-bot-username').value = data.bot_username || '';
-                document.getElementById('setting-publish-interval').value = data.publish_interval || 720;
-                document.getElementById('setting-updates-channel').value = data.updates_channel || '';
-                document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
-                document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
-                document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
-            })
-            .catch(err => console.error('خطأ في تحميل الإعدادات:', err));
+        fetch('/api/settings').then(res => res.json()).then(data => {
+            document.getElementById('setting-bot-name').value = data.bot_name || '';
+            document.getElementById('setting-bot-username').value = data.bot_username || '';
+            document.getElementById('setting-publish-interval').value = data.publish_interval || 720;
+            document.getElementById('setting-updates-channel').value = data.updates_channel || '';
+            document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
+            document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
+            document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
+        }).catch(err => console.error('خطأ في تحميل الإعدادات:', err));
     }
 
     document.getElementById('settings-form').addEventListener('submit', function(e) {
@@ -1356,39 +676,15 @@
             auto_backup: document.getElementById('setting-auto-backup').checked,
             nsfw_enabled: document.getElementById('setting-nsfw').checked
         };
-        fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        })
-        .then(res => res.json())
-        .then(data => {
-            showToast(data.message || '✅ تم حفظ الإعدادات', 'success');
-        })
+        fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+        .then(res => res.json()).then(data => { showToast(data.message || '✅ تم حفظ الإعدادات', 'success'); })
         .catch(err => showToast('❌ فشل حفظ الإعدادات', 'error'));
     });
 
-    // ===== تصدير =====
-    function exportData(type) {
-        let url = '/api/export';
-        if (type) url += '?type=' + type;
-        window.open(url, '_blank');
-    }
+    function exportData(type) { let url = '/api/export'; if (type) url += '?type=' + type; window.open(url, '_blank'); }
+    function logout() { if (confirm('هل أنت متأكد من تسجيل الخروج؟')) { document.cookie = 'session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;'; window.location.href = '/logout'; } }
+    function showLoading(show) { document.getElementById('loading-overlay').classList.toggle('active', show); }
 
-    // ===== تسجيل الخروج =====
-    function logout() {
-        if (confirm('هل أنت متأكد من تسجيل الخروج؟')) {
-            document.cookie = 'session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-            window.location.href = '/logout';
-        }
-    }
-
-    // ===== تحميل =====
-    function showLoading(show) {
-        document.getElementById('loading-overlay').classList.toggle('active', show);
-    }
-
-    // ===== تحديث تلقائي كل 30 ثانية =====
     setInterval(() => {
         const activePage = document.querySelector('.sidebar .nav-link.active');
         if (activePage) {
@@ -1406,14 +702,8 @@
         }
     }, 30000);
 
-    // ===== WebSocket ping =====
-    setInterval(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-        }
-    }, 20000);
+    setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'ping' })); } }, 20000);
 
-    // ===== التهيئة =====
     document.addEventListener('DOMContentLoaded', function() {
         connectWebSocket();
         initCharts();
