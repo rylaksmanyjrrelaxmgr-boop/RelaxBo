@@ -3525,7 +3525,7 @@ def check_web_auth(request):
             encoded = auth_header.split(' ')[1]
             decoded = base64.b64decode(encoded).decode('utf-8')
             username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
+            if username == "admin" and password == "mmmmm739377114":
                 return True
         except:
             pass
@@ -3954,7 +3954,7 @@ async def login_handler(request):
             data = await request.post()
             username = data.get('username', '')
             password = data.get('password', '')
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
+            if username == "admin" and password == "mmmmm739377114":
                 session_id = create_session({'username': username})
                 response = web.Response(status=302, headers={'Location': '/'})
                 response.set_cookie('session_id', session_id, httponly=True, max_age=WEB_SESSION_TIMEOUT)
