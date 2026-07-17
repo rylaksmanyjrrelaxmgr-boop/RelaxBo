@@ -1,3 +1,27 @@
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تسجيل الدخول</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .box { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); text-align: center; }
+        input { padding: 10px; width: 250px; margin: 10px 0; border: 1px solid #ccc; border-radius: 6px; }
+        button { padding: 10px 25px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h3>🔐 ريلاكس مانيجر</h3>
+        <p>أدخل كلمة المرور</p>
+        <input type="password" id="pass" placeholder="كلمة المرور">
+        <br>
+        <button onclick="location.href='/?key=' + document.getElementById('pass').value">دخول</button>
+    </div>
+</body>
+</html>"""
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -3892,31 +3916,33 @@ async def api_system_info_handler(request):
 # ===== Web Routes =====
 async def root_handler(request):
     try:
-        # السماح بالدخول فقط إذا كان ?key= يساوي WEB_PASSWORD
-        if request.rel_url.query.get('key') != WEB_PASSWORD:
-            return web.Response(status=401, text="🔒 غير مصرح. أضف ?key=كلمة_المرور إلى الرابط.")
-        # عرض الصفحة الرئيسية
-        if JINJA2_AVAILABLE and template_env:
+        # إذا كان هناك ?key= صحيح، اسمح بالدخول
+        if request.rel_url.query.get('key') == WEB_PASSWORD:
+            # عرض لوحة التحكم (الكود الأصلي)
+            if JINJA2_AVAILABLE and template_env:
+                try:
+                    template = template_env.get_template('index.html')
+                    html = template.render(
+                        WEB_SECRET_KEY=WEB_SECRET_KEY,
+                        BOT_NAME=BOT_NAME,
+                        BOT_USERNAME=BOT_USERNAME
+                    )
+                    return web.Response(text=html, content_type='text/html')
+                except:
+                    pass
             try:
-                template = template_env.get_template('index.html')
-                html = template.render(
-                    WEB_SECRET_KEY=WEB_SECRET_KEY,
-                    BOT_NAME=BOT_NAME,
-                    BOT_USERNAME=BOT_USERNAME
-                )
-                return web.Response(text=html, content_type='text/html')
+                with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
+                    html = f.read()
+                    html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
+                    html = html.replace("{{ BOT_NAME }}", BOT_NAME)
+                    html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
+                    return web.Response(text=html, content_type='text/html')
             except:
-                pass
-        try:
-            with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
-                html = f.read()
-                html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
-                html = html.replace("{{ BOT_NAME }}", BOT_NAME)
-                html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
-                return web.Response(text=html, content_type='text/html')
-        except:
-            return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
-            <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
+                return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
+                <body><h1>🚀 ريلاكس مانيجر يعمل!</h1></body></html>""", content_type='text/html')
+        else:
+            # عرض صفحة تسجيل الدخول
+            return web.Response(text=LOGIN_HTML, content_type='text/html')
     except Exception as e:
         logger.error(f"خطأ في root_handler: {e}")
         return web.Response(text=f"❌ خطأ داخلي: {str(e)}", status=500)
