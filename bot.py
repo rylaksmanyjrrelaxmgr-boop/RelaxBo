@@ -3541,7 +3541,7 @@ async def auth_middleware(request, handler):
         return web.Response(status=401, text="🔒 مطلوب مصادقة")
     return await handler(request)
 
-web_app.middlewares.append(auth_middleware)  # تم تعطيل المصادقة
+  # تم تعطيل المصادقة
 
 # ===== API Handlers =====
 async def api_stats_handler(request):
@@ -3918,6 +3918,8 @@ async def api_system_info_handler(request):
 
 # ===== Web Routes =====
 async def root_handler(request):
+    if not check_web_auth(request):
+        return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="البوت"'})
     try:
         if check_web_auth(request):
             session_id = request.cookies.get('session_id')
