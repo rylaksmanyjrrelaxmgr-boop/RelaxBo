@@ -10612,7 +10612,7 @@ async def auto_reply_stats_callback(update: Update, context: ContextTypes.DEFAUL
 ━━━━━━━━━━━━━━━━━━━━━━
 
 📌 **ملاحظة:** الردود المدمجة (200 رد) لا يمكن حذفها، ولكن يمكن تعطيلها."""
-    await query.edit_message_text(text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
+    await safe_edit_markdown(query,text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
 
 async def user_auto_reply_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
