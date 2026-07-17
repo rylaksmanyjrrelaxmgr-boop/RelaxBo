@@ -3542,8 +3542,6 @@ def check_rate_limit(ip: str) -> bool:
 
 @web.middleware
 
-
-
 def check_web_auth(request):
     """السماح بالدخول عبر ?key= أو Basic Auth"""
     # 1. الدخول عبر ?key=WEB_PASSWORD
