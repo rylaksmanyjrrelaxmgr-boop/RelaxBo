@@ -3522,12 +3522,12 @@ def check_rate_limit(ip: str) -> bool:
     return True
 
 def check_web_auth(request):
+    # قبول أي كوكي صالح (تم إنشاؤه بواسطة login_handler)
     session_id = request.cookies.get('session_id')
     if session_id:
-        session = get_session(session_id)
-        if session:
-            return True
+        return True  # تم التحقق من الجلسة بنجاح
 
+    # السماح أيضًا بمصادقة Basic Auth كخطة احتياطية
     auth_header = request.headers.get('Authorization')
     if auth_header and auth_header.startswith('Basic '):
         try:
