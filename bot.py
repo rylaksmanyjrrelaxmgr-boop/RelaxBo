@@ -3513,7 +3513,6 @@ def check_rate_limit(ip: str) -> bool:
     return True
 
 def check_web_auth(request):
-    return True  # تم تعطيل المصادقة
     session_id = request.cookies.get('session_id')
     if session_id:
         session = get_session(session_id)
