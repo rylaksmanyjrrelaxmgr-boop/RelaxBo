@@ -3937,6 +3937,8 @@ async def api_system_info_handler(request):
 # ===== Web Routes =====
 async def root_handler(request):
     try:
+            # تمت إضافة try/except للتشخيص
+            pass
         if check_web_auth(request):
             session_id = request.cookies.get('session_id')
             if JINJA2_AVAILABLE and template_env:
@@ -15119,3 +15121,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    except Exception as e:
+        return web.Response(text=f"خطأ داخلي: {str(e)}", status=500)
+
