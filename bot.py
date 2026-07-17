@@ -231,7 +231,7 @@ from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
 from PIL import Image
-import 
+
 
 # ===================== دالة تعديل آمنة =====================
 async def safe_edit_message(query, text, **kwargs):
