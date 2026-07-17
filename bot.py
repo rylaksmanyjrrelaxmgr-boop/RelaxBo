@@ -3543,6 +3543,7 @@ def check_rate_limit(ip: str) -> bool:
 @web.middleware
 
 
+
 def check_web_auth(request):
     """السماح بالدخول عبر ?key= أو Basic Auth"""
     # 1. الدخول عبر ?key=WEB_PASSWORD
@@ -3560,6 +3561,8 @@ def check_web_auth(request):
         except:
             pass
     return False
+
+
 async def auth_middleware(request, handler):
     if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
         return await handler(request)
