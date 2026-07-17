@@ -7918,12 +7918,12 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         try:
             if query:
                 await query.edit_message_text(
-                    f"❌ حدث خطأ غير متوقع (الرمز: `{error_id}`).\nتم تسجيل المشكلة وسيتم حلها قريباً."
+                    f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
                 )
             else:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"❌ حدث خطأ غير متوقع (الرمز: `{error_id}`).\nتم تسجيل المشكلة وسيتم حلها قريباً."
+                    text=f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
                 )
         except Exception as e2:
             logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e2}")
