@@ -3533,9 +3533,8 @@ def check_web_auth(request):
 
 @web.middleware
 async def auth_middleware(request, handler):
-    if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
-        return await handler(request)
-    if request.path.startswith('/static/'):
+    # السماح للـ API والملفات الثابتة
+    if request.path.startswith('/api/') or request.path.startswith('/static/') or request.path in ['/login', '/logout', '/health', '/ws', '/ws_extended']:
         return await handler(request)
     if not check_web_auth(request):
         return web.Response(status=401, text="🔒 مطلوب مصادقة")
