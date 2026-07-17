@@ -7918,12 +7918,12 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         try:
             if query:
                 await query.edit_message_text(
-                    f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
+                    f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
                 )
             else:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
+                    text=f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
                 )
         except Exception as e2:
             logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e2}")
@@ -13381,14 +13381,14 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await safe_send_markdown(
                     context.bot,
                     update.effective_user.id,
-                    f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
+                    f"❌ حدث خطأ:\n`{str(error)[:300]}`\n(الرمز: `{error_id}`)"
                 )
             except Exception as e:
                 logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e}")
                 try:
                     await context.bot.send_message(
                         chat_id=update.effective_user.id,
-                        text=f"❌ خطأ: `خطأ غير معروف` (كود: {error_id})"
+                        text=f"❌ خطأ: `{str(error)[:300]}` (كود: {error_id})"
                     )
                 except:
                     pass
