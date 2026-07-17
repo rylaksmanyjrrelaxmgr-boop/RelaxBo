@@ -3335,7 +3335,7 @@ async def auto_reply_admins_callback(update: Update, context: ContextTypes.DEFAU
     await db_set_auto_reply_only_admins(chat_id, new_status)
     settings = await db_get_auto_reply_settings(chat_id)
     admin_text = "👑 مشرفين فقط" if new_status else "👥 الجميع"
-    await query.edit_message_text(f"✅ تم تغيير وضع الردود إلى: {admin_text}", reply_markup=get_auto_reply_keyboard(chat_id, settings))
+    await safe_edit_markdown(query,f"✅ تم تغيير وضع الردود إلى: {admin_text}", reply_markup=get_auto_reply_keyboard(chat_id, settings))
 
 async def auto_reply_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
