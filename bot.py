@@ -231,7 +231,17 @@ from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
 from PIL import Image
-import numpy as np
+import 
+
+# ===================== دالة تعديل آمنة =====================
+async def safe_edit_message(query, text, **kwargs):
+    """تعديل آمن للرسالة - يتجاهل خطأ عدم التعديل"""
+    try:
+        return await safe_edit_message(query, text, **kwargs)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            raise
+numpy as np
 
 # ===================== نظام اللغات من ملفات منفصلة =====================
 _lang_data = {}
@@ -1890,7 +1900,6 @@ class CustomFormatter(logging.Formatter):
                 pass
         return msg
 
-from 
 # ===================== دالة تعديل آمنة =====================
 async def safe_edit_message(query, text, **kwargs):
     """تعديل آمن للرسالة - يتجاهل خطأ عدم التعديل"""
