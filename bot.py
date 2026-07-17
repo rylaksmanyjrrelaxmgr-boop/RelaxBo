@@ -43,74 +43,6 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import types
-import sys
-import traceback
-import logging
-
-# ===================== نظام تصحيح الأخطاء المتقدم =====================
-class DebugErrorHandler:
-    """نظام متقدم لتصحيح الأخطاء"""
-    
-    def __init__(self):
-        self.errors_log = []
-        self.max_errors = 100
-        
-    def log_error(self, error: Exception, context: dict = None):
-        """تسجيل الخطأ مع كل التفاصيل"""
-        error_id = secrets.token_hex(4)
-        error_info = {
-            'id': error_id,
-            'type': type(error).__name__,
-            'message': str(error),
-            'traceback': traceback.format_exc(),
-            'context': context or {},
-            'timestamp': mecca_now_iso()
-        }
-        
-        # حفظ في الذاكرة
-        self.errors_log.append(error_info)
-        if len(self.errors_log) > self.max_errors:
-            self.errors_log.pop(0)
-        
-        # طباعة في السجل
-        print(f"""
-        ╔══════════════════════════════════════════════════════════╗
-        ║  🔴 خطأ (الرمز: {error_id})                         ║
-        ╠══════════════════════════════════════════════════════════╣
-        ║  📌 النوع: {error_info['type']}                        
-        ║  📝 الرسالة: {error_info['message'][:100]}              
-        ║  🕐 الوقت: {error_info['timestamp']}                    
-        ╠══════════════════════════════════════════════════════════╣
-        ║  📂 المكدس:                                             
-        ║  {error_info['traceback'][:300]}...
-        ╚══════════════════════════════════════════════════════════╝
-        """)
-        
-        # حفظ في ملف
-        try:
-            with open(ERROR_LOG, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*60}\n")
-                f.write(f"خطأ (الرمز: {error_id})\n")
-                f.write(f"النوع: {error_info['type']}\n")
-                f.write(f"الرسالة: {error_info['message']}\n")
-                f.write(f"السياق: {json.dumps(context, default=str)}\n")
-                f.write(f"المكدس:\n{error_info['traceback']}\n")
-                f.write(f"{'='*60}\n")
-        except:
-            pass
-            
-        return error_id
-    
-    def get_last_error(self):
-        """الحصول على آخر خطأ"""
-        return self.errors_log[-1] if self.errors_log else None
-
-debug_handler = DebugErrorHandler()
-
-# استبدال دالة log_error القديمة
-def log_error(error: Exception, context: dict = None) -> str:
-    """تسجيل الأخطاء وإرجاع معرف فريد"""
-    return debug_handler.log_error(error, context)
 
 # ===================== التحقق من إصدار بايثون =====================
 def check_python_version():
@@ -14525,6 +14457,16 @@ async def init_db_improved():
             )
         """)
 
+        # ========== جدول قوانين المجموعة ==========
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id INTEGER PRIMARY KEY,
+                rules_text TEXT,
+                set_by INTEGER,
+                set_at TIMESTAMP
+            )
+        """)
+
         # ========== الفهارس (Indexes) للتحسين ==========
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
@@ -14548,6 +14490,7 @@ async def init_db_improved():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_daily ON users(last_daily_reward)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_rules_chat ON group_rules(chat_id)")
 
         # ========== تحديث الجداول القديمة ==========
 
