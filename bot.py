@@ -3512,19 +3512,9 @@ def check_rate_limit(ip: str) -> bool:
     WEB_RATE_LIMITS[ip].append(now)
     return True
 
-def check_web_auth(request):
-    return True  # تعطيل مؤقت
-@web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
-        return await handler(request)
-    if request.path.startswith('/static/'):
-        return await handler(request)
-    if not check_web_auth(request):
-        return web.Response(status=401, text="🔒 مطلوب مصادقة")
-    return await handler(request)
 
-web_app.middlewares.append(auth_middleware)
+
+# auth_middleware removed
 
 # ===== API Handlers =====
 async def api_stats_handler(request):
@@ -3902,82 +3892,42 @@ async def api_system_info_handler(request):
 # ===== Web Routes =====
 async def root_handler(request):
     try:
-        if check_web_auth(request):
-            session_id = request.cookies.get('session_id')
-            if JINJA2_AVAILABLE and template_env:
-                try:
-                    template = template_env.get_template('index.html')
-                    html = template.render(
-                        WEB_SECRET_KEY=WEB_SECRET_KEY,
-                        BOT_NAME=BOT_NAME,
-                        BOT_USERNAME=BOT_USERNAME
-                    )
-                    return web.Response(text=html, content_type='text/html')
-                except Exception as e:
-                    logger.error(f"خطأ في عرض القالب: {e}")
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Basic '):
             try:
-                with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
-                    html = f.read()
-                    html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
-                    html = html.replace("{{ BOT_NAME }}", BOT_NAME)
-                    html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
-                    return web.Response(text=html, content_type='text/html')
+                encoded = auth_header.split(' ')[1]
+                decoded = base64.b64decode(encoded).decode('utf-8')
+                username, password = decoded.split(':', 1)
+                if username == WEB_USERNAME and password == WEB_PASSWORD:
+                    # المصادقة ناجحة - عرض الصفحة الرئيسية
+                    if JINJA2_AVAILABLE and template_env:
+                        try:
+                            template = template_env.get_template('index.html')
+                            html = template.render(
+                                WEB_SECRET_KEY=WEB_SECRET_KEY,
+                                BOT_NAME=BOT_NAME,
+                                BOT_USERNAME=BOT_USERNAME
+                            )
+                            return web.Response(text=html, content_type='text/html')
+                        except:
+                            pass
+                    try:
+                        with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
+                            html = f.read()
+                            html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
+                            html = html.replace("{{ BOT_NAME }}", BOT_NAME)
+                            html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
+                            return web.Response(text=html, content_type='text/html')
+                    except:
+                        return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
+                        <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
             except:
-                return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
-                <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
-        else:
-            return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="البوت"'})
+                pass
+        # طلب المصادقة من المتصفح
+        return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="RelaxMgr"'})
     except Exception as e:
-        logger.error(f"خطأ في عرض الصفحة الرئيسية: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
-async def login_handler(request):
-    try:
-        if request.method == 'POST':
-            data = await request.post()
-            username = data.get('username', '')
-            password = data.get('password', '')
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                session_id = create_session({'username': username})
-                response = web.Response(status=302, headers={'Location': '/'})
-                response.set_cookie('session_id', session_id, httponly=True, max_age=WEB_SESSION_TIMEOUT)
-                return response
-            return web.Response(text='❌ اسم المستخدم أو كلمة المرور غير صحيحة', status=401)
-        html = """
-        <!DOCTYPE html>
-        <html lang="ar" dir="rtl">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>تسجيل الدخول - ريلاكس مانيجر</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <style>
-                body { background: #f5f6fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-                .login-card { background: white; border-radius: 20px; padding: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
-                .login-card .brand { font-size: 28px; font-weight: bold; color: #2d3436; margin-bottom: 30px; text-align: center; }
-                .login-card .brand i { color: #0984e3; }
-            </style>
-        </head>
-        <body>
-            <div class="login-card">
-                <div class="brand"><i class="bi bi-robot"></i> ريلاكس مانيجر</div>
-                <h5 class="text-center mb-4">🔐 تسجيل الدخول</h5>
-                <form method="POST">
-                    <div class="mb-3"><label class="form-label">اسم المستخدم</label><input type="text" name="username" class="form-control" required autofocus></div>
-                    <div class="mb-3"><label class="form-label">كلمة المرور</label><input type="password" name="password" class="form-control" required></div>
-                    <button type="submit" class="btn btn-primary w-100">دخول</button>
-                </form>
-                <hr><p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.2</p>
-            </div>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-        </body>
-        </html>
-        """
-        return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        logger.error(f"خطأ في صفحة تسجيل الدخول: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
+        logger.error(f"خطأ في root_handler: {e}")
+        return web.Response(text=f"❌ خطأ داخلي: {str(e)}", status=500)
 async def logout_handler(request):
     session_id = request.cookies.get('session_id')
     if session_id:
@@ -4010,8 +3960,8 @@ async def health_check_handler(request):
 
 # ===== تسجيل المسارات =====
 web_app.router.add_get('/', root_handler)
-web_app.router.add_get('/login', login_handler)
-web_app.router.add_post('/login', login_handler)
+
+
 web_app.router.add_get('/logout', logout_handler)
 web_app.router.add_get('/health', health_check_handler)
 
