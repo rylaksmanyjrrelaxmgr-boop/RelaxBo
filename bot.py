@@ -3542,31 +3542,13 @@ def check_rate_limit(ip: str) -> bool:
 
 @web.middleware
 
-def check_web_auth(request):
-    """السماح بالدخول عبر ?key= أو Basic Auth"""
-    # 1. الدخول عبر ?key=WEB_PASSWORD
-    if request.rel_url.query.get('key') == WEB_PASSWORD:
-        return True
-    # 2. Basic Auth كخطة احتياطية
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
-    return False
-
 
 async def auth_middleware(request, handler):
     if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
         return await handler(request)
     if request.path.startswith('/static/'):
         return await handler(request)
-    if not check_web_auth(request):
+    if not True:
         return web.Response(status=401, text="🔒 مطلوب مصادقة")
     return await handler(request)
 
@@ -3946,9 +3928,22 @@ async def api_system_info_handler(request):
         return web.json_response({'error': str(e)}, status=500)
 
 # ===== Web Routes =====
+
+def validate_basic_auth(auth_header):
+    try:
+        encoded = auth_header.split(' ')[1]
+        decoded = base64.b64decode(encoded).decode('utf-8')
+        username, password = decoded.split(':', 1)
+        return username == WEB_USERNAME and password == WEB_PASSWORD
+    except:
+        return False
+
 async def root_handler(request):
     try:
-        if check_web_auth(request):
+        auth = request.headers.get("Authorization")
+        if not auth or not auth.startswith("Basic ") or not validate_basic_auth(auth):
+            return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="RelaxMgr"'})
+        if True:
             session_id = request.cookies.get('session_id')
             if JINJA2_AVAILABLE and template_env:
                 try:
