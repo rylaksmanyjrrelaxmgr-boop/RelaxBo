@@ -230,7 +230,14 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from aiohttp import web, WSMsgType
 import aiohttp
-from PIL import Image
+from 
+async def safe_edit(query, text, **kw):
+    try:
+        return await safe_edit(query, text, **kw)
+    except Exception as e:
+        if "not modified" not in str(e):
+            raise
+PIL import Image
 
 
 # ===================== دالة تعديل آمنة =====================
