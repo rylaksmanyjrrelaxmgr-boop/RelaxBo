@@ -7816,14 +7816,14 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
                 chat_id = int(query.data.split(":")[-1])
             except (ValueError, IndexError) as e:
                 error_id = advanced_logger.log_error("فشل استخراج chat_id من الكولباك", e, {"data": query.data})
-                await safe_edit_markdown(query, f"❌ بيانات الكولباك غير صالحة (الرمز: `{error_id}`)")
+                await query.edit_message_text(f"❌ بيانات الكولباك غير صالحة (الرمز: `{error_id}`)")
                 return
         else:
             chat_id = context.user_data.get('group_chat_id')
 
         if not chat_id:
             if query:
-                await safe_edit_markdown(query, "❌ لم يتم تحديد المجموعة")
+                await query.edit_message_text("❌ لم يتم تحديد المجموعة")
             else:
                 await context.bot.send_message(chat_id=uid, text="❌ لم يتم تحديد المجموعة")
             return
@@ -7833,7 +7833,7 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             error_id = advanced_logger.log_error("فشل التحقق من الصلاحية", e, {"chat_id": chat_id, "user_id": uid})
             if query:
-                await safe_edit_markdown(query, f"❌ فشل التحقق من الصلاحية (الرمز: `{error_id}`)")
+                await query.edit_message_text(f"❌ فشل التحقق من الصلاحية (الرمز: `{error_id}`)")
             else:
                 await context.bot.send_message(chat_id=uid, text=f"❌ فشل التحقق من الصلاحية (الرمز: `{error_id}`)")
             return
@@ -7850,7 +7850,7 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             error_id = advanced_logger.log_error("فشل جلب إعدادات الأمان", e, {"chat_id": chat_id})
             if query:
-                await safe_edit_markdown(query, f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
+                await query.edit_message_text(f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
             else:
                 await context.bot.send_message(chat_id=uid, text=f"❌ فشل جلب إعدادات الأمان (الرمز: `{error_id}`)")
             return
@@ -8781,12 +8781,12 @@ async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         if "Stars" in str(e):
             if query:
-                await safe_edit_markdown(query, "❌ الدفع بالنجوم غير مفعل حالياً، استخدم /trial")
+                await query.edit_message_text("❌ الدفع بالنجوم غير مفعل حالياً، استخدم /trial")
             else:
                 await update.message.reply_text("❌ الدفع بالنجوم غير مفعل حالياً، استخدم /trial")
         else:
             if query:
-                await safe_edit_markdown(query, f"❌ خطأ: خطأ غير معروف")
+                await query.edit_message_text(f"❌ خطأ: خطأ غير معروف")
             else:
                 await update.message.reply_text(f"❌ خطأ: خطأ غير معروف")
 
@@ -9737,7 +9737,7 @@ async def admin_backup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         error_id = log_error(e, {'user_id': uid, 'action': 'admin_backup'})
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         if query:
-            await safe_edit_markdown(query, f"❌ فشل إنشاء النسخة (الرمز: `{error_id}`)", reply_markup=kb)
+            await query.edit_message_text(f"❌ فشل إنشاء النسخة (الرمز: `{error_id}`)", reply_markup=kb)
         else:
             await update.message.reply_text(f"❌ فشل إنشاء النسخة (الرمز: `{error_id}`)", reply_markup=kb)
 
@@ -9795,7 +9795,7 @@ async def admin_restore_backup_select_callback(update: Update, context: ContextT
         error_id = log_error(e, {'user_id': uid, 'backup': backup_name})
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         if query:
-            await safe_edit_markdown(query, f"❌ فشل الاستعادة (الرمز: `{error_id}`)", reply_markup=kb)
+            await query.edit_message_text(f"❌ فشل الاستعادة (الرمز: `{error_id}`)", reply_markup=kb)
         else:
             await update.message.reply_text(f"❌ فشل الاستعادة (الرمز: `{error_id}`)", reply_markup=kb)
 
@@ -10021,7 +10021,7 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
     broadcast_text = context.user_data.get('broadcast_text', '')
     if not broadcast_text:
         if query:
-            await safe_edit_markdown(query, "❌ لا يوجد نص للإرسال")
+            await query.edit_message_text("❌ لا يوجد نص للإرسال")
         else:
             await update.message.reply_text("❌ لا يوجد نص للإرسال")
         return
@@ -10029,13 +10029,13 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
     for pattern in dangerous_patterns:
         if re.search(pattern, broadcast_text, re.IGNORECASE):
             if query:
-                await safe_edit_markdown(query, "❌ النص يحتوي على كود ضار! تم منع الإرسال.")
+                await query.edit_message_text("❌ النص يحتوي على كود ضار! تم منع الإرسال.")
             else:
                 await update.message.reply_text("❌ النص يحتوي على كود ضار! تم منع الإرسال.")
             return
     if len(broadcast_text) > 4000:
         if query:
-            await safe_edit_markdown(query, "❌ النص طويل جداً (الحد الأقصى 4000 حرف)")
+            await query.edit_message_text("❌ النص طويل جداً (الحد الأقصى 4000 حرف)")
         else:
             await update.message.reply_text("❌ النص طويل جداً (الحد الأقصى 4000 حرف)")
         return
@@ -10488,10 +10488,10 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
         row = await cur.fetchone()
         return row[0] if row else 0
     current = await execute_db(_get_ban)
-    new_status = 0 if current == 1 else 1
-    async def _update_ban(conn):
-        await conn.execute("UPDATE bot_groups SET banned=? WHERE chat_id=?", (new_status, group_chat_id))
-        await conn.commit()
+    await safe_edit_markdown(query,
+        f"✅ تم تغيير وضع الردود إلى: {admin_text}",
+        reply_markup=get_auto_reply_keyboard(chat_id, settings)
+    )
     await execute_db(_update_ban)
     status_text = "محظورة" if new_status == 1 else "نشطة"
     if query:
@@ -10528,7 +10528,7 @@ async def auto_reply_admins_callback(update: Update, context: ContextTypes.DEFAU
     await db_set_auto_reply_only_admins(chat_id, new_status)
     settings = await db_get_auto_reply_settings(chat_id)
     admin_text = "👑 مشرفين فقط" if new_status else "👥 الجميع"
-    await query.edit_message_text(
+    await safe_edit_markdown(query,
         f"✅ تم تغيير وضع الردود إلى: {admin_text}",
         reply_markup=get_auto_reply_keyboard(chat_id, settings)
     )
@@ -10859,7 +10859,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
         except:
             try:
                 if update.callback_query:
-                    await safe_edit_markdown(update.callback_query, "❌ حدث خطأ أثناء تحميل المسابقات.")
+                    await update.callback_query.edit_message_text("❌ حدث خطأ أثناء تحميل المسابقات.")
                 else:
                     await context.bot.send_message(chat_id=user_id, text="❌ حدث خطأ أثناء تحميل المسابقات.")
             except:
@@ -10889,7 +10889,7 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
         contest_id = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
         try:
-            await safe_edit_markdown(query, "❌ بيانات غير صالحة.")
+            await query.edit_message_text("❌ بيانات غير صالحة.")
         except:
             pass
         return
@@ -10898,14 +10898,14 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
         contest = await db_get_contest(contest_id)
         if not contest:
             try:
-                await safe_edit_markdown(query, "❌ المسابقة غير موجودة.")
+                await query.edit_message_text("❌ المسابقة غير موجودة.")
             except:
                 pass
             return
 
         if contest['status'] != 'active':
             try:
-                await safe_edit_markdown(query, "❌ هذه المسابقة غير متاحة حالياً.")
+                await query.edit_message_text("❌ هذه المسابقة غير متاحة حالياً.")
             except:
                 pass
             return
@@ -10914,7 +10914,7 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
             end_date = datetime.fromisoformat(contest['end_date'])
             if end_date < utc_now():
                 try:
-                    await safe_edit_markdown(query, "❌ هذه المسابقة قد انتهت.")
+                    await query.edit_message_text("❌ هذه المسابقة قد انتهت.")
                 except:
                     pass
                 return
@@ -10946,7 +10946,7 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         error_id = log_error(e, {'user_id': user_id, 'contest_id': contest_id})
         try:
-            await safe_edit_markdown(query, f"❌ حدث خطأ أثناء المشاركة (الرمز: `{error_id}`).")
+            await query.edit_message_text(f"❌ حدث خطأ أثناء المشاركة (الرمز: `{error_id}`).")
         except:
             pass
 
@@ -10998,7 +10998,7 @@ async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT
         error_id = log_error(e, {'user_id': user_id})
         if query:
             try:
-                await safe_edit_markdown(query, f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
+                await query.edit_message_text(f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
             except:
                 pass
         else:
@@ -11139,7 +11139,7 @@ async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         lang = context.user_data.get('lang_set')
     if not lang:
         if query:
-            await safe_edit_markdown(query, "❌ لم يتم تحديد اللغة")
+            await query.edit_message_text("❌ لم يتم تحديد اللغة")
         else:
             await update.message.reply_text("❌ لم يتم تحديد اللغة")
         return
