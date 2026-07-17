@@ -11,7 +11,7 @@ cryptography==41.0.7
 deep-translator==1.11.0
 bleach==6.1.0
 qrcode==7.4.2
-Pillow==12.3.0
+Pillow==10.4.0
 plotly==6.9.0
 aiofiles==25.1.0
 reportlab==5.0.0
