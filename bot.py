@@ -12180,7 +12180,7 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
             await update.message.reply_text("✅ تم إرسال الكود بنجاح على الخاص!")
             logger.info(f"📁 تم إرسال كود البوت للمستخدم {user_id} على الخاص")
         except Exception as e:
-            await update.message.reply_text(f"❌ فشل إرسال الكود: خطأ غير معروف")
+            await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
             logger.error(f"خطأ في إرسال الكود: {e}")
         context.user_data.pop('sendcode_temp_password', None)
         context.user_data.pop('sendcode_temp_timestamp', None)
