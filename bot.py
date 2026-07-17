@@ -3892,39 +3892,31 @@ async def api_system_info_handler(request):
 # ===== Web Routes =====
 async def root_handler(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if auth_header and auth_header.startswith('Basic '):
+        # السماح بالدخول فقط إذا كان ?key= يساوي WEB_PASSWORD
+        if request.rel_url.query.get('key') != WEB_PASSWORD:
+            return web.Response(status=401, text="🔒 غير مصرح. أضف ?key=كلمة_المرور إلى الرابط.")
+        # عرض الصفحة الرئيسية
+        if JINJA2_AVAILABLE and template_env:
             try:
-                encoded = auth_header.split(' ')[1]
-                decoded = base64.b64decode(encoded).decode('utf-8')
-                username, password = decoded.split(':', 1)
-                if username == WEB_USERNAME and password == WEB_PASSWORD:
-                    # المصادقة ناجحة - عرض الصفحة الرئيسية
-                    if JINJA2_AVAILABLE and template_env:
-                        try:
-                            template = template_env.get_template('index.html')
-                            html = template.render(
-                                WEB_SECRET_KEY=WEB_SECRET_KEY,
-                                BOT_NAME=BOT_NAME,
-                                BOT_USERNAME=BOT_USERNAME
-                            )
-                            return web.Response(text=html, content_type='text/html')
-                        except:
-                            pass
-                    try:
-                        with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
-                            html = f.read()
-                            html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
-                            html = html.replace("{{ BOT_NAME }}", BOT_NAME)
-                            html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
-                            return web.Response(text=html, content_type='text/html')
-                    except:
-                        return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
-                        <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
+                template = template_env.get_template('index.html')
+                html = template.render(
+                    WEB_SECRET_KEY=WEB_SECRET_KEY,
+                    BOT_NAME=BOT_NAME,
+                    BOT_USERNAME=BOT_USERNAME
+                )
+                return web.Response(text=html, content_type='text/html')
             except:
                 pass
-        # طلب المصادقة من المتصفح
-        return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="RelaxMgr"'})
+        try:
+            with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
+                html = f.read()
+                html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
+                html = html.replace("{{ BOT_NAME }}", BOT_NAME)
+                html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
+                return web.Response(text=html, content_type='text/html')
+        except:
+            return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
+            <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
     except Exception as e:
         logger.error(f"خطأ في root_handler: {e}")
         return web.Response(text=f"❌ خطأ داخلي: {str(e)}", status=500)
