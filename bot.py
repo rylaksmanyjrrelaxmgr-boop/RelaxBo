@@ -3513,12 +3513,6 @@ def check_rate_limit(ip: str) -> bool:
     return True
 
 def check_web_auth(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        session = get_session(session_id)
-        if session:
-            return True
-
     auth_header = request.headers.get('Authorization')
     if auth_header and auth_header.startswith('Basic '):
         try:
@@ -3530,7 +3524,6 @@ def check_web_auth(request):
         except:
             pass
     return False
-
 @web.middleware
 async def auth_middleware(request, handler):
     if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
