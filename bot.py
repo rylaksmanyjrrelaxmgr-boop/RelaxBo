@@ -3541,6 +3541,8 @@ async def auth_middleware(request, handler):
         return web.Response(status=401, text="🔒 مطلوب مصادقة")
     return await handler(request)
 
+web_app.middlewares.append(auth_middleware)
+
   # تم تعطيل المصادقة
 
 # ===== API Handlers =====
