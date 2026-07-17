@@ -6767,7 +6767,7 @@ async def execute_ban(bot, chat_id: int, user_id: int, until_date=None, reason: 
         await execute_db(_log)
         return True, f"✅ تم حظر المستخدم `{user_id}` بنجاح"
     except Exception as e:
-        return False, f"❌ فشل الحظر: {str(e)[:100]}"
+        return False, f"❌ فشل الحظر: خطأ غير معروف"
 
 async def execute_mute(bot, chat_id: int, user_id: int, duration_minutes: int = None, reason: str = "", moderator_id: int = None):
     try:
@@ -6793,7 +6793,7 @@ async def execute_mute(bot, chat_id: int, user_id: int, duration_minutes: int = 
         await execute_db(_log)
         return True, f"✅ تم كتم المستخدم `{user_id}`{duration_text}"
     except Exception as e:
-        return False, f"❌ فشل الكتم: {str(e)[:100]}"
+        return False, f"❌ فشل الكتم: خطأ غير معروف"
 
 async def execute_kick(bot, chat_id: int, user_id: int, reason: str = "", moderator_id: int = None):
     try:
@@ -6806,7 +6806,7 @@ async def execute_kick(bot, chat_id: int, user_id: int, reason: str = "", modera
         await execute_db(_log)
         return True, f"✅ تم طرد المستخدم `{user_id}`"
     except Exception as e:
-        return False, f"❌ فشل الطرد: {str(e)[:100]}"
+        return False, f"❌ فشل الطرد: خطأ غير معروف"
 
 async def execute_warn(bot, chat_id: int, user_id: int, moderator_id: int, reason: str = "", auto_ban_limit: int = 3):
     async def _add_warning(conn):
@@ -6844,14 +6844,14 @@ async def execute_restrict(bot, chat_id: int, user_id: int, reason: str = "", mo
         await execute_db(_log)
         return True, f"✅ تم تقييد المستخدم `{user_id}` (لا يمكنه إرسال وسائط)"
     except Exception as e:
-        return False, f"❌ فشل التقييد: {str(e)[:100]}"
+        return False, f"❌ فشل التقييد: خطأ غير معروف"
 
 async def execute_pin(bot, chat_id: int, message_id: int, disable_notification: bool = False):
     try:
         await bot.pin_chat_message(chat_id, message_id, disable_notification=disable_notification)
         return True, "✅ تم تثبيت الرسالة"
     except Exception as e:
-        return False, f"❌ فشل التثبيت: {str(e)[:100]}"
+        return False, f"❌ فشل التثبيت: خطأ غير معروف"
 
 async def execute_unban(bot, chat_id: int, user_id: int, moderator_id: int = None):
     try:
@@ -6863,7 +6863,7 @@ async def execute_unban(bot, chat_id: int, user_id: int, moderator_id: int = Non
         await execute_db(_log)
         return True, f"✅ تم إلغاء حظر المستخدم `{user_id}`"
     except Exception as e:
-        return False, f"❌ فشل إلغاء الحظر: {str(e)[:100]}"
+        return False, f"❌ فشل إلغاء الحظر: خطأ غير معروف"
 
 async def get_moderation_log(chat_id: int, limit: int = 20) -> str:
     async def _get_log(conn):
@@ -7918,12 +7918,12 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         try:
             if query:
                 await query.edit_message_text(
-                    f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
+                    f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
                 )
             else:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
+                    text=f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
                 )
         except Exception as e2:
             logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e2}")
@@ -8786,9 +8786,9 @@ async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAUL
                 await update.message.reply_text("❌ الدفع بالنجوم غير مفعل حالياً، استخدم /trial")
         else:
             if query:
-                await query.edit_message_text(f"❌ خطأ: {str(e)[:100]}")
+                await query.edit_message_text(f"❌ خطأ: خطأ غير معروف")
             else:
-                await update.message.reply_text(f"❌ خطأ: {str(e)[:100]}")
+                await update.message.reply_text(f"❌ خطأ: خطأ غير معروف")
 
 async def buy_subscription_1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -12171,7 +12171,7 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
             await update.message.reply_text("✅ تم إرسال الكود بنجاح على الخاص!")
             logger.info(f"📁 تم إرسال كود البوت للمستخدم {user_id} على الخاص")
         except Exception as e:
-            await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
+            await update.message.reply_text(f"❌ فشل إرسال الكود: خطأ غير معروف")
             logger.error(f"خطأ في إرسال الكود: {e}")
         context.user_data.pop('sendcode_temp_password', None)
         context.user_data.pop('sendcode_temp_timestamp', None)
@@ -12982,7 +12982,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
                 await update.message.reply_text("✅ تم نشر التحديث في قناة التحديثات")
             except Exception as e:
-                await update.message.reply_text(f"❌ فشل النشر: {str(e)[:100]}\nتأكد من أن البوت مشرف في القناة @{channel}")
+                await update.message.reply_text(f"❌ فشل النشر: خطأ غير معروف\nتأكد من أن البوت مشرف في القناة @{channel}")
         else:
             await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات بعد\nاستخدم زر '⚙️ قناة التحديثات' أولاً")
         await admin_panel_callback(update, context)
@@ -13017,7 +13017,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                         )
                         await update.message.reply_text("✅ تم إرسال رسالة اختبار للقناة.")
                     except Exception as e:
-                        await update.message.reply_text(f"⚠️ **تنبيه:** لم أتمكن من إرسال رسالة اختبار للقناة.\nتأكد من أن البوت مشرف ولديه صلاحية الإرسال.\nالخطأ: {str(e)[:100]}")
+                        await update.message.reply_text(f"⚠️ **تنبيه:** لم أتمكن من إرسال رسالة اختبار للقناة.\nتأكد من أن البوت مشرف ولديه صلاحية الإرسال.\nالخطأ: خطأ غير معروف")
                 else:
                     await update.message.reply_text("❌ **فشل حفظ القناة!** حاول مرة أخرى.")
             else:
@@ -13381,14 +13381,14 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await safe_send_markdown(
                     context.bot,
                     update.effective_user.id,
-                    f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
+                    f"❌ حدث خطأ:\n`خطأ غير معروف`\n(الرمز: `{error_id}`)"
                 )
             except Exception as e:
                 logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e}")
                 try:
                     await context.bot.send_message(
                         chat_id=update.effective_user.id,
-                        text=f"❌ خطأ: `{str(e)[:300]}` (كود: {error_id})"
+                        text=f"❌ خطأ: `خطأ غير معروف` (كود: {error_id})"
                     )
                 except:
                     pass
