@@ -3513,17 +3513,7 @@ def check_rate_limit(ip: str) -> bool:
     return True
 
 def check_web_auth(request):
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
-    return False
+    return True  # تعطيل مؤقت
 @web.middleware
 async def auth_middleware(request, handler):
     if request.path in ['/', '/login', '/logout', '/health', '/static/', '/ws', '/ws_extended', '/api/export']:
