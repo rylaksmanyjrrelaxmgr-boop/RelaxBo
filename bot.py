@@ -3513,6 +3513,7 @@ def check_rate_limit(ip: str) -> bool:
     return True
 
 def check_web_auth(request):
+    return True  # تم تعطيل المصادقة
     session_id = request.cookies.get('session_id')
     if session_id:
         session = get_session(session_id)
@@ -3541,7 +3542,7 @@ async def auth_middleware(request, handler):
         return web.Response(status=401, text="🔒 مطلوب مصادقة")
     return await handler(request)
 
-web_app.middlewares.append(auth_middleware)
+#web_app.middlewares.append(auth_middleware)  # تم تعطيل المصادقة
 
 # ===== API Handlers =====
 async def api_stats_handler(request):
