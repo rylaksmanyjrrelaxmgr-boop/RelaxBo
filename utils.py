@@ -699,3 +699,36 @@ async def set_user_translation_language(user_id: int, lang: str):
     await execute_db(_set)
     user_translation_settings_cache[user_id] = lang
 
+
+# ========== نظام الملفات الاحتياطية ==========
+import json
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+def load_json_secure(filepath, default_data):
+    """تحميل JSON بأمان: لو الملف مو موجود يستخدم البيانات الافتراضية"""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            logger.warning(f"⚠️ الملف {filepath} غير موجود، استخدام البيانات الافتراضية")
+            return default_data
+    except Exception as e:
+        logger.error(f"خطأ في قراءة {filepath}: {e}")
+        return default_data
+
+def load_text_secure(filepath, default_text=""):
+    """قراءة ملف نصي بأمان: لو مو موجود يرجع النص الافتراضي"""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        else:
+            logger.warning(f"⚠️ الملف {filepath} غير موجود، استخدام النص الافتراضي")
+            return default_text
+    except Exception as e:
+        logger.error(f"خطأ في قراءة {filepath}: {e}")
+        return default_text
