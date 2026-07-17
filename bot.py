@@ -13388,7 +13388,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 try:
                     await context.bot.send_message(
                         chat_id=update.effective_user.id,
-                        text=f"❌ حدث خطأ (الرمز: {error_id}). سيتم حله قريباً."
+                        text=f"❌ خطأ: `{str(e)[:300]}` (كود: {error_id})"
                     )
                 except:
                     pass

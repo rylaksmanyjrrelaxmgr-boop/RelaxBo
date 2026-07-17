@@ -6191,11 +6191,11 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         if update and update.effective_user and context and context.bot:
             try:
-                await safe_send_markdown(context.bot, update.effective_user.id, f"❌ **حدث خطأ غير متوقع** (الرمز: `{error_id}`)\n\nتم تسجيل المشكلة وسيتم حلها قريباً. جرب مرة أخرى لاحقاً.")
+                await safe_send_markdown(context.bot, update.effective_user.id, f"❌ خطأ: `{str(e)[:300]}` (كود: {error_id})")
             except Exception as e:
                 logger.error(f"Failed to send error message to user: {e}")
                 try:
-                    await context.bot.send_message(chat_id=update.effective_user.id, text=f"❌ حدث خطأ (الرمز: {error_id}). سيتم حله قريباً.")
+                    await context.bot.send_message(chat_id=update.effective_user.id, text=f"❌ خطأ: `{str(e)[:300]}` (كود: {error_id})")
                 except:
                     pass
         if PRIMARY_OWNER_ID and context and context.bot:
