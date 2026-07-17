@@ -10835,7 +10835,10 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
         except:
             try:
                 if update.callback_query:
+                    try:
                     await update.callback_query.edit_message_text("❌ حدث خطأ أثناء تحميل المسابقات.")
+                except:
+                    pass
                 else:
                     await context.bot.send_message(chat_id=user_id, text="❌ حدث خطأ أثناء تحميل المسابقات.")
             except:
