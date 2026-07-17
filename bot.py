@@ -13381,7 +13381,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await safe_send_markdown(
                     context.bot,
                     update.effective_user.id,
-                    f"❌ **حدث خطأ غير متوقع** (الرمز: `{error_id}`)\n\nتم تسجيل المشكلة وسيتم حلها قريباً. جرب مرة أخرى لاحقاً."
+                    f"❌ حدث خطأ:\n`{str(e)[:300]}`\n(الرمز: `{error_id}`)"
                 )
             except Exception as e:
                 logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e}")
