@@ -3521,17 +3521,22 @@ def check_rate_limit(ip: str) -> bool:
     WEB_RATE_LIMITS[ip].append(now)
     return True
 
-def check_web_auth(request):
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Basic "):
-        try:
-            encoded = auth_header.split(" ")[1]
-            decoded = base64.b64decode(encoded).decode("utf-8")
-            username, password = decoded.split(":", 1)
-            if username == WEB_USERNAME and password == WEB_PASSWORD:
-                return True
-        except:
-            pass
+
+        # السماح بالدخول عبر ?key=كلمة_المرور
+        if request.rel_url.query.get('key') == WEB_PASSWORD:
+            return True
+        # يمكن أيضًا استخدام Basic Auth كاحتياط
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Basic '):
+            try:
+                encoded = auth_header.split(' ')[1]
+                decoded = base64.b64decode(encoded).decode('utf-8')
+                username, password = decoded.split(':', 1)
+                if username == WEB_USERNAME and password == WEB_PASSWORD:
+                    return True
+            except:
+                pass
+        return False
     return False
     return False  # مؤقتاً  # تعطيل مؤقت
 
