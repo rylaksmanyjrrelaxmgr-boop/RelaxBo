@@ -7641,7 +7641,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     kb, title, active_channel = await get_main_keyboard(uid)
     if active_channel:
         context.user_data['active_channel'] = active_channel
-                await db_set_active_channel(uid, active_channel)
+        await db_set_active_channel(uid, active_channel)
     if query:
         await safe_edit_markdown(query, title, reply_markup=kb)
     else:
@@ -9810,7 +9810,7 @@ async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     kb, title, active_channel = await get_main_keyboard(uid)
     if active_channel:
         context.user_data['active_channel'] = active_channel
-                await db_set_active_channel(uid, active_channel)
+        await db_set_active_channel(uid, active_channel)
     if query:
         await safe_edit_markdown(query, f"✅ تم تغيير اللغة إلى {lang_name}\n\n{title}", reply_markup=kb)
     else:
