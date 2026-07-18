@@ -1661,7 +1661,7 @@ class NotificationSystem:
 
     async def send_notification(self, bot, user_id: int, text: str, parse_mode: str = "MarkdownV2", reply_markup=None):
         try:
-            await safe_send_markdown(bot, user_id, text, reply_markup)
+        await safe_send_markdown(bot, user_id, text, reply_markup)
             advanced_logger.log_access(user_id, "NOTIFICATION_SENT", {"text": text[:50]})
             return True
         except Exception as e:
@@ -1675,7 +1675,7 @@ class NotificationSystem:
         async def send_one(user_id):
             async with semaphore:
                 try:
-                    await safe_send_markdown(bot, user_id, text)
+        await safe_send_markdown(bot, user_id, text)
                     return (user_id, True)
                 except:
                     await asyncio.sleep(delay)
@@ -1839,10 +1839,10 @@ async def safe_send_long_message(bot, chat_id: int, text: str, reply_markup=None
     first = True
     for part in parts:
         if first and reply_markup:
-            await safe_send_markdown(bot, chat_id, part, reply_markup)
+        await safe_send_markdown(bot, chat_id, part, reply_markup)
             first = False
         else:
-            await safe_send_markdown(bot, chat_id, part)
+        await safe_send_markdown(bot, chat_id, part)
         await asyncio.sleep(0.5)
     return None
 
@@ -3877,7 +3877,7 @@ async def add_points(user_id: int, update: Update = None, context: ContextTypes.
                 msg = f"🎉 **تهانينا!**\nلقد وصلت إلى المستوى {new_levels[0]}! 🎉"
             else:
                 msg = f"🎉 **تهانينا!**\nلقد تقدمت {len(new_levels)} مستويات إلى المستوى {new_levels[-1]}! 🎉"
-            await safe_send_markdown(context.bot, user_id, msg)
+        await safe_send_markdown(context.bot, user_id, msg)
         except:
             pass
     await db_update_user_level(user_id, points, level)
@@ -5403,7 +5403,7 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("❌ أمر غير معروف")
         return
     
-    await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
 
 # ===================== دوال المشرفين المخفيين (أوامر) =====================
 
@@ -6933,7 +6933,7 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         if banned == 1:
             continue
         try:
-            await safe_send_markdown(context.bot, uid, text)
+        await safe_send_markdown(context.bot, uid, text)
             sent += 1
             await asyncio.sleep(0.1)
         except:
@@ -7984,7 +7984,7 @@ async def my_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if query:
             await safe_edit_markdown(query, msg, reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, msg, reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, msg, reply_markup=kb)
         return
     keyboard = []
     for chat_id, chat_name, username, banned in groups:
@@ -8151,7 +8151,7 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         if query:
             await safe_edit_markdown(query, text, reply_markup=security_keyboard(chat_id))
         else:
-            await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
+        await safe_send_markdown(context.bot, uid, text, reply_markup=security_keyboard(chat_id))
     except Exception as e:
         error_id = advanced_logger.log_error("خطأ غير متوقع في group_settings_callback", e, {"chat_id": chat_id, "user_id": uid})
         try:
@@ -8407,7 +8407,7 @@ async def save_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if query:
             await safe_edit_markdown(query, get_text(uid, 'days_saved'), reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, get_text(uid, 'days_saved'), reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, get_text(uid, 'days_saved'), reply_markup=kb)
     else:
         if query:
             await query.edit_message_text(get_text(uid, 'error'))
@@ -8712,7 +8712,7 @@ async def security_refresh_groups_callback(update: Update, context: ContextTypes
         if query:
             await safe_edit_markdown(query, text, reply_markup=keyboard)
         else:
-            await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
         return
     keyboard = []
     for group in groups:
@@ -9184,7 +9184,7 @@ async def referral_claim_reward_callback(update: Update, context: ContextTypes.D
         if query:
             await safe_edit_markdown(query, get_text(uid, 'no_reward_available'), reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, get_text(uid, 'no_reward_available'), reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, get_text(uid, 'no_reward_available'), reply_markup=kb)
         return
     claimed = await db_claim_referral_reward(uid)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.REFERRAL_MENU)]])
@@ -9207,7 +9207,7 @@ async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_T
         if query:
             await safe_edit_markdown(query, get_text(uid, 'no_referrals'), reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, get_text(uid, 'no_referrals'), reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, get_text(uid, 'no_referrals'), reply_markup=kb)
         return
     text = f"📊 **{get_text(uid, 'referral_list')}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
     for referred_id, referred_at, is_rewarded, first_name, username in referrals:
@@ -9458,7 +9458,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
                 except:
                     await update.callback_query.edit_message_text(text)
             else:
-                await safe_send_markdown(context.bot, user_id, text)
+        await safe_send_markdown(context.bot, user_id, text)
             return
         text = get_text(user_id, 'contests_active').format("")
         keyboard = []
@@ -9509,7 +9509,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
             except:
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         error_id = log_error(e, {
             'user_id': update.effective_user.id if update and update.effective_user else None,
@@ -9520,7 +9520,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
             if update.callback_query:
                 await safe_edit_markdown(update.callback_query, msg)
             else:
-                await safe_send_markdown(context.bot, user_id, msg)
+        await safe_send_markdown(context.bot, user_id, msg)
         except:
             try:
                 if update.callback_query:
@@ -9622,7 +9622,7 @@ async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT
                 except:
                     pass
             else:
-                await safe_send_markdown(context.bot, user_id, get_text(user_id, 'no_winners'))
+        await safe_send_markdown(context.bot, user_id, get_text(user_id, 'no_winners'))
             return
         text = get_text(user_id, 'contest_winners_title')
         for contest_id, title, prize, winner_id, announced_at in winners:
@@ -9648,7 +9648,7 @@ async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT
             except:
                 await query.edit_message_text(text, reply_markup=keyboard)
         else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
     except Exception as e:
         error_id = log_error(e, {'user_id': user_id})
         if query:
@@ -9657,7 +9657,7 @@ async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT
             except:
                 pass
         else:
-            await safe_send_markdown(context.bot, user_id, f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
+        await safe_send_markdown(context.bot, user_id, f"❌ حدث خطأ أثناء عرض الفائزين (الرمز: `{error_id}`).")
 
 async def contests_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await contests_command_handler(update, context)
@@ -9835,7 +9835,7 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         if query:
             await safe_edit_markdown(query, text, reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
     elif data == "top":
         top_users = await get_top_users(10)
         if not top_users:
@@ -9857,7 +9857,7 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         if query:
             await safe_edit_markdown(query, text, reply_markup=kb)
         else:
-            await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
     elif data == "schedule_post":
         context.user_data['state'] = UserState.WAITING_SCHEDULE_POST
         msg = "📝 **جدولة منشور جديد**\n\nأرسل المنشور بالصيغة التالية:\n`YYYY-MM-DD HH:MM نص المنشور`\n\nمثال: `2024-12-31 20:00 مرحباً بالجميع!`\n\n🕐 الوقت بتوقيت مكة المكرمة"
@@ -10314,7 +10314,7 @@ async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
         if query:
             await safe_edit_markdown(query, text, reply_markup=keyboard)
         else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
         return
     text = f"📊 **إحصائيات {channel_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"📝 إجمالي المنشورات: {stats['total_posts']}\n"
@@ -10390,7 +10390,7 @@ async def channel_growth_callback(update: Update, context: ContextTypes.DEFAULT_
         if query:
             await safe_edit_markdown(query, text, reply_markup=keyboard)
         else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
         return
     text = f"📈 **نمو {channel_name} (آخر 30 يوم)**\n━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"📝 إجمالي المنشورات في الفترة: {growth['total_posts']}\n"
@@ -10432,7 +10432,7 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
         if query:
             await safe_edit_markdown(query, text, reply_markup=keyboard)
         else:
-            await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
         return
     text = f"📊 **ملخص قنواتي**\n━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"📡 عدد القنوات: {summary['total_channels']}\n"
@@ -10515,7 +10515,7 @@ async def ensure_force_subscribe(update: Update, context: ContextTypes.DEFAULT_T
                 return False
             await safe_edit_markdown(update.callback_query, msg, reply_markup=keyboard)
         elif update.message:
-            await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
     except Exception:
         pass
     return False
@@ -10635,7 +10635,7 @@ async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(get_text(user_id, 'back'), callback_data=CallbackData.BACK)]
     ])
-    await safe_send_markdown(context.bot, user_id, get_text(user_id, 'help'), reply_markup=keyboard)
+        await safe_send_markdown(context.bot, user_id, get_text(user_id, 'help'), reply_markup=keyboard)
 
 async def support_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -10731,7 +10731,7 @@ async def stats_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("📈 نمو القناة", callback_data=f"{CallbackData.CHANNEL_GROWTH}:{active}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
     ])
-    await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
+        await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 async def lock_chat_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat is None or update.effective_user is None:
@@ -10929,7 +10929,7 @@ async def rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     message = f"📜 **قوانين المجموعة**\n━━━━━━━━━━━━━━━━━━━━━━\n\n{rules_text}\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📌 تم التعيين بواسطة: `{set_by}`\n"
     message += f"🕐 التاريخ: {set_at_str}"
-    await safe_send_markdown(context.bot, chat_id, message)
+        await safe_send_markdown(context.bot, chat_id, message)
 
 # ===================== معالجات الرسائل =====================
 
@@ -11091,7 +11091,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(get_text(uid, 'channel_exists'))
         kb, title, active = await get_main_keyboard(uid)
         context.user_data['active_channel'] = active
-                await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
+        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
         return
     if state == UserState.WAITING_INTERVAL_MINUTES:
         context.user_data.pop('state', None)
@@ -11468,7 +11468,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 target_id = int(parts[0])
                 success, msg = await execute_ban(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11480,7 +11480,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 target_id = int(parts[0])
                 minutes = context.user_data.get('mute_minutes', 60)
                 success, msg = await execute_mute(context.bot, chat_id, target_id, minutes, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11491,7 +11491,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 target_id = int(parts[0])
                 success, msg = await execute_warn(context.bot, chat_id, target_id, uid, reason=reason)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11502,7 +11502,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 target_id = int(parts[0])
                 success, msg = await execute_kick(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11513,7 +11513,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 target_id = int(parts[0])
                 success, msg = await execute_restrict(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11522,7 +11522,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 target_id = int(text)
                 success, msg = await execute_unban(context.bot, chat_id, target_id, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             except ValueError:
                 await update.message.reply_text("❌ معرف مستخدم غير صالح")
             context.user_data.pop('state', None)
@@ -11530,7 +11530,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         if state == UserState.WAITING_PIN_MESSAGE:
             if update.message.reply_to_message:
                 success, msg = await execute_pin(context.bot, chat_id, update.message.reply_to_message.message_id)
-                await safe_send_markdown(context.bot, chat_id, msg)
+        await safe_send_markdown(context.bot, chat_id, msg)
             else:
                 await update.message.reply_text("❌ يرجى الرد على الرسالة التي تريد تثبيتها")
             context.user_data.pop('state', None)
@@ -11587,7 +11587,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         if update and update.effective_user and context and context.bot:
             try:
-                await safe_send_markdown(
+        await safe_send_markdown(
                     context.bot,
                     update.effective_user.id,
                     f"❌ حدث خطأ:\n`{str(error)[:300]}`\n(الرمز: `{error_id}`)"
@@ -11631,7 +11631,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if await is_chat_locked(chat_id):
         try:
             await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🔒 المجموعة مقفلة من قبل المشرف", 5)
+        await safe_send_markdown(context.bot, chat_id, f"🔒 المجموعة مقفلة من قبل المشرف", 5)
         except:
             pass
         return
@@ -11642,7 +11642,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if not await db_check_slow_mode(chat_id, user_id):
         try:
             await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"⏱️ **وضع بطيء مفعل**\n@{user.username or str(user_id)} يرجى الانتظار قبل إرسال رسالة جديدة", 3)
+        await safe_send_markdown(context.bot, chat_id, f"⏱️ **وضع بطيء مفعل**\n@{user.username or str(user_id)} يرجى الانتظار قبل إرسال رسالة جديدة", 3)
         except:
             pass
         return
@@ -11652,7 +11652,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         if settings.get('delete_stickers', False):
             try:
                 await update.message.delete()
-                await safe_send_markdown(context.bot, chat_id, f"🎴 **تم حذف الملصق**\n@{user.username or str(user_id)} الملصقات غير مسموح بها في هذه المجموعة.")
+        await safe_send_markdown(context.bot, chat_id, f"🎴 **تم حذف الملصق**\n@{user.username or str(user_id)} الملصقات غير مسموح بها في هذه المجموعة.")
                 await apply_penalty(context.bot, chat_id, user_id, settings)
             except Exception as e:
                 logger.error(f"فشل حذف الملصق: {e}")
@@ -11663,7 +11663,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         if settings.get('delete_videos', False):
             try:
                 await update.message.delete()
-                await safe_send_markdown(context.bot, chat_id, f"🎬 **تم حذف الفيديو**\n@{user.username or str(user_id)} الفيديوهات غير مسموح بها في هذه المجموعة.")
+        await safe_send_markdown(context.bot, chat_id, f"🎬 **تم حذف الفيديو**\n@{user.username or str(user_id)} الفيديوهات غير مسموح بها في هذه المجموعة.")
                 await apply_penalty(context.bot, chat_id, user_id, settings)
             except Exception as e:
                 logger.error(f"فشل حذف الفيديو: {e}")
@@ -11684,7 +11684,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
                 elif result.get("nsfw", False):
                     await update.message.delete()
                     warning = f"🚫 **تم حذف الصورة**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
-                    await safe_send_markdown(context.bot, chat_id, warning)
+        await safe_send_markdown(context.bot, chat_id, warning)
                     security_settings = await db_get_security_settings(chat_id)
                     await apply_penalty(context.bot, chat_id, user_id, security_settings)
                     return
@@ -11703,7 +11703,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
                 elif result.get("nsfw", False):
                     await update.message.delete()
                     warning = f"🚫 **تم حذف الفيديو**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\nتم تحليل {result.get('frames_analyzed', 0)} إطار.\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
-                    await safe_send_markdown(context.bot, chat_id, warning)
+        await safe_send_markdown(context.bot, chat_id, warning)
                     security_settings = await db_get_security_settings(chat_id)
                     await apply_penalty(context.bot, chat_id, user_id, security_settings)
                     return
@@ -11728,7 +11728,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         if banned_word:
             try:
                 await update.message.delete()
-                await safe_send_markdown(context.bot, chat_id, f"🚫 **كلمة محظورة**\n@{user.username or str(user_id)} الكلمة `{banned_word}` غير مسموح بها")
+        await safe_send_markdown(context.bot, chat_id, f"🚫 **كلمة محظورة**\n@{user.username or str(user_id)} الكلمة `{banned_word}` غير مسموح بها")
             except:
                 pass
             await apply_penalty(context.bot, chat_id, user_id, security_settings)
@@ -11736,7 +11736,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if security_settings.get('links') and contains_link(text):
         try:
             await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🔗 **الروابط غير مسموح بها**\n@{user.username or str(user_id)}")
+        await safe_send_markdown(context.bot, chat_id, f"🔗 **الروابط غير مسموح بها**\n@{user.username or str(user_id)}")
         except:
             pass
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
@@ -11744,7 +11744,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
     if security_settings.get('mentions') and contains_mention(text):
         try:
             await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"@ **المعرفات غير مسموح بها**\n@{user.username or str(user_id)}")
+        await safe_send_markdown(context.bot, chat_id, f"@ **المعرفات غير مسموح بها**\n@{user.username or str(user_id)}")
         except:
             pass
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
@@ -13669,7 +13669,7 @@ async def send_reminders_loop_improved(bot):
                 text = get_text(user_id, 'subscription_warning').format(days_left)
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💎 تجديد الاشتراك", callback_data=CallbackData.SUBSCRIBE_MENU), InlineKeyboardButton("🔕 إيقاف التذكير", callback_data=CallbackData.REMINDER_TOGGLE_SUB)]])
                 try:
-                    await safe_send_markdown(bot, user_id, text, reply_markup=keyboard)
+        await safe_send_markdown(bot, user_id, text, reply_markup=keyboard)
                     await db_update_last_reminder_sent(user_id, "subscription_expiry")
                 except:
                     pass
@@ -13702,7 +13702,7 @@ async def daily_reminder_task(bot):
                     groups = await db_get_user_groups_count(user_id)
                     text = get_text(user_id, 'daily_stats').format(channels, total_posts, unpublished, groups)
                     try:
-                        await safe_send_markdown(bot, user_id, text)
+        await safe_send_markdown(bot, user_id, text)
                     except:
                         pass
                     user_language[user_id] = original_lang
@@ -13735,7 +13735,7 @@ async def weekly_reminder_task(bot):
                     referral_stats = await db_get_referral_stats(user_id)
                     text = get_text(user_id, 'weekly_report').format(channels, total_posts, unpublished, groups, referral_stats['total_referrals'])
                     try:
-                        await safe_send_markdown(bot, user_id, text)
+        await safe_send_markdown(bot, user_id, text)
                     except:
                         pass
                     user_language[user_id] = original_lang
