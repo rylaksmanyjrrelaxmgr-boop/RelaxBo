@@ -4085,8 +4085,11 @@ async def db_set_allowed_sendcode_user(user_id: int) -> None:
     return await execute_db(_set)
 
 print("✅ تم تحميل الكود الأساسي بنجاح مع التصحيحات.")
-# ===================== الدوال المفقودة - النسخة الكاملة =====================
-# أضف هذا الكود في نهاية ملف البوت قبل السطر if __name__ == "__main__":
+# ============================================================================
+# الدوال المفقودة - ملف كامل جاهز للنسخ
+# ============================================================================
+# أضف هذا الملف كاملاً في نهاية ملف البوت قبل السطر if __name__ == "__main__":
+# ============================================================================
 
 # ===================== دوال قاعدة البيانات للمسابقات =====================
 
@@ -5561,24 +5564,71 @@ async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAU
     
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
-# ===================== دوال أوامر إضافية =====================
+# ===================== دوال أوامر sendcode (مع الإصلاحات) =====================
 
-async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إرسال كود البوت للمستخدم المصرح له"""
+async def set_sendcode_user_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعيين مستخدم لصلاحية /sendcode - أمر يدوي"""
     user_id = update.effective_user.id
     
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
     
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📝 **تعيين مستخدم لصلاحية /sendcode**\n\n"
+            "الاستخدام: `/set_sendcode_user معرف_المستخدم`\n"
+            "مثال: `/set_sendcode_user 123456789`\n\n"
+            "📌 بعد التعيين، يمكن للمستخدم استخدام /sendcode"
+        )
+        return
+    
+    try:
+        target_user_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
+        return
+    
+    # التحقق من وجود المستخدم
+    try:
+        user = await context.bot.get_chat(target_user_id)
+    except:
+        await update.message.reply_text(f"❌ لا يمكن العثور على المستخدم `{target_user_id}`")
+        return
+    
+    # حفظ المستخدم المصرح له
+    await db_set_allowed_sendcode_user(target_user_id)
+    
+    await security_audit.log("SENDCODE_USER_SET", user_id, {"target": target_user_id}, "CRITICAL")
+    
+    await update.message.reply_text(
+        f"✅ **تم تعيين المستخدم المصرح له بنجاح!**\n\n"
+        f"👤 المستخدم: `{target_user_id}`\n"
+        f"📌 يمكنه الآن استخدام `/sendcode` للحصول على كود البوت."
+    )
+
+
+async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إرسال كود البوت للمستخدم المصرح له - إصلاح الأخطاء"""
+    user_id = update.effective_user.id
+    
+    # التحقق من أن المستخدم مشرف
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        await update.message.reply_text(get_text(user_id, 'admin_only'))
+        return
+    
+    # التحقق من وجود مستخدم مصرح له
     allowed_user = await db_get_allowed_sendcode_user()
     if not allowed_user:
         await update.message.reply_text(
             "❌ **لم يتم تحديد مستخدم مصرح له**\n\n"
-            "استخدم الأمر /set_sendcode_user من لوحة الأدمن أولاً."
+            "استخدم الأمر `/set_sendcode_user معرف_المستخدم` أولاً.\n"
+            "مثال: `/set_sendcode_user 123456789`"
         )
         return
     
+    # التحقق من المصادقة الثنائية
     if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
         context.user_data['waiting_2fa'] = True
         await update.message.reply_text(
@@ -5588,17 +5638,35 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
         return
     
     try:
+        # إنشاء كود عشوائي
         code = secrets.token_urlsafe(32)
+        
+        # إرسال الكود للمستخدم المصرح له (مع تنسيق Markdown آمن)
         await context.bot.send_message(
             chat_id=allowed_user,
-            text=f"🔑 **كود البوت**\n━━━━━━━━━━━━━━━━━━━━━━\n`{code}`\n━━━━━━━━━━━━━━━━━━━━━━\n📌 صالح لمدة 10 دقائق فقط"
+            text=f"🔑 **كود البوت**\n━━━━━━━━━━━━━━━━━━━━━━\n`{code}`\n━━━━━━━━━━━━━━━━━━━━━━\n📌 صالح لمدة 10 دقائق فقط",
+            parse_mode="MarkdownV2"
         )
-        await update.message.reply_text(f"✅ تم إرسال الكود إلى المستخدم `{allowed_user}`")
+        
+        await update.message.reply_text(
+            f"✅ **تم إرسال الكود بنجاح!**\n\n"
+            f"👤 المستلم: `{allowed_user}`\n"
+            f"📌 الكود صالح لمدة 10 دقائق."
+        )
+        
+        # تسجيل الحدث
+        await security_audit.log("SENDCODE_SENT", user_id, {"target": allowed_user}, "CRITICAL")
+        
     except Exception as e:
-        await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
+        await update.message.reply_text(
+            f"❌ **فشل إرسال الكود**\n\n"
+            f"الخطأ: `{str(e)[:100]}`\n\n"
+            f"تأكد من أن البوت لديه صلاحية الإرسال للمستخدم."
+        )
+
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج تأكيد كود البوت"""
+    """معالج تأكيد كود 2FA"""
     user_id = update.effective_user.id
     code = update.message.text.strip()
     
@@ -5610,16 +5678,37 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
                 context.user_data['2fa_time'] = time_module.time()
                 context.user_data.pop('waiting_2fa', None)
                 await update.message.reply_text("✅ تم التحقق من المصادقة الثنائية!")
+                # إعادة محاولة إرسال الكود
                 await sendcode_command_handler(update, context)
                 return
             else:
-                await update.message.reply_text("❌ رمز غير صحيح!")
+                await update.message.reply_text("❌ رمز غير صحيح! حاول مرة أخرى.")
                 context.user_data.pop('waiting_2fa', None)
                 return
-        except:
-            await update.message.reply_text("❌ خطأ في التحقق")
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ في التحقق: `{str(e)[:50]}`")
             context.user_data.pop('waiting_2fa', None)
             return
+
+
+# ===================== دوال قاعدة البيانات لـ sendcode =====================
+
+async def db_get_allowed_sendcode_user() -> int | None:
+    """جلب المستخدم المصرح له باستخدام /sendcode"""
+    async def _get(conn):
+        cur = await conn.execute("SELECT user_id FROM allowed_sendcode_user WHERE id=1")
+        row = await cur.fetchone()
+        return row[0] if row else None
+    return await execute_db(_get)
+
+
+async def db_set_allowed_sendcode_user(user_id: int) -> None:
+    """تعيين المستخدم المصرح له باستخدام /sendcode"""
+    async def _set(conn):
+        await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
+        await conn.commit()
+    return await execute_db(_set)
+
 
 # ===================== دوال إحصائيات القناة =====================
 
@@ -5862,94 +5951,7 @@ def contains_mention(text: str) -> bool:
         return False
     return bool(re.search(r'@\w+', text))
 
-# ===================== دوال إدارة التذاكر (إضافية) =====================
-
-async def admin_support_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض تذاكر الدعم"""
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    
-    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
-        if query:
-            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
-        return
-    
-    tickets = await db_get_all_tickets(20)
-    
-    if not tickets:
-        msg = "📭 **لا توجد تذاكر دعم**"
-    else:
-        msg = "📋 **تذاكر الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for ticket in tickets:
-            ticket_id, user_id, username, message, ticket_num, status, created_at = ticket
-            status_text = "🟡 قيد الانتظار" if status == 'pending' else "🟢 تم الرد"
-            try:
-                created_dt = datetime.fromisoformat(created_at)
-                created_mecca = utc_to_mecca(created_dt)
-                created_str = created_mecca.strftime("%Y-%m-%d %H:%M")
-            except:
-                created_str = created_at[:16] if created_at else "?"
-            
-            msg += f"📌 #{ticket_num} - {status_text}\n"
-            msg += f"👤 المستخدم: `{user_id}` ({username[:20]})\n"
-            msg += f"📝 {message[:50]}{'...' if len(message) > 50 else ''}\n"
-            msg += f"🕐 {created_str}\n"
-            msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ حذف جميع التذاكر", callback_data=CallbackData.ADMIN_DELETE_ALL_TICKETS)],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
-    ])
-    
-    if query:
-        await safe_edit_markdown(query, msg, reply_markup=keyboard)
-    else:
-        await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
-
-async def admin_delete_all_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تأكيد حذف جميع التذاكر"""
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    
-    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
-        if query:
-            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
-        return
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ نعم، حذف الكل", callback_data=CallbackData.ADMIN_CONFIRM_DELETE_TICKETS)],
-        [InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.ADMIN_SUPPORT_TICKETS)]
-    ])
-    
-    await query.edit_message_text(
-        "⚠️ **تأكيد حذف جميع التذاكر**\n\n"
-        "سيتم حذف جميع تذاكر الدعم بشكل نهائي.\n"
-        "هل أنت متأكد؟",
-        reply_markup=keyboard
-    )
-
-async def admin_confirm_delete_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تأكيد حذف جميع التذاكر"""
-    query = update.callback_query
-    if query:
-        await query.answer()
-    user_id = update.effective_user.id
-    
-    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
-        if query:
-            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
-        return
-    
-    deleted = await db_delete_all_tickets()
-    await query.edit_message_text(f"✅ تم حذف {deleted} تذكرة بنجاح")
-    await admin_support_tickets_callback(update, context)
-# ===================== دوال إضافية مفقودة - الجزء الثاني =====================
-
-# ===== دوال لوحة الأدمن =====
+# ===================== دوال لوحة الأدمن =====================
 
 async def admin_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض جميع المستخدمين (لوحة الأدمن)"""
@@ -6933,7 +6935,7 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         try:
             await safe_send_markdown(context.bot, uid, text)
             sent += 1
-            await asyncio.sleep(0.1)  # تجنب الحظر
+            await asyncio.sleep(0.1)
         except:
             failed += 1
     
@@ -6986,7 +6988,7 @@ async def admin_manage_sendcode_callback(update: Update, context: ContextTypes.D
         await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
 
 async def admin_set_sendcode_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تعيين مستخدم لصلاحية /sendcode"""
+    """معالج تعيين مستخدم لصلاحية /sendcode"""
     query = update.callback_query
     if query:
         await query.answer()
@@ -6998,12 +7000,23 @@ async def admin_set_sendcode_user_callback(update: Update, context: ContextTypes
         return
     
     context.user_data['state'] = UserState.WAITING_SENDCODE_USER
-    msg = "👤 **تعيين مستخدم لصلاحية /sendcode**\n\nأرسل معرف المستخدم (user_id):"
+    
+    msg = (
+        "👤 **تعيين مستخدم لصلاحية /sendcode**\n\n"
+        "أرسل معرف المستخدم (user_id):\n"
+        "مثال: `123456789`\n\n"
+        "📌 يمكنك أيضاً استخدام الأمر:\n"
+        "`/set_sendcode_user 123456789`"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 إلغاء", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
     
     if query:
-        await query.edit_message_text(msg, parse_mode="MarkdownV2")
+        await safe_edit_markdown(query, msg, reply_markup=keyboard)
     else:
-        await update.message.reply_text(msg, parse_mode="MarkdownV2")
+        await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
 
 async def admin_show_log_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض قناة التقارير"""
@@ -7080,17 +7093,14 @@ async def admin_toggle_channel_ban_callback(update: Update, context: ContextType
             await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
         return
     
-    # استخراج معرف القناة من البيانات
     data = query.data.split(":")[-1]
     channel_db_id = int(data.split("_")[0]) if "_" in data else int(data)
     
-    # الحصول على معلومات القناة
     ch_info = await db_get_channel_info(channel_db_id)
     if not ch_info:
         await query.edit_message_text("❌ القناة غير موجودة")
         return
     
-    # تبديل حالة الحظر
     async def _toggle(conn):
         cur = await conn.execute("SELECT banned FROM user_channels WHERE id=?", (channel_db_id,))
         row = await cur.fetchone()
@@ -7119,7 +7129,6 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
     
     chat_id = int(query.data.split(":")[-1])
     
-    # تبديل حالة الحظر
     async def _toggle(conn):
         cur = await conn.execute("SELECT banned FROM bot_groups WHERE chat_id=?", (chat_id,))
         row = await cur.fetchone()
@@ -7133,6 +7142,92 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
     status = "محظورة" if new_banned == 1 else "نشطة"
     await query.edit_message_text(f"✅ تم تغيير حالة المجموعة إلى: {status}")
     await admin_groups_callback(update, context)
+
+# ===================== دوال إدارة التذاكر =====================
+
+async def admin_support_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض تذاكر الدعم"""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        if query:
+            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+        return
+    
+    tickets = await db_get_all_tickets(20)
+    
+    if not tickets:
+        msg = "📭 **لا توجد تذاكر دعم**"
+    else:
+        msg = "📋 **تذاكر الدعم**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for ticket in tickets:
+            ticket_id, user_id, username, message, ticket_num, status, created_at = ticket
+            status_text = "🟡 قيد الانتظار" if status == 'pending' else "🟢 تم الرد"
+            try:
+                created_dt = datetime.fromisoformat(created_at)
+                created_mecca = utc_to_mecca(created_dt)
+                created_str = created_mecca.strftime("%Y-%m-%d %H:%M")
+            except:
+                created_str = created_at[:16] if created_at else "?"
+            
+            msg += f"📌 #{ticket_num} - {status_text}\n"
+            msg += f"👤 المستخدم: `{user_id}` ({username[:20]})\n"
+            msg += f"📝 {message[:50]}{'...' if len(message) > 50 else ''}\n"
+            msg += f"🕐 {created_str}\n"
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ حذف جميع التذاكر", callback_data=CallbackData.ADMIN_DELETE_ALL_TICKETS)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
+    
+    if query:
+        await safe_edit_markdown(query, msg, reply_markup=keyboard)
+    else:
+        await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
+
+async def admin_delete_all_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأكيد حذف جميع التذاكر"""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        if query:
+            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+        return
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ نعم، حذف الكل", callback_data=CallbackData.ADMIN_CONFIRM_DELETE_TICKETS)],
+        [InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.ADMIN_SUPPORT_TICKETS)]
+    ])
+    
+    await query.edit_message_text(
+        "⚠️ **تأكيد حذف جميع التذاكر**\n\n"
+        "سيتم حذف جميع تذاكر الدعم بشكل نهائي.\n"
+        "هل أنت متأكد؟",
+        reply_markup=keyboard
+    )
+
+async def admin_confirm_delete_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأكيد حذف جميع التذاكر"""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        if query:
+            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+        return
+    
+    deleted = await db_delete_all_tickets()
+    await query.edit_message_text(f"✅ تم حذف {deleted} تذكرة بنجاح")
+    await admin_support_tickets_callback(update, context)
 
 # ===================== دوال إضافية للسلامة =====================
 
@@ -7177,7 +7272,7 @@ async def health_check_handler(request):
             'error': str(e)[:100]
         }, status=500)
 
-# ===================== دوال تعريف UserState =====================
+# ===================== تعريف UserState =====================
 
 class UserState:
     """حالات المستخدم"""
@@ -7220,6 +7315,11 @@ class UserState:
     SELECTING_DAYS = "selecting_days"
     WAITING_GROUP_SECURITY = "waiting_group_security"
     WAITING_SENDCODE_PASSWORD = "waiting_sendcode_password"
+
+
+# ============================================================================
+# نهاية الملف - جميع الدوال المفقودة
+# ============================================================================
 # ===================== دوال القوائم والأزرار (الكيبورد) =====================
 
 async def get_main_keyboard(user_id: int):
@@ -10990,8 +11090,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.reply_text(get_text(uid, 'channel_exists'))
         kb, title, active = await get_main_keyboard(uid)
-        context.user_data['active_channel'] = active
-        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
+        context.user_data['active_channel'] = active        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
         return
     if state == UserState.WAITING_INTERVAL_MINUTES:
         context.user_data.pop('state', None)
@@ -13827,6 +13926,8 @@ async def main():
     application.add_handler(CommandHandler("updates", updates_command_handler))
     application.add_handler(CommandHandler("stats", stats_command_handler))
     application.add_handler(CommandHandler("sendcode", sendcode_command_handler))
+    # ✅ تم إضافة الأمر المفقود هنا
+    application.add_handler(CommandHandler("set_sendcode_user", set_sendcode_user_command_handler))
     application.add_handler(CommandHandler("lock", lock_chat_command_handler))
     application.add_handler(CommandHandler("unlock", unlock_chat_command_handler))
     application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
@@ -14163,3 +14264,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
