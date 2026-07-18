@@ -7641,7 +7641,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     kb, title, active_channel = await get_main_keyboard(uid)
     if active_channel:
         context.user_data['active_channel'] = active_channel
-        await db_set_active_channel(uid, active_channel)
+                await db_set_active_channel(uid, active_channel)
     if query:
         await safe_edit_markdown(query, title, reply_markup=kb)
     else:
@@ -9810,7 +9810,7 @@ async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     kb, title, active_channel = await get_main_keyboard(uid)
     if active_channel:
         context.user_data['active_channel'] = active_channel
-        await db_set_active_channel(uid, active_channel)
+                await db_set_active_channel(uid, active_channel)
     if query:
         await safe_edit_markdown(query, f"✅ تم تغيير اللغة إلى {lang_name}\n\n{title}", reply_markup=kb)
     else:
@@ -11090,7 +11090,8 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.reply_text(get_text(uid, 'channel_exists'))
         kb, title, active = await get_main_keyboard(uid)
-        context.user_data['active_channel'] = active        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
+        context.user_data['active_channel'] = active
+                await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
         return
     if state == UserState.WAITING_INTERVAL_MINUTES:
         context.user_data.pop('state', None)
