@@ -11127,8 +11127,10 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 if __name__ == "__main__":
     try:
-        os.environ["WEB_CONCURRENCY"] = "1"
-        asyncio.run(main())
+        # إنشاء حلقة أحداث جديدة لتجنب تعارضات Render
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت")
     except Exception as e:
@@ -11136,3 +11138,9 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        try:
+            # محاولة إغلاق الحلقة بأمان
+            loop.close()
+        except:
+            pass
