@@ -3485,6 +3485,11 @@ except Exception as e:
 
 # ===== واجهة الويب =====
 web_app = web.Application()
+
+# نقطة فحص الصحة لـ Render
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+web_app.router.add_get('/health', health_check)
 WEB_SESSIONS = {}
 WEB_SESSION_TIMEOUT = 3600
 WEB_RATE_LIMITS = defaultdict(list)
