@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 from enum import Enum, auto
-
+from collections import defaultdict
 # ===================== التحقق من إصدار بايثون =====================
 def check_python_version():
     required_version = (3, 8)
