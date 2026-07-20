@@ -56,7 +56,8 @@ from database import (
     db_is_banned, db_get_user_level, db_update_user_level,
     execute_db
 )
-from security import get_ram_usage, check_database_health, check_telegram_health
+from security import check_database_health, check_telegram_health
+from utils import get_ram_usage
 
 # ===================== إعدادات WebSocket =====================
 
