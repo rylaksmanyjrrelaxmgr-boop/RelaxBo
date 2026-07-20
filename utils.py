@@ -805,3 +805,7 @@ def check_single_instance():
     except Exception as e:
         print(f"⚠️ لا يمكن التحقق من التشغيل الواحد: {e}")
         return None
+# ===================== متغيرات NSFW المؤقتة =====================
+NSFW_CACHE = {}
+NSFW_CACHE_TTL = 300
+_NSFW_CACHE_LOCK = asyncio.Lock()
