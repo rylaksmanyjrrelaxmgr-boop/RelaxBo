@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from PIL import Image
-
+from collections import defaultdict
 from constants import (
     SIGHTENGINE_API_USER, SIGHTENGINE_API_SECRET,
     NSFW_ENABLED, NSFW_THRESHOLD, NSFW_MAX_FILE_SIZE,
