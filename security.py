@@ -589,3 +589,10 @@ async def import_banned_words_on_startup():
             print(f"📭 لا توجد كلمات محظورة في {BANNED_WORDS_FILE} للاستيراد")
     except Exception as e:
         print(f"❌ فشل استيراد الكلمات المحظورة: {e}")
+def check_database_health():
+    """التحقق من صحة قاعدة البيانات (مؤقت)"""
+    return True
+
+def check_telegram_health():
+    """التحقق من صحة اتصال تيليجرام (مؤقت)"""
+    return True
