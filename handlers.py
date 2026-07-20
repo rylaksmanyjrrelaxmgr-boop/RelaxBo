@@ -4482,3 +4482,63 @@ async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAUL
     else:
         await safe_send_markdown(context.bot, user_id, text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
 
+# ===== دوال مؤقتة للتوافق مع bot.py =====
+async def start(update, context):
+    pass
+
+async def help_command(update, context):
+    pass
+
+async def status_command(update, context):
+    pass
+
+async def settings_command(update, context):
+    pass
+
+async def backup_command(update, context):
+    pass
+
+async def restore_command(update, context):
+    pass
+
+async def list_command(update, context):
+    pass
+
+async def delete_command(update, context):
+    pass
+
+async def cancel_command(update, context):
+    pass
+
+async def filter_messages_handler(update, context):
+    pass
+
+async def broadcast_command(update, context):
+    pass
+
+async def reminder_command(update, context):
+    pass
+
+async def admin_callback_handler(update, context):
+    pass
+
+async def callback_handler(update, context):
+    pass
+
+async def handle_media_group(update, context):
+    pass
+
+async def error_handler(update, context):
+    pass
+
+async def send_admin_alert(update, context):
+    pass
+
+async def schedule_daily_reminder(update, context):
+    pass
+
+async def auto_post(update, context):
+    pass
+
+async def handle_inline_query(update, context):
+    pass
