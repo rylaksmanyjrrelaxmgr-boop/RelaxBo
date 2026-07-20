@@ -801,3 +801,90 @@ def compress_backup(data):
     """ضغط بيانات النسخ الاحتياطي (مؤقت)"""
     return data  # حالياً يرجع البيانات كما هي بدون ضغط
 
+def decompress_backup(data):
+    """فك ضغط بيانات النسخ الاحتياطي (مؤقت)"""
+    return data  # يرجع البيانات كما هي
+# ========== دوال الوقت ==========
+def utc_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+def mecca_now():
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone.utc) + timedelta(hours=3)
+
+def utc_now_iso():
+    return utc_now().isoformat()
+
+def mecca_now_iso():
+    return mecca_now().isoformat()
+
+def utc_to_mecca(dt):
+    return dt + timedelta(hours=3)
+
+def mecca_to_utc(dt):
+    return dt - timedelta(hours=3)
+
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except:
+        return default
+
+# ========== الذاكرة واللوج ==========
+def memory_optimizer():
+    import gc
+    gc.collect()
+
+class advanced_logger:
+    @staticmethod
+    def log_access(user_id, action, data=None):
+        print(f"[LOG] user={user_id} action={action} data={data}")
+
+def log_error(error, context=None):
+    print(f"[ERROR] {error} | context={context}")
+
+# ========== الترجمة ==========
+def translate_text(text, dest_lang='ar'):
+    # ترجمة وهمية - ترجع النص نفسه
+    return text
+
+def get_user_translation_language(user_id):
+    return 'ar'
+
+# ========== الإرسال الآمن ==========
+def safe_send_markdown(bot, chat_id, text, **kwargs):
+    # إرسال نص عادي بدون ماركداون مؤقتاً
+    return bot.send_message(chat_id, text, **kwargs)
+
+# ========== التشفير ==========
+def encrypt_file_stream(src_path, dst_path, cipher):
+    # نسخ الملف بدون تشفير (مؤقت)
+    with open(src_path, 'rb') as f_in:
+        data = f_in.read()
+    with open(dst_path, 'wb') as f_out:
+        f_out.write(data)
+
+def decrypt_file_stream(src_path, dst_path, cipher):
+    # نسخ الملف بدون فك تشفير (مؤقت)
+    with open(src_path, 'rb') as f_in:
+        data = f_in.read()
+    with open(dst_path, 'wb') as f_out:
+        f_out.write(data)
+
+# ========== الضغط ==========
+def compress_backup(data: bytes) -> bytes:
+    return data
+
+def decompress_backup(data: bytes) -> bytes:
+    return data
+
+# ========== استخدام الرام ==========
+def get_ram_usage():
+    import psutil
+    mem = psutil.virtual_memory()
+    return {'percent': mem.percent}
+
+# ========== متغير النقاط ==========
+user_points_last_hour = {}
+
