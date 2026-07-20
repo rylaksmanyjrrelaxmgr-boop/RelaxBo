@@ -789,3 +789,19 @@ async def health_check_handler(request):
     from aiohttp import web
     return web.json_response({'status': 'ok', 'version': '19.3.3'})
 
+def check_single_instance():
+    """التحقق من عدم وجود نسخة أخرى من البوت تعمل"""
+    try:
+        import socket
+        from constants import TEMP_PATH
+        sock_path = TEMP_PATH / "bot.sock"
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.bind(str(sock_path))
+            return sock
+        except socket.error:
+            print("❌ البوت يعمل بالفعل!")
+            sys.exit(1)
+    except Exception as e:
+        print(f"⚠️ لا يمكن التحقق من التشغيل الواحد: {e}")
+        return None
