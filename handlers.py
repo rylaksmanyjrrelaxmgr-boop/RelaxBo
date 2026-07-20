@@ -4343,3 +4343,263 @@ async def admin_banned_words_callback(update, context):
 async def nsfw_settings_callback(update, context):
     # سيتم تنفيذها في handlers الإضافية
     pass
+# ===================== دوال مؤقتة للتوافق =====================
+
+async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ أمر /sendcode غير مفعل حالياً. تواصل مع المطور.")
+
+async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ إدارة الردود غير مفعلة حالياً.")
+
+async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ إدارة الكلمات المحظورة غير مفعلة حالياً.")
+
+async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ إعدادات NSFW غير مفعلة حالياً.")
+
+async def handle_contest_creation_states(update, context, state):
+    return False
+
+async def handle_sendcode_confirmation_handler(update, context):
+    await update.message.reply_text("⚠️ تأكيد /sendcode غير مفعل.")
+
+import time as time_module
+from datetime import datetime
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from constants import CallbackData, UserState, PRIMARY_OWNER_ID, ENABLE_2FA, ADMIN_2FA_SECRET, PYOTP_AVAILABLE, NSFW_ENABLED, NSFW_THRESHOLD
+from database import db_get_allowed_sendcode_user, db_get_all_replies, db_get_banned_words, db_get_auto_reply_settings
+from utils import safe_edit_markdown, safe_send_markdown, is_authorized_in_group, is_bot_admin, utc_now, utc_now_iso
+# ===================== دوال مؤقتة للتوافق (يمكن تطويرها لاحقاً) =====================
+
+async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    معالج أمر /sendcode - إرسال كود البوت لمستخدم معين
+    """
+    user_id = update.effective_user.id
+    # التحقق من صلاحية المستخدم
+    allowed_user = await db_get_allowed_sendcode_user()
+    if user_id != PRIMARY_OWNER_ID and user_id != allowed_user:
+        await update.message.reply_text("🔒 هذا الأمر غير مصرح لك.")
+        return
+    # التحقق من وجود 2FA
+    if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
+        context.user_data['waiting_2fa'] = True
+        await update.message.reply_text("🔐 أدخل رمز المصادقة الثنائية (2FA):")
+        return
+    # إرسال الكود
+    try:
+        bot_info = await context.bot.get_me()
+        code = f"@{bot_info.username}"
+        await update.message.reply_text(f"📋 **كود البوت:**\n`{code}`\n\nيمكنك مشاركة هذا الكود مع الآخرين لتفعيل البوت.", parse_mode="MarkdownV2")
+    except Exception as e:
+        await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
+
+async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    لوحة إدارة الردود التلقائية للمجموعات
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    # عرض قائمة الردود
+    replies = await db_get_all_replies()
+    if not replies:
+        text = "📭 لا توجد ردود مسجلة."
+    else:
+        text = "📋 **قائمة الردود التلقائية:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for keyword, reply in replies[:20]:
+            text += f"• `{keyword}` → {reply[:50]}{'...' if len(reply) > 50 else ''}\n"
+        if len(replies) > 20:
+            text += f"\n... و {len(replies)-20} رد آخر"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة رد", callback_data=CallbackData.ADMIN_ADD_REPLY),
+         InlineKeyboardButton("🗑️ حذف رد", callback_data=CallbackData.ADMIN_DEL_REPLY)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
+    if query:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
+    else:
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+
+async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    لوحة إدارة الكلمات المحظورة العامة
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    words = await db_get_banned_words(-1)  # -1 يعني عامة
+    if not words:
+        text = "📭 لا توجد كلمات محظورة عامة."
+    else:
+        text = "🚫 **الكلمات المحظورة العامة:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for word, added_by, added_at in words[:30]:
+            text += f"• `{word}` (أضيف بواسطة `{added_by}` في {added_at[:10]})\n"
+        if len(words) > 30:
+            text += f"\n... و {len(words)-30} كلمة أخرى"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة كلمة", callback_data=CallbackData.ADMIN_ADD_BANNED_WORD),
+         InlineKeyboardButton("🗑️ حذف كلمة", callback_data=CallbackData.ADMIN_REMOVE_BANNED_WORD)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
+    if query:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
+    else:
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+
+async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    إعدادات NSFW (كشف المحتوى غير اللائق)
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    status = "🟢 مفعل" if NSFW_ENABLED else "🔴 معطل"
+    threshold = NSFW_THRESHOLD * 100
+    text = f"🔞 **إعدادات NSFW**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 الحالة: {status}\n📊 نسبة الحساسية: {threshold:.0f}%\n\n🔍 يتم كشف المحتوى غير اللائق في الصور والفيديوهات."
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🔄 تبديل الحالة", callback_data=CallbackData.NSFW_TOGGLE)],
+        [InlineKeyboardButton(f"⚙️ تغيير الحساسية", callback_data=CallbackData.NSFW_THRESHOLD_SET)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
+    ])
+    if query:
+        await safe_edit_markdown(query, text, reply_markup=keyboard)
+    else:
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
+
+async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState):
+    """
+    معالج حالات إنشاء المسابقات
+    """
+    user_id = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
+    contest_data = context.user_data.get('contest_data', {})
+
+    if state == UserState.WAITING_CONTEST_TITLE:
+        contest_data['title'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_DESCRIPTION
+        await update.message.reply_text("📝 **وصف المسابقة:**\nأرسل وصفاً تفصيلياً للمسابقة:")
+        return True
+
+    elif state == UserState.WAITING_CONTEST_DESCRIPTION:
+        contest_data['description'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_PRIZE
+        await update.message.reply_text("🎁 **جائزة المسابقة:**\nأرسل الجائزة (مثال: 100 نقطة، هدية، إلخ):")
+        return True
+
+    elif state == UserState.WAITING_CONTEST_PRIZE:
+        contest_data['prize'] = text
+        context.user_data['state'] = UserState.WAITING_CONTEST_END_DATE
+        await update.message.reply_text("📅 **تاريخ انتهاء المسابقة:**\nأرسل التاريخ بالصيغة: `YYYY-MM-DD`\nمثال: `2025-12-31`")
+        return True
+
+    elif state == UserState.WAITING_CONTEST_END_DATE:
+        try:
+            end_date = datetime.strptime(text, '%Y-%m-%d')
+            if end_date <= utc_now().date():
+                await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
+                return True
+            contest_data['end_date'] = end_date.isoformat()
+            # حفظ المسابقة في قاعدة البيانات
+            from database import execute_db
+            async def _save_contest(conn):
+                await conn.execute("""
+                    INSERT INTO contests (creator_id, title, description, prize, end_date, status, created_at, contest_type)
+                    VALUES (?, ?, ?, ?, ?, 'active', ?, 'raffle')
+                """, (user_id, contest_data['title'], contest_data['description'], contest_data['prize'], contest_data['end_date'], utc_now_iso()))
+                await conn.commit()
+                return conn.lastrowid
+            contest_id = await execute_db(_save_contest)
+            context.user_data.pop('contest_data', None)
+            context.user_data.pop('state', None)
+            await update.message.reply_text(f"✅ **تم إنشاء المسابقة بنجاح!**\n🆔 المعرف: {contest_id}\n📌 العنوان: {contest_data['title']}")
+            await admin_panel_callback(update, context)
+        except ValueError:
+            await update.message.reply_text("❌ صيغة تاريخ غير صحيحة! استخدم: `YYYY-MM-DD`")
+        return True
+
+    elif state == UserState.WAITING_CONTEST_ANSWER:
+        contest_id = context.user_data.get('contest_join_id')
+        if not contest_id:
+            await update.message.reply_text("❌ حدث خطأ، حاول مرة أخرى.")
+            return True
+        # حفظ مشاركة المستخدم
+        from database import execute_db
+        async def _save_participation(conn):
+            await conn.execute("""
+                INSERT OR IGNORE INTO contest_participants (user_id, contest_id, answer, joined_at)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, contest_id, text, utc_now_iso()))
+            await conn.commit()
+        await execute_db(_save_participation)
+        context.user_data.pop('contest_join_id', None)
+        context.user_data.pop('state', None)
+        await update.message.reply_text("✅ **تم تسجيل مشاركتك في المسابقة!**\nنتمنى لك حظاً سعيداً 🍀")
+        await contests_command_handler(update, context)
+        return True
+
+    return False
+
+async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    تأكيد المصادقة الثنائية لأمر /sendcode
+    """
+    user_id = update.effective_user.id
+    code = update.message.text.strip()
+    if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
+        try:
+            import pyotp
+            totp = pyotp.TOTP(ADMIN_2FA_SECRET)
+            if totp.verify(code):
+                context.user_data['2fa_verified'] = True
+                context.user_data['2fa_time'] = time_module.time()
+                context.user_data.pop('waiting_2fa', None)
+                context.user_data.pop('state', None)
+                await update.message.reply_text("✅ تم التحقق من المصادقة الثنائية!")
+                # إعادة توجيه لأمر sendcode
+                await sendcode_command_handler(update, context)
+            else:
+                await update.message.reply_text("❌ رمز غير صحيح!")
+                context.user_data.pop('waiting_2fa', None)
+                context.user_data.pop('state', None)
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ في التحقق: {str(e)[:100]}")
+            context.user_data.pop('waiting_2fa', None)
+            context.user_data.pop('state', None)
+    else:
+        await update.message.reply_text("❌ المصادقة الثنائية غير مفعلة.")
+
+async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    إعدادات الردود التلقائية للمجموعة
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('auto_reply_chat_id')
+    if not chat_id:
+        await update.message.reply_text("❌ لم يتم تحديد المجموعة.")
+        return
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
+        return
+    settings = await db_get_auto_reply_settings(chat_id)
+    text = f"📝 **إعدادات الردود التلقائية**\n━━━━━━━━━━━━━━━━━━━━━━\n📌 الحالة: {'🟢 مفعل' if settings['enabled'] else '🔴 معطل'}\n👥 المستخدمون: {'👑 مشرفين فقط' if settings['only_admins'] else '👥 الجميع'}\n🤖 تجاهل البوتات: {'✅' if settings['ignore_bots'] else '❌'}"
+    if query:
+        await safe_edit_markdown(query, text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
+    else:
+        await safe_send_markdown(context.bot, user_id, text, reply_markup=get_auto_reply_keyboard(chat_id, settings))
+
