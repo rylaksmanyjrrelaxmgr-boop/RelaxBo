@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from functools import lru_cache, wraps
 import urllib.parse
-
+from collections import defaultdict
 # استيراد المكتبات المطلوبة
 try:
     import bleach
