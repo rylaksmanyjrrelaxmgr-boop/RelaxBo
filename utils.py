@@ -797,3 +797,7 @@ def get_user_translation_language(user_id):
     حالياً ترجع 'ar' كافتراضي، لكن يمكن تطويرها لاحقاً.
     """
     return 'ar'   # أو None إذا كنت تريد التعامل معها لاحقاً
+def compress_backup(data):
+    """ضغط بيانات النسخ الاحتياطي (مؤقت)"""
+    return data  # حالياً يرجع البيانات كما هي بدون ضغط
+
