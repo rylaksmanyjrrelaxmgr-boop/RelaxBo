@@ -35,7 +35,7 @@ from utils import (
     get_banned_words_admin_keyboard, penalty_keyboard, mute_duration_keyboard,
     contains_link, contains_mention, get_ram_usage, memory_optimizer,
     build_days_keyboard, check_bot_permissions, advanced_logger, log_error,
-    translate_text, get_user_translation_language, set_user_translation_language,
+    translate_text, 
     invalidate_user_cache, parse_days_of_week_safe, parse_dates_safe,
     rate_limiter
 )
