@@ -4,7 +4,7 @@
 """
 ثوابت وإعدادات عامة
 """
-
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -504,3 +504,6 @@ NSFW_CACHE = {}
 NSFW_CACHE_TTL = 300
 _NSFW_CACHE_LOCK = asyncio.Lock()
 user_points_last_hour = defaultdict(lambda: (0, 0.0))
+# ===================== متغيرات عامة =====================
+user_language = {}
+WEB_PORT_USED = WEB_PORT
