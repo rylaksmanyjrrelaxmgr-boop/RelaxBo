@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-معالجات الأوامر والكولباك والرسائل - كاملة بدون اختصار
+معالجات الأوامر والكولباك والرسائل - كاملة
 """
 
 import asyncio
@@ -23,7 +23,8 @@ from constants import (
     BOT_NAME, BOT_USERNAME, PRIMARY_OWNER_ID, CallbackData, UserState,
     LEVEL_REQUIREMENTS, MAX_UNPUBLISHED_POSTS, MAX_POSTS_PER_SESSION,
     TOKEN, SUPPORTED_LANGUAGES, ENABLE_2FA, ADMIN_2FA_SECRET, PYOTP_AVAILABLE,
-    BATTERY_SAVER_MODE, MAX_FILE_SIZE, DEFAULT_PUBLISH_INTERVAL_SECONDS
+    BATTERY_SAVER_MODE, MAX_FILE_SIZE, DEFAULT_PUBLISH_INTERVAL_SECONDS,
+    user_language
 )
 from utils import (
     safe_send_markdown, safe_edit_markdown, safe_send_error, safe_send_long_message,
@@ -35,9 +36,8 @@ from utils import (
     get_banned_words_admin_keyboard, penalty_keyboard, mute_duration_keyboard,
     contains_link, contains_mention, get_ram_usage, memory_optimizer,
     build_days_keyboard, check_bot_permissions, advanced_logger, log_error,
-    translate_text, 
-    invalidate_user_cache, parse_days_of_week_safe, parse_dates_safe,
-    rate_limiter
+    translate_text, invalidate_user_cache, parse_days_of_week_safe,
+    parse_dates_safe, rate_limiter, check_single_instance
 )
 from database import (
     db_register_user, db_update_user_cache, db_is_banned, db_set_ban,
@@ -84,7 +84,9 @@ from database import (
     set_user_language, db_get_all_user_channels_no_limit, db_all_users_channels,
     db_register_channel, db_get_all_bot_channels, db_get_user_reminder_settings,
     db_update_reminder_settings, db_get_users_needing_reminder, db_update_last_reminder_sent,
-    db_get_subscription_days_left
+    db_get_subscription_days_left, db_has_active_subscription,
+    get_user_translation_language, set_user_translation_language,
+    execute_db
 )
 from security import (
     check_nsfw_cached, check_nsfw_video, load_banned_words_from_file,
@@ -152,13 +154,8 @@ async def get_main_keyboard(user_id: int):
     except:
         auto_status = False
     auto_text = "مفعل" if auto_status else "معطل"
-    
-    # جلب النصوص من ملفات اللغة (سيتم التعامل معها لاحقاً)
-    from constants import user_language
     lang = user_language.get(user_id, 'ar')
-    
     title = f"🌿 **{BOT_NAME}**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المعرف: `{user_id}`\n👥 مجموعاتي: {my_groups}\n💎 الاشتراك: {sub_text}\n📡 القناة النشطة: {ch_display}\n📝 المنشورات غير المنشورة: {cnt}\n⚙️ النشر التلقائي: {auto_text}"
-    
     updates_channel = None
     try:
         updates_channel = await db_get_updates_channel()
@@ -167,12 +164,10 @@ async def get_main_keyboard(user_id: int):
     updates_url = f"https://t.me/{updates_channel}" if updates_channel else None
 
     keyboard = []
-
     keyboard.append([
         InlineKeyboardButton("👥 مجموعاتي", callback_data=CallbackData.GROUPS_MY),
         InlineKeyboardButton("➕ إضافة قناة", callback_data=CallbackData.CHANNELS_ADD)
     ])
-
     keyboard.append([
         InlineKeyboardButton("📡 قنواتي", callback_data=CallbackData.CHANNELS_MY),
         InlineKeyboardButton("⚙️ الإعدادات", callback_data=CallbackData.SETTINGS_MENU)
@@ -246,14 +241,12 @@ async def get_main_keyboard(user_id: int):
         keyboard.append([
             InlineKeyboardButton("👑 لوحة الأدمن", callback_data=CallbackData.ADMIN_PANEL)
         ])
-
     valid_keyboard = []
     for row in keyboard:
         if row and all(isinstance(btn, InlineKeyboardButton) for btn in row):
             valid_keyboard.append(row)
     if not valid_keyboard:
         valid_keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
-
     return InlineKeyboardMarkup(valid_keyboard), title, active
 
 # ===================== دوال التحقق من القناة =====================
@@ -294,12 +287,11 @@ async def ensure_force_subscribe(update: Update, context: ContextTypes.DEFAULT_T
             await safe_edit_markdown(update.callback_query, msg, reply_markup=keyboard)
         elif update.message:
             await safe_send_markdown(context.bot, user_id, msg, reply_markup=keyboard)
-    except Exception:
+    except:
         pass
     return False
 
 # ===================== معالجات الأوامر الأساسية =====================
-
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -608,7 +600,6 @@ async def set_rules_command_handler(update: Update, context: ContextTypes.DEFAUL
         return
     rules_text = " ".join(args)
     rules_text = sanitize_text(rules_text, max_length=4000)
-    from database import execute_db
     async def _set_rules(conn):
         await conn.execute(
             "INSERT OR REPLACE INTO group_rules (chat_id, rules_text, set_by, set_at) VALUES (?, ?, ?, ?)",
@@ -630,7 +621,6 @@ async def rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
         return
     chat_id = chat.id
-    from database import execute_db
     async def _get_rules(conn):
         cur = await conn.execute(
             "SELECT rules_text, set_by, set_at FROM group_rules WHERE chat_id=?",
@@ -660,7 +650,6 @@ async def rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await safe_send_markdown(context.bot, chat_id, message)
 
 # ===================== معالجات المالك والمشرفين المخفيين =====================
-
 async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
@@ -744,7 +733,6 @@ async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAU
     await safe_send_markdown(context.bot, user_id, text)
 
 # ===================== معالجات الكولباك الأساسية =====================
-
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -1020,7 +1008,6 @@ async def clear_all_posts_callback(update: Update, context: ContextTypes.DEFAULT
     active = int(query.data.split(":")[-1]) if query else context.user_data.get('clear_all_posts_id')
     if not active:
         return
-    from database import execute_db
     async def _clear_posts(conn):
         await conn.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
         await conn.commit()
@@ -1147,7 +1134,6 @@ async def delete_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("❌ غير مصرح")
         return
-    from database import execute_db
     async def _delete_group(conn):
         await conn.execute("DELETE FROM bot_groups WHERE chat_id = ?", (chat_id,))
         await conn.execute("DELETE FROM user_groups_link WHERE chat_id = ?", (chat_id,))
@@ -1182,7 +1168,6 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(chat_id=uid, text="🔒 هذا الأمر للمشرفين فقط!")
         return
     settings = await db_get_security_settings(chat_id)
-    from database import execute_db
     async def _get_group_name(conn):
         cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
         row = await cur.fetchone()
@@ -1281,7 +1266,6 @@ async def toggle_auto_recycle_callback(update: Update, context: ContextTypes.DEF
     await settings_menu_callback(update, context)
 
 # ===================== معالجات الكولباك للجدولة =====================
-
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -1484,7 +1468,6 @@ async def save_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ حدث خطأ")
 
 # ===================== معالجات الكولباك للأمان =====================
-
 async def security_links_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -1832,7 +1815,6 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
             await update.message.reply_text(error_text)
         return
     settings = await db_get_security_settings(chat_id)
-    from database import execute_db
     async def _get_group_name(conn):
         cur = await conn.execute("SELECT chat_name FROM bot_groups WHERE chat_id=?", (chat_id,))
         row = await cur.fetchone()
@@ -1904,7 +1886,6 @@ async def security_refresh_groups_callback(update: Update, context: ContextTypes
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ===================== معالجات الكولباك للعقوبات =====================
-
 async def penalty_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2022,7 +2003,6 @@ async def penalty_mute_duration_callback(update: Update, context: ContextTypes.D
             await update.message.reply_text(f"✅ تم تعيين العقوبة التلقائية إلى: **كتم {text}**", reply_markup=kb)
 
 # ===================== معالجات الكولباك للدعم والمساعدة =====================
-
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2126,7 +2106,6 @@ async def support_back_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await support_menu_callback(update, context)
 
 # ===================== معالجات الكولباك للتجربة والاشتراك =====================
-
 async def trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2231,7 +2210,6 @@ async def buy_subscription_90_callback(update: Update, context: ContextTypes.DEF
     await buy_subscription_callback(update, context, 90, 120, "اشتراك 3 أشهر")
 
 # ===================== معالجات الكولباك للمطور والتحديثات =====================
-
 async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2344,7 +2322,6 @@ async def updates_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 # ===================== معالجات الكولباك للإحالات =====================
-
 async def referral_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2409,7 +2386,6 @@ async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_T
     if query:
         await query.answer()
     uid = update.effective_user.id
-    from database import execute_db
     async def _get_referrals(conn):
         cur = await conn.execute("SELECT r.referred_id, r.referred_at, r.is_rewarded, u.first_name, u.username FROM referrals r LEFT JOIN users_cache u ON r.referred_id = u.user_id WHERE r.referrer_id = ? ORDER BY r.referred_at DESC LIMIT 20", (uid,))
         return await cur.fetchall()
@@ -2443,7 +2419,6 @@ async def referral_list_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, uid, text, reply_markup=keyboard)
 
 # ===================== معالجات الكولباك للتذكيرات =====================
-
 async def reminder_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2535,7 +2510,6 @@ async def reminder_lang_callback(update: Update, context: ContextTypes.DEFAULT_T
     await reminder_menu_callback(update, context)
 
 # ===================== معالجات الكولباك للترجمة =====================
-
 async def translation_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2613,7 +2587,6 @@ async def translation_set_callback(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"✅ تم تفعيل الترجمة إلى {lang_name}", reply_markup=kb)
 
 # ===================== معالجات الكولباك للوحة المشرف =====================
-
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2631,7 +2604,6 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_send_markdown(context.bot, uid, "👑 **لوحة الأدمن**\n━━━━━━━━━━━━━━━━━━━━━━\nاختر الإجراء المطلوب:", reply_markup=get_admin_keyboard(uid))
 
 # ===================== معالجات الكولباك للمسابقات =====================
-
 async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not update or not update.effective_user:
@@ -2861,7 +2833,6 @@ async def admin_declare_winner_callback(update: Update, context: ContextTypes.DE
         await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="MarkdownV2")
 
 # ===================== معالجات الكولباك للغة =====================
-
 async def lang_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -2968,7 +2939,6 @@ async def handle_text_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         await contests_command_handler(update, context)
 
 # ===================== معالجات الكولباك للإجراءات المتقدمة =====================
-
 async def advanced_actions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -3200,7 +3170,6 @@ async def group_action_unban_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(msg)
 
 # ===================== معالجات الكولباك للوحة التحكم =====================
-
 async def panel_lock_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -3248,7 +3217,6 @@ async def panel_close_callback_handler(update: Update, context: ContextTypes.DEF
         await query.message.delete()
 
 # ===================== معالجات الكولباك للنشر في جميع القنوات =====================
-
 async def publish_all_channels_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -3324,7 +3292,6 @@ async def publish_all_channels_callback_handler(update: Update, context: Context
         await safe_send_markdown(context.bot, uid, result_text, reply_markup=keyboard)
 
 # ===================== معالجات الكولباك لإحصائيات القنوات =====================
-
 async def channel_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -3496,7 +3463,6 @@ async def my_channel_stats_callback(update: Update, context: ContextTypes.DEFAUL
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 # ===================== معالجات الكولباك للإشتراك الإجباري =====================
-
 async def check_subscribe_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -3528,7 +3494,6 @@ async def check_subscribe_callback_handler(update: Update, context: ContextTypes
             await update.message.reply_text("⚠️ الاشتراك الإجباري غير مفعل")
 
 # ===================== معالجات الدفع =====================
-
 async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
     if query.invoice_payload.startswith("sub_"):
@@ -3550,7 +3515,6 @@ async def successful_payment_callback_handler(update: Update, context: ContextTy
     await update.message.reply_text(f"✅ **تم تفعيل اشتراكك لمدة {days} يوماً!**\nشكراً لدعمك ❤️", parse_mode="MarkdownV2")
 
 # ===================== معالجات أوامر المشرفين الإضافية =====================
-
 async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_user is None or update.effective_chat is None:
         return
@@ -3604,7 +3568,6 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
     await safe_send_markdown(context.bot, chat_id, msg)
 
 # ===================== معالجات تحديثات المجموعة =====================
-
 async def track_chat_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.my_chat_member and update.my_chat_member.new_chat_member.status in ['administrator', 'creator']:
         chat = update.effective_chat
@@ -3640,8 +3603,7 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db_sync_group_admins(chat_id, context.bot, user_id)
                 break
 
-# ===================== معالج الرسائل الرئيسي (كامل) =====================
-
+# ===================== معالج الرسائل الرئيسي =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -4188,7 +4150,6 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
     # ===================== حالة حذف كلمة محظورة عامة =====================
     if state == UserState.WAITING_REMOVE_GLOBAL_BANNED_WORD:
         word = text.lower()
-        from database import execute_db
         async def _remove(conn):
             await conn.execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word, -1))
             await conn.commit()
@@ -4318,75 +4279,17 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ تم الإلغاء")
             await main_menu_callback(update, context)
 
-# ===================== دوال مساعدة (سيتم تعريفها في الملفات الأخرى) =====================
-
-async def handle_contest_creation_states(update, context, state):
-    # سيتم تنفيذها في handlers الإضافية
-    return False
-
-async def handle_sendcode_confirmation_handler(update, context):
-    # سيتم تنفيذها في handlers الإضافية
-    pass
-
-async def sendcode_command_handler(update, context):
-    # سيتم تنفيذها في handlers الإضافية
-    pass
-
-async def admin_replies_callback(update, context):
-    # سيتم تنفيذها في handlers الإضافية
-    pass
-
-async def admin_banned_words_callback(update, context):
-    # سيتم تنفيذها في handlers الإضافية
-    pass
-
-async def nsfw_settings_callback(update, context):
-    # سيتم تنفيذها في handlers الإضافية
-    pass
-# ===================== دوال مؤقتة للتوافق =====================
-
-async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ أمر /sendcode غير مفعل حالياً. تواصل مع المطور.")
-
-async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ إدارة الردود غير مفعلة حالياً.")
-
-async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ إدارة الكلمات المحظورة غير مفعلة حالياً.")
-
-async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ إعدادات NSFW غير مفعلة حالياً.")
-
-async def handle_contest_creation_states(update, context, state):
-    return False
-
-async def handle_sendcode_confirmation_handler(update, context):
-    await update.message.reply_text("⚠️ تأكيد /sendcode غير مفعل.")
-
-import time as time_module
-from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from constants import CallbackData, UserState, PRIMARY_OWNER_ID, ENABLE_2FA, ADMIN_2FA_SECRET, PYOTP_AVAILABLE, NSFW_ENABLED, NSFW_THRESHOLD
-from database import db_get_allowed_sendcode_user, db_get_all_replies, db_get_banned_words, db_get_auto_reply_settings
-from utils import safe_edit_markdown, safe_send_markdown, is_authorized_in_group, is_bot_admin, utc_now, utc_now_iso
 # ===================== دوال مؤقتة للتوافق (يمكن تطويرها لاحقاً) =====================
-
 async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    معالج أمر /sendcode - إرسال كود البوت لمستخدم معين
-    """
     user_id = update.effective_user.id
-    # التحقق من صلاحية المستخدم
     allowed_user = await db_get_allowed_sendcode_user()
     if user_id != PRIMARY_OWNER_ID and user_id != allowed_user:
         await update.message.reply_text("🔒 هذا الأمر غير مصرح لك.")
         return
-    # التحقق من وجود 2FA
     if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
         context.user_data['waiting_2fa'] = True
         await update.message.reply_text("🔐 أدخل رمز المصادقة الثنائية (2FA):")
         return
-    # إرسال الكود
     try:
         bot_info = await context.bot.get_me()
         code = f"@{bot_info.username}"
@@ -4395,9 +4298,6 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
 
 async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    لوحة إدارة الردود التلقائية للمجموعات
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -4405,7 +4305,6 @@ async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_T
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
         return
-    # عرض قائمة الردود
     replies = await db_get_all_replies()
     if not replies:
         text = "📭 لا توجد ردود مسجلة."
@@ -4426,9 +4325,6 @@ async def admin_replies_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    لوحة إدارة الكلمات المحظورة العامة
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -4436,7 +4332,7 @@ async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFA
     if user_id != PRIMARY_OWNER_ID and not await is_bot_admin(user_id):
         await update.message.reply_text("🔒 هذا الأمر للمشرفين فقط!")
         return
-    words = await db_get_banned_words(-1)  # -1 يعني عامة
+    words = await db_get_banned_words(-1)
     if not words:
         text = "📭 لا توجد كلمات محظورة عامة."
     else:
@@ -4456,9 +4352,6 @@ async def admin_banned_words_callback(update: Update, context: ContextTypes.DEFA
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    إعدادات NSFW (كشف المحتوى غير اللائق)
-    """
     query = update.callback_query
     if query:
         await query.answer()
@@ -4480,9 +4373,6 @@ async def nsfw_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
         await safe_send_markdown(context.bot, user_id, text, reply_markup=keyboard)
 
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState):
-    """
-    معالج حالات إنشاء المسابقات
-    """
     user_id = update.effective_user.id
     text = update.message.text.strip() if update.message.text else ""
     contest_data = context.user_data.get('contest_data', {})
@@ -4512,8 +4402,6 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
                 return True
             contest_data['end_date'] = end_date.isoformat()
-            # حفظ المسابقة في قاعدة البيانات
-            from database import execute_db
             async def _save_contest(conn):
                 await conn.execute("""
                     INSERT INTO contests (creator_id, title, description, prize, end_date, status, created_at, contest_type)
@@ -4535,8 +4423,6 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
         if not contest_id:
             await update.message.reply_text("❌ حدث خطأ، حاول مرة أخرى.")
             return True
-        # حفظ مشاركة المستخدم
-        from database import execute_db
         async def _save_participation(conn):
             await conn.execute("""
                 INSERT OR IGNORE INTO contest_participants (user_id, contest_id, answer, joined_at)
@@ -4553,9 +4439,6 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
     return False
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    تأكيد المصادقة الثنائية لأمر /sendcode
-    """
     user_id = update.effective_user.id
     code = update.message.text.strip()
     if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
@@ -4568,7 +4451,6 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
                 context.user_data.pop('waiting_2fa', None)
                 context.user_data.pop('state', None)
                 await update.message.reply_text("✅ تم التحقق من المصادقة الثنائية!")
-                # إعادة توجيه لأمر sendcode
                 await sendcode_command_handler(update, context)
             else:
                 await update.message.reply_text("❌ رمز غير صحيح!")
@@ -4582,9 +4464,6 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
         await update.message.reply_text("❌ المصادقة الثنائية غير مفعلة.")
 
 async def admin_auto_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    إعدادات الردود التلقائية للمجموعة
-    """
     query = update.callback_query
     if query:
         await query.answer()

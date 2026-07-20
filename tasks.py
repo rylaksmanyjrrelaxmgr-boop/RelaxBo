@@ -23,8 +23,10 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+from collections import defaultdict
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from cryptography.fernet import Fernet
 
 from constants import (
     PRIMARY_OWNER_ID, TOKEN, BACKUP_DIR, MAX_BACKUPS,
@@ -32,14 +34,17 @@ from constants import (
     MAX_CHANNELS_PER_CYCLE, SCHEDULED_POSTS_SLEEP,
     REMINDERS_SLEEP, AUTO_BACKUP_SLEEP, CLOUD_BACKUP_ENABLED,
     GOOGLE_AUTH_AVAILABLE, GOOGLE_DRIVE_FOLDER_ID,
-    ZSTD_AVAILABLE, DB_ENCRYPTION, ENCRYPTION_KEY, BACKUP_ENCRYPTION_KEY
+    ZSTD_AVAILABLE, ZSTD_COMPRESSOR, ZSTD_DECOMPRESSOR,
+    DB_ENCRYPTION, ENCRYPTION_KEY, BACKUP_ENCRYPTION_KEY,
+    BACKUP_CIPHER, DB_PATH, user_language, CallbackData
 )
 from utils import (
     utc_now, mecca_now, utc_now_iso, mecca_now_iso,
     utc_to_mecca, mecca_to_utc, safe_int,
     memory_optimizer, advanced_logger, log_error,
     translate_text, get_user_translation_language,
-    safe_send_markdown
+    safe_send_markdown, encrypt_file_stream, decrypt_file_stream,
+    compress_backup, decompress_backup
 )
 from database import (
     db_pool, execute_db, db_get_channels, db_get_channel_info,
@@ -102,7 +107,8 @@ from database import (
     db_all_users_channels, db_register_channel, db_get_all_bot_channels,
     db_get_user_reminder_settings, db_update_reminder_settings,
     db_get_users_needing_reminder, db_update_last_reminder_sent,
-    db_get_subscription_days_left, db_get_auto_recycle
+    db_get_subscription_days_left, db_get_auto_recycle,
+    get_user_translation_language
 )
 from security import (
     check_nsfw_cached, check_nsfw_video, load_banned_words_from_file,
@@ -118,62 +124,6 @@ from security import (
 from web import ws_manager, ws_extended
 
 # ===================== دوال النسخ الاحتياطي =====================
-
-def encrypt_file_stream(src: Path, dst: Path, cipher: Fernet, chunk_size: int = 64*1024):
-    """تشفير ملف بشكل تدفقي"""
-    from cryptography.fernet import Fernet
-    with open(src, 'rb') as f_in, open(dst, 'wb') as f_out:
-        while True:
-            chunk = f_in.read(chunk_size)
-            if not chunk:
-                break
-            encrypted_chunk = cipher.encrypt(chunk)
-            f_out.write(encrypted_chunk)
-
-def decrypt_file_stream(src: Path, dst: Path, cipher: Fernet, chunk_size: int = 64*1024):
-    """فك تشفير ملف بشكل تدفقي"""
-    from cryptography.fernet import Fernet
-    with open(src, 'rb') as f_in, open(dst, 'wb') as f_out:
-        while True:
-            chunk = f_in.read(chunk_size)
-            if not chunk:
-                break
-            decrypted_chunk = cipher.decrypt(chunk)
-            f_out.write(decrypted_chunk)
-
-def encrypt_db_backup():
-    """تشفير قاعدة البيانات للنسخ الاحتياطي"""
-    from constants import DB_PATH, DB_ENCRYPTION, ENCRYPTION_KEY
-    from cryptography.fernet import Fernet
-    if not DB_ENCRYPTION:
-        return DB_PATH
-    cipher = Fernet(ENCRYPTION_KEY)
-    encrypted_path = DB_PATH.with_suffix('.enc')
-    encrypt_file_stream(DB_PATH, encrypted_path, cipher)
-    return encrypted_path
-
-def compress_backup(data: bytes) -> bytes:
-    """ضغط البيانات للنسخ الاحتياطي"""
-    from constants import ZSTD_AVAILABLE, ZSTD_COMPRESSOR
-    if ZSTD_AVAILABLE:
-        try:
-            return ZSTD_COMPRESSOR.compress(data)
-        except:
-            pass
-    import gzip
-    return gzip.compress(data)
-
-def decompress_backup(data: bytes) -> bytes:
-    """فك ضغط البيانات من النسخ الاحتياطي"""
-    from constants import ZSTD_AVAILABLE, ZSTD_DECOMPRESSOR
-    if ZSTD_AVAILABLE:
-        try:
-            return ZSTD_DECOMPRESSOR.decompress(data)
-        except:
-            pass
-    import gzip
-    return gzip.decompress(data)
-
 async def create_backup() -> Path:
     """إنشاء نسخة احتياطية كاملة"""
     try:
@@ -184,7 +134,6 @@ async def create_backup() -> Path:
         with open(temp_backup.name, 'rb') as f:
             backup_data = f.read()
         compressed = compress_backup(backup_data)
-        from constants import BACKUP_CIPHER, BACKUP_DIR
         encrypted = BACKUP_CIPHER.encrypt(compressed)
         backup_file = BACKUP_DIR / f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.enc"
         with open(backup_file, 'wb') as f:
@@ -212,7 +161,6 @@ async def restore_backup(backup_path: Path):
     """استعادة نسخة احتياطية"""
     if not backup_path.exists():
         raise FileNotFoundError(f"الملف {backup_path} غير موجود")
-    from constants import BACKUP_CIPHER, DB_PATH
     with open(backup_path, 'rb') as f:
         encrypted = f.read()
     try:
@@ -282,7 +230,6 @@ async def incremental_backup() -> Optional[Path]:
         if backup_data:
             data_json = json.dumps(backup_data, default=str)
             compressed = compress_backup(data_json.encode('utf-8'))
-            from constants import BACKUP_CIPHER, BACKUP_DIR
             encrypted = BACKUP_CIPHER.encrypt(compressed)
             backup_file = BACKUP_DIR / f"incremental_{mecca_now().strftime('%Y%m%d_%H%M%S')}.inc"
             with open(backup_file, 'wb') as f:
@@ -380,7 +327,6 @@ async def upload_backup_to_drive(backup_path: Path, max_retries: int = 3) -> Opt
         return None
 
 # ===================== حلقة النشر التلقائي =====================
-
 async def auto_publish_loop_improved(bot: Bot):
     """حلقة النشر التلقائي للمنشورات"""
     await asyncio.sleep(5)
@@ -519,7 +465,6 @@ async def auto_publish_loop_improved(bot: Bot):
             await asyncio.sleep(backoff)
 
 # ===================== حلقة المنشورات المجدولة =====================
-
 async def run_scheduled_posts_loop_improved(bot: Bot):
     """حلقة تنفيذ المنشورات المجدولة"""
     consecutive_errors = 0
@@ -551,7 +496,6 @@ async def run_scheduled_posts_loop_improved(bot: Bot):
             await asyncio.sleep(backoff)
 
 # ===================== حلقة التذكيرات والإشعارات =====================
-
 async def send_reminders_loop_improved(bot: Bot):
     """حلقة إرسال التذكيرات والإشعارات"""
     await asyncio.sleep(30)
@@ -654,7 +598,6 @@ async def weekly_reminder_task(bot: Bot):
             await asyncio.sleep(60)
 
 # ===================== حلقة النسخ الاحتياطي التلقائي =====================
-
 async def auto_backup_loop():
     """حلقة النسخ الاحتياطي التلقائي"""
     consecutive_errors = 0
@@ -686,7 +629,6 @@ async def auto_backup_loop():
             await asyncio.sleep(backoff)
 
 # ===================== حلقة تنظيف الجلسات والتذاكر =====================
-
 async def cleanup_expired_sessions_improved():
     """تنظيف الجلسات المنتهية والتذاكر القديمة"""
     CLEANUP_SLEEP = 3600
@@ -705,7 +647,6 @@ async def cleanup_expired_sessions_improved():
         advanced_logger.log_access(0, "CLEANUP_COMPLETED", {})
 
 # ===================== حلقة بث الإحصائيات عبر WebSocket =====================
-
 async def broadcast_stats_periodically():
     """بث الإحصائيات عبر WebSocket بشكل دوري"""
     while True:
@@ -724,7 +665,6 @@ async def broadcast_stats_periodically():
         })
 
 # ===================== حلقة إغلاق المسابقات تلقائياً =====================
-
 async def auto_close_contests_loop(bot: Bot):
     """إغلاق المسابقات المنتهية تلقائياً"""
     while True:
@@ -766,7 +706,6 @@ async def auto_close_contests_loop(bot: Bot):
             log_error(e, {"operation": "auto_close_contests_loop"})
 
 # ===================== حلقة مراقبة الذاكرة =====================
-
 async def memory_monitor():
     """مراقبة استخدام الذاكرة وتنظيفها تلقائياً"""
     while True:
@@ -783,7 +722,6 @@ async def memory_monitor():
             await asyncio.sleep(60)
 
 # ===================== حلقة النبض الداخلي (لـ Render) =====================
-
 async def self_ping_loop():
     """نبض داخلي للحفاظ على تشغيل البوت على Render"""
     await asyncio.sleep(10)
@@ -803,7 +741,6 @@ async def self_ping_loop():
         await asyncio.sleep(600)
 
 # ===================== دوال مساعدة =====================
-
 async def check_bot_permissions(bot, chat_id: int) -> tuple:
     """التحقق من صلاحيات البوت في القناة"""
     try:
@@ -825,3 +762,36 @@ async def cleanup_points_cache():
         to_delete = [uid for uid, (_, ts) in user_points_last_hour.items() if now - ts > 3600]
         for uid in to_delete:
             del user_points_last_hour[uid]
+
+# ===================== دوال التشفير الإضافية =====================
+def encrypt_db_backup():
+    """تشفير قاعدة البيانات للنسخ الاحتياطي"""
+    from constants import DB_ENCRYPTION, ENCRYPTION_KEY
+    if not DB_ENCRYPTION:
+        return DB_PATH
+    cipher = Fernet(ENCRYPTION_KEY)
+    encrypted_path = DB_PATH.with_suffix('.enc')
+    encrypt_file_stream(DB_PATH, encrypted_path, cipher)
+    return encrypted_path
+
+def compress_backup(data: bytes) -> bytes:
+    """ضغط البيانات للنسخ الاحتياطي"""
+    from constants import ZSTD_AVAILABLE, ZSTD_COMPRESSOR
+    if ZSTD_AVAILABLE:
+        try:
+            return ZSTD_COMPRESSOR.compress(data)
+        except:
+            pass
+    import gzip
+    return gzip.compress(data)
+
+def decompress_backup(data: bytes) -> bytes:
+    """فك ضغط البيانات من النسخ الاحتياطي"""
+    from constants import ZSTD_AVAILABLE, ZSTD_DECOMPRESSOR
+    if ZSTD_AVAILABLE:
+        try:
+            return ZSTD_DECOMPRESSOR.decompress(data)
+        except:
+            pass
+    import gzip
+    return gzip.decompress(data)

@@ -4,12 +4,18 @@
 """
 ثوابت وإعدادات عامة
 """
-import asyncio
+
 import os
 import sys
+import asyncio
+import secrets
+import json
 from pathlib import Path
 from enum import Enum, auto
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
 # ===================== التحقق من إصدار بايثون =====================
 def check_python_version():
     required_version = (3, 8)
@@ -34,17 +40,12 @@ TEMP_PATH = BASE_PATH / "temp"
 STATIC_PATH = BASE_PATH / "static"
 TEMPLATES_PATH = BASE_PATH / "templates"
 LANG_PATH = BASE_PATH / "lang"
-BASE_PATH = Path(__file__).parent.resolve()
-DATA_PATH = BASE_PATH / "data"
-DB_PATH = DATA_PATH / "bot_data.db"
-BACKUP_DIR = BASE_PATH / "backups"
-LOG_PATH = BASE_PATH / "logs" / "bot.log"
-BANNED_WORDS_FILE = BASE_PATH / "banned_words.txt"   # <-- أضف هذا السطر
+BANNED_WORDS_FILE = BASE_PATH / "banned_words.txt"
+
 for p in [DATA_PATH, BACKUP_DIR, LOG_PATH.parent, TEMP_PATH, STATIC_PATH, TEMPLATES_PATH, LANG_PATH]:
     p.mkdir(parents=True, exist_ok=True)
 
-# ===================== إعدادات البيئة =====================
-from dotenv import load_dotenv
+# ===================== تحميل متغيرات البيئة =====================
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -75,13 +76,11 @@ WEB_PORT = int(os.getenv("WEB_PORT", RENDER_PORT))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
 if not WEB_PASSWORD and os.getenv('ENVIRONMENT', 'development') == 'production':
-    import secrets
     WEB_PASSWORD = secrets.token_urlsafe(16)
     print(f"🔑 كلمة المرور المؤقتة: {WEB_PASSWORD}")
 WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
 WEB_SECRET_KEY = os.getenv("WEB_SECRET_KEY", "")
 if not WEB_SECRET_KEY:
-    import secrets
     WEB_SECRET_KEY = secrets.token_urlsafe(32)
 WEB_SESSION_TIMEOUT = int(os.getenv("WEB_SESSION_TIMEOUT", 3600))
 WEB_RATE_LIMIT = int(os.getenv("WEB_RATE_LIMIT", 100))
@@ -504,11 +503,11 @@ try:
 except ImportError:
     pass
 
-# ===================== متغيرات التخزين المؤقت =====================
+# ===================== متغيرات عامة =====================
+user_language = {}
+WEB_PORT_USED = WEB_PORT
 NSFW_CACHE = {}
 NSFW_CACHE_TTL = 300
 _NSFW_CACHE_LOCK = asyncio.Lock()
 user_points_last_hour = defaultdict(lambda: (0, 0.0))
-# ===================== متغيرات عامة =====================
-user_language = {}
-WEB_PORT_USED = WEB_PORT
+

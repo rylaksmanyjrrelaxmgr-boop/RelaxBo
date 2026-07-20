@@ -8,12 +8,24 @@
 import sqlite3
 import json
 import asyncio
+import hashlib
+import time as time_module
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Callable, Tuple
 from pathlib import Path
 
-from constants import DB_PATH, DB_TIMEOUT, MAX_CONNECTIONS, LEVEL_REQUIREMENTS, PRIMARY_OWNER_ID
-from utils import utc_now, utc_now_iso, safe_int, mecca_now, mecca_now_iso, to_naive, utc_to_mecca
+import aiosqlite
+
+from constants import (
+    DB_PATH, DB_TIMEOUT, MAX_CONNECTIONS, LEVEL_REQUIREMENTS,
+    PRIMARY_OWNER_ID, DEFAULT_PUBLISH_INTERVAL_SECONDS,
+    user_language
+)
+from utils import (
+    utc_now, utc_now_iso, safe_int, mecca_now, mecca_now_iso,
+    to_naive, utc_to_mecca, sanitize_text, parse_days_of_week_safe,
+    parse_dates_safe, log_error
+)
 
 # ===================== Pool اتصالات قاعدة البيانات =====================
 class DatabasePool:
@@ -25,7 +37,6 @@ class DatabasePool:
     async def initialize(self):
         async with self._lock:
             if self._pool is None:
-                import aiosqlite
                 self._pool = await aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT)
                 await self._pool.execute("PRAGMA journal_mode=WAL")
                 await self._pool.execute("PRAGMA synchronous=NORMAL")
@@ -142,6 +153,7 @@ async def db_activate_trial(user_id: int) -> int:
 async def db_activate_subscription(user_id: int, days: int):
     async def _activate(conn):
         cur = await conn.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
         current_end = None
         if row and row[0]:
             try:
@@ -475,18 +487,15 @@ async def db_get_user_groups(user_id: int):
             """
             cur = await conn.execute(query, (user_id, user_id, user_id))
             rows = await cur.fetchall()
-            
             hidden_admin_query = "SELECT chat_id FROM hidden_admins WHERE admin_id = ?"
             hidden_admin_cur = await conn.execute(hidden_admin_query, (user_id,))
             hidden_admin_chats = {row[0] for row in await hidden_admin_cur.fetchall()}
-            
             visible_groups = []
             for row in rows:
                 chat_id = row[0]
                 if chat_id in hidden_admin_chats:
                     continue
                 visible_groups.append(row)
-            
             return visible_groups
         except Exception as e:
             return []
@@ -1150,10 +1159,9 @@ async def db_mark_ticket_replied(ticket_id):
 async def db_delete_all_tickets() -> int:
     async def _delete(conn):
         await conn.execute("DELETE FROM support_tickets")
-        count = cur.rowcount
         await conn.execute("UPDATE settings SET value='0' WHERE key='last_ticket_number'")
         await conn.commit()
-        return count
+        return True
     return await execute_db(_delete)
 
 # ===================== دوال الإحالات =====================
@@ -1428,8 +1436,7 @@ async def get_user_translation_language(user_id: int) -> str:
         cur = await conn.execute("SELECT lang FROM user_translation WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
         return row[0] if row else 'off'
-    lang = await execute_db(_get)
-    return lang
+    return await execute_db(_get)
 
 async def set_user_translation_language(user_id: int, lang: str):
     async def _set(conn):
@@ -1684,19 +1691,13 @@ async def db_get_channel_stats_summary(user_id: int) -> dict:
 
 # ===================== دوال اللغة =====================
 async def set_user_language(user_id: int, lang: str):
-    from constants import user_language
     user_language[user_id] = lang
     async def _set(conn):
         await conn.execute("INSERT OR REPLACE INTO user_language (user_id, lang) VALUES (?, ?)", (user_id, lang))
         await conn.commit()
     await execute_db(_set)
 
-# ===================== دوال أخرى =====================
-async def cleanup_expired_sessions():
-    # يمكن تنفيذها في tasks.py
-    pass
-# ===================== تهيئة قاعدة البيانات =====================
-
+# ===================== دوال تهيئة قاعدة البيانات =====================
 async def init_db_improved():
     """تهيئة قاعدة البيانات مع جميع الجداول والفهارس والتحسينات"""
     import aiosqlite
@@ -2275,8 +2276,6 @@ async def init_db_improved():
         await conn.commit()
     
     # تهيئة pool الاتصالات
-    from database import db_pool
     await db_pool.initialize()
     
     print("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
-

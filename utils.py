@@ -23,7 +23,7 @@ from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from functools import lru_cache, wraps
 import urllib.parse
 from collections import defaultdict
-# استيراد المكتبات المطلوبة
+
 try:
     import bleach
 except ImportError:
@@ -33,11 +33,11 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 
-# من constants.py
 from constants import (
     ENCRYPTION_KEY, BACKUP_ENCRYPTION_KEY, DB_ENCRYPTION,
     DATA_PATH, TEMP_PATH, SECURITY_LOG, ERROR_LOG, ACCESS_LOG,
-    LOG_PATH, DB_PATH, SUPPORTED_LANGUAGES
+    LOG_PATH, DB_PATH, SUPPORTED_LANGUAGES, PRIMARY_OWNER_ID,
+    NSFW_CACHE, NSFW_CACHE_TTL, _NSFW_CACHE_LOCK, user_points_last_hour
 )
 
 # ===================== التهرب من علامات Markdown =====================
@@ -147,7 +147,6 @@ def decrypt_file_stream(src: Path, dst: Path, cipher: Fernet, chunk_size: int = 
 def encrypt_db_backup():
     if not DB_ENCRYPTION:
         return DB_PATH
-    from constants import ENCRYPTION_KEY
     cipher = Fernet(ENCRYPTION_KEY)
     encrypted_path = DB_PATH.with_suffix('.enc')
     encrypt_file_stream(DB_PATH, encrypted_path, cipher)
@@ -270,7 +269,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
         return _auth_cache[cache_key]
 
     authorized = False
-    # استيراد دوال قاعدة البيانات بشكل متأخر لتجنب الاعتماد الدائري
     from database import db_is_real_admin, db_is_hidden_owner, db_is_hidden_admin
     if await db_is_real_admin(chat_id, user_id):
         authorized = True
@@ -294,8 +292,7 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None):
         _auth_cache.clear()
 
 def invalidate_user_cache(user_id: int):
-    # إبطال ذاكرة التخزين المؤقت للمستخدم (مثل الكيبورد الرئيسي)
-    pass  # يمكن تنفيذها حسب الحاجة
+    pass
 
 # ===================== دوال الإرسال الآمنة =====================
 async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
@@ -411,7 +408,7 @@ async def safe_send_long_message(bot, chat_id: int, text: str, reply_markup=None
         await asyncio.sleep(0.5)
     return None
 
-# ===================== دوال أخرى (مترجم، إلخ) =====================
+# ===================== مترجم غير متزامن =====================
 class AsyncTranslator:
     def __init__(self):
         self.session = None
@@ -503,8 +500,6 @@ def security_keyboard(chat_id: int):
 def get_admin_keyboard(user_id: int):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     from constants import CallbackData
-    # هذه دالة ستستخدم get_text من نظام اللغات، سنستدعيها لاحقاً
-    # لكن سنبقيها هنا للهيكل
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 المستخدمين", callback_data=CallbackData.ADMIN_USERS),
          InlineKeyboardButton("🚫 المحظورين", callback_data=CallbackData.ADMIN_BANNED_USERS)],
@@ -668,12 +663,9 @@ async def check_database_health():
         return False
 
 async def check_telegram_health():
-    # سيتم تمرير bot لاحقاً
     return True
 
 # ===================== دوال تنظيف نقاط المستخدمين =====================
-user_points_last_hour = {}
-
 async def cleanup_points_cache():
     while True:
         await asyncio.sleep(3600)
@@ -708,7 +700,7 @@ async def check_bot_permissions(bot, chat_id: int) -> tuple:
     except:
         return False, "فشل التحقق من صلاحيات البوت"
 
-# ===================== دالة معالجة الأخطاء العالمية =====================
+# ===================== دوال معالجة الأخطاء =====================
 class AdvancedLogger:
     def __init__(self):
         self.loggers = {}
@@ -758,10 +750,7 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
-# ===================== دالة safe_int مكررة للتأكيد =====================
-# (موجودة بالفعل)
-
-# ===================== دوال إضافية =====================
+# ===================== دوال أخرى =====================
 def parse_days_of_week_safe(days_str: str) -> list:
     if not days_str:
         return []
@@ -784,16 +773,10 @@ def parse_dates_safe(dates_str: str) -> list:
     except:
         return []
 
-# ===================== دالة health_check_handler =====================
-async def health_check_handler(request):
-    from aiohttp import web
-    return web.json_response({'status': 'ok', 'version': '19.3.3'})
-
+# ===================== دوال التحقق من التشغيل الواحد =====================
 def check_single_instance():
-    """التحقق من عدم وجود نسخة أخرى من البوت تعمل"""
     try:
         import socket
-        from constants import TEMP_PATH
         sock_path = TEMP_PATH / "bot.sock"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -805,7 +788,6 @@ def check_single_instance():
     except Exception as e:
         print(f"⚠️ لا يمكن التحقق من التشغيل الواحد: {e}")
         return None
+
 # ===================== متغيرات NSFW المؤقتة =====================
-NSFW_CACHE = {}
-NSFW_CACHE_TTL = 300
-_NSFW_CACHE_LOCK = asyncio.Lock()
+# تم نقلها إلى constants.py بالفعل

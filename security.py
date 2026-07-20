@@ -15,19 +15,21 @@ import time as time_module
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from PIL import Image
 from collections import defaultdict
+from datetime import datetime, timedelta
+from PIL import Image
+
 from constants import (
     SIGHTENGINE_API_USER, SIGHTENGINE_API_SECRET,
     NSFW_ENABLED, NSFW_THRESHOLD, NSFW_MAX_FILE_SIZE,
     NSFW_MAX_VIDEO_SIZE, NSFW_FRAMES,
     CV2_AVAILABLE, ZSTD_AVAILABLE, PRIMARY_OWNER_ID,
-    BANNED_WORDS_FILE
+    BANNED_WORDS_FILE, NSFW_CACHE, NSFW_CACHE_TTL,
+    _NSFW_CACHE_LOCK
 )
 from utils import (
-    NSFW_CACHE, NSFW_CACHE_TTL, _NSFW_CACHE_LOCK,
     sanitize_text, safe_int, utc_now_iso, mecca_now,
-    log_error, advanced_logger
+    log_error, advanced_logger, utc_now
 )
 
 # ===================== استيراد cv2 و numpy بشكل آمن =====================

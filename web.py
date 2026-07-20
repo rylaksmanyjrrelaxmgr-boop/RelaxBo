@@ -31,7 +31,8 @@ from constants import (
     WEB_RATE_LIMIT, WEB_RATE_WINDOW,
     PRIMARY_OWNER_ID, BOT_NAME, BOT_USERNAME,
     TEMPLATES_PATH, STATIC_PATH, JINJA2_AVAILABLE,
-    TOKEN, DB_PATH, BACKUP_DIR, LOG_PATH
+    TOKEN, DB_PATH, BACKUP_DIR, LOG_PATH,
+    WEB_PORT_USED
 )
 from utils import (
     utc_now, mecca_now, utc_now_iso, safe_int,
@@ -199,7 +200,6 @@ ws_extended = WebSocketExtendedHandler()
 # ===================== إدارة الجلسات =====================
 
 WEB_SESSIONS = {}
-WEB_SESSION_TIMEOUT = WEB_SESSION_TIMEOUT
 WEB_RATE_LIMITS = defaultdict(list)
 
 def generate_session_id() -> str:
@@ -446,7 +446,7 @@ async def api_export_handler(request):
                 writer.writerow([user_id, ch_id, ch_tele, ch_name, banned])
             temp_file.write('\n')
         if export_type == 'groups' or export_type == 'all':
-            groups = await db_get_all_groups()
+            groups = await db_get_all_groups(only_banned=False, limit=1000)
             writer.writerow(['Chat ID', 'Chat Name', 'Username', 'Added By', 'Added At', 'Banned'])
             for chat_id, chat_name, username, added_by, added_at, banned in groups:
                 writer.writerow([chat_id, chat_name, username, added_by, added_at, banned])
@@ -526,7 +526,7 @@ async def api_channels_handler(request):
 async def api_groups_handler(request):
     """قائمة المجموعات"""
     try:
-        groups = await db_get_all_groups()
+        groups = await db_get_all_groups(only_banned=False, limit=1000)
         result = []
         for chat_id, chat_name, username, added_by, added_at, banned in groups:
             result.append({
@@ -814,8 +814,6 @@ async def start_web_server():
                 site = web.TCPSite(runner, WEB_HOST, port)
                 await site.start()
                 advanced_logger.log_access(0, "WEB_SERVER_STARTED", {"host": WEB_HOST, "port": port})
-                global WEB_PORT_USED
-                WEB_PORT_USED = port
                 return
             except OSError as e:
                 if "address already in use" in str(e):
@@ -825,5 +823,5 @@ async def start_web_server():
     except Exception as e:
         advanced_logger.log_error("فشل تشغيل خادم الويب", e)
 
-WEB_PORT_USED = WEB_PORT
-
+# ===================== استيراد asyncio للتشغيل =====================
+import asyncio

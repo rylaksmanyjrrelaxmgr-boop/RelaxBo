@@ -34,6 +34,7 @@ from utils import (
 from database import db_pool, init_db_improved
 from security import import_banned_words_on_startup
 from handlers import (
+    # أوامر
     start_command_handler, language_command_handler,
     syncgroup_command_handler, security_command_handler,
     register_hidden_owner_handler, add_hidden_admin_command,
@@ -50,7 +51,7 @@ from handlers import (
     track_chat_member, on_bot_added, filter_messages_handler,
     message_handler_main, global_error_handler,
     pre_checkout_callback_handler, successful_payment_callback_handler,
-    # جميع معالجات الكولباك
+    # كولباك
     main_menu_callback, back_callback, cancel_session_callback,
     add_channel_callback, my_channels_callback,
     delete_channel_callback, select_channel_callback,
@@ -112,20 +113,27 @@ from handlers import (
     channel_stats_callback, channel_growth_callback,
     channel_stats_refresh_callback, my_channel_stats_callback,
     check_subscribe_callback_handler,
-    admin_create_contest_callback, admin_declare_winner_callback,
-    admin_replies_callback, admin_banned_words_callback,
-    nsfw_settings_callback
+    admin_auto_reply_callback,
+    # دوال مؤقتة
+    sendcode_command_handler, admin_replies_callback,
+    admin_banned_words_callback, nsfw_settings_callback,
+    handle_contest_creation_states, handle_sendcode_confirmation_handler,
+    admin_auto_reply_callback
 )
 from tasks import (
     auto_publish_loop_improved, auto_backup_loop,
     run_scheduled_posts_loop_improved, send_reminders_loop_improved,
     cleanup_expired_sessions_improved, broadcast_stats_periodically,
     cleanup_points_cache, memory_monitor, auto_close_contests_loop,
-    self_ping_loop, start_web_server
+    self_ping_loop
 )
+from web import start_web_server
 
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, PreCheckoutQueryHandler, ChatMemberHandler
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, PreCheckoutQueryHandler, ChatMemberHandler
+)
 from telegram.request import HTTPXRequest
 import httpx
 
@@ -189,6 +197,7 @@ async def main():
     application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
     application.add_handler(CommandHandler("panel", panel_command_handler))
     application.add_handler(CommandHandler("set_log_channel", set_log_channel_command_handler))
+    application.add_handler(CommandHandler("sendcode", sendcode_command_handler))
     application.add_handler(CommandHandler("ban", handle_moderation_commands))
     application.add_handler(CommandHandler("mute", handle_moderation_commands))
     application.add_handler(CommandHandler("warn", handle_moderation_commands))
@@ -337,6 +346,20 @@ async def main():
     application.add_handler(CallbackQueryHandler(my_channel_stats_callback, pattern="^my_channel_stats$"))
     # الإشتراك الإجباري
     application.add_handler(CallbackQueryHandler(check_subscribe_callback_handler, pattern="^check_subscribe$"))
+    # إعدادات الردود التلقائية
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^admin_auto_reply$"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^admin_auto_reply_select:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_toggle:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_admins:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_reset:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_confirm_reset:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_cancel:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^auto_reply_stats:"))
+    application.add_handler(CallbackQueryHandler(admin_auto_reply_callback, pattern="^user_auto_reply_toggle:"))
+    # NSFW
+    application.add_handler(CallbackQueryHandler(nsfw_settings_callback, pattern="^nsfw_settings$"))
+    application.add_handler(CallbackQueryHandler(nsfw_settings_callback, pattern="^nsfw_toggle$"))
+    application.add_handler(CallbackQueryHandler(nsfw_settings_callback, pattern="^nsfw_threshold_set$"))
 
     # ========== معالجات الدفع ==========
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
@@ -393,6 +416,7 @@ async def main():
         BotCommand("set_rules", "تعيين قوانين المجموعة"),
         BotCommand("rules", "عرض قوانين المجموعة"),
         BotCommand("set_log_channel", "تعيين قناة التقارير"),
+        BotCommand("sendcode", "إرسال كود البوت"),
     ]
     await application.bot.set_my_commands(commands)
 

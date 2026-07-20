@@ -7,7 +7,6 @@
 
 import random
 
-# ===================== الردود =====================
 WELCOME_REPLIES = {
     "مرحباً": ["أهلاً وسهلاً بك في مجموعتنا 🤍", "أهلاً بك، نورت المجموعة 🌸", "مرحباً، تشرفنا بوجودك 🙏"],
     "السلام عليكم": ["وعليكم السلام ورحمة الله وبركاته 🌹", "وعليكم السلام، نورت المجموعة 🌸", "الله يبارك فيك 🙏"],
@@ -241,7 +240,6 @@ EXTRA_REPLIES = {
     "ياحلو": ["حلوك الله 🌸", "أنت الحلو 🌹", "حلو كلامك 🙏"]
 }
 
-# دمج جميع الردود في قاموس واحد
 ALL_REPLIES = {}
 for d in [WELCOME_REPLIES, FAQ_REPLIES, POSITIVE_REPLIES, RELIGIOUS_REPLIES,
           JOKE_REPLIES, MOTIVATIONAL_REPLIES, SOCIAL_REPLIES, ADMIN_REPLIES,
