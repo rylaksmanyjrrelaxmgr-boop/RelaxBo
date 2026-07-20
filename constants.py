@@ -510,4 +510,4 @@ NSFW_CACHE = {}
 NSFW_CACHE_TTL = 300
 _NSFW_CACHE_LOCK = asyncio.Lock()
 user_points_last_hour = defaultdict(lambda: (0, 0.0))
-
+ZSTD_COMPRESSOR = None
