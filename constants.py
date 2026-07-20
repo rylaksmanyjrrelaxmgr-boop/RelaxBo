@@ -34,7 +34,12 @@ TEMP_PATH = BASE_PATH / "temp"
 STATIC_PATH = BASE_PATH / "static"
 TEMPLATES_PATH = BASE_PATH / "templates"
 LANG_PATH = BASE_PATH / "lang"
-
+BASE_PATH = Path(__file__).parent.resolve()
+DATA_PATH = BASE_PATH / "data"
+DB_PATH = DATA_PATH / "bot_data.db"
+BACKUP_DIR = BASE_PATH / "backups"
+LOG_PATH = BASE_PATH / "logs" / "bot.log"
+BANNED_WORDS_FILE = BASE_PATH / "banned_words.txt"   # <-- أضف هذا السطر
 for p in [DATA_PATH, BACKUP_DIR, LOG_PATH.parent, TEMP_PATH, STATIC_PATH, TEMPLATES_PATH, LANG_PATH]:
     p.mkdir(parents=True, exist_ok=True)
 
