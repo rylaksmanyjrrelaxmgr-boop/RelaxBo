@@ -1695,3 +1695,588 @@ async def set_user_language(user_id: int, lang: str):
 async def cleanup_expired_sessions():
     # يمكن تنفيذها في tasks.py
     pass
+# ===================== تهيئة قاعدة البيانات =====================
+
+async def init_db_improved():
+    """تهيئة قاعدة البيانات مع جميع الجداول والفهارس والتحسينات"""
+    import aiosqlite
+    from constants import DB_PATH, DB_TIMEOUT, PRIMARY_OWNER_ID, DEFAULT_PUBLISH_INTERVAL_SECONDS
+    from utils import utc_now_iso
+    
+    async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA cache_size=-64000")
+        await conn.execute("PRAGMA temp_store=MEMORY")
+        await conn.execute("PRAGMA wal_autocheckpoint=1000")
+        await conn.execute("PRAGMA optimize")
+        await conn.execute("PRAGMA max_page_count=1000000")
+        await conn.execute("PRAGMA secure_delete=ON")
+
+        # ========== إنشاء الجداول ==========
+        
+        # جدول المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                auto_publish INTEGER DEFAULT 1,
+                banned INTEGER DEFAULT 0,
+                trial_used INTEGER DEFAULT 0,
+                subscription_end TEXT DEFAULT NULL,
+                referral_code TEXT DEFAULT NULL,
+                referred_by INTEGER DEFAULT NULL,
+                active_channel INTEGER DEFAULT NULL,
+                auto_reply_enabled INTEGER DEFAULT 1,
+                auto_recycle INTEGER DEFAULT 1,
+                last_daily_reward TEXT DEFAULT NULL,
+                last_weekly_reward TEXT DEFAULT NULL,
+                achievements TEXT DEFAULT '[]'
+            )
+        """)
+        
+        # جدول قنوات المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                channel_id TEXT,
+                channel_name TEXT,
+                created_at TIMESTAMP,
+                banned INTEGER DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+        """)
+        
+        # جدول المنشورات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_db_id INTEGER,
+                text TEXT,
+                media_type TEXT DEFAULT 'text',
+                media_file_id TEXT,
+                published INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                views_count INTEGER DEFAULT 0,
+                last_view_time TIMESTAMP,
+                created_at TIMESTAMP,
+                FOREIGN KEY(channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        
+        # جدول الإعدادات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        
+        # جدول ردود المجموعة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_replies (
+                keyword TEXT PRIMARY KEY,
+                reply TEXT
+            )
+        """)
+        
+        # جدول أمان المجموعة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_security (
+                chat_id INTEGER PRIMARY KEY,
+                delete_links INTEGER DEFAULT 0,
+                delete_mentions INTEGER DEFAULT 0,
+                warn_message INTEGER DEFAULT 1,
+                slow_mode INTEGER DEFAULT 0,
+                slow_mode_seconds INTEGER DEFAULT 5,
+                welcome_enabled INTEGER DEFAULT 0,
+                welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+                goodbye_enabled INTEGER DEFAULT 0,
+                goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+                delete_banned_words INTEGER DEFAULT 0,
+                auto_penalty TEXT DEFAULT 'none',
+                auto_mute_duration INTEGER DEFAULT 60,
+                delete_stickers INTEGER DEFAULT 0,
+                delete_videos INTEGER DEFAULT 0,
+                delete_service_messages INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول إعدادات المجموعة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_settings (
+                chat_id INTEGER PRIMARY KEY,
+                anti_links INTEGER DEFAULT 0,
+                anti_badwords INTEGER DEFAULT 0,
+                welcome_msg INTEGER DEFAULT 1,
+                mute_all INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول مشرفي البوت
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER PRIMARY KEY
+            )
+        """)
+        
+        # جدول مجموعات البوت
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id INTEGER PRIMARY KEY,
+                chat_name TEXT,
+                username TEXT,
+                added_by INTEGER,
+                added_at TIMESTAMP,
+                banned INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول قنوات البوت
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_channels (
+                channel_id INTEGER PRIMARY KEY,
+                channel_name TEXT,
+                added_by INTEGER,
+                added_at TIMESTAMP,
+                banned INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول رسائل المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id INTEGER,
+                chat_id INTEGER,
+                message_time TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        
+        # جدول كاش المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users_cache (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_updated TEXT
+            )
+        """)
+        
+        # جدول تحذيرات المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id INTEGER,
+                chat_id INTEGER,
+                warnings INTEGER DEFAULT 0,
+                PRIMARY KEY(user_id, chat_id)
+            )
+        """)
+        
+        # جدول الكلمات المحظورة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT,
+                chat_id INTEGER,
+                added_by INTEGER,
+                added_at TIMESTAMP,
+                UNIQUE(word, chat_id)
+            )
+        """)
+        
+        # جدول المالكين المخفيين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+                chat_id INTEGER PRIMARY KEY,
+                owner_id INTEGER,
+                is_hidden INTEGER DEFAULT 1
+            )
+        """)
+        
+        # جدول المشرفين المخفيين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                added_by INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, admin_id)
+            )
+        """)
+        
+        # جدول رابط المستخدمين بالمجموعات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id INTEGER,
+                chat_id INTEGER,
+                PRIMARY KEY(user_id, chat_id)
+            )
+        """)
+        
+        # جدول مشرفي المجموعة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
+        
+        # جدول مستويات المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_levels (
+                user_id INTEGER PRIMARY KEY,
+                points INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1
+            )
+        """)
+        
+        # جدول تذاكر الدعم
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                message TEXT,
+                ticket_number INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP,
+                replied INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول قفل المجموعات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id INTEGER PRIMARY KEY,
+                locked INTEGER DEFAULT 0,
+                locked_at TIMESTAMP,
+                locked_by INTEGER
+            )
+        """)
+        
+        # جدول الجدولة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                channel_db_id INTEGER PRIMARY KEY,
+                schedule_type TEXT DEFAULT 'interval_minutes',
+                interval_minutes INTEGER DEFAULT 12,
+                interval_hours INTEGER DEFAULT 0,
+                interval_days INTEGER DEFAULT 0,
+                days_of_week TEXT DEFAULT '',
+                specific_dates TEXT DEFAULT '',
+                publish_time TEXT DEFAULT '00:00',
+                cron_expression TEXT DEFAULT NULL,
+                next_publish_date TEXT,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        
+        # جدول آخر نشر
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS last_publish (
+                channel_db_id INTEGER PRIMARY KEY,
+                last_publish_time TIMESTAMP,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        
+        # جدول المنشورات المجدولة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                publish_time TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                fail_count INTEGER DEFAULT 0
+            )
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_posts(publish_time)")
+        
+        # جدول مستخدم /sendcode
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_sendcode_user (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                user_id INTEGER
+            )
+        """)
+        
+        # جدول الإحالات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER NOT NULL,
+                referred_id INTEGER NOT NULL,
+                referred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_rewarded INTEGER DEFAULT 0,
+                UNIQUE(referred_id)
+            )
+        """)
+        
+        # جدول مكافآت الإحالات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                user_id INTEGER PRIMARY KEY,
+                referral_count INTEGER DEFAULT 0,
+                total_reward_days INTEGER DEFAULT 0,
+                claimed_reward_days INTEGER DEFAULT 0
+            )
+        """)
+        
+        # جدول إعدادات الإحالات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        
+        # جدول إعدادات التذكيرات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reminder_settings (
+                user_id INTEGER PRIMARY KEY,
+                subscription_reminder INTEGER DEFAULT 1,
+                daily_stats_reminder INTEGER DEFAULT 0,
+                weekly_report INTEGER DEFAULT 1,
+                reminder_days_before INTEGER DEFAULT 3,
+                last_reminder_sent INTEGER DEFAULT 0,
+                notification_lang TEXT DEFAULT 'ar'
+            )
+        """)
+        
+        # جدول سجل الإجراءات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS moderation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                user_id INTEGER,
+                action TEXT,
+                duration_minutes INTEGER,
+                moderator_id INTEGER,
+                reason TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        
+        # جدول ترجمة المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_translation (
+                user_id INTEGER PRIMARY KEY,
+                lang TEXT DEFAULT 'off'
+            )
+        """)
+        
+        # جدول إحصائيات القنوات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_db_id INTEGER NOT NULL,
+                total_posts INTEGER DEFAULT 0,
+                published_posts INTEGER DEFAULT 0,
+                unpublished_posts INTEGER DEFAULT 0,
+                total_views INTEGER DEFAULT 0,
+                avg_views_per_post REAL DEFAULT 0,
+                last_post_time TIMESTAMP,
+                avg_time_between_posts REAL DEFAULT 0,
+                best_publish_hour INTEGER DEFAULT 0,
+                best_publish_day INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
+                UNIQUE(channel_db_id)
+            )
+        """)
+        
+        # جدول جلسات الويب
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_data TEXT,
+                expires INTEGER
+            )
+        """)
+        
+        # جدول المسابقات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER,
+                title TEXT,
+                description TEXT,
+                prize TEXT,
+                end_date TEXT,
+                status TEXT DEFAULT 'active',
+                winner_id INTEGER,
+                created_at TIMESTAMP,
+                contest_type TEXT DEFAULT 'raffle'
+            )
+        """)
+        
+        # جدول مشاركي المسابقات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                contest_id INTEGER,
+                answer TEXT,
+                joined_at TIMESTAMP,
+                UNIQUE(user_id, contest_id)
+            )
+        """)
+        
+        # جدول فائزي المسابقات
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contest_id INTEGER,
+                winner_id INTEGER,
+                announced_at TIMESTAMP
+            )
+        """)
+        
+        # جدول إعدادات الردود التلقائية
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                only_admins INTEGER DEFAULT 0,
+                ignore_bots INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # جدول قوانين المجموعة
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id INTEGER PRIMARY KEY,
+                rules_text TEXT,
+                set_by INTEGER,
+                set_at TIMESTAMP
+            )
+        """)
+        
+        # جدول لغة المستخدمين
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_language (
+                user_id INTEGER PRIMARY KEY,
+                lang TEXT DEFAULT 'ar'
+            )
+        """)
+        
+        # ========== إنشاء الفهارس ==========
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule(next_publish_date)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id, word)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_messages_time ON user_messages(message_time)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, published, fail_count)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_points ON user_levels(points DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_chat ON moderation_log(chat_id, created_at)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats ON channel_stats(channel_db_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_views ON posts(views_count)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_published_views ON posts(published, views_count)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_contests_active ON contests(status, end_date)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_admins_chat ON hidden_admins(chat_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_cron ON schedule(cron_expression)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_daily ON users(last_daily_reward)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_rules_chat ON group_rules(chat_id)")
+
+        # ========== تحديث الجداول القديمة ==========
+        try:
+            cursor = await conn.execute("PRAGMA table_info(group_security)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'auto_penalty' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_penalty TEXT DEFAULT 'none'")
+            if 'auto_mute_duration' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_mute_duration INTEGER DEFAULT 60")
+            if 'delete_stickers' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_stickers INTEGER DEFAULT 0")
+            if 'delete_videos' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_videos INTEGER DEFAULT 0")
+            if 'delete_service_messages' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_service_messages INTEGER DEFAULT 0")
+        except Exception as e:
+            print(f"خطأ في تحديث group_security: {e}")
+
+        try:
+            cursor = await conn.execute("PRAGMA table_info(users)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'active_channel' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN active_channel INTEGER DEFAULT NULL")
+            if 'referral_code' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT NULL")
+            if 'auto_reply_enabled' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN auto_reply_enabled INTEGER DEFAULT 1")
+            if 'auto_recycle' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN auto_recycle INTEGER DEFAULT 1")
+            if 'last_daily_reward' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN last_daily_reward TEXT DEFAULT NULL")
+            if 'last_weekly_reward' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN last_weekly_reward TEXT DEFAULT NULL")
+            if 'achievements' not in column_names:
+                await conn.execute("ALTER TABLE users ADD COLUMN achievements TEXT DEFAULT '[]'")
+        except Exception as e:
+            print(f"خطأ في تحديث users: {e}")
+
+        try:
+            cursor = await conn.execute("PRAGMA table_info(posts)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'views_count' not in column_names:
+                await conn.execute("ALTER TABLE posts ADD COLUMN views_count INTEGER DEFAULT 0")
+            if 'last_view_time' not in column_names:
+                await conn.execute("ALTER TABLE posts ADD COLUMN last_view_time TIMESTAMP")
+        except Exception as e:
+            print(f"خطأ في تحديث posts: {e}")
+
+        try:
+            cursor = await conn.execute("PRAGMA table_info(contests)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'contest_type' not in column_names:
+                await conn.execute("ALTER TABLE contests ADD COLUMN contest_type TEXT DEFAULT 'raffle'")
+        except Exception as e:
+            print(f"خطأ في تحديث contests: {e}")
+
+        try:
+            cursor = await conn.execute("PRAGMA table_info(schedule)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            if 'cron_expression' not in column_names:
+                await conn.execute("ALTER TABLE schedule ADD COLUMN cron_expression TEXT DEFAULT NULL")
+        except Exception as e:
+            print(f"خطأ في تحديث schedule: {e}")
+
+        # ========== البيانات الافتراضية ==========
+        await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (PRIMARY_OWNER_ID,))
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('updates_channel', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_enabled', '0')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_channel', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_backup', '1')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_backup', '')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('log_channel_id', '')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('reward_days_per_referral', '3')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('referral_bonus_points', '50')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('max_referrals_per_day', '5')")
+        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('welcome_bonus_points', '10')")
+        await conn.commit()
+    
+    # تهيئة pool الاتصالات
+    from database import db_pool
+    await db_pool.initialize()
+    
+    print("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
+
