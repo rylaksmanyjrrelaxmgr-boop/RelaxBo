@@ -3,6 +3,7 @@
 
 """
 نظام الأمان المتقدم – نسخة نهائية متوافقة
+- تمت إضافة import_banned_words_from_file
 """
 
 import io, hashlib, base64, tempfile, os, asyncio, time as time_module, re, json, logging
@@ -272,6 +273,15 @@ async def import_banned_words_to_db(conn, words: List[str], added_by: int = None
     except: pass
     return imported
 
+# الدالة المطلوبة لـ handlers.py
+async def import_banned_words_from_file() -> None:
+    """تحميل الكلمات المحظورة من الملف واستيرادها إلى قاعدة البيانات."""
+    from database import execute_db
+    words = load_banned_words_from_file(BANNED_WORDS_FILE)
+    if words:
+        async def _import(conn): return await import_banned_words_to_db(conn, words, PRIMARY_OWNER_ID)
+        await execute_db(_import)
+
 async def check_banned_words(text: str, db_conn=None) -> Tuple[bool, Optional[str]]:
     if not text: return False, None
     async with BANNED_PATTERNS_LOCK:
@@ -388,16 +398,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, settings: dict, reason:
     if penalty == 'warn': return await execute_warn(bot, chat_id, user_id, reason=reason, auto_ban_limit=settings.get('auto_ban_limit',3))
     return False, "لا توجد عقوبة"
 
-def contains_link(text: str) -> bool:
-    if not text: return False
-    patterns = [r'https?://[^\s]+', r'www\.[a-zA-Z0-9][^\s]*\.[a-zA-Z]{2,}[^\s]*', r'[a-zA-Z0-9][^\s]*\.(com|net|org|io|gov|edu|me|info|xyz|online|site|store|web|co|uk|de|fr|ru|ir|sa|ae|eg)/[^\s]*']
-    for p in patterns:
-        if re.search(p, text, re.IGNORECASE): return True
-    return False
-
-def contains_mention(text: str) -> bool:
-    return bool(re.search(r'@\w{5,}', text)) if text else False
-
 async def get_moderation_log(chat_id: int, limit: int = 20, action_filter: Optional[str] = None) -> str:
     from database import execute_db
     from utils import utc_to_mecca
@@ -417,12 +417,8 @@ async def get_moderation_log(chat_id: int, limit: int = 20, action_filter: Optio
     except Exception as e: return f"❌ خطأ: {e}"
 
 async def import_banned_words_on_startup():
-    from database import execute_db
-    words = load_banned_words_from_file(BANNED_WORDS_FILE)
-    if words:
-        async def _import(conn): return await import_banned_words_to_db(conn, words, PRIMARY_OWNER_ID)
-        await execute_db(_import)
     asyncio.create_task(nsfw_cache_cleanup_task())
+    await import_banned_words_from_file()
 
 def is_nsfw_enabled() -> bool: return NSFW_ENABLED
 def get_nsfw_threshold() -> float: return NSFW_THRESHOLD
