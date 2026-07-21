@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-الملف الرئيسي لتشغيل البوت - النسخة النهائية المُحسَّنة
-- متوافق مع BackgroundTaskManager
-- متوافق مع handlers.py الكامل
-- معالجة check_single_instance على جميع الأنظمة
-- دمج الرسائل الخاصة مع إنشاء المسابقات
-"""
-
-import asyncio
-import os
-import sys
-import traceback
+import asyncio, os, sys, traceback
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent))
 
 from constants import (
@@ -31,7 +19,6 @@ from utils import (
 from database import db, init_db_improved
 from security import import_banned_words_on_startup
 from handlers import (
-    # الأوامر
     start_command_handler, language_command_handler,
     syncgroup_command_handler, security_command_handler,
     register_hidden_owner_handler, add_hidden_admin_command,
@@ -48,7 +35,6 @@ from handlers import (
     track_chat_member, on_bot_added, filter_messages_handler,
     message_handler_main, global_error_handler,
     pre_checkout_callback_handler, successful_payment_callback_handler,
-    # الكولباك
     main_menu_callback, back_callback, cancel_session_callback,
     add_channel_callback, my_channels_callback,
     delete_channel_callback, select_channel_callback,
@@ -111,9 +97,7 @@ from handlers import (
     channel_stats_refresh_callback, my_channel_stats_callback,
     check_subscribe_callback_handler,
     admin_auto_reply_callback,
-    # دوال إنشاء المسابقات (سيتم استدعاؤها من داخل private_message_router)
     handle_contest_creation_states,
-    # دوال أخرى
     sendcode_command_handler, admin_replies_callback,
     admin_banned_words_callback, nsfw_settings_callback,
     handle_sendcode_confirmation_handler
@@ -128,14 +112,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-
-# ===================== دالة وسيطة لمعالج الرسائل الخاصة =====================
 async def private_message_router(update, context):
-    """
-    معالج موحّد للرسائل الخاصة:
-    - إذا كان المستخدم في جلسة إنشاء مسابقة، يتم توجيهه إلى handle_contest_creation_states
-    - وإلا يتم توجيهه إلى message_handler_main
-    """
     try:
         from database import db_is_creating_contest
         user_id = update.effective_user.id
@@ -144,44 +121,21 @@ async def private_message_router(update, context):
     except (ImportError, AttributeError):
         if context.user_data.get("creating_contest"):
             return await handle_contest_creation_states(update, context)
-
     return await message_handler_main(update, context)
 
-
-# ===================== الدالة الرئيسية =====================
-
 async def main():
-    """تشغيل البوت"""
-    # تهيئة قاعدة البيانات واستيراد الكلمات المحظورة
     await init_db_improved()
     await import_banned_words_on_startup()
-
-    # تهيئة قفل NSFW
     get_nsfw_lock()
 
-    # إعداد طلبات HTTP
     if USE_PROXY:
-        request = HTTPXRequest(
-            proxy_url=PROXY_URL,
-            read_timeout=60.0,
-            write_timeout=30.0,
-            connect_timeout=30.0,
-            pool_timeout=10.0,
-            connection_pool_size=MAX_CONNECTIONS
-        )
+        request = HTTPXRequest(proxy_url=PROXY_URL, read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
     else:
-        request = HTTPXRequest(
-            read_timeout=60.0,
-            write_timeout=30.0,
-            connect_timeout=30.0,
-            pool_timeout=10.0,
-            connection_pool_size=MAX_CONNECTIONS
-        )
+        request = HTTPXRequest(read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
 
     application = Application.builder().token(TOKEN).request(request).build()
     application.add_error_handler(global_error_handler)
 
-    # ========== الأوامر ==========
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -218,7 +172,6 @@ async def main():
     application.add_handler(CommandHandler("set_rules", set_rules_command_handler))
     application.add_handler(CommandHandler("rules", rules_command_handler))
 
-    # ========== الكولباك ==========
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
@@ -344,21 +297,13 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_banned_words_callback, pattern="^admin_banned_words:"))
     application.add_handler(CallbackQueryHandler(handle_sendcode_confirmation_handler, pattern="^sendcode_confirm:"))
 
-    # ========== الدفع ==========
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
-
-    # ========== المجموعات والأعضاء ==========
     application.add_handler(ChatMemberHandler(track_chat_add, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added))
-
-    # ========== الرسائل ==========
-    # المجموعات
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
     application.add_handler(MessageHandler(filters.CAPTION & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
-
-    # الخاص (مع دمج إنشاء المسابقات)
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, private_message_router))
     application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, private_message_router))
@@ -366,7 +311,6 @@ async def main():
     application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, private_message_router))
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, private_message_router))
 
-    # ========== قائمة الأوامر ==========
     commands = [
         BotCommand("start", "بدء البوت"),
         BotCommand("trial", "تجربة مجانية"),
@@ -406,39 +350,22 @@ async def main():
     ]
     await application.bot.set_my_commands(commands)
 
-    # ========== مهام الخلفية وخادم الويب ==========
     task_manager = BackgroundTaskManager(application.bot)
     await task_manager.start_all()
     asyncio.create_task(start_web_server())
 
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
-    print("✅ جميع الملفات تم تحميلها بنجاح")
-    print("📡 جاري تشغيل البوت...")
-
     try:
-        await application.run_polling(
-            drop_pending_updates=True,
-            poll_interval=POLL_INTERVAL
-        )
-    except asyncio.CancelledError:
-        advanced_logger.log_access(0, "BOT_CANCELLED", {})
-    except KeyboardInterrupt:
-        advanced_logger.log_access(0, "BOT_STOPPED_BY_USER", {})
+        await application.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
     finally:
-        advanced_logger.log_access(0, "BOT_SHUTDOWN", {})
         await task_manager.stop_all()
         await db.close()
-
-
-# ===================== نقطة الدخول =====================
 
 if __name__ == "__main__":
     try:
         lock_socket = check_single_instance()
         if lock_socket is False:
-            print("❌ البوت يعمل بالفعل!")
-            sys.exit(1)
-
+            print("❌ البوت يعمل بالفعل!"); sys.exit(1)
         os.environ["WEB_CONCURRENCY"] = "1"
         asyncio.run(main())
     except KeyboardInterrupt:
