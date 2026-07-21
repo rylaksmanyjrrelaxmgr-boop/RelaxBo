@@ -233,6 +233,12 @@ async def health_check_handler(request):
         return web.json_response({'status':'ok' if db_ok and tg_ok else 'degraded','version':'19.3.3'})
     except: return web.json_response({'error':'حدث خطأ داخلي'}, status=500)
 
+async def api_charts_handler(request):
+    try:
+        return web.json_response({"user_growth":{"labels":[],"data":[]},"posts_distribution":{"published":0,"unpublished":0}})
+    except:
+        return web.json_response({"error":"حدث خطأ داخلي"}, status=500)
+
 async def api_stats_handler(request):
     try:
         total, banned, posts, groups, channels = await db_stats()
