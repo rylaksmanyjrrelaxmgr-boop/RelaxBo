@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-المهام الخلفية - الإصدار النهائي
+المهام الخلفية – إصدار خالٍ من SyntaxError
 """
 
 import asyncio, json, logging, os, random, shutil, sqlite3, sys, tempfile, time as time_module
@@ -111,7 +111,6 @@ class BackgroundTaskManager:
 
     async def start_all(self):
         if self._tasks: return
-        logger.info("بدء تشغيل المهام الخلفية...")
         task_definitions = [
             ('auto_publish', self._auto_publish_loop), ('scheduled_posts', self._scheduled_posts_loop),
             ('reminders', self._reminders_loop), ('daily_reports', self._daily_report_loop),
@@ -123,7 +122,6 @@ class BackgroundTaskManager:
         for name, coro_func in task_definitions:
             event = asyncio.Event(); self._stop_events[name] = event; self._error_counts[name] = 0
             self._tasks[name] = asyncio.create_task(self._run_with_error_tracking(name, coro_func, event))
-        logger.info(f"تم بدء {len(self._tasks)} مهمة")
 
     async def stop_all(self):
         if not self._tasks: return
@@ -316,7 +314,6 @@ class BackgroundTaskManager:
             path = BACKUP_DIR / f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.enc"
             with open(path,'wb') as f: f.write(encrypted)
             await self._cleanup_old_backups()
-            logger.info(f"نسخة احتياطية كاملة: {path.name}")
             return path
         except Exception as e: log_error(e, {"operation":"create_full_backup"}); raise
         finally:
@@ -341,7 +338,6 @@ class BackgroundTaskManager:
             encrypted = BACKUP_CIPHER.encrypt(compressed)
             path = BACKUP_DIR / f"incremental_{mecca_now().strftime('%Y%m%d_%H%M%S')}.inc"
             with open(path,'wb') as f: f.write(encrypted)
-            logger.info(f"نسخة تزايدية: {path.name}")
             return path
         except Exception as e: log_error(e, {"operation":"create_incremental_backup"}); return None
 
@@ -354,7 +350,7 @@ class BackgroundTaskManager:
             limit = MAX_BACKUP_SIZE_MB * 1024 * 1024
             while total > limit and len(backups)>1:
                 old = backups.pop(); total -= old.stat().st_size; old.unlink(missing_ok=True)
-        except Exception as e: logger.warning(f"خطأ في تنظيف النسخ القديمة: {e}")
+        except: pass
 
     async def _cleanup_loop(self, stop_event):
         while not stop_event.is_set():
@@ -382,7 +378,10 @@ class BackgroundTaskManager:
 
     async def _contests_loop(self, stop_event):
         while not stop_event.is_set():
-            expired = await execute_db(lambda conn: [r[0] for r in (await conn.execute(_SQL_GET_EXPIRED_CONTESTS, (utc_now().isoformat(),))).fetchall()])
+            async def _get_expired(conn):
+                cur = await conn.execute(_SQL_GET_EXPIRED_CONTESTS, (utc_now().isoformat(),))
+                return [r[0] for r in await cur.fetchall()]
+            expired = await execute_db(_get_expired)
             for cid in expired:
                 winner = await db_get_random_participant(cid)
                 if winner:
