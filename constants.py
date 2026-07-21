@@ -353,3 +353,4 @@ async def send_web_password_to_owner(bot):
                 f"🌐 رابط لوحة التحكم: http://{WEB_HOST}:{WEB_PORT}\n"
                 f"👤 اسم المستخدم: {WEB_USERNAME}", parse_mode="Markdown")
         except: pass
+WEB_PORT = get_env_int("WEB_PORT", 10000)
