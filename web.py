@@ -155,6 +155,8 @@ class WebSocketHub:
         return ws
 
 ws_hub = WebSocketHub()
+ws_manager = ws_hub
+ws_extended = ws_hub
 ws_extended = ws_hub
 
 @web.middleware
