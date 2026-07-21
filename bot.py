@@ -362,6 +362,7 @@ async def main():
         await db.close()
 
 
+
 if __name__ == "__main__":
     try:
         lock_socket = check_single_instance()
@@ -369,7 +370,12 @@ if __name__ == "__main__":
             print("❌ البوت يعمل بالفعل!")
             sys.exit(1)
         os.environ["WEB_CONCURRENCY"] = "1"
-        asyncio.run(main())
+        
+        # استخدام الحلقة الحالية بدلاً من إنشاء حلقة جديدة
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
+        
     except KeyboardInterrupt:
         print("🛑 تم إيقاف البوت")
     except Exception as e:
