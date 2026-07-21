@@ -22,7 +22,7 @@ from constants import (
     USE_PROXY, PROXY_URL, MAX_CONNECTIONS,
     POLL_INTERVAL, WEB_HOST, WEB_PORT,
     BATTERY_SAVER_MODE, LOG_PATH, ERROR_LOG,
-    init_nsfw_lock
+    get_nsfw_lock
 )
 from utils import (
     advanced_logger, log_error, memory_optimizer,
@@ -157,7 +157,7 @@ async def main():
     await import_banned_words_on_startup()
 
     # تهيئة قفل NSFW
-    init_nsfw_lock()
+    get_nsfw_lock()
 
     # إعداد طلبات HTTP
     if USE_PROXY:
