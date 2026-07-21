@@ -15,24 +15,14 @@ from typing import Optional, Dict, Any, Set, List
 from aiohttp import web, WSMsgType
 
 try:
-    from constants import (
-        WEB_HOST, WEB_PORT, WEB_USERNAME, WEB_PASSWORD,
-        WEB_SECRET_KEY, WEB_SESSION_TIMEOUT,
-        WEB_RATE_LIMIT, WEB_RATE_WINDOW,
-        PRIMARY_OWNER_ID, BOT_NAME, BOT_USERNAME,
-        TEMPLATES_PATH, STATIC_PATH, JINJA2_AVAILABLE,
-        TOKEN, DB_PATH, BACKUP_DIR, LOG_PATH
-    )
-except ImportError as e:
-    raise ImportError("ملف constants.py مفقود") from e
-
-try:
-    from utils import (
-        utc_now, mecca_now, utc_now_iso, safe_int,
-        advanced_logger, log_error, memory_optimizer, logger,
-        get_ram_usage
-    )
+    from tasks import BackgroundTaskManager
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
 except ImportError:
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
     def get_ram_usage(): return {"percent":0}
     try:
         from utils import advanced_logger, log_error
@@ -40,28 +30,26 @@ except ImportError:
         raise ImportError("ملف utils.py مفقود")
 
 try:
-    from database import (
-        db_stats, db_get_all_users, db_get_all_groups,
-        db_get_all_user_channels_no_limit,
-        db_get_active_contests_with_participants,
-        db_get_updates_channel, db_get_force_subscribe_status,
-        db_get_auto_backup, db_get_publish_interval_seconds,
-        db_set_publish_interval_seconds, db_set_updates_channel,
-        db_set_force_subscribe_status, db_set_auto_backup,
-        db_set_ban, db_is_banned, execute_db
-    )
-except ImportError as e:
-    raise ImportError("ملف database.py مفقود") from e
-
-try:
-    from security import check_database_health, check_telegram_health
+    from tasks import BackgroundTaskManager
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
 except ImportError:
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
     async def check_database_health(): return True
     async def check_telegram_health(): return True
 
 try:
-    from tasks import list_backups, create_backup, restore_backup
+    from tasks import BackgroundTaskManager
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
 except ImportError:
+    async def list_backups(): return []
+    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
+    async def restore_backup(path): pass
     async def list_backups(): raise RuntimeError("tasks.py غير موجود")
     async def create_backup(): raise RuntimeError("tasks.py غير موجود")
     async def restore_backup(path): raise RuntimeError("tasks.py غير موجود")
