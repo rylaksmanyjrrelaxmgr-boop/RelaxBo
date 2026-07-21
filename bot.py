@@ -18,90 +18,7 @@ from utils import (
 )
 from database import db, init_db_improved
 from security import import_banned_words_on_startup
-from handlers import (
-    start_command_handler, language_command_handler,
-    syncgroup_command_handler, security_command_handler,
-    register_hidden_owner_handler, add_hidden_admin_command,
-    remove_hidden_admin_command, list_hidden_admins_command,
-    trial_command_handler, subscribe_command_handler,
-    help_command_handler, support_command_handler,
-    rank_command_handler, top_command_handler,
-    developer_command_handler, updates_command_handler,
-    stats_command_handler, lock_chat_command_handler,
-    unlock_chat_command_handler, panel_command_handler,
-    schedule_post_command_handler, set_log_channel_command_handler,
-    set_rules_command_handler, rules_command_handler,
-    handle_moderation_commands, track_chat_add,
-    track_chat_member, on_bot_added, filter_messages_handler,
-    message_handler_main, global_error_handler,
-    pre_checkout_callback_handler, successful_payment_callback_handler,
-    main_menu_callback, back_callback, cancel_session_callback,
-    add_channel_callback, my_channels_callback,
-    delete_channel_callback, select_channel_callback,
-    add_15_posts_callback, publish_one_callback,
-    my_posts_callback, delete_single_post_callback,
-    confirm_clear_all_posts_callback, clear_all_posts_callback,
-    recycle_posts_callback, my_pending_stats_callback,
-    my_full_stats_callback, my_groups_callback,
-    delete_group_callback, group_settings_callback,
-    settings_menu_callback, toggle_auto_publish_callback,
-    toggle_auto_recycle_callback,
-    schedule_menu_callback, set_interval_minutes_callback,
-    set_interval_hours_callback, set_interval_days_callback,
-    set_cron_callback, set_days_callback, set_dates_callback,
-    set_publish_time_callback, day_select_callback,
-    save_days_callback,
-    security_links_callback, security_mentions_callback,
-    security_warn_callback, security_slowmode_callback,
-    security_banned_words_menu_callback, banned_words_add_callback,
-    banned_words_list_callback, banned_words_remove_callback,
-    security_welcome_callback, security_goodbye_callback,
-    security_stickers_callback, security_videos_callback,
-    security_service_messages_callback, security_close_callback,
-    security_main_callback, security_select_group_callback,
-    security_refresh_groups_callback,
-    penalty_menu_callback, penalty_kick_callback,
-    penalty_ban_callback, penalty_mute_callback,
-    penalty_mute_duration_callback,
-    help_callback, support_menu_callback,
-    support_help_callback, support_ticket_callback,
-    support_back_callback,
-    trial_callback, subscribe_menu_callback,
-    buy_subscription_1_callback, buy_subscription_2_callback,
-    buy_subscription_30_callback, buy_subscription_90_callback,
-    developer_callback, updates_callback,
-    referral_menu_callback, referral_copy_link_callback,
-    referral_claim_reward_callback, referral_list_callback,
-    reminder_menu_callback, reminder_toggle_sub_callback,
-    reminder_toggle_daily_callback, reminder_toggle_weekly_callback,
-    reminder_set_days_callback, reminder_set_lang_callback,
-    reminder_lang_callback,
-    translation_menu_callback, translation_off_callback,
-    translation_set_callback,
-    admin_panel_callback,
-    contests_command_handler, contests_menu_callback,
-    contest_join_callback, contest_winners_callback,
-    contests_back_callback,
-    create_contest_command_handler, declare_winner_command_handler,
-    admin_create_contest_callback, admin_declare_winner_callback,
-    lang_callback_handler, handle_text_callbacks,
-    advanced_actions_callback, group_action_ban_callback,
-    group_action_mute_callback, advanced_mute_duration_callback,
-    group_action_warn_callback, group_action_kick_callback,
-    group_action_restrict_callback, group_action_pin_callback,
-    group_action_log_callback, group_action_unban_callback,
-    panel_lock_callback_handler, panel_unlock_callback_handler,
-    panel_close_callback_handler,
-    publish_all_channels_callback_handler,
-    channel_stats_callback, channel_growth_callback,
-    channel_stats_refresh_callback, my_channel_stats_callback,
-    check_subscribe_callback_handler,
-    admin_auto_reply_callback,
-    handle_contest_creation_states,
-    sendcode_command_handler, admin_replies_callback,
-    admin_banned_words_callback, nsfw_settings_callback,
-    handle_sendcode_confirmation_handler
-)
+from handlers import *
 from tasks import BackgroundTaskManager
 from web import start_web_server
 
@@ -114,13 +31,9 @@ from telegram.request import HTTPXRequest
 
 async def private_message_router(update, context):
     try:
-        from database import db_is_creating_contest
-        user_id = update.effective_user.id
-        if await db_is_creating_contest(user_id):
-            return await handle_contest_creation_states(update, context)
-    except (ImportError, AttributeError):
         if context.user_data.get("creating_contest"):
             return await handle_contest_creation_states(update, context)
+    except: pass
     return await message_handler_main(update, context)
 
 async def main():
@@ -136,6 +49,7 @@ async def main():
     application = Application.builder().token(TOKEN).request(request).build()
     application.add_error_handler(global_error_handler)
 
+    # تسجيل جميع المعالجات
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -361,24 +275,7 @@ async def main():
         await task_manager.stop_all()
         await db.close()
 
-
-
-if __name__ == "__main__":
-    try:
-        lock_socket = check_single_instance()
-        if lock_socket is False:
-            print("❌ البوت يعمل بالفعل!")
-            sys.exit(1)
-        os.environ["WEB_CONCURRENCY"] = "1"
-        
-        # استخدام الحلقة الحالية بدلاً من إنشاء حلقة جديدة
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-        
-    except KeyboardInterrupt:
-        print("🛑 تم إيقاف البوت")
-    except Exception as e:
-        print(f"❌ خطأ فادح: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+# نقطة البداية
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(main())
