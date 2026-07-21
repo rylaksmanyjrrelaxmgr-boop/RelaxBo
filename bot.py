@@ -361,31 +361,17 @@ async def main():
         await task_manager.stop_all()
         await db.close()
 
+
 if __name__ == "__main__":
     try:
-        # التحقق من وجود تشغيل آخر
         lock_socket = check_single_instance()
         if lock_socket is False:
             print("❌ البوت يعمل بالفعل!")
             sys.exit(1)
-
-        # تعيين متغير البيئة
         os.environ["WEB_CONCURRENCY"] = "1"
-        
-        # تشغيل البوت
         asyncio.run(main())
-        
     except KeyboardInterrupt:
-        print("\n🛑 تم إيقاف البوت بواسطة المستخدم")
-    except RuntimeError as e:
-        if "event loop" in str(e).lower():
-            print("⚠️ تم اكتشاف حلقة أحداث قيد التشغيل، جاري استخدام الحلقة الحالية...")
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(main())
-        else:
-            print(f"❌ خطأ فادح: {e}")
-            traceback.print_exc()
-            sys.exit(1)
+        print("🛑 تم إيقاف البوت")
     except Exception as e:
         print(f"❌ خطأ فادح: {e}")
         traceback.print_exc()

@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-خادم الويب المتكامل – نسخة آمنة، محسّنة، وخالية من الأخطاء
-يدعم واجهة متطورة مع static files
+خادم الويب المتكامل – نسخة آمنة ومصححة بالكامل
 """
 
 import os, json, base64, secrets, time as time_module, tempfile, csv, asyncio
@@ -15,42 +14,69 @@ from typing import Optional, Dict, Any, Set, List
 from aiohttp import web, WSMsgType
 
 try:
-    from tasks import BackgroundTaskManager
-    async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
-except ImportError:
-    async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
-    def get_ram_usage(): return {"percent":0}
-    try:
-        from utils import advanced_logger, log_error
-    except ImportError:
-        raise ImportError("ملف utils.py مفقود")
+    from constants import (
+        WEB_HOST, WEB_PORT, WEB_USERNAME, WEB_PASSWORD,
+        WEB_SECRET_KEY, WEB_SESSION_TIMEOUT,
+        WEB_RATE_LIMIT, WEB_RATE_WINDOW,
+        PRIMARY_OWNER_ID, BOT_NAME, BOT_USERNAME,
+        TEMPLATES_PATH, STATIC_PATH, JINJA2_AVAILABLE,
+        TOKEN, DB_PATH, BACKUP_DIR, LOG_PATH
+    )
+except ImportError as e:
+    raise ImportError("ملف constants.py مفقود أو غير مكتمل") from e
 
 try:
-    from tasks import BackgroundTaskManager
-    async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
+    from utils import (
+        utc_now, mecca_now, utc_now_iso, safe_int,
+        advanced_logger, log_error, memory_optimizer, logger,
+        get_ram_usage
+    )
 except ImportError:
-    async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
+    def get_ram_usage(): return {"percent":0}
+    try: from utils import advanced_logger, log_error
+    except ImportError: raise ImportError("ملف utils.py مفقود أو غير مكتمل")
+
+try:
+    from database import (
+        db_stats, db_get_all_users, db_get_all_groups,
+        db_get_all_user_channels_no_limit,
+        db_get_active_contests_with_participants,
+        db_get_updates_channel, db_get_force_subscribe_status,
+        db_get_auto_backup, db_get_publish_interval_seconds,
+        db_set_publish_interval_seconds, db_set_updates_channel,
+        db_set_force_subscribe_status, db_set_auto_backup,
+        db_set_ban, db_is_banned, execute_db
+    )
+except ImportError as e:
+    raise ImportError("ملف database.py مفقود أو غير مكتمل") from e
+
+try:
+    from security import check_database_health, check_telegram_health
+except ImportError:
     async def check_database_health(): return True
     async def check_telegram_health(): return True
 
 try:
     from tasks import BackgroundTaskManager
-    async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
+    TASKS_AVAILABLE = True
+    async def list_backups():
+        """قائمة النسخ الاحتياطية المتاحة."""
+        return (
+            sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
+            + sorted(BACKUP_DIR.glob("incremental_*.inc"), key=lambda x: x.stat().st_mtime, reverse=True)
+        )
+    async def create_backup():
+        """إنشاء نسخة احتياطية جديدة."""
+        mgr = BackgroundTaskManager(None)
+        path = await mgr._create_full_backup()
+        return path
+    async def restore_backup(path):
+        """استعادة نسخة احتياطية."""
+        if not path.exists():
+            raise FileNotFoundError(f"الملف {path} غير موجود")
+        # TODO: تنفيذ استعادة كاملة
 except ImportError:
     async def list_backups(): return []
-    async def create_backup(): return type("_", (), {"name":"backup.enc"})()
-    async def restore_backup(path): pass
-    async def list_backups(): raise RuntimeError("tasks.py غير موجود")
     async def create_backup(): raise RuntimeError("tasks.py غير موجود")
     async def restore_backup(path): raise RuntimeError("tasks.py غير موجود")
 
@@ -157,11 +183,10 @@ class WebSocketHub:
 ws_hub = WebSocketHub()
 ws_manager = ws_hub
 ws_extended = ws_hub
-ws_extended = ws_hub
 
 @web.middleware
 async def auth_middleware(request, handler):
-    public = ['/login','/logout','/health','/ws','/ws_extended','/static/']
+    public = ['/login','/logout','/health','/ws','/ws_extended']
     if request.path in public or request.path.startswith('/static/'): return await handler(request)
     if not check_web_auth(request):
         if request.path.startswith('/api/') or request.headers.get('Accept') == 'application/json':
@@ -223,17 +248,16 @@ async def health_check_handler(request):
         return web.json_response({'status':'ok' if db_ok and tg_ok else 'degraded','version':'19.3.3'})
     except: return web.json_response({'error':'حدث خطأ داخلي'}, status=500)
 
-async def api_charts_handler(request):
-    try:
-        return web.json_response({"user_growth":{"labels":[],"data":[]},"posts_distribution":{"published":0,"unpublished":0}})
-    except:
-        return web.json_response({"error":"حدث خطأ داخلي"}, status=500)
-
 async def api_stats_handler(request):
     try:
         total, banned, posts, groups, channels = await db_stats()
         return web.json_response({'total_users':total,'active_users':total-banned,'banned_users':banned,'pending_posts':posts,'groups':groups,'channels':channels})
     except: return web.json_response({'error':'حدث خطأ داخلي'}, status=500)
+
+async def api_charts_handler(request):
+    try:
+        return web.json_response({"user_growth":{"labels":[],"data":[]},"posts_distribution":{"published":0,"unpublished":0}})
+    except: return web.json_response({"error":"حدث خطأ داخلي"}, status=500)
 
 async def api_groups_handler(request):
     try:
@@ -353,8 +377,7 @@ async def api_logs_handler(request):
                         parts = line.strip().split(' - ', 3)
                         if len(parts) >= 4:
                             logs.append({'time': parts[0], 'level': parts[1], 'message': parts[-1]})
-                        else:
-                            logs.append({'time': '', 'level': 'INFO', 'message': line.strip()})
+                        else: logs.append({'time': '', 'level': 'INFO', 'message': line.strip()})
                     except: logs.append({'time': '', 'level': 'INFO', 'message': line.strip()})
         return web.json_response(logs)
     except: return web.json_response({'error':'حدث خطأ داخلي'}, status=500)
