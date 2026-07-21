@@ -2,796 +2,411 @@
 # -*- coding: utf-8 -*-
 
 """
-المهام الخلفية (Background Tasks)
-- النشر التلقائي للمنشورات
-- النسخ الاحتياطي التلقائي
-- التذكيرات والإشعارات
-- تنظيف الجلسات والتذاكر القديمة
-- مراقبة الذاكرة
-- إغلاق المسابقات تلقائياً
-- نبض البوت الداخلي
+المهام الخلفية - الإصدار النهائي
 """
 
-import asyncio
-import random
-import time as time_module
-import json
-import os
-import shutil
-import tempfile
-import subprocess
-from pathlib import Path
+import asyncio, json, logging, os, random, shutil, sqlite3, sys, tempfile, time as time_module
+from contextlib import suppress
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
-from collections import defaultdict
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple, List
 
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-from cryptography.fernet import Fernet
+from telegram.error import TelegramError, Forbidden, BadRequest, NetworkError, TimedOut
+
+logger = logging.getLogger(__name__)
+
+try:
+    import contextvars as _contextvars
+    user_language_context = _contextvars.ContextVar('user_language', default='ar')
+except ImportError:
+    import threading
+    class _FallbackContextVar:
+        def __init__(self, name, default=None): self._name=name; self._default=default; self._local=threading.local()
+        def set(self, value): self._local.value=value; return value
+        def get(self): return getattr(self._local,'value',self._default)
+    user_language_context = _FallbackContextVar('user_language', default='ar')
 
 from constants import (
-    PRIMARY_OWNER_ID, TOKEN, BACKUP_DIR, MAX_BACKUPS,
-    DEFAULT_PUBLISH_INTERVAL_SECONDS, PUBLISH_RETRY_DELAY,
-    MAX_CHANNELS_PER_CYCLE, SCHEDULED_POSTS_SLEEP,
-    REMINDERS_SLEEP, AUTO_BACKUP_SLEEP, CLOUD_BACKUP_ENABLED,
-    GOOGLE_AUTH_AVAILABLE, GOOGLE_DRIVE_FOLDER_ID,
-    ZSTD_AVAILABLE, ZSTD_COMPRESSOR, ZSTD_DECOMPRESSOR,
-    DB_ENCRYPTION, ENCRYPTION_KEY, BACKUP_ENCRYPTION_KEY,
-    BACKUP_CIPHER, DB_PATH, user_language, CallbackData
+    PRIMARY_OWNER_ID, BACKUP_DIR, MAX_BACKUPS, PUBLISH_RETRY_DELAY,
+    MAX_CHANNELS_PER_CYCLE, SCHEDULED_POSTS_SLEEP, REMINDERS_SLEEP,
+    AUTO_BACKUP_SLEEP, CLOUD_BACKUP_ENABLED, GOOGLE_AUTH_AVAILABLE,
+    GOOGLE_DRIVE_FOLDER_ID, DB_PATH, BACKUP_CIPHER, CallbackData,
+    user_points_last_hour
 )
+try: from constants import MAX_BACKUP_SIZE_MB
+except ImportError: MAX_BACKUP_SIZE_MB = 500
+
 from utils import (
     utc_now, mecca_now, utc_now_iso, mecca_now_iso,
-    utc_to_mecca, mecca_to_utc, safe_int,
     memory_optimizer, advanced_logger, log_error,
     translate_text, get_user_translation_language,
-    safe_send_markdown, encrypt_file_stream, decrypt_file_stream,
-    compress_backup, decompress_backup
+    safe_send_markdown, compress_backup, decompress_backup,
+    get_ram_usage
 )
+
+try: from utils import check_bot_permissions as check_bot_perms
+except ImportError:
+    async def check_bot_perms(bot: Bot, chat_id: int) -> Tuple[bool, str]:
+        try:
+            me = await bot.get_chat_member(chat_id, bot.id)
+            if me.status not in ('administrator','creator'): return False, "البوت ليس مشرفاً"
+            if not me.can_post_messages: return False, "البوت لا يملك صلاحية النشر"
+            return True, ""
+        except: return False, "فشل التحقق"
+
 from database import (
-    db_pool, execute_db, db_get_channels, db_get_channel_info,
+    db, execute_db, db_has_active_subscription, db_has_used_trial,
     db_get_next_post, db_mark_published, db_increment_fail_count,
-    db_set_last_publish, db_update_next_publish_date,
+    db_set_last_publish, db_update_next_publish_date, db_set_next_publish_date,
     db_get_posts_count, db_get_published_count,
-    db_reset_all_posts_to_unpublished,
-    db_get_auto_recycle, db_set_auto_recycle,
-    db_has_active_subscription, db_has_used_trial,
-    db_get_user_level, db_update_user_level,
-    db_get_user_reminder_settings, db_update_reminder_settings,
+    db_reset_all_posts_to_unpublished, db_get_auto_recycle,
     db_get_users_needing_reminder, db_update_last_reminder_sent,
     db_get_user_unpublished_posts, db_get_user_total_posts,
     db_get_user_channels_count, db_get_user_groups_count,
-    db_get_referral_stats,
-    db_get_updates_channel, db_set_updates_channel,
-    db_get_auto_backup, db_set_auto_backup, db_get_last_backup_time,
+    db_get_referral_stats, db_get_auto_backup, db_get_last_backup_time,
     db_get_due_scheduled_posts, db_delete_scheduled_post,
-    db_update_scheduled_post_fail,
-    db_get_active_contests_with_participants, db_get_contest,
-    db_get_random_participant, db_set_contest_winner,
-    db_stats, db_get_channel_stats, db_get_channel_growth,
-    db_get_allowed_sendcode_user,
-    db_get_force_subscribe_status, db_get_force_subscribe_channel,
-    db_get_log_channel_id,
-    db_get_publish_interval_seconds, db_set_publish_interval_seconds,
-    db_get_all_users, db_is_banned, db_auto_status,
-    db_get_user_posts_for_channel, db_delete_single_post,
-    db_unpublished_count,
-    db_add_reply, db_del_reply, db_get_reply, db_get_all_replies,
-    db_register_group, db_get_user_groups, db_sync_group_admins,
-    db_get_security_settings, db_set_security_settings,
-    db_add_banned_word, db_remove_banned_word, db_get_banned_words,
-    db_register_hidden_owner_group, db_add_hidden_admin,
-    db_remove_hidden_admin, db_is_hidden_admin, db_get_hidden_admins,
-    db_is_real_admin, add_bot_admin, remove_bot_admin, is_bot_admin,
-    db_save_schedule, db_get_schedule, db_set_next_publish_date,
-    db_set_last_publish, schedule_cron, db_update_next_publish_date,
-    db_set_publish_time,
-    db_add_scheduled_post, db_delete_scheduled_post,
-    db_update_scheduled_post_fail,
-    db_get_auto_reply_settings, db_set_auto_reply_enabled,
-    db_set_auto_reply_only_admins, db_toggle_auto_reply,
-    db_get_user_auto_reply_status, db_set_user_auto_reply_status,
-    db_get_referral_code, db_generate_referral_code,
-    db_get_user_by_referral_code,
-    db_add_referral, db_auto_reward_referral, db_get_referral_stats,
-    db_claim_referral_reward, db_get_referral_settings,
-    db_get_welcome_bonus_points,
-    db_get_next_ticket_number, db_save_ticket, db_get_user_ticket,
-    db_get_all_tickets, db_get_last_ticket_id_for_user,
-    db_mark_ticket_replied, db_delete_all_tickets,
-    db_set_chat_lock, is_chat_locked,
-    db_stats, db_get_channel_stats, db_get_channel_growth,
-    db_get_channel_stats_summary,
-    db_get_active_contests_with_participants, db_get_user_participation,
-    db_get_contest, db_get_random_participant, db_set_contest_winner,
-    db_get_contest_winners,
-    set_user_language, db_get_all_user_channels_no_limit,
-    db_all_users_channels, db_register_channel, db_get_all_bot_channels,
-    db_get_user_reminder_settings, db_update_reminder_settings,
-    db_get_users_needing_reminder, db_update_last_reminder_sent,
-    db_get_subscription_days_left, db_get_auto_recycle,
-    get_user_translation_language
+    db_update_scheduled_post_fail, db_get_contest,
+    db_get_random_participant, db_set_contest_winner, db_stats,
+    db_get_publish_interval_seconds
 )
-from security import (
-    check_nsfw_cached, check_nsfw_video, load_banned_words_from_file,
-    import_banned_words_from_file, BANNED_PATTERNS,
-    apply_penalty, execute_ban, execute_mute, execute_kick,
-    execute_warn, execute_restrict, execute_pin, execute_unban,
-    get_moderation_log, check_bot_admin_permissions,
-    delete_message_after_delay, NSFW_ENABLED,
-    NSFW_THRESHOLD, NSFW_MAX_FILE_SIZE, NSFW_MAX_VIDEO_SIZE,
-    NSFW_FRAMES, security_audit, anomaly_detector,
-    is_nsfw_enabled, get_nsfw_threshold, set_nsfw_threshold
-)
-from web import ws_manager, ws_extended
 
-# ===================== دوال النسخ الاحتياطي =====================
-async def create_backup() -> Path:
-    """إنشاء نسخة احتياطية كاملة"""
-    try:
-        encrypted_path = encrypt_db_backup()
-        temp_backup = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-        temp_backup.close()
-        shutil.copy2(DB_PATH, temp_backup.name)
-        with open(temp_backup.name, 'rb') as f:
-            backup_data = f.read()
-        compressed = compress_backup(backup_data)
-        encrypted = BACKUP_CIPHER.encrypt(compressed)
-        backup_file = BACKUP_DIR / f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.enc"
-        with open(backup_file, 'wb') as f:
-            f.write(encrypted)
-        os.unlink(temp_backup.name)
-        # حذف النسخ القديمة
-        backups = sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
-        for old_backup in backups[MAX_BACKUPS:]:
-            old_backup.unlink()
-        if CLOUD_BACKUP_ENABLED and GOOGLE_AUTH_AVAILABLE:
-            await upload_backup_to_drive(backup_file)
-        advanced_logger.log_access(0, "BACKUP_CREATED", {"file": backup_file.name})
-        return backup_file
-    except Exception as e:
-        log_error(e, {"operation": "create_backup"})
-        raise
+try: from web import ws_manager
+except ImportError: ws_manager = None
 
-async def list_backups():
-    """قائمة النسخ الاحتياطية"""
-    backups = sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
-    incremental = sorted(BACKUP_DIR.glob("incremental_*.inc"), key=lambda x: x.stat().st_mtime, reverse=True)
-    return list(backups) + list(incremental)
+_points_lock = asyncio.Lock()
 
-async def restore_backup(backup_path: Path):
-    """استعادة نسخة احتياطية"""
-    if not backup_path.exists():
-        raise FileNotFoundError(f"الملف {backup_path} غير موجود")
-    with open(backup_path, 'rb') as f:
-        encrypted = f.read()
-    try:
-        decrypted = BACKUP_CIPHER.decrypt(encrypted)
-    except Exception as e:
-        raise ValueError(f"فشل فك التشفير: {e}")
-    try:
-        decompressed = decompress_backup(decrypted)
-    except Exception as e:
-        raise ValueError(f"فشل فك الضغط: {e}")
-    if backup_path.suffix == '.inc':
-        data = json.loads(decompressed.decode('utf-8'))
-        async def _merge_data(conn):
-            if 'posts' in data:
-                for post in data['posts']:
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO posts (id, channel_db_id, text, media_type, media_file_id, published, fail_count, views_count, last_view_time, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (post['id'], post['channel_db_id'], post['text'], post['media_type'], post['media_file_id'], post['published'], post['fail_count'], post['views_count'], post['last_view_time'], post['created_at'])
-                    )
-            if 'users' in data:
-                for user in data['users']:
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO users (user_id, auto_publish, banned, trial_used, subscription_end, referral_code, referred_by, active_channel, auto_reply_enabled, auto_recycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (user['user_id'], user['auto_publish'], user['banned'], user['trial_used'], user['subscription_end'], user['referral_code'], user['referred_by'], user['active_channel'], user['auto_reply_enabled'], user['auto_recycle'])
-                    )
-            await conn.commit()
-        await execute_db(_merge_data)
-        advanced_logger.log_access(0, "INCREMENTAL_RESTORED", {"file": backup_path.name})
-    else:
-        temp_restore = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-        temp_restore.write(decompressed)
-        temp_restore.close()
-        current_backup = BACKUP_DIR / f"pre_restore_{mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(DB_PATH, current_backup)
-        shutil.copy2(temp_restore.name, DB_PATH)
-        os.unlink(temp_restore.name)
-        await db_pool.initialize()
-        advanced_logger.log_access(0, "FULL_RESTORED", {"file": backup_path.name})
+_SQL_GET_DUE_CHANNELS = """
+    SELECT uc.id, uc.channel_id, u.user_id
+    FROM user_channels uc
+    JOIN users u ON uc.user_id = u.user_id
+    LEFT JOIN schedule s ON uc.id = s.channel_db_id
+    WHERE u.auto_publish = 1 AND u.banned = 0 AND uc.banned = 0
+      AND (s.next_publish_date IS NULL OR s.next_publish_date <= ?)
+    ORDER BY COALESCE(s.next_publish_date, '1970-01-01') ASC LIMIT ?
+"""
+_SQL_GET_DAILY_USERS = "SELECT user_id, notification_lang FROM user_reminder_settings WHERE daily_stats_reminder = 1"
+_SQL_GET_WEEKLY_USERS = "SELECT user_id, notification_lang FROM user_reminder_settings WHERE weekly_report = 1"
+_SQL_GET_EXPIRED_CONTESTS = "SELECT id FROM contests WHERE status = 'active' AND end_date <= ?"
+_SQL_CLEANUP_SESSIONS = "DELETE FROM web_sessions WHERE expires < ?"
+_SQL_CLEANUP_TICKETS = "DELETE FROM support_tickets WHERE created_at < ? AND status = 'closed'"
+_SQL_CLOSE_CONTEST = "UPDATE contests SET status = 'finished' WHERE id = ?"
+_SQL_UPDATE_BACKUP_TIME = "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup', ?)"
 
-async def incremental_backup() -> Optional[Path]:
-    """نسخ احتياطي متزايد"""
-    try:
-        last_backup = await db_get_last_backup_time()
-        if last_backup:
-            last_time = datetime.fromisoformat(last_backup)
-        else:
-            last_time = utc_now() - timedelta(days=7)
-        backup_data = {}
-        async def _get_new_posts(conn):
-            cur = await conn.execute(
-                "SELECT * FROM posts WHERE created_at > ? LIMIT 1000",
-                (last_time.isoformat(),)
-            )
-            return await cur.fetchall()
-        new_posts = await execute_db(_get_new_posts)
-        if new_posts:
-            backup_data['posts'] = [dict(post) for post in new_posts]
-        async def _get_new_users(conn):
-            cur = await conn.execute(
-                "SELECT * FROM users WHERE user_id IN (SELECT user_id FROM users_cache WHERE last_updated > ?)",
-                (last_time.isoformat(),)
-            )
-            return await cur.fetchall()
-        new_users = await execute_db(_get_new_users)
-        if new_users:
-            backup_data['users'] = [dict(user) for user in new_users]
-        if backup_data:
-            data_json = json.dumps(backup_data, default=str)
-            compressed = compress_backup(data_json.encode('utf-8'))
-            encrypted = BACKUP_CIPHER.encrypt(compressed)
-            backup_file = BACKUP_DIR / f"incremental_{mecca_now().strftime('%Y%m%d_%H%M%S')}.inc"
-            with open(backup_file, 'wb') as f:
-                f.write(encrypted)
-            advanced_logger.log_access(0, "INCREMENTAL_BACKUP", {"file": backup_file.name})
-            return backup_file
-        return None
-    except Exception as e:
-        log_error(e, {"operation": "incremental_backup"})
-        return None
+def is_fernet_valid(obj): return obj is not None and callable(getattr(obj,'encrypt',None)) and callable(getattr(obj,'decrypt',None))
 
-async def upload_backup_to_drive(backup_path: Path, max_retries: int = 3) -> Optional[str]:
-    """رفع النسخة الاحتياطية إلى Google Drive"""
-    if not CLOUD_BACKUP_ENABLED or not GOOGLE_AUTH_AVAILABLE or not GOOGLE_DRIVE_FOLDER_ID:
-        return None
-    if not backup_path.exists():
-        return None
-    try:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-        from constants import GOOGLE_CREDENTIALS_FILE, TOKEN_FILE
-        for attempt in range(max_retries):
-            try:
-                creds = None
-                token_path = Path(TOKEN_FILE)
-                if token_path.exists():
-                    try:
-                        creds = Credentials.from_authorized_user_file(
-                            str(token_path),
-                            ['https://www.googleapis.com/auth/drive.file']
-                        )
-                    except:
-                        pass
-                if creds and creds.valid:
-                    service = build('drive', 'v3', credentials=creds)
-                elif creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    with open(token_path, 'w') as token:
-                        token.write(creds.to_json())
-                    service = build('drive', 'v3', credentials=creds)
-                else:
-                    from google_auth_oauthlib.flow import InstalledAppFlow
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        GOOGLE_CREDENTIALS_FILE,
-                        ['https://www.googleapis.com/auth/drive.file']
-                    )
-                    creds = flow.run_local_server(port=0)
-                    with open(token_path, 'w') as token:
-                        token.write(creds.to_json())
-                    service = build('drive', 'v3', credentials=creds)
-                file_name = f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.enc"
-                # حذف الملفات القديمة
-                try:
-                    results = service.files().list(
-                        q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents",
-                        orderBy="createdTime desc",
-                        pageSize=15,
-                        fields="files(id, name)"
-                    ).execute()
-                    files = results.get('files', [])
-                    for old_file in files[10:]:
-                        try:
-                            service.files().delete(fileId=old_file['id']).execute()
-                        except:
-                            pass
-                except:
-                    pass
-                media = MediaFileUpload(
-                    str(backup_path),
-                    mimetype='application/octet-stream',
-                    resumable=True,
-                    chunksize=1024*1024
-                )
-                file_metadata = {
-                    'name': file_name,
-                    'parents': [GOOGLE_DRIVE_FOLDER_ID]
-                }
-                file = service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields='id'
-                )
-                response = file.execute()
-                file_id = response.get('id')
-                advanced_logger.log_access(0, "DRIVE_UPLOAD", {"file": file_name, "id": file_id})
-                return file_id
+async def wait_with_timeout(stop_event: asyncio.Event, timeout: float) -> bool:
+    try: await asyncio.wait_for(stop_event.wait(), timeout=timeout); return True
+    except asyncio.TimeoutError: return False
+
+class BackgroundTaskManager:
+    def __init__(self, bot: Bot):
+        self.bot = bot
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._stop_events: Dict[str, asyncio.Event] = {}
+        self._error_counts: Dict[str, int] = {}
+        self._max_errors = {'auto_publish':10,'scheduled_posts':5,'reminders':10,'daily_reports':10,'weekly_reports':10,'auto_backup':5,'cleanup':20,'memory_monitor':20,'stats_broadcast':20,'contests':10,'self_ping':30}
+        self._max_backoff = {'auto_publish':300,'scheduled_posts':120,'reminders':300,'daily_reports':600,'weekly_reports':600,'auto_backup':900,'cleanup':600,'memory_monitor':300,'stats_broadcast':300,'contests':600,'self_ping':120}
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def start_all(self):
+        if self._tasks: return
+        logger.info("بدء تشغيل المهام الخلفية...")
+        task_definitions = [
+            ('auto_publish', self._auto_publish_loop), ('scheduled_posts', self._scheduled_posts_loop),
+            ('reminders', self._reminders_loop), ('daily_reports', self._daily_report_loop),
+            ('weekly_reports', self._weekly_report_loop), ('auto_backup', self._auto_backup_loop),
+            ('cleanup', self._cleanup_loop), ('memory_monitor', self._memory_monitor_loop),
+            ('stats_broadcast', self._stats_broadcast_loop), ('contests', self._contests_loop),
+            ('self_ping', self._self_ping_loop)
+        ]
+        for name, coro_func in task_definitions:
+            event = asyncio.Event(); self._stop_events[name] = event; self._error_counts[name] = 0
+            self._tasks[name] = asyncio.create_task(self._run_with_error_tracking(name, coro_func, event))
+        logger.info(f"تم بدء {len(self._tasks)} مهمة")
+
+    async def stop_all(self):
+        if not self._tasks: return
+        for event in self._stop_events.values(): event.set()
+        for task in self._tasks.values():
+            if not task.done(): task.cancel()
+        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        self._tasks.clear(); self._stop_events.clear()
+
+    async def _run_with_error_tracking(self, name, coro_func, stop_event):
+        max_errors = self._max_errors.get(name,10)
+        max_backoff = self._max_backoff.get(name,300)
+        base_backoff = 10
+        while not stop_event.is_set():
+            try: await coro_func(stop_event); break
+            except asyncio.CancelledError: break
             except Exception as e:
-                if attempt == max_retries - 1:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-    except Exception as e:
-        log_error(e, {"operation": "upload_backup_to_drive"})
-        return None
+                self._error_counts[name] += 1
+                if self._error_counts[name] >= max_errors: break
+                wait = min(base_backoff * (2**(self._error_counts[name]-1)), max_backoff)
+                if await wait_with_timeout(stop_event, wait): break
 
-# ===================== حلقة النشر التلقائي =====================
-async def auto_publish_loop_improved(bot: Bot):
-    """حلقة النشر التلقائي للمنشورات"""
-    await asyncio.sleep(5)
-    consecutive_errors = 0
-    backoff = 10
-    max_backoff = 60
-    semaphore = asyncio.Semaphore(5)
+    async def _send_message_safe(self, chat_id, text):
+        try: await self.bot.send_message(chat_id, text, read_timeout=30)
+        except TypeError: await self.bot.send_message(chat_id, text)
 
-    async def publish_one(row):
-        async with semaphore:
-            ch_db_id, ch_tele_id, user_id = row
-            if not await db_has_active_subscription(user_id) and not await db_has_used_trial(user_id):
-                return
-            has_permission, permission_msg = await check_bot_permissions(bot, ch_tele_id)
-            if not has_permission:
-                return
-            auto_recycle = await db_get_auto_recycle(user_id)
-            total = await db_get_posts_count(ch_db_id)
-            published = await db_get_published_count(ch_db_id)
-            if total > 0 and published >= total:
-                if auto_recycle:
-                    advanced_logger.log_access(user_id, "AUTO_RECYCLE", {"channel": ch_tele_id, "total": total})
-                    await db_reset_all_posts_to_unpublished(ch_db_id)
-                    try:
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total} منشور للنشر من جديد.",
-                            parse_mode="MarkdownV2"
-                        )
-                    except:
-                        pass
-                    return
-                else:
-                    advanced_logger.log_access(user_id, "PUBLISH_STOPPED", {"channel": ch_tele_id, "reason": "auto_recycle_disabled"})
-                    try:
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=f"⚠️ **توقف النشر التلقائي**\n\n📡 القناة: {ch_tele_id}\n📝 تم نشر جميع المنشورات ({published}/{total}).\n\n♻️ إعادة التدوير التلقائي معطل.\n📌 قم بتفعيله من الإعدادات أو أضف منشورات جديدة.",
-                            parse_mode="MarkdownV2"
-                        )
-                    except:
-                        pass
-                    await db_set_next_publish_date(ch_db_id, utc_now() + timedelta(days=365))
-                    return
-            post = await db_get_next_post(ch_db_id)
-            if not post:
-                if auto_recycle:
-                    total = await db_get_posts_count(ch_db_id)
-                    if total > 0:
+    async def _auto_publish_loop(self, stop_event):
+        sem = asyncio.Semaphore(5)
+        async def publish_single(row):
+            async with sem:
+                ch_db_id, ch_tele_id, user_id = row
+                if not (await db_has_active_subscription(user_id) or await db_has_used_trial(user_id)): return
+                has_perm, _ = await check_bot_perms(self.bot, ch_tele_id)
+                if not has_perm: return
+                total = await db_get_posts_count(ch_db_id); published = await db_get_published_count(ch_db_id)
+                post = None
+                if total > 0 and published >= total:
+                    if await db_get_auto_recycle(user_id):
                         await db_reset_all_posts_to_unpublished(ch_db_id)
-                        advanced_logger.log_access(user_id, "AUTO_RECYCLE_EMPTY", {"channel": ch_tele_id, "total": total})
-                        try:
-                            await bot.send_message(
-                                chat_id=user_id,
-                                text=f"♻️ **تم إعادة تدوير المنشورات تلقائياً!**\n\n📡 القناة: {ch_tele_id}\n📝 تم إعادة تعيين {total} منشور للنشر من جديد.",
-                                parse_mode="MarkdownV2"
-                            )
-                        except:
-                            pass
-                        return
+                        post = await db_get_next_post(ch_db_id)
                     else:
+                        await db_set_next_publish_date(ch_db_id, utc_now()+timedelta(days=365))
                         return
                 else:
-                    return
-            translation_lang = await get_user_translation_language(user_id)
-            final_text = post['text']
-            if translation_lang != 'off' and final_text:
-                try:
-                    translated = await translate_text(final_text, translation_lang)
-                    if translated and translated != final_text:
-                        final_text = f"{final_text}\n\n🌐 {translated}"
-                except:
-                    pass
-            success = False
-            for attempt in range(3):
-                try:
-                    if post['media_type'] == 'photo' and post['media_file_id']:
-                        await bot.send_photo(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'video' and post['media_file_id']:
-                        await bot.send_video(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'document' and post['media_file_id']:
-                        await bot.send_document(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'audio' and post['media_file_id']:
-                        await bot.send_audio(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'voice' and post['media_file_id']:
-                        await bot.send_voice(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    elif post['media_type'] == 'animation' and post['media_file_id']:
-                        await bot.send_animation(ch_tele_id, post['media_file_id'], caption=final_text if final_text else None)
-                    else:
-                        await bot.send_message(ch_tele_id, final_text, parse_mode=None)
-                    success = True
-                    break
-                except Exception as e:
-                    advanced_logger.log_error(f"محاولة {attempt+1} فشلت في النشر", e, {"channel": ch_tele_id})
-                    if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
-            if success:
-                await db_mark_published(post['id'])
-                await db_set_last_publish(ch_db_id, utc_now())
-                await db_update_next_publish_date(ch_db_id)
-            else:
-                await db_increment_fail_count(post['id'])
-                advanced_logger.log_error(f"فشل دائم في نشر المنشور {post['id']}", None, {"channel": ch_tele_id})
-                next_retry = utc_now() + timedelta(seconds=PUBLISH_RETRY_DELAY)
-                await db_set_next_publish_date(ch_db_id, next_retry)
-            await asyncio.sleep(random.uniform(2, 5))
+                    post = await db_get_next_post(ch_db_id)
+                if not post: return
+                final_text = post.get('text','') or ''
+                lang = get_user_translation_language(user_id)
+                if asyncio.iscoroutine(lang): lang = await lang
+                if lang and lang not in ('off','ar'):
+                    try:
+                        trans = await translate_text(final_text, lang)
+                        if trans and trans != final_text: final_text = f"{final_text}\n\n🌐 {trans}"
+                    except: pass
+                success = False
+                for attempt in range(3):
+                    try:
+                        media_type = post.get('media_type','text')
+                        media_file_id = (post.get('media_file_id','') or '').strip()
+                        if media_file_id:
+                            methods = {'photo':self.bot.send_photo,'video':self.bot.send_video,'document':self.bot.send_document,'audio':self.bot.send_audio,'voice':self.bot.send_voice,'animation':self.bot.send_animation}
+                            method = methods.get(media_type)
+                            if method:
+                                try: await method(ch_tele_id, media_file_id, caption=final_text or None, read_timeout=30)
+                                except TypeError: await method(ch_tele_id, media_file_id, caption=final_text or None)
+                            else: await self._send_message_safe(ch_tele_id, final_text or ' ')
+                        else: await self._send_message_safe(ch_tele_id, final_text or ' ')
+                        success = True; break
+                    except (Forbidden, BadRequest): break
+                    except (NetworkError, TimedOut): await asyncio.sleep(2**attempt)
+                    except TelegramError: await asyncio.sleep(2**attempt)
+                    except Exception: await asyncio.sleep(2**attempt)
+                if success:
+                    await db_mark_published(post['id']); await db_set_last_publish(ch_db_id, utc_now())
+                    await db_update_next_publish_date(ch_db_id)
+                else:
+                    await db_increment_fail_count(post['id'])
+                    await db_set_next_publish_date(ch_db_id, utc_now()+timedelta(seconds=PUBLISH_RETRY_DELAY))
+                await asyncio.sleep(random.uniform(1,3))
 
-    while True:
-        try:
-            publish_interval = await db_get_publish_interval_seconds()
-            async def _get_due_channels(conn, limit=MAX_CHANNELS_PER_CYCLE):
-                now_utc_iso = utc_now().isoformat()
-                cur = await conn.execute("""
-                    SELECT uc.id, uc.channel_id, u.user_id
-                    FROM user_channels uc
-                    JOIN users u ON uc.user_id = u.user_id
-                    LEFT JOIN schedule s ON uc.id = s.channel_db_id
-                    WHERE u.auto_publish = 1
-                      AND u.banned = 0
-                      AND uc.banned = 0
-                      AND (s.next_publish_date IS NULL OR s.next_publish_date <= ?)
-                    ORDER BY COALESCE(s.next_publish_date, '1970-01-01') ASC
-                    LIMIT ?
-                """, (now_utc_iso, limit))
+        while not stop_event.is_set():
+            interval = await db_get_publish_interval_seconds()
+            now_iso = utc_now().isoformat()
+            async def _get(conn):
+                cur = await conn.execute(_SQL_GET_DUE_CHANNELS, (now_iso, MAX_CHANNELS_PER_CYCLE))
                 return await cur.fetchall()
-            rows = await execute_db(_get_due_channels)
-            tasks = [publish_one(row) for row in rows]
-            await asyncio.gather(*tasks, return_exceptions=True)
-            consecutive_errors = 0
-            backoff = publish_interval
-            await asyncio.sleep(publish_interval)
-        except Exception as e:
-            log_error(e, {"operation": "auto_publish_loop"})
-            consecutive_errors += 1
-            backoff = min(backoff * 1.5, max_backoff)
-            await asyncio.sleep(backoff)
+            rows = await execute_db(_get)
+            if rows: await asyncio.gather(*[publish_single(r) for r in rows], return_exceptions=True)
+            if await wait_with_timeout(stop_event, interval): break
 
-# ===================== حلقة المنشورات المجدولة =====================
-async def run_scheduled_posts_loop_improved(bot: Bot):
-    """حلقة تنفيذ المنشورات المجدولة"""
-    consecutive_errors = 0
-    backoff = SCHEDULED_POSTS_SLEEP
-    max_backoff = 60
-    while True:
-        try:
-            await asyncio.sleep(SCHEDULED_POSTS_SLEEP)
-            now_utc = utc_now()
-            posts = await db_get_due_scheduled_posts(now_utc)
+    async def _scheduled_posts_loop(self, stop_event):
+        while not stop_event.is_set():
+            posts = await db_get_due_scheduled_posts(utc_now())
             for post_id, chat_id, text, fail_count in posts:
+                if stop_event.is_set(): break
                 try:
-                    await bot.send_message(chat_id, text)
-                    await db_delete_scheduled_post(post_id)
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    new_fail = fail_count + 1
-                    await db_update_scheduled_post_fail(post_id, new_fail)
-                    if new_fail >= 5:
-                        await db_delete_scheduled_post(post_id)
-                        advanced_logger.log_error(f"تم حذف منشور مجدول بعد 5 محاولات فاشلة: {post_id}", None, {"chat_id": chat_id})
-                    else:
-                        log_error(e, {"operation": "scheduled_post", "post_id": post_id})
-            consecutive_errors = 0
-            backoff = SCHEDULED_POSTS_SLEEP
-        except Exception as e:
-            log_error(e, {"operation": "scheduled_posts_loop"})
-            backoff = min(backoff * 1.5, max_backoff)
-            await asyncio.sleep(backoff)
+                    await self._send_message_safe(chat_id, text); await db_delete_scheduled_post(post_id)
+                except (Forbidden, BadRequest): await db_delete_scheduled_post(post_id)
+                except TelegramError:
+                    if fail_count+1 >= 5: await db_delete_scheduled_post(post_id)
+                    else: await db_update_scheduled_post_fail(post_id, fail_count+1)
+            if await wait_with_timeout(stop_event, SCHEDULED_POSTS_SLEEP): break
 
-# ===================== حلقة التذكيرات والإشعارات =====================
-async def send_reminders_loop_improved(bot: Bot):
-    """حلقة إرسال التذكيرات والإشعارات"""
-    await asyncio.sleep(30)
-    asyncio.create_task(daily_reminder_task(bot))
-    asyncio.create_task(weekly_reminder_task(bot))
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            users_to_remind = await db_get_users_needing_reminder()
-            for user_data in users_to_remind:
-                user_id = user_data['user_id']
-                days_left = user_data['days_left']
-                lang = user_data['notification_lang']
-                original_lang = user_language.get(user_id, 'ar')
-                user_language[user_id] = lang
-                text = f"⚠️ **تنبيه!**\nاشتراكك ينتهي خلال {days_left} أيام\nقم بتجديده الآن لتستمر الميزات 💎"
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💎 تجديد الاشتراك", callback_data=CallbackData.SUBSCRIBE_MENU),
-                     InlineKeyboardButton("🔕 إيقاف التذكير", callback_data=CallbackData.REMINDER_TOGGLE_SUB)]
-                ])
+    async def _reminders_loop(self, stop_event):
+        while not stop_event.is_set():
+            users = await db_get_users_needing_reminder()
+            for u in users:
+                if stop_event.is_set(): break
+                user_id = u['user_id']; days_left = u['days_left']; lang = u.get('notification_lang','ar')
+                token = user_language_context.set(lang)
                 try:
-                    await safe_send_markdown(bot, user_id, text, reply_markup=keyboard)
-                    await db_update_last_reminder_sent(user_id, "subscription_expiry")
-                except:
-                    pass
-                user_language[user_id] = original_lang
+                    sub_cb = CallbackData.SUBSCRIBE_MENU.value if hasattr(CallbackData,'SUBSCRIBE_MENU') else "subscribe"
+                    rem_cb = CallbackData.REMINDER_TOGGLE_SUB.value if hasattr(CallbackData,'REMINDER_TOGGLE_SUB') else "toggle_reminder"
+                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💎 تجديد الاشتراك", callback_data=sub_cb), InlineKeyboardButton("🔕 إيقاف التذكير", callback_data=rem_cb)]])
+                    sent = False
+                    try:
+                        await safe_send_markdown(self.bot, user_id, f"⚠️ **تنبيه!**\nاشتراكك ينتهي خلال {days_left} أيام\nقم بتجديده الآن لتستمر الميزات 💎", reply_markup=keyboard)
+                        sent = True
+                    except: pass
+                    if sent: await db_update_last_reminder_sent(user_id, "subscription_expiry")
+                finally: user_language_context.reset(token)
                 await asyncio.sleep(0.5)
-            await asyncio.sleep(REMINDERS_SLEEP)
-        except Exception as e:
-            log_error(e, {"operation": "reminders_loop"})
-            await asyncio.sleep(60)
+            if await wait_with_timeout(stop_event, REMINDERS_SLEEP): break
 
-async def daily_reminder_task(bot: Bot):
-    """مهمة الإشعار اليومي"""
-    last_daily_date = None
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            if last_daily_date != today_str:
-                last_daily_date = today_str
-                async def _get_daily_users(conn):
-                    cur = await conn.execute("SELECT user_id, notification_lang FROM user_reminder_settings WHERE daily_stats_reminder=1")
-                    return await cur.fetchall()
-                daily_users = await execute_db(_get_daily_users)
-                for user_id, lang in daily_users:
-                    original_lang = user_language.get(user_id, 'ar')
-                    user_language[user_id] = lang
-                    channels = await db_get_user_channels_count(user_id)
-                    total_posts = await db_get_user_total_posts(user_id)
-                    unpublished = await db_get_user_unpublished_posts(user_id)
-                    groups = await db_get_user_groups_count(user_id)
-                    text = f"📊 **تقريرك اليومي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {channels}\n📝 إجمالي المنشورات: {total_posts}\n⏳ غير المنشورة: {unpublished}\n👥 المجموعات: {groups}"
-                    try:
-                        await safe_send_markdown(bot, user_id, text)
-                    except:
-                        pass
-                    user_language[user_id] = original_lang
-                    await asyncio.sleep(0.3)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            log_error(e, {"operation": "daily_reminder_task"})
-            await asyncio.sleep(60)
+    async def _daily_report_loop(self, stop_event):
+        last_date = None
+        while not stop_event.is_set():
+            today = mecca_now().strftime("%Y-%m-%d")
+            if last_date == today: await asyncio.sleep(3600); continue
+            last_date = today
+            async def _get(conn):
+                cur = await conn.execute(_SQL_GET_DAILY_USERS); return await cur.fetchall()
+            for user_id, lang in await execute_db(_get):
+                if stop_event.is_set(): break
+                token = user_language_context.set(lang)
+                try:
+                    text = f"📊 **تقريرك اليومي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {await db_get_user_channels_count(user_id)}\n📝 إجمالي المنشورات: {await db_get_user_total_posts(user_id)}\n⏳ غير المنشورة: {await db_get_user_unpublished_posts(user_id)}\n👥 المجموعات: {await db_get_user_groups_count(user_id)}"
+                    try: await safe_send_markdown(self.bot, user_id, text)
+                    except: pass
+                finally: user_language_context.reset(token)
+                await asyncio.sleep(0.3)
+            if await wait_with_timeout(stop_event, 3600): break
 
-async def weekly_reminder_task(bot: Bot):
-    """مهمة الإشعار الأسبوعي"""
-    last_weekly_date = None
-    while True:
-        try:
-            now = utc_now()
-            now_mecca = utc_to_mecca(now)
-            today_str = now_mecca.strftime("%Y-%m-%d")
-            if last_weekly_date != today_str and now_mecca.weekday() == 6:
-                last_weekly_date = today_str
-                async def _get_weekly_users(conn):
-                    cur = await conn.execute("SELECT user_id, notification_lang FROM user_reminder_settings WHERE weekly_report=1")
-                    return await cur.fetchall()
-                weekly_users = await execute_db(_get_weekly_users)
-                for user_id, lang in weekly_users:
-                    original_lang = user_language.get(user_id, 'ar')
-                    user_language[user_id] = lang
-                    channels = await db_get_user_channels_count(user_id)
-                    total_posts = await db_get_user_total_posts(user_id)
-                    unpublished = await db_get_user_unpublished_posts(user_id)
-                    groups = await db_get_user_groups_count(user_id)
-                    referral_stats = await db_get_referral_stats(user_id)
-                    text = f"📈 **تقريرك الأسبوعي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {channels}\n📝 إجمالي المنشورات: {total_posts}\n⏳ غير المنشورة: {unpublished}\n👥 المجموعات: {groups}\n🔗 الإحالات: {referral_stats['total_referrals']}"
-                    try:
-                        await safe_send_markdown(bot, user_id, text)
-                    except:
-                        pass
-                    user_language[user_id] = original_lang
-                    await asyncio.sleep(0.3)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            log_error(e, {"operation": "weekly_reminder_task"})
-            await asyncio.sleep(60)
+    async def _weekly_report_loop(self, stop_event):
+        last_date = None
+        while not stop_event.is_set():
+            now = mecca_now(); today = now.strftime("%Y-%m-%d")
+            if last_date == today or now.weekday() != 4: await asyncio.sleep(3600); continue
+            last_date = today
+            async def _get(conn):
+                cur = await conn.execute(_SQL_GET_WEEKLY_USERS); return await cur.fetchall()
+            for user_id, lang in await execute_db(_get):
+                if stop_event.is_set(): break
+                token = user_language_context.set(lang)
+                try:
+                    ref = await db_get_referral_stats(user_id)
+                    total_ref = ref.get('total_referrals',0) if isinstance(ref,dict) else (ref if isinstance(ref,(int,float)) else 0)
+                    text = f"📈 **تقريرك الأسبوعي**\n━━━━━━━━━━━━━━━━━━━━━━\n📡 القنوات: {await db_get_user_channels_count(user_id)}\n📝 إجمالي المنشورات: {await db_get_user_total_posts(user_id)}\n⏳ غير المنشورة: {await db_get_user_unpublished_posts(user_id)}\n👥 المجموعات: {await db_get_user_groups_count(user_id)}\n🔗 الإحالات: {total_ref}"
+                    try: await safe_send_markdown(self.bot, user_id, text)
+                    except: pass
+                finally: user_language_context.reset(token)
+                await asyncio.sleep(0.3)
+            if await wait_with_timeout(stop_event, 3600): break
 
-# ===================== حلقة النسخ الاحتياطي التلقائي =====================
-async def auto_backup_loop():
-    """حلقة النسخ الاحتياطي التلقائي"""
-    consecutive_errors = 0
-    backoff = AUTO_BACKUP_SLEEP
-    max_backoff = 7 * 24 * 60 * 60
-    while True:
-        try:
-            await asyncio.sleep(AUTO_BACKUP_SLEEP)
-            auto_enabled = await db_get_auto_backup()
-            if auto_enabled:
-                last_backup = await db_get_last_backup_time()
-                if not last_backup:
-                    await create_backup()
+    async def _auto_backup_loop(self, stop_event):
+        while not stop_event.is_set():
+            if await db_get_auto_backup():
+                last = await db_get_last_backup_time()
+                if not last: await self._create_full_backup(); await self._update_backup_time()
                 else:
-                    last_time = datetime.fromisoformat(last_backup)
-                    if (utc_now() - last_time).days >= 7:
-                        await create_backup()
-                    else:
-                        await incremental_backup()
-                async def _update_backup_time(conn):
-                    await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup', ?)", (utc_now_iso(),))
-                    await conn.commit()
-                await execute_db(_update_backup_time)
-            consecutive_errors = 0
-            backoff = AUTO_BACKUP_SLEEP
-        except Exception as e:
-            log_error(e, {"operation": "auto_backup_loop"})
-            backoff = min(backoff * 1.5, max_backoff)
-            await asyncio.sleep(backoff)
+                    try: days = (utc_now() - datetime.fromisoformat(last)).days
+                    except: days = 999
+                    if days >= 7: await self._create_full_backup(); await self._update_backup_time()
+                    else: await self._create_incremental_backup()
+            if await wait_with_timeout(stop_event, AUTO_BACKUP_SLEEP): break
 
-# ===================== حلقة تنظيف الجلسات والتذاكر =====================
-async def cleanup_expired_sessions_improved():
-    """تنظيف الجلسات المنتهية والتذاكر القديمة"""
-    CLEANUP_SLEEP = 3600
-    while True:
-        await asyncio.sleep(CLEANUP_SLEEP)
-        now = time_module.time()
-        async def _cleanup_sessions(conn):
-            await conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now,))
-            await conn.commit()
-        await execute_db(_cleanup_sessions)
-        async def _cleanup_tickets(conn):
-            cutoff = (utc_now() - timedelta(days=30)).isoformat()
-            await conn.execute("DELETE FROM support_tickets WHERE created_at < ? AND status='closed'", (cutoff,))
-            await conn.commit()
-        await execute_db(_cleanup_tickets)
-        advanced_logger.log_access(0, "CLEANUP_COMPLETED", {})
+    async def _update_backup_time(self):
+        await execute_db(lambda conn: conn.execute(_SQL_UPDATE_BACKUP_TIME, (utc_now_iso(),)) or conn.commit())
 
-# ===================== حلقة بث الإحصائيات عبر WebSocket =====================
-async def broadcast_stats_periodically():
-    """بث الإحصائيات عبر WebSocket بشكل دوري"""
-    while True:
-        await asyncio.sleep(5)
-        total, banned, posts, groups, channels = await db_stats()
-        await ws_manager.broadcast({
-            'type': 'stats',
-            'data': {
-                'total_users': total,
-                'active_users': total - banned,
-                'banned_users': banned,
-                'pending_posts': posts,
-                'groups': groups,
-                'channels': channels
-            }
-        })
-
-# ===================== حلقة إغلاق المسابقات تلقائياً =====================
-async def auto_close_contests_loop(bot: Bot):
-    """إغلاق المسابقات المنتهية تلقائياً"""
-    while True:
-        await asyncio.sleep(3600)
+    async def _create_full_backup(self) -> Optional[Path]:
+        temp_files = []
         try:
-            now = utc_now().isoformat()
-            async def _get_expired(conn):
-                cur = await conn.execute(
-                    "SELECT id FROM contests WHERE status = 'active' AND end_date <= ?",
-                    (now,)
-                )
-                return [row[0] for row in await cur.fetchall()]
-            expired = await execute_db(_get_expired)
-            for contest_id in expired:
-                winner_id = await db_get_random_participant(contest_id)
-                if winner_id:
-                    await db_set_contest_winner(contest_id, winner_id)
-                    contest = await db_get_contest(contest_id)
-                    try:
-                        await bot.send_message(
-                            winner_id,
-                            f"🎉 **تهانينا!**\nلقد فزت في مسابقة **{contest['title']}**\n🎁 الجائزة: {contest['prize']}"
-                        )
-                    except:
-                        pass
-                    await bot.send_message(
-                        PRIMARY_OWNER_ID,
-                        f"🤖 تم إغلاق المسابقة #{contest_id} تلقائياً.\nالفائز: {winner_id}"
-                    )
-                else:
-                    async def _close(conn):
-                        await conn.execute(
-                            "UPDATE contests SET status = 'finished' WHERE id = ?",
-                            (contest_id,)
-                        )
-                        await conn.commit()
-                    await execute_db(_close)
-        except Exception as e:
-            log_error(e, {"operation": "auto_close_contests_loop"})
+            if not DB_PATH.exists(): return None
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db'); tmp.close(); temp_files.append(Path(tmp.name))
+            shutil.copy2(DB_PATH, tmp.name)
+            with open(tmp.name,'rb') as f: data = f.read()
+            compressed = compress_backup(data)
+            if not is_fernet_valid(BACKUP_CIPHER): raise ValueError("BACKUP_CIPHER غير مهيأ")
+            encrypted = BACKUP_CIPHER.encrypt(compressed)
+            path = BACKUP_DIR / f"backup_{mecca_now().strftime('%Y%m%d_%H%M%S')}.enc"
+            with open(path,'wb') as f: f.write(encrypted)
+            await self._cleanup_old_backups()
+            logger.info(f"نسخة احتياطية كاملة: {path.name}")
+            return path
+        except Exception as e: log_error(e, {"operation":"create_full_backup"}); raise
+        finally:
+            for f in temp_files:
+                with suppress(OSError): f.unlink(missing_ok=True)
 
-# ===================== حلقة مراقبة الذاكرة =====================
-async def memory_monitor():
-    """مراقبة استخدام الذاكرة وتنظيفها تلقائياً"""
-    while True:
+    async def _create_incremental_backup(self) -> Optional[Path]:
         try:
-            from utils import get_ram_usage
-            ram = get_ram_usage()
-            if ram['percent'] > 80:
-                advanced_logger.log_access(0, "MEMORY_HIGH", {"percent": ram['percent']})
-                memory_optimizer()
-                advanced_logger.log_access(0, "MEMORY_OPTIMIZED", {})
-            await asyncio.sleep(60)
-        except Exception as e:
-            log_error(e, {"operation": "memory_monitor"})
-            await asyncio.sleep(60)
+            last = await db_get_last_backup_time()
+            try: last_time = datetime.fromisoformat(last) if last else utc_now()-timedelta(days=7)
+            except: last_time = utc_now()-timedelta(days=7)
+            data = {}
+            async def _posts(conn):
+                cur = await conn.execute("SELECT * FROM posts WHERE created_at > ? LIMIT 1000", (last_time.isoformat(),))
+                rows = await cur.fetchall()
+                try: return [dict(row) for row in rows]
+                except: return []
+            posts = await execute_db(_posts)
+            if posts: data['posts'] = posts
+            if not data: return None
+            compressed = compress_backup(json.dumps(data, default=str, ensure_ascii=False).encode())
+            encrypted = BACKUP_CIPHER.encrypt(compressed)
+            path = BACKUP_DIR / f"incremental_{mecca_now().strftime('%Y%m%d_%H%M%S')}.inc"
+            with open(path,'wb') as f: f.write(encrypted)
+            logger.info(f"نسخة تزايدية: {path.name}")
+            return path
+        except Exception as e: log_error(e, {"operation":"create_incremental_backup"}); return None
 
-# ===================== حلقة النبض الداخلي (لـ Render) =====================
-async def self_ping_loop():
-    """نبض داخلي للحفاظ على تشغيل البوت على Render"""
-    await asyncio.sleep(10)
-    external_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if external_url:
-        url = f"{external_url}/"
-    else:
-        url = f"http://0.0.0.0:{os.getenv('PORT', '10000')}/"
-    while True:
+    async def _cleanup_old_backups(self):
+        try:
+            backups = sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
+            for old in backups[MAX_BACKUPS:]: old.unlink(missing_ok=True)
+            backups = sorted(BACKUP_DIR.glob("backup_*.enc"), key=lambda x: x.stat().st_mtime, reverse=True)
+            total = sum(b.stat().st_size for b in backups)
+            limit = MAX_BACKUP_SIZE_MB * 1024 * 1024
+            while total > limit and len(backups)>1:
+                old = backups.pop(); total -= old.stat().st_size; old.unlink(missing_ok=True)
+        except Exception as e: logger.warning(f"خطأ في تنظيف النسخ القديمة: {e}")
+
+    async def _cleanup_loop(self, stop_event):
+        while not stop_event.is_set():
+            now_ts = time_module.time()
+            await execute_db(lambda conn: conn.execute(_SQL_CLEANUP_SESSIONS, (now_ts,)) or conn.commit())
+            await execute_db(lambda conn: conn.execute(_SQL_CLEANUP_TICKETS, ((utc_now()-timedelta(days=30)).isoformat(),)) or conn.commit())
+            async with _points_lock:
+                for uid in [u for u, (_, t) in list(user_points_last_hour.items()) if now_ts - t > 3600]:
+                    with suppress(KeyError): del user_points_last_hour[uid]
+            if await wait_with_timeout(stop_event, 3600): break
+
+    async def _memory_monitor_loop(self, stop_event):
+        while not stop_event.is_set():
+            ram = get_ram_usage(); pct = ram.get('percent',0) if isinstance(ram,dict) else 0
+            if pct > 80: memory_optimizer()
+            if await wait_with_timeout(stop_event, 60): break
+
+    async def _stats_broadcast_loop(self, stop_event):
+        if ws_manager is None: return
+        while not stop_event.is_set():
+            s = await db_stats()
+            if s and isinstance(s,(tuple,list)):
+                await ws_manager.broadcast({'type':'stats','data':{'total_users':s[0],'active_users':s[0]-s[1],'banned_users':s[1],'pending_posts':s[2],'groups':s[3],'channels':s[4]}})
+            if await wait_with_timeout(stop_event, 5): break
+
+    async def _contests_loop(self, stop_event):
+        while not stop_event.is_set():
+            expired = await execute_db(lambda conn: [r[0] for r in (await conn.execute(_SQL_GET_EXPIRED_CONTESTS, (utc_now().isoformat(),))).fetchall()])
+            for cid in expired:
+                winner = await db_get_random_participant(cid)
+                if winner:
+                    await db_set_contest_winner(cid, winner)
+                    contest = await db_get_contest(cid)
+                    if contest:
+                        try: await self.bot.send_message(winner, f"🎉 **تهانينا!**\nلقد فزت في مسابقة **{contest.get('title','')}**\n🎁 الجائزة: {contest.get('prize','')}", parse_mode="MarkdownV2")
+                        except: pass
+                else: await execute_db(lambda conn: conn.execute(_SQL_CLOSE_CONTEST, (cid,)) or conn.commit())
+            if await wait_with_timeout(stop_event, 3600): break
+
+    async def _self_ping_loop(self, stop_event):
+        url = f"{os.getenv('RENDER_EXTERNAL_URL','')}/" if os.getenv("RENDER_EXTERNAL_URL") else f"http://0.0.0.0:{os.getenv('PORT','10000')}/"
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
-                    advanced_logger.log_access(0, "SELF_PING", {"status": resp.status})
-        except Exception as e:
-            advanced_logger.log_error("فشل النبض الداخلي", e)
-        await asyncio.sleep(600)
+                while not stop_event.is_set():
+                    try: await session.get(url, timeout=10)
+                    except: pass
+                    if await wait_with_timeout(stop_event, 600): break
+        except ImportError: pass
 
-# ===================== دوال مساعدة =====================
-async def check_bot_permissions(bot, chat_id: int) -> tuple:
-    """التحقق من صلاحيات البوت في القناة"""
-    try:
-        me = await bot.get_chat_member(chat_id, bot.id)
-        if me.status not in ['administrator', 'creator']:
-            return False, "البوت ليس مشرفاً"
-        if not me.can_post_messages:
-            return False, "البوت لا يملك صلاحية النشر"
-        return True, ""
-    except:
-        return False, "فشل التحقق من صلاحيات البوت"
+async def start_background_tasks(bot: Bot) -> BackgroundTaskManager:
+    mgr = BackgroundTaskManager(bot); await mgr.start_all(); return mgr
 
-async def cleanup_points_cache():
-    """تنظيف ذاكرة النقاط المؤقتة"""
-    from utils import user_points_last_hour
-    while True:
-        await asyncio.sleep(3600)
-        now = time_module.time()
-        to_delete = [uid for uid, (_, ts) in user_points_last_hour.items() if now - ts > 3600]
-        for uid in to_delete:
-            del user_points_last_hour[uid]
-
-# ===================== دوال التشفير الإضافية =====================
-def encrypt_db_backup():
-    """تشفير قاعدة البيانات للنسخ الاحتياطي"""
-    from constants import DB_ENCRYPTION, ENCRYPTION_KEY
-    if not DB_ENCRYPTION:
-        return DB_PATH
-    cipher = Fernet(ENCRYPTION_KEY)
-    encrypted_path = DB_PATH.with_suffix('.enc')
-    encrypt_file_stream(DB_PATH, encrypted_path, cipher)
-    return encrypted_path
-
-def compress_backup(data: bytes) -> bytes:
-    """ضغط البيانات للنسخ الاحتياطي"""
-    from constants import ZSTD_AVAILABLE, ZSTD_COMPRESSOR
-    if ZSTD_AVAILABLE:
-        try:
-            return ZSTD_COMPRESSOR.compress(data)
-        except:
-            pass
-    import gzip
-    return gzip.compress(data)
-
-def decompress_backup(data: bytes) -> bytes:
-    """فك ضغط البيانات من النسخ الاحتياطي"""
-    from constants import ZSTD_AVAILABLE, ZSTD_DECOMPRESSOR
-    if ZSTD_AVAILABLE:
-        try:
-            return ZSTD_DECOMPRESSOR.decompress(data)
-        except:
-            pass
-    import gzip
-    return gzip.decompress(data)
+async def stop_background_tasks(mgr: BackgroundTaskManager):
+    if mgr: await mgr.stop_all()
