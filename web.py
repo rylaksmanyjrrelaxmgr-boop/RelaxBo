@@ -167,6 +167,7 @@ class WebSocketHub:
         return ws
 
 ws_hub = WebSocketHub()
+ws_extended = ws_hub
 
 @web.middleware
 async def auth_middleware(request, handler):
