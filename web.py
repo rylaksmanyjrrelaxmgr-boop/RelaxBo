@@ -365,7 +365,6 @@ async def api_logs_delete_handler(request):
     except: return web.json_response({'error':'حدث خطأ داخلي'}, status=500)
 
 def setup_web_routes(app: web.Application):
-    app.router.add_static('/static/', path=STATIC_PATH)
     app.router.add_get('/', root_handler)
     app.router.add_get('/login', login_handler); app.router.add_post('/login', login_handler)
     app.router.add_get('/logout', logout_handler)
