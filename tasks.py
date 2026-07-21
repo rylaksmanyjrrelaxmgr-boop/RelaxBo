@@ -40,7 +40,7 @@ except ImportError: MAX_BACKUP_SIZE_MB = 500
 from utils import (
     utc_now, mecca_now, utc_now_iso, mecca_now_iso,
     memory_optimizer, advanced_logger, log_error,
-    translate_text, get_user_translation_language,
+    translate_text, 
     safe_send_markdown, compress_backup, decompress_backup,
     get_ram_usage
 )
@@ -56,6 +56,7 @@ except ImportError:
         except: return False, "فشل التحقق"
 
 from database import (
+    get_user_translation_language,
     db, execute_db, db_has_active_subscription, db_has_used_trial,
     db_get_next_post, db_mark_published, db_increment_fail_count,
     db_set_last_publish, db_update_next_publish_date, db_set_next_publish_date,
