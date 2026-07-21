@@ -2,34 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-دوال مساعدة عامة – النسخة النهائية الكاملة
+دوال مساعدة عامة – النسخة النهائية الشاملة
 - جميع دوال الوقت، التشفير، الترجمة، الضغط
-- جميع دوال لوحات المفاتيح (Keyboards) المطلوبة لـ handlers.py
-- compress_backup / decompress_backup لدعم tasks.py
+- دوال لوحات المفاتيح (Keyboards)
+- compress_backup / decompress_backup
+- contains_link / contains_mention / contains_hashtag
 """
 
-import re
-import json
-import time as time_module
-import secrets
-import hashlib
-import html
-import os
-import sys
-import gc
-import asyncio
-import socket
-import logging
+import re, json, time as time_module, secrets, hashlib, html, os, sys, gc, asyncio, socket, logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any
 import urllib.parse
 from collections import defaultdict, OrderedDict
 
-try:
-    import bleach
-except ImportError:
-    bleach = None
+try: import bleach
+except ImportError: bleach = None
 
 from cryptography.fernet import Fernet
 
@@ -45,150 +33,100 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 def get_env_int(key: str, default: int) -> int:
-    try:
-        return int(os.getenv(key, str(default)))
-    except (ValueError, TypeError):
-        return default
+    try: return int(os.getenv(key, str(default)))
+    except: return default
 
 def get_env_bool(key: str, default: bool) -> bool:
-    return os.getenv(key, str(default)).lower() in ['true', '1', 'yes', 'on']
+    return os.getenv(key, str(default)).lower() in ['true','1','yes','on']
 
 def get_env_float(key: str, default: float) -> float:
-    try:
-        return float(os.getenv(key, str(default)))
-    except (ValueError, TypeError):
-        return default
+    try: return float(os.getenv(key, str(default)))
+    except: return default
 
 def escape_markdown_v2(text: str) -> str:
-    if not text:
-        return ""
-    special_chars = r'_*[]()~`>#+\-=|{}.!'
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+    if not text: return ""
+    for char in r'_*[]()~`>#+\-=|{}.!': text = text.replace(char, f'\\{char}')
     return text
 
 def clean_text_for_telegram(text: str) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     text = re.sub(r'[\u200b\u200c\u200d\u2060\uFEFF\u202a\u202b\u202c\u202d\u202e]', '', text)
-    text = text.replace('\ufeff', '').replace('\ufffc', '')
-    return text
+    return text.replace('\ufeff','').replace('\ufffc','')
 
 def sanitize_text(text: str, max_length: int = 4096, allow_tags: list = None) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     if bleach is not None:
         try:
-            if allow_tags is None:
-                allow_tags = ['b', 'i', 'u', 's', 'a', 'code', 'pre', 'strong', 'em']
-            cleaned = bleach.clean(text, tags=allow_tags, attributes={'a': ['href', 'title']}, styles=[], strip=True)
-            text = cleaned
-        except Exception as e:
-            logger.warning(f"فشل تنظيف النص باستخدام bleach: {e}")
+            if allow_tags is None: allow_tags = ['b','i','u','s','a','code','pre','strong','em']
+            text = bleach.clean(text, tags=allow_tags, attributes={'a':['href','title']}, styles=[], strip=True)
+        except: pass
     else:
         text = re.sub(r'<[^>]*>', '', text)
-    if len(text) > max_length:
-        text = text[:max_length]
+    if len(text) > max_length: text = text[:max_length]
     return text
 
-def encode_callback_data(data: str) -> str:
-    return urllib.parse.quote(data, safe='')
-
-def decode_callback_data(data: str) -> str:
-    return urllib.parse.unquote(data)
-
+def encode_callback_data(data: str) -> str: return urllib.parse.quote(data, safe='')
+def decode_callback_data(data: str) -> str: return urllib.parse.unquote(data)
 def safe_int(value, default=0):
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
+    try: return int(value)
+    except: return default
 
-def utc_now():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-def mecca_now():
-    return utc_now() + timedelta(hours=3)
-
-def utc_now_iso():
-    return utc_now().isoformat()
-
-def mecca_now_iso():
-    return mecca_now().isoformat()
+def utc_now(): return datetime.now(timezone.utc).replace(tzinfo=None)
+def mecca_now(): return utc_now() + timedelta(hours=3)
+def utc_now_iso(): return utc_now().isoformat()
+def mecca_now_iso(): return mecca_now().isoformat()
 
 def to_naive(dt):
-    if dt is None:
-        return None
-    if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
-        return dt.replace(tzinfo=None)
+    if dt is None: return None
+    if hasattr(dt,'tzinfo') and dt.tzinfo is not None: return dt.replace(tzinfo=None)
     return dt
 
 def mecca_to_utc(mecca_dt):
-    if mecca_dt is None:
-        return None
-    if hasattr(mecca_dt, 'tzinfo') and mecca_dt.tzinfo is not None:
-        mecca_dt = mecca_dt.replace(tzinfo=None)
+    if mecca_dt is None: return None
+    if hasattr(mecca_dt,'tzinfo') and mecca_dt.tzinfo is not None: mecca_dt = mecca_dt.replace(tzinfo=None)
     return mecca_dt - timedelta(hours=3)
 
 def utc_to_mecca(utc_dt):
-    if utc_dt is None:
-        return None
-    if hasattr(utc_dt, 'tzinfo') and utc_dt.tzinfo is not None:
-        utc_dt = utc_dt.replace(tzinfo=None)
+    if utc_dt is None: return None
+    if hasattr(utc_dt,'tzinfo') and utc_dt.tzinfo is not None: utc_dt = utc_dt.replace(tzinfo=None)
     return utc_dt + timedelta(hours=3)
 
 def encrypt_file(path: Path, cipher: Fernet) -> Path:
-    with open(path, 'rb') as f:
-        data = f.read()
+    data = path.read_bytes()
     encrypted = cipher.encrypt(data)
     encrypted_path = path.with_suffix('.enc')
-    with open(encrypted_path, 'wb') as f:
-        f.write(encrypted)
+    encrypted_path.write_bytes(encrypted)
     return encrypted_path
 
 def decrypt_file(path: Path, cipher: Fernet) -> Path:
-    with open(path, 'rb') as f:
-        encrypted = f.read()
+    encrypted = path.read_bytes()
     decrypted = cipher.decrypt(encrypted)
     decrypted_path = path.with_suffix('.dec')
-    with open(decrypted_path, 'wb') as f:
-        f.write(decrypted)
+    decrypted_path.write_bytes(decrypted)
     return decrypted_path
 
 def encrypt_db_backup():
-    if not DB_ENCRYPTION:
-        logger.info("تشفير قاعدة البيانات معطّل. استخدام النسخة الأصلية.")
-        return DB_PATH
-    cipher = Fernet(ENCRYPTION_KEY)
-    return encrypt_file(DB_PATH, cipher)
+    if not DB_ENCRYPTION: return DB_PATH
+    return encrypt_file(DB_PATH, Fernet(ENCRYPTION_KEY))
 
-# ========== دوال الضغط للنسخ الاحتياطي ==========
 try:
     import zstandard
-    ZSTD_AVAILABLE = True
-    ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3)
-    ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
+    ZSTD_AVAILABLE = True; ZSTD_COMPRESSOR = zstandard.ZstdCompressor(level=3); ZSTD_DECOMPRESSOR = zstandard.ZstdDecompressor()
 except ImportError:
-    ZSTD_AVAILABLE = False
-    ZSTD_COMPRESSOR = None
-    ZSTD_DECOMPRESSOR = None
+    ZSTD_AVAILABLE = False; ZSTD_COMPRESSOR = None; ZSTD_DECOMPRESSOR = None
 
 def compress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE and ZSTD_COMPRESSOR:
-        try:
-            return ZSTD_COMPRESSOR.compress(data)
-        except Exception as e:
-            logger.warning(f"فشل ضغط النسخ الاحتياطي: {e}")
+        try: return ZSTD_COMPRESSOR.compress(data)
+        except: pass
     return data
 
 def decompress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE and ZSTD_DECOMPRESSOR:
-        try:
-            return ZSTD_DECOMPRESSOR.decompress(data)
-        except Exception as e:
-            logger.warning(f"فشل فك ضغط النسخ الاحتياطي: {e}")
+        try: return ZSTD_DECOMPRESSOR.decompress(data)
+        except: pass
     return data
 
-# ========== التخزين المؤقت ==========
 try:
     from cachetools import TTLCache
     CACHETOOLS_AVAILABLE = True
@@ -199,420 +137,290 @@ except ImportError:
     CACHETOOLS_AVAILABLE = False
     class SimpleTTLCache:
         def __init__(self, maxsize=1000, ttl=300):
-            self.maxsize = maxsize
-            self.ttl = ttl
-            self.cache = OrderedDict()
-            self.timestamps = {}
+            self.maxsize, self.ttl = maxsize, ttl
+            self.cache = OrderedDict(); self.timestamps = {}
         def _clean_expired(self):
             now = time_module.time()
-            expired = [k for k, ts in self.timestamps.items() if now - ts >= self.ttl]
-            for k in expired:
-                del self.cache[k]
-                del self.timestamps[k]
-        def __contains__(self, key):
-            self._clean_expired()
-            return key in self.cache
+            for k in [k for k,ts in self.timestamps.items() if now-ts>=self.ttl]:
+                del self.cache[k]; del self.timestamps[k]
+        def __contains__(self, key): self._clean_expired(); return key in self.cache
         def __getitem__(self, key):
             self._clean_expired()
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
+            if key in self.cache: self.cache.move_to_end(key); return self.cache[key]
             raise KeyError
         def __setitem__(self, key, value):
             self._clean_expired()
-            if key in self.cache:
-                del self.cache[key]
-            elif len(self.cache) >= self.maxsize:
-                oldest_key, _ = self.cache.popitem(last=False)
-                del self.timestamps[oldest_key]
-            self.cache[key] = value
-            self.timestamps[key] = time_module.time()
+            if key in self.cache: del self.cache[key]
+            elif len(self.cache)>=self.maxsize:
+                oldest, _ = self.cache.popitem(last=False); del self.timestamps[oldest]
+            self.cache[key] = value; self.timestamps[key] = time_module.time()
         def get(self, key, default=None):
-            try:
-                return self.__getitem__(key)
-            except KeyError:
-                return default
+            try: return self[key]
+            except KeyError: return default
         def pop(self, key, default=None):
             self._clean_expired()
             if key in self.cache:
-                value = self.cache[key]
-                del self.cache[key]
-                del self.timestamps[key]
-                return value
+                v = self.cache[key]; del self.cache[key]; del self.timestamps[key]; return v
             return default
-        def clear(self):
-            self.cache.clear()
-            self.timestamps.clear()
-        def clear_pattern(self, prefix: str):
+        def clear(self): self.cache.clear(); self.timestamps.clear()
+        def clear_pattern(self, prefix):
             self._clean_expired()
-            keys = [k for k in list(self.cache.keys()) if k.startswith(prefix)]
-            for k in keys:
-                del self.cache[k]
-                del self.timestamps[k]
-    _admin_cache = SimpleTTLCache(maxsize=1000, ttl=300)
-    _security_cache = SimpleTTLCache(maxsize=500, ttl=60)
-    _auth_cache = SimpleTTLCache(maxsize=1000, ttl=300)
+            for k in [k for k in list(self.cache.keys()) if k.startswith(prefix)]:
+                del self.cache[k]; del self.timestamps[k]
+    _admin_cache = SimpleTTLCache(1000,300)
+    _security_cache = SimpleTTLCache(500,60)
+    _auth_cache = SimpleTTLCache(1000,300)
 
 class TimedLRUCache:
     def __init__(self, maxsize=200, ttl=3600):
-        self.cache = OrderedDict()
-        self.maxsize = maxsize
-        self.ttl = ttl
-        self._lock = asyncio.Lock()
+        self.cache = OrderedDict(); self.maxsize = maxsize; self.ttl = ttl; self._lock = asyncio.Lock()
     async def get(self, key):
         async with self._lock:
             if key in self.cache:
-                value, timestamp = self.cache[key]
-                if time_module.time() - timestamp < self.ttl:
-                    self.cache.move_to_end(key)
-                    return value
+                v, ts = self.cache[key]
+                if time_module.time()-ts < self.ttl: self.cache.move_to_end(key); return v
                 del self.cache[key]
             return None
     async def set(self, key, value):
         async with self._lock:
-            if key in self.cache:
-                del self.cache[key]
+            if key in self.cache: del self.cache[key]
             self.cache[key] = (value, time_module.time())
-            if len(self.cache) > self.maxsize:
-                self.cache.popitem(last=False)
+            if len(self.cache) > self.maxsize: self.cache.popitem(last=False)
     async def clear(self):
-        async with self._lock:
-            self.cache.clear()
+        async with self._lock: self.cache.clear()
 
-_translation_cache = TimedLRUCache(maxsize=500, ttl=3600)
+_translation_cache = TimedLRUCache(500, 3600)
 
 async def memory_optimizer():
     try:
-        _admin_cache.clear()
-        _security_cache.clear()
-        _auth_cache.clear()
-        await _translation_cache.clear()
-        gc.collect()
+        _admin_cache.clear(); _security_cache.clear(); _auth_cache.clear()
+        await _translation_cache.clear(); gc.collect()
         return True
-    except Exception as e:
-        logger.warning(f"⚠️ فشل تحسين الذاكرة: {e}")
-        return False
+    except: return False
 
-async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    if user_id == PRIMARY_OWNER_ID:
-        return True
+async def is_authorized_in_group(bot, chat_id, user_id):
+    if user_id == PRIMARY_OWNER_ID: return True
     cache_key = f"auth_{chat_id}_{user_id}"
-    if cache_key in _auth_cache:
-        return _auth_cache[cache_key]
+    if cache_key in _auth_cache: return _auth_cache[cache_key]
     from database import db_is_real_admin, db_is_hidden_owner, db_is_hidden_admin
-    authorized = await db_is_real_admin(chat_id, user_id)
-    if not authorized:
-        authorized = await db_is_hidden_owner(chat_id, user_id)
-    if not authorized:
-        authorized = await db_is_hidden_admin(chat_id, user_id)
+    authorized = await db_is_real_admin(chat_id, user_id) or await db_is_hidden_owner(chat_id, user_id) or await db_is_hidden_admin(chat_id, user_id)
     _auth_cache[cache_key] = authorized
     return authorized
 
-def invalidate_auth_cache(chat_id: int = None, user_id: int = None):
-    if chat_id is not None and user_id is not None:
-        _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
-    elif chat_id is not None:
-        prefix = f"auth_{chat_id}_"
-        if hasattr(_auth_cache, 'clear_pattern'):
-            _auth_cache.clear_pattern(prefix)
+def invalidate_auth_cache(chat_id=None, user_id=None):
+    if chat_id and user_id: _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
+    elif chat_id:
+        if hasattr(_auth_cache,'clear_pattern'): _auth_cache.clear_pattern(f"auth_{chat_id}_")
         else:
-            keys = [k for k in _auth_cache if k.startswith(prefix)]
-            for k in keys:
-                del _auth_cache[k]
-    else:
-        _auth_cache.clear()
+            for k in [k for k in _auth_cache if k.startswith(f"auth_{chat_id}_")]: del _auth_cache[k]
+    else: _auth_cache.clear()
 
-def invalidate_user_cache(user_id: int):
-    pass
+def invalidate_user_cache(user_id): pass
 
-# ========== الإرسال الآمن ==========
-async def safe_send_markdown(bot, chat_id: int, text: str, reply_markup=None, **kwargs):
-    if not text:
-        return None
+async def safe_send_markdown(bot, chat_id, text, reply_markup=None, **kwargs):
+    if not text: return None
     clean = sanitize_text(text)
     try:
         escaped = escape_markdown_v2(clean)
-        if len(escaped) > 4096:
-            escaped = escaped[:4093] + "..."
+        if len(escaped)>4096: escaped = escaped[:4093]+"..."
         return await bot.send_message(chat_id=chat_id, text=escaped, parse_mode='MarkdownV2', reply_markup=reply_markup, **kwargs)
     except Exception as e:
         if "can't parse entities" in str(e).lower():
             try:
-                html_text = clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                if len(html_text) > 4096:
-                    html_text = html_text[:4093] + "..."
+                html_text = clean.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                if len(html_text)>4096: html_text = html_text[:4093]+"..."
                 return await bot.send_message(chat_id=chat_id, text=html_text, parse_mode='HTML', reply_markup=reply_markup, **kwargs)
-            except Exception:
-                try:
-                    return await bot.send_message(chat_id=chat_id, text=clean[:4096], reply_markup=reply_markup, **kwargs)
-                except Exception:
-                    raise
-        else:
-            raise
+            except:
+                try: return await bot.send_message(chat_id=chat_id, text=clean[:4096], reply_markup=reply_markup, **kwargs)
+                except: raise
+        else: raise
 
-async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
-    if not query or not query.message:
-        return None
+async def safe_edit_markdown(query, text, reply_markup=None, **kwargs):
+    if not query or not query.message: return None
     clean = sanitize_text(text)
     try:
         escaped = escape_markdown_v2(clean)
-        if len(escaped) > 4096:
-            escaped = escaped[:4093] + "..."
+        if len(escaped)>4096: escaped = escaped[:4093]+"..."
         return await query.edit_message_text(text=escaped, parse_mode='MarkdownV2', reply_markup=reply_markup, **kwargs)
     except Exception as e:
         err = str(e).lower()
         if "can't parse entities" in err:
             try:
-                html_text = clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                if len(html_text) > 4096:
-                    html_text = html_text[:4093] + "..."
+                html_text = clean.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                if len(html_text)>4096: html_text = html_text[:4093]+"..."
                 return await query.edit_message_text(text=html_text, parse_mode='HTML', reply_markup=reply_markup, **kwargs)
-            except Exception:
-                try:
-                    return await query.edit_message_text(text=clean[:4096], reply_markup=reply_markup, **kwargs)
-                except Exception:
-                    raise
-        elif "message is not modified" in err:
-            try:
-                await query.answer("✅ تم التحديث")
             except:
-                pass
+                try: return await query.edit_message_text(text=clean[:4096], reply_markup=reply_markup, **kwargs)
+                except: raise
+        elif "message is not modified" in err:
+            try: await query.answer("✅ تم التحديث")
+            except: pass
             return None
-        else:
-            raise
+        else: raise
 
-async def safe_send_plain(bot, chat_id: int, text: str, **kwargs):
-    if not text:
-        return
-    clean = sanitize_text(text)
-    return await bot.send_message(chat_id=chat_id, text=clean[:4096], parse_mode=None, **kwargs)
+async def safe_send_plain(bot, chat_id, text, **kwargs):
+    if not text: return
+    return await bot.send_message(chat_id=chat_id, text=sanitize_text(text)[:4096], parse_mode=None, **kwargs)
 
-async def safe_send_error(bot, chat_id: int, text: str):
-    try:
-        return await safe_send_markdown(bot, chat_id, text)
-    except Exception:
-        return await bot.send_message(chat_id=chat_id, text=text[:4000], parse_mode=None)
+async def safe_send_error(bot, chat_id, text):
+    try: return await safe_send_markdown(bot, chat_id, text)
+    except: return await bot.send_message(chat_id=chat_id, text=text[:4000], parse_mode=None)
 
-async def safe_send_long_message(bot, chat_id: int, text: str, reply_markup=None, max_length: int = 4000):
-    if len(text) <= max_length:
-        return await safe_send_markdown(bot, chat_id, text, reply_markup)
-    parts = []
-    current = ""
+async def safe_send_long_message(bot, chat_id, text, reply_markup=None, max_length=4000):
+    if len(text) <= max_length: return await safe_send_markdown(bot, chat_id, text, reply_markup)
+    parts = []; current = ""
     for line in text.split('\n'):
-        if len(current) + len(line) + 1 > max_length:
-            parts.append(current)
-            current = line
-        else:
-            current += "\n" + line if current else line
-    if current:
-        parts.append(current)
+        if len(current)+len(line)+1 > max_length: parts.append(current); current = line
+        else: current += "\n"+line if current else line
+    if current: parts.append(current)
     first = True
     for part in parts:
-        if first and reply_markup:
-            await safe_send_markdown(bot, chat_id, part, reply_markup)
-            first = False
-        else:
-            await safe_send_markdown(bot, chat_id, part)
+        if first and reply_markup: await safe_send_markdown(bot, chat_id, part, reply_markup); first = False
+        else: await safe_send_markdown(bot, chat_id, part)
         await asyncio.sleep(0.5)
-    return None
 
-# ========== الترجمة ==========
 class AsyncTranslator:
-    def __init__(self):
-        self.session = None
-        self.pending = {}
+    def __init__(self): self.session = None; self.pending = {}
     async def get_session(self):
         if self.session is None:
-            import aiohttp
-            self.session = aiohttp.ClientSession()
+            import aiohttp; self.session = aiohttp.ClientSession()
         return self.session
-    async def translate(self, text: str, target: str) -> str:
-        if not text or target not in SUPPORTED_LANGUAGES:
-            return text
+    async def translate(self, text, target):
+        if not text or target not in SUPPORTED_LANGUAGES: return text
         cache_key = hashlib.md5(f"{text}_{target}".encode()).hexdigest()
         cached = await _translation_cache.get(cache_key)
-        if cached:
-            return cached
+        if cached: return cached
         key = (text, target)
         if key in self.pending:
-            future = asyncio.Future()
-            self.pending[key].append(future)
-            return await future
+            future = asyncio.Future(); self.pending[key].append(future); return await future
         self.pending[key] = []
         try:
             session = await self.get_session()
             url = "https://translate.googleapis.com/translate_a/single"
-            params = {"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text}
+            params = {"client":"gtx","sl":"auto","tl":target,"dt":"t","q":text}
             async with session.get(url, params=params, timeout=10) as resp:
                 data = await resp.json()
                 translated = data[0][0][0] if data and data[0] and data[0][0] else text
             await _translation_cache.set(cache_key, translated)
             for future in self.pending[key]:
-                if not future.done():
-                    future.set_result(translated)
+                if not future.done(): future.set_result(translated)
             return translated
         except (Exception, asyncio.CancelledError) as e:
-            if isinstance(e, asyncio.CancelledError):
-                logger.warning(f"تم إلغاء مهمة الترجمة: {text[:30]}...")
-            else:
-                logger.error(f"خطأ في الترجمة: {e}")
             for future in self.pending[key]:
-                if not future.done():
-                    future.set_result(text)
+                if not future.done(): future.set_result(text)
             return text
         finally:
-            if key in self.pending:
-                del self.pending[key]
+            if key in self.pending: del self.pending[key]
 
 smart_translator = AsyncTranslator()
+translate_text = smart_translator.translate
 
-async def translate_text(text: str, target_lang: str, source_lang: str = 'auto') -> str:
-    return await smart_translator.translate(text, target_lang)
-
-# ========== أدوات أخرى ==========
 def get_ram_usage():
     try:
-        import psutil
-        return {'percent': psutil.virtual_memory().percent}
-    except ImportError:
-        return {'percent': 0}
+        import psutil; return {'percent': psutil.virtual_memory().percent}
+    except ImportError: return {'percent': 0}
 
 async def check_database_health():
     try:
         from database import execute_db
-        async def _check(conn):
-            await conn.execute("SELECT 1")
-        await execute_db(_check)
+        await execute_db(lambda conn: conn.execute("SELECT 1"))
         return True
-    except Exception as e:
-        logger.warning(f"⚠️ فشل فحص صحة قاعدة البيانات: {e}")
-        return False
+    except: return False
 
-async def check_telegram_health():
-    return True
+async def check_telegram_health(): return True
 
 class AdvancedLogger:
-    def __init__(self):
-        self.loggers = {}
     def log_error(self, message, error=None, context=None):
         import traceback
-        error_id = secrets.token_hex(4)
-        log_msg = f"[{error_id}] {message}"
-        if error:
-            log_msg += f" - {error}"
-        if context:
-            log_msg += f" - السياق: {json.dumps(context, default=str)[:200]}"
-        logger.error(log_msg)
-        if error:
-            traceback.print_exc()
-        return error_id
-    def log_access(self, user_id, action, details=None):
-        log_msg = f"User: {user_id} - Action: {action}"
-        if details:
-            log_msg += f" - {json.dumps(details, default=str)[:100]}"
-        logger.info(log_msg)
-    def log_security(self, event, user_id, details=None, severity="INFO"):
-        log_msg = f"[{severity}] {event} - User: {user_id}"
-        if details:
-            log_msg += f" - {json.dumps(details, default=str)[:200]}"
-        logger.warning(log_msg)
+        eid = secrets.token_hex(4)
+        msg = f"[{eid}] {message}"
+        if error: msg += f" - {error}"
+        if context: msg += f" - {json.dumps(context, default=str)[:200]}"
+        logger.error(msg)
+        if error: traceback.print_exc()
+        return eid
+    def log_access(self, uid, action, details=None):
+        msg = f"User: {uid} - Action: {action}"
+        if details: msg += f" - {json.dumps(details, default=str)[:100]}"
+        logger.info(msg)
 
 advanced_logger = AdvancedLogger()
 log_error = advanced_logger.log_error
 
 class RateLimiter:
-    def __init__(self):
-        self.requests = {}
-        self.lock = asyncio.Lock()
-    async def check_rate_limit(self, user_id: int, action: str, max_requests: int, time_window: int) -> bool:
+    def __init__(self): self.requests = {}; self.lock = asyncio.Lock()
+    async def check_rate_limit(self, user_id, action, max_requests, time_window):
         async with self.lock:
-            key = f"{user_id}:{action}"
-            now = time_module.time()
+            key = f"{user_id}:{action}"; now = time_module.time()
             if key in self.requests:
-                self.requests[key] = [t for t in self.requests[key] if now - t < time_window]
-                if not self.requests[key]:
-                    del self.requests[key]
-            if key not in self.requests:
-                self.requests[key] = [now]
-                return True
-            if len(self.requests[key]) >= max_requests:
-                return False
-            self.requests[key].append(now)
-            return True
-    async def cleanup_old_entries(self, max_age: int = 600):
+                self.requests[key] = [t for t in self.requests[key] if now-t < time_window]
+                if not self.requests[key]: del self.requests[key]
+            if key not in self.requests: self.requests[key] = [now]; return True
+            if len(self.requests[key]) >= max_requests: return False
+            self.requests[key].append(now); return True
+    async def cleanup_old_entries(self, max_age=600):
         async with self.lock:
             now = time_module.time()
-            keys_to_delete = []
-            for key, timestamps in self.requests.items():
-                if not timestamps or (now - timestamps[-1] > max_age):
-                    keys_to_delete.append(key)
-            for key in keys_to_delete:
+            for key in [k for k,ts in self.requests.items() if not ts or now-ts[-1]>max_age]:
                 del self.requests[key]
 
 rate_limiter = RateLimiter()
 
-def parse_days_of_week_safe(days_str: str) -> list:
-    if not days_str:
-        return []
+def parse_days_of_week_safe(days_str):
+    if not days_str: return []
     try:
         days = json.loads(days_str)
-        if isinstance(days, list):
-            return [int(d) for d in days if isinstance(d, (int, str)) and str(d).isdigit()]
-        return []
-    except Exception:
-        return []
+        if isinstance(days,list): return [int(d) for d in days if str(d).isdigit()]
+    except: pass
+    return []
 
-def parse_dates_safe(dates_str: str) -> list:
-    if not dates_str:
-        return []
+def parse_dates_safe(dates_str):
+    if not dates_str: return []
     try:
         dates = json.loads(dates_str)
-        if isinstance(dates, list):
-            return [str(d) for d in dates if isinstance(d, str)]
-        return []
-    except Exception:
-        return []
+        if isinstance(dates,list): return [str(d) for d in dates if isinstance(d,str)]
+    except: pass
+    return []
 
 def check_single_instance():
     try:
         sock_path = TEMP_PATH / "bot.sock"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.bind(str(sock_path))
-            return sock
-        except socket.error:
-            logger.error("❌ البوت يعمل بالفعل!")
-            return False
-    except AttributeError:
-        logger.warning("⚠️ نظام التشغيل لا يدعم AF_UNIX. تخطي التحقق من المثيل الواحد.")
-        return None
-    except Exception as e:
-        logger.warning(f"⚠️ لا يمكن التحقق من التشغيل الواحد: {e}")
-        return None
+        try: sock.bind(str(sock_path)); return sock
+        except socket.error: logger.error("❌ البوت يعمل بالفعل!"); return False
+    except AttributeError: logger.warning("⚠️ AF_UNIX غير مدعوم"); return None
+    except: return None
 
-# ========== صلاحيات البوت ==========
-async def check_bot_permissions(bot, chat_id: int, chat_type: str = None) -> tuple:
+async def check_bot_permissions(bot, chat_id, chat_type=None):
     try:
-        if chat_type is None:
-            chat = await bot.get_chat(chat_id)
-            chat_type = chat.type
+        if chat_type is None: chat_type = (await bot.get_chat(chat_id)).type
         me = await bot.get_chat_member(chat_id, bot.id)
-        if me.status not in ['administrator', 'creator']:
-            return False, "البوت ليس مشرفاً"
-        if chat_type == 'channel':
-            if not me.can_post_messages:
-                return False, "البوت لا يملك صلاحية النشر في القناة"
-        else:
-            if not me.can_send_messages:
-                return False, "البوت لا يملك صلاحية إرسال الرسائل في المجموعة"
+        if me.status not in ('administrator','creator'): return False, "البوت ليس مشرفاً"
+        if chat_type == 'channel' and not me.can_post_messages: return False, "البوت لا يملك صلاحية النشر"
         return True, ""
-    except Exception as e:
-        return False, f"فشل التحقق من صلاحيات البوت: {str(e)[:100]}"
+    except Exception as e: return False, f"فشل التحقق: {e}"
 
-# ===================== لوحات المفاتيح (Keyboards) =====================
+# ===================== دوال فحص الروابط والإشارات =====================
+def contains_link(text: str) -> bool:
+    if not text: return False
+    patterns = [r'https?://[^\s]+', r'www\.[a-zA-Z0-9][^\s]*\.[a-zA-Z]{2,}[^\s]*',
+                r'[a-zA-Z0-9][^\s]*\.(com|net|org|io|gov|edu|me|info|xyz|online|site|store|web|co|uk|de|fr|ru|ir|sa|ae|eg)/[^\s]*']
+    for p in patterns:
+        if re.search(p, text, re.IGNORECASE): return True
+    return False
+
+def contains_mention(text: str) -> bool:
+    if not text: return False
+    return bool(re.search(r'@\w{5,}', text))
+
+def contains_hashtag(text: str) -> bool:
+    if not text: return False
+    return bool(re.search(r'#\w+', text))
+
+# ===================== لوحات المفاتيح =====================
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-def get_advanced_group_actions_keyboard(chat_id: int):
+def get_advanced_group_actions_keyboard(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛑 حظر", callback_data=f"{CallbackData.GROUP_ACTION_BAN}:{chat_id}"),
          InlineKeyboardButton("🔇 كتم", callback_data=f"{CallbackData.GROUP_ACTION_MUTE}:{chat_id}")],
@@ -624,7 +432,7 @@ def get_advanced_group_actions_keyboard(chat_id: int):
          InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
     ])
 
-def get_advanced_mute_duration_keyboard(chat_id: int):
+def get_advanced_mute_duration_keyboard(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"adv_mute_duration:5:{chat_id}"),
          InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"adv_mute_duration:30:{chat_id}")],
@@ -636,7 +444,7 @@ def get_advanced_mute_duration_keyboard(chat_id: int):
          InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")]
     ])
 
-def security_keyboard(chat_id: int):
+def security_keyboard(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"),
          InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
@@ -654,7 +462,7 @@ def security_keyboard(chat_id: int):
         [InlineKeyboardButton("🔙 إغلاق", callback_data=CallbackData.SECURITY_CLOSE)]
     ])
 
-def get_admin_keyboard(user_id: int):
+def get_admin_keyboard(user_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 المستخدمين", callback_data=CallbackData.ADMIN_USERS),
          InlineKeyboardButton("🚫 المحظورين", callback_data=CallbackData.ADMIN_BANNED_USERS)],
@@ -713,21 +521,21 @@ def get_replies_keyboard():
          InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
     ])
 
-def get_auto_reply_keyboard(chat_id: int, settings: dict):
-    status_text = "🟢 مفعل" if settings['enabled'] else "🔴 معطل"
-    admin_text = "👑 مشرفين فقط" if settings['only_admins'] else "👥 الجميع"
+def get_auto_reply_keyboard(chat_id, settings):
+    status = "🟢 مفعل" if settings.get('enabled') else "🔴 معطل"
+    admin = "👑 مشرفين فقط" if settings.get('only_admins') else "👥 الجميع"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📝 الردود التلقائية: {status_text}", callback_data=f"{CallbackData.AUTO_REPLY_TOGGLE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton(f"👥 المستخدمون: {admin_text}", callback_data=f"{CallbackData.AUTO_REPLY_ADMINS_PREFIX}{chat_id}")],
+        [InlineKeyboardButton(f"📝 الردود التلقائية: {status}", callback_data=f"{CallbackData.AUTO_REPLY_TOGGLE_PREFIX}{chat_id}")],
+        [InlineKeyboardButton(f"👥 المستخدمون: {admin}", callback_data=f"{CallbackData.AUTO_REPLY_ADMINS_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🔄 إعادة تعيين الردود", callback_data=f"{CallbackData.AUTO_REPLY_RESET_PREFIX}{chat_id}")],
         [InlineKeyboardButton("📊 إحصائيات الردود", callback_data=f"{CallbackData.AUTO_REPLY_STATS_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
     ])
 
-def get_user_auto_reply_keyboard(user_id: int, enabled: bool):
-    status_text = "🟢 مفعل" if enabled else "🔴 معطل"
+def get_user_auto_reply_keyboard(user_id, enabled):
+    status = "🟢 مفعل" if enabled else "🔴 معطل"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📝 الردود التلقائية: {status_text}", callback_data=f"{CallbackData.USER_AUTO_REPLY_TOGGLE_PREFIX}{user_id}")],
+        [InlineKeyboardButton(f"📝 الردود التلقائية: {status}", callback_data=f"{CallbackData.USER_AUTO_REPLY_TOGGLE_PREFIX}{user_id}")],
         [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)]
     ])
 
@@ -739,7 +547,7 @@ def get_banned_words_admin_keyboard():
          InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
     ])
 
-def penalty_keyboard(chat_id: int):
+def penalty_keyboard(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔴 طرد", callback_data=f"{CallbackData.PENALTY_KICK}:{chat_id}"),
          InlineKeyboardButton("🛑 حظر", callback_data=f"{CallbackData.PENALTY_BAN}:{chat_id}")],
@@ -747,7 +555,7 @@ def penalty_keyboard(chat_id: int):
          InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
     ])
 
-def mute_duration_keyboard(chat_id: int):
+def mute_duration_keyboard(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏱️ 5 دقائق", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_5}:{chat_id}"),
          InlineKeyboardButton("⏱️ 30 دقيقة", callback_data=f"{CallbackData.GROUP_MUTE_DURATION_30}:{chat_id}")],
@@ -759,9 +567,9 @@ def mute_duration_keyboard(chat_id: int):
          InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}")]
     ])
 
-async def build_days_keyboard(user_id: int, context):
+async def build_days_keyboard(user_id, context):
     selected = context.user_data.get('selected_days', [])
-    day_names = ['الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
+    day_names = ['الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت','الأحد']
     keyboard = []
     for i, name in enumerate(day_names):
         status = "✅" if i in selected else "⬜"
