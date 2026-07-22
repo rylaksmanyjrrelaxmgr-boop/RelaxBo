@@ -11816,13 +11816,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # ===== حذف رسائل الخدمة =====
-if security_settings.get('delete_service'):
-    if update.message.new_chat_members or update.message.left_chat_member:
-        try:
-            await update.message.delete()
-        except:
-            pass
-        return
+# تم إزالة الكود القديم واستبداله بالدالة الجديدة
         is_service = (
             update.message.new_chat_members or
             update.message.left_chat_member or
@@ -13420,6 +13414,7 @@ async def main():
     print("   • ✅ إصلاح شاملة للكود")
 
     try:
+    application.add_handler(MessageHandler(None, delete_service_messages), group=0)
         await application.run_polling(
             drop_pending_updates=True,
             poll_interval=POLL_INTERVAL
@@ -13443,6 +13438,44 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"❌ خطأ فادح: {e}")
         import traceback
+
+# ===== دوال حذف رسائل الخدمة (تمت إضافتها تلقائيًا) =====
+def is_service_message(message):
+    """تعيد True إذا كانت الرسالة خدمية"""
+    return any((
+        message.new_chat_members,
+        message.left_chat_member,
+        message.new_chat_title,
+        message.new_chat_photo,
+        message.delete_chat_photo,
+        message.group_chat_created,
+        message.supergroup_chat_created,
+        message.channel_chat_created,
+        message.message_auto_delete_timer_changed,
+        message.pinned_message,
+        message.video_chat_started,
+        message.video_chat_ended,
+        message.video_chat_participants_invited,
+        message.forum_topic_created,
+        message.forum_topic_edited,
+        message.forum_topic_closed,
+        message.forum_topic_reopened,
+        message.general_forum_topic_hidden,
+        message.general_forum_topic_unhidden,
+        message.write_access_allowed,
+        message.proximity_alert_triggered,
+        message.boost_added,
+        message.web_app_data,
+    ))
+
+async def delete_service_messages(update, context):
+    if update.message and is_service_message(update.message):
+        try:
+            await update.message.delete()
+        except:
+            pass
+# ========================================================
+
         traceback.print_exc()
         sys.exit(1)
 
