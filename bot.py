@@ -11836,7 +11836,6 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
                 pass
             return
         is_service = (
-            update.message.service_message is not None or
             update.message.new_chat_members or
             update.message.left_chat_member or
             update.message.new_chat_title or
@@ -11855,9 +11854,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
                 pass
             return
     is_service = (
-        update.message.service_message is not None or
         update.message.new_chat_members or
-        update.message.left_chat_member or
         update.message.new_chat_title or
         update.message.new_chat_photo or
         update.message.delete_chat_photo or
