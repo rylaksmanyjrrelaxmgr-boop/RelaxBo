@@ -12,8 +12,16 @@ from handlers import *
 from tasks import BackgroundTaskManager
 from web import start_web_server
 
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, PreCheckoutQueryHandler, ChatMemberHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
+
+# دالة احتياطية لمعالجة الأخطاء
+try:
+    _ = global_error_handler
+except NameError:
+    async def global_error_handler(update, context):
+        import logging
+        logging.error(msg="حدث خطأ:", exc_info=context.error)
 
 async def main():
     await init_db_improved()
@@ -36,6 +44,8 @@ async def main():
     app.add_handler(CommandHandler("trial", trial_command_handler))
     app.add_handler(CommandHandler("subscribe", subscribe_command_handler))
     app.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
+    app.add_handler(CommandHandler("language", language_command_handler))
+    app.add_handler(CommandHandler("security", security_command_handler))
 
     # الكولباك الأساسية
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
@@ -47,17 +57,23 @@ async def main():
     app.add_handler(CallbackQueryHandler(subscribe_menu_callback, pattern="^subscribe:menu$"))
     app.add_handler(CallbackQueryHandler(help_callback, pattern="^help$"))
     app.add_handler(CallbackQueryHandler(contests_menu_callback, pattern="^contests_menu$"))
+    app.add_handler(CallbackQueryHandler(my_groups_callback, pattern="^groups:my_groups$"))
+    app.add_handler(CallbackQueryHandler(group_settings_callback, pattern="^groups:settings:"))
+    app.add_handler(CallbackQueryHandler(security_links_callback, pattern="^security:links:"))
+    app.add_handler(CallbackQueryHandler(security_mentions_callback, pattern="^security:mentions:"))
+    app.add_handler(CallbackQueryHandler(security_stickers_callback, pattern="^security:stickers:"))
+    app.add_handler(CallbackQueryHandler(security_videos_callback, pattern="^security:videos:"))
 
-    # أهم سطرين: الرسائل في الخاص والمجموعات
+    # رسائل الخاص والمجموعات
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
 
-    # مهام الخلفية
+    # بدء الخدمات
     task_manager = BackgroundTaskManager(app.bot)
     await task_manager.start_all()
     asyncio.create_task(start_web_server())
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3) – البوت يرد الآن في الخاص ✅")
+    print(f"🚀 تم تشغيل {BOT_NAME} – يرد في الخاص والمجموعات ✅")
     await app.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
     await task_manager.stop_all()
     await db.close()
