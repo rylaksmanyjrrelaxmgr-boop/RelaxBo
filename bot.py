@@ -1529,6 +1529,7 @@ class ErrorHandler:
         last_error = None
         for attempt in range(self.max_retries):
             try:
+                    pass
                 return await func(*args, **kwargs)
             except (TimedOut, NetworkError) as e:
                 last_error = e
@@ -1555,6 +1556,7 @@ class ErrorHandler:
         last_error = None
         for attempt in range(self.max_retries):
             try:
+                    pass
                 return func(*args, **kwargs)
             except Exception as e:
                 last_error = e
@@ -1777,12 +1779,14 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
 
 async def safe_send_error(bot, chat_id: int, text: str):
     try:
+            pass
         return await safe_send_markdown(bot, chat_id, text)
     except Exception as e:
         logger.warning(f"فشل إرسال تقرير الخطأ: {e}")
         plain_text = re.sub(r'[*_`\[\]()~>#+\-=|{}.!\\]', '', text)
         plain_text = plain_text.replace("\\", "")
         try:
+                pass
             return await bot.send_message(chat_id=chat_id, text=plain_text[:4000])
         except Exception as e2:
             return await bot.send_message(chat_id=chat_id, text=text[:4000], parse_mode=None)
@@ -2007,6 +2011,7 @@ db_pool = DatabasePool(max_connections=MAX_CONNECTIONS)
 async def execute_db(func: Callable):
     conn = await db_pool.get_connection()
     try:
+            pass
         return await func(conn)
     except Exception as e:
         logger.error(f"خطأ في قاعدة البيانات: {e}")
@@ -2127,6 +2132,7 @@ def decrypt_db_backup(encrypted_path: Path) -> bytes:
 def compress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
+                pass
             return ZSTD_COMPRESSOR.compress(data)
         except:
             pass
@@ -2135,6 +2141,7 @@ def compress_backup(data: bytes) -> bytes:
 def decompress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
+                pass
             return ZSTD_DECOMPRESSOR.decompress(data)
         except:
             pass
@@ -2144,6 +2151,7 @@ def decompress_backup(data: bytes) -> bytes:
 async def retry_with_jitter(func: Callable, max_retries: int = 5, base_delay: float = 1) -> Any:
     for attempt in range(max_retries):
         try:
+                pass
             return await func()
         except Exception as e:
             if attempt == max_retries - 1:
@@ -2160,6 +2168,7 @@ def retry(max_retries=3, delay=1, backoff=2, exceptions=(Exception,)):
             _delay = delay
             for attempt in range(max_retries):
                 try:
+                        pass
                     return await func(*args, **kwargs)
                 except exceptions as e:
                     if attempt == max_retries - 1:
@@ -4595,6 +4604,7 @@ def parse_days_of_week_safe(days_str):
     if not days_str:
         return []
     try:
+            pass
         return json.loads(days_str)
     except:
         return []
@@ -4603,6 +4613,7 @@ def parse_dates_safe(dates_str):
     if not dates_str:
         return []
     try:
+            pass
         return json.loads(dates_str)
     except:
         return []
@@ -13402,7 +13413,6 @@ async def main():
     print("   • ✅ إصلاح شاملة للكود")
 
     try:
-    application.add_handler(MessageHandler(None, delete_service_messages), group=0)
         await application.run_polling(
             drop_pending_updates=True,
             poll_interval=POLL_INTERVAL
