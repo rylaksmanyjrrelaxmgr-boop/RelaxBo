@@ -10262,12 +10262,8 @@ async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAU
 
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
-# ===================== دوال التحقق من صلاحية المشرف (المطلوبة) =====================
+# ===================== دوال التحقق من صلاحية المشرف =====================
 async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    دالة مخصصة للتحقق مما إذا كان المستخدم مشرفاً في المجموعة.
-    تستخدم is_authorized_in_group مع التخزين المؤقت.
-    """
     if update.effective_chat is None or update.effective_user is None:
         return False
     if update.effective_chat.type not in ['group', 'supergroup']:
@@ -10276,7 +10272,7 @@ async def check_admin_access(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     return await is_authorized_in_group(context.bot, chat_id, user_id)
 
-# ===================== معالجات الكولباك للإجراءات المتقدمة (الجزء الثاني) =====================
+# ===================== معالجات الدفع =====================
 async def pre_checkout_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
     if query.invoice_payload.startswith("sub_"):
@@ -10381,10 +10377,6 @@ async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===================== معالج /sendcode مع مهلة 10 دقائق =====================
 async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    أمر /sendcode - يرسل كود البوت الكامل للمستخدم المصرح له.
-    المهلة: 10 دقائق (600 ثانية).
-    """
     user_id = update.effective_user.id
     allowed_user = await db_get_allowed_sendcode_user()
     if user_id != PRIMARY_OWNER_ID and user_id != allowed_user:
@@ -10414,9 +10406,6 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    معالج تأكيد كلمة المرور لـ /sendcode مع مهلة 10 دقائق.
-    """
     user_id = update.effective_user.id
     expected_password = context.user_data.get('sendcode_temp_password')
     timestamp = context.user_data.get('sendcode_temp_timestamp', 0)
@@ -10483,7 +10472,7 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
         context.user_data.pop('sendcode_temp_timestamp', None)
         context.user_data.pop('state', None)
 
-# ===================== معالجات الكولباك للأوامر الإضافية =====================
+# ===================== أوامر إضافية =====================
 async def language_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     keyboard = InlineKeyboardMarkup([
@@ -10512,8 +10501,6 @@ async def syncgroup_command_handler(update: Update, context: ContextTypes.DEFAUL
     user_id = update.effective_user.id
 
     await db_register_group(chat_id, chat_name, user_id, update.effective_chat.username)
-
-    # مزامنة المشرفين الحقيقيين
     await db_sync_group_admins(chat_id, context.bot, user_id)
 
     bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
@@ -10554,7 +10541,6 @@ async def subscribe_command_handler(update: Update, context: ContextTypes.DEFAUL
     await subscribe_menu_callback(update, context)
 
 async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أمر /help"""
     if update.message is None:
         return
     user_id = update.effective_user.id
@@ -10845,7 +10831,7 @@ async def handle_moderation_commands(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text("📝 **الاستخدام:** `/unban معرف_المستخدم`", parse_mode="MarkdownV2")
         return
 
-# ===================== معالجات الكولباك لإضافة البوت =====================
+# ===================== معالجات إضافة البوت =====================
 async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.new_chat_members:
         return
@@ -10953,7 +10939,6 @@ async def detect_owner_type(bot, chat_id):
         return {'is_hidden': True, 'user_id': None}
     except:
         return {'is_hidden': True, 'user_id': None}
-
 # ===================== معالج الرسائل الرئيسي =====================
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
@@ -11536,7 +11521,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
         await nsfw_settings_callback(update, context)
         return
 
-    # ===== معالجة الأوامر المتقدمة (ban, mute, warn, kick, restrict, pin, unban) =====
+    # ===== معالجة الأوامر المتقدمة =====
     if state and isinstance(state, UserState) and state.name.startswith('WAITING_'):
         chat_id = context.user_data.get('advanced_chat_id')
         if not chat_id:
@@ -11706,7 +11691,7 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"فشل معالج الأخطاء نفسه: {e}")
 
-# ===================== فلتر الرسائل مع كشف NSFW وإضافة رسالة ترويجية =====================
+# ===================== فلتر الرسائل مع كشف NSFW =====================
 async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -11838,7 +11823,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
         return
 
-    # ===== حذف الملفات (documents) =====
+    # ===== حذف الملفات =====
     if security_settings.get('delete_documents') and update.message.document:
         try:
             await update.message.delete()
@@ -11848,7 +11833,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
         return
 
-    # ===== حذف الملصقات (stickers) =====
+    # ===== حذف الملصقات =====
     if security_settings.get('delete_stickers') and update.message.sticker:
         try:
             await update.message.delete()
@@ -11925,6 +11910,8 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"فشل إرسال رسالة ترويجية: {e}")
 
 # ===================== خادم الويب =====================
+web_app = web.Application()
+
 async def health_check_handler(request):
     try:
         db_healthy = await check_database_health()
@@ -12386,7 +12373,6 @@ async def self_ping_loop():
         except Exception as e:
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
         await asyncio.sleep(600)
-
 # ===================== تهيئة قاعدة البيانات المحسنة =====================
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
@@ -13423,3 +13409,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
