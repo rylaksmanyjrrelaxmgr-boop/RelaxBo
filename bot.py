@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os
-# هذا السطر يحل المشكلة مباشرة في الكود
 os.environ['PTB_DISABLE_SIGNAL_HANDLER'] = 'true'
 
 import asyncio, sys, traceback
@@ -33,83 +31,54 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-
-# ===================== دالة وسيطة لمعالج الرسائل الخاصة =====================
 async def private_message_router(update, context):
     try:
-        from database import db_is_creating_contest
-        user_id = update.effective_user.id
-        if await db_is_creating_contest(user_id):
-            return await handle_contest_creation_states(update, context)
-    except (ImportError, AttributeError):
         if context.user_data.get("creating_contest"):
             return await handle_contest_creation_states(update, context)
-
+    except: pass
     return await message_handler_main(update, context)
 
-
-# ===================== الدالة الرئيسية =====================
-
 async def main():
-    """تشغيل البوت"""
     await init_db_improved()
     await import_banned_words_on_startup()
     get_nsfw_lock()
 
     if USE_PROXY:
-        request = HTTPXRequest(
-            proxy_url=PROXY_URL,
-            read_timeout=60.0,
-            write_timeout=30.0,
-            connect_timeout=30.0,
-            pool_timeout=10.0,
-            connection_pool_size=MAX_CONNECTIONS
-        )
+        request = HTTPXRequest(proxy_url=PROXY_URL, read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
     else:
-        request = HTTPXRequest(
-            read_timeout=60.0,
-            write_timeout=30.0,
-            connect_timeout=30.0,
-            pool_timeout=10.0,
-            connection_pool_size=MAX_CONNECTIONS
-        )
+        request = HTTPXRequest(read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
 
     application = Application.builder().token(TOKEN).request(request).build()
     application.add_error_handler(global_error_handler)
 
-    # ========== الأوامر ==========
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("help", help_command_handler))
-    application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("panel", panel_command_handler))
     application.add_handler(CommandHandler("stats", stats_command_handler))
     application.add_handler(CommandHandler("contests", contests_command_handler))
-    application.add_handler(CommandHandler("trial", trial_command_handler))
-    application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
-    application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
 
-    # ========== الكولباك ==========
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
     application.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
 
-    # ========== الرسائل ==========
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
 
     await application.bot.set_my_commands([BotCommand("start", "بدء البوت"), BotCommand("help", "المساعدة")])
 
+    task_manager = BackgroundTaskManager(application.bot)
+    await task_manager.start_all()
+    asyncio.create_task(start_web_server())
+
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
     await application.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
-
-
-# ===================== نقطة الدخول =====================
+    await task_manager.stop_all()
+    await db.close()
 
 if __name__ == "__main__":
     try:
         lock_socket = check_single_instance()
         if lock_socket is False:
-            print("❌ البوت يعمل بالفعل!")
-            sys.exit(1)
+            print("❌ البوت يعمل بالفعل!"); sys.exit(1)
         asyncio.run(main())
     except KeyboardInterrupt:
         print("🛑 تم إيقاف البوت")
