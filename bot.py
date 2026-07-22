@@ -15,14 +15,6 @@ from web import start_web_server
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
-# دالة احتياطية لمعالجة الأخطاء
-try:
-    _ = global_error_handler
-except NameError:
-    async def global_error_handler(update, context):
-        import logging
-        logging.error(msg="حدث خطأ:", exc_info=context.error)
-
 async def main():
     await init_db_improved()
     await import_banned_words_on_startup()
@@ -35,7 +27,7 @@ async def main():
     app = Application.builder().token(TOKEN).request(request).build()
     app.add_error_handler(global_error_handler)
 
-    # الأوامر الأساسية
+    # الأوامر
     app.add_handler(CommandHandler("start", start_command_handler))
     app.add_handler(CommandHandler("help", help_command_handler))
     app.add_handler(CommandHandler("panel", panel_command_handler))
@@ -47,7 +39,7 @@ async def main():
     app.add_handler(CommandHandler("language", language_command_handler))
     app.add_handler(CommandHandler("security", security_command_handler))
 
-    # الكولباك الأساسية
+    # الكولباك
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     app.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
@@ -64,19 +56,15 @@ async def main():
     app.add_handler(CallbackQueryHandler(security_stickers_callback, pattern="^security:stickers:"))
     app.add_handler(CallbackQueryHandler(security_videos_callback, pattern="^security:videos:"))
 
-    # رسائل الخاص والمجموعات
+    # الرسائل
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
 
-    # بدء الخدمات
-    task_manager = BackgroundTaskManager(app.bot)
-    await task_manager.start_all()
+    # تشغيل خادم الويب في الخلفية (ضروري لـ Render)
     asyncio.create_task(start_web_server())
 
-    print(f"🚀 تم تشغيل {BOT_NAME} – يرد في الخاص والمجموعات ✅")
+    print(f"🚀 تم تشغيل {BOT_NAME} - المنفذ مفتوح والخاص يرد ✅")
     await app.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
-    await task_manager.stop_all()
-    await db.close()
 
 if __name__ == "__main__":
     try:
