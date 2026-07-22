@@ -56,15 +56,17 @@ async def main():
     app.add_handler(CallbackQueryHandler(security_stickers_callback, pattern="^security:stickers:"))
     app.add_handler(CallbackQueryHandler(security_videos_callback, pattern="^security:videos:"))
 
-    # الرسائل
+    # الرسائل (الخاص والمجموعات)
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
 
-    # تشغيل خادم الويب في الخلفية (ضروري لـ Render)
+    # لو عايز تشغل خادم الويب برضه (عشان لوحة التحكم)، ده شغال عادي:
     asyncio.create_task(start_web_server())
 
-    print(f"🚀 تم تشغيل {BOT_NAME} - المنفذ مفتوح والخاص يرد ✅")
+    print(f"🚀 تم تشغيل {BOT_NAME} - يرد في الخاص والمجموعات ✅")
     await app.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
+    await task_manager.stop_all()
+    await db.close()
 
 if __name__ == "__main__":
     try:
