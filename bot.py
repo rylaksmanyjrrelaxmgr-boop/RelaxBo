@@ -3,125 +3,72 @@
 import os
 os.environ['PTB_DISABLE_SIGNAL_HANDLER'] = 'true'
 
-import asyncio, sys, traceback
+import asyncio
+import sys
+import traceback
 from pathlib import Path
+
+# إضافة المسار الحالي
 sys.path.insert(0, str(Path(__file__).parent))
 
-from telegram import Bot
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from telegram.request import HTTPXRequest
-
-from constants import TOKEN, BOT_NAME, MAX_CONNECTIONS, USE_PROXY, PROXY_URL, POLL_INTERVAL
+# استيراد المكونات الأساسية فقط
+from constants import TOKEN, BOT_NAME
 from utils import check_single_instance
-from database import db, init_db_improved
-from security import import_banned_words_on_startup
-from handlers import *
-from web import start_web_server
 
+# استيراد مكتبة تيليجرام
+from telegram import Update, Bot
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes
+)
+
+# ===================== معالجات مدمجة مباشرة =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /start"""
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🌿 **{BOT_NAME}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 المعرف: `{user.id}`\n\n"
+        f"مرحباً بك! البوت يعمل بنجاح ✅",
+        parse_mode="MarkdownV2"
+    )
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الرسائل النصية"""
+    text = update.message.text
+    await update.message.reply_text(f"📩 استلمت: {text}")
+
+# ===================== الدالة الرئيسية =====================
 async def main():
-    # تهيئة قاعدة البيانات
-    await init_db_improved()
-    await import_banned_words_on_startup()
-
-    # إعداد الطلب
-    if USE_PROXY:
-        request = HTTPXRequest(proxy_url=PROXY_URL, read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
-    else:
-        request = HTTPXRequest(read_timeout=60.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=10.0, connection_pool_size=MAX_CONNECTIONS)
-
+    """تشغيل البوت"""
     # بناء التطبيق
-    application = Application.builder().token(TOKEN).request(request).build()
-    application.add_error_handler(global_error_handler)
+    application = Application.builder().token(TOKEN).build()
 
-    # حذف أي webhook سابق لضمان عمل polling
+    # تسجيل المعالجات الأساسية
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    # حذف أي webhook سابق
     bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # تسجيل المعالجات الأساسية
-    application.add_handler(CommandHandler("start", start_command_handler))
-    application.add_handler(CommandHandler("help", help_command_handler))
-    application.add_handler(CommandHandler("language", language_command_handler))
-    application.add_handler(CommandHandler("panel", panel_command_handler))
-    application.add_handler(CommandHandler("stats", stats_command_handler))
-    application.add_handler(CommandHandler("contests", contests_command_handler))
-    application.add_handler(CommandHandler("trial", trial_command_handler))
-    application.add_handler(CommandHandler("subscribe", subscribe_command_handler))
-    application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
-    application.add_handler(CommandHandler("security", security_command_handler))
-    application.add_handler(CommandHandler("register_hidden_owner", register_hidden_owner_handler))
-    application.add_handler(CommandHandler("add_hidden_admin", add_hidden_admin_command))
-    application.add_handler(CommandHandler("remove_hidden_admin", remove_hidden_admin_command))
-    application.add_handler(CommandHandler("list_hidden_admins", list_hidden_admins_command))
-    application.add_handler(CommandHandler("support", support_command_handler))
-    application.add_handler(CommandHandler("rank", rank_command_handler))
-    application.add_handler(CommandHandler("top", top_command_handler))
-    application.add_handler(CommandHandler("developer", developer_command_handler))
-    application.add_handler(CommandHandler("updates", updates_command_handler))
-    application.add_handler(CommandHandler("lock", lock_chat_command_handler))
-    application.add_handler(CommandHandler("unlock", unlock_chat_command_handler))
-    application.add_handler(CommandHandler("schedule", schedule_post_command_handler))
-    application.add_handler(CommandHandler("set_log_channel", set_log_channel_command_handler))
-    application.add_handler(CommandHandler("sendcode", sendcode_command_handler))
-    application.add_handler(CommandHandler("ban", handle_moderation_commands))
-    application.add_handler(CommandHandler("mute", handle_moderation_commands))
-    application.add_handler(CommandHandler("warn", handle_moderation_commands))
-    application.add_handler(CommandHandler("kick", handle_moderation_commands))
-    application.add_handler(CommandHandler("restrict", handle_moderation_commands))
-    application.add_handler(CommandHandler("pin", handle_moderation_commands))
-    application.add_handler(CommandHandler("unban", handle_moderation_commands))
-    application.add_handler(CommandHandler("create_contest", create_contest_command_handler))
-    application.add_handler(CommandHandler("declare_winner", declare_winner_command_handler))
-    application.add_handler(CommandHandler("set_rules", set_rules_command_handler))
-    application.add_handler(CommandHandler("rules", rules_command_handler))
+    print(f"🚀 تم تشغيل {BOT_NAME}")
+    print("📡 البوت جاهز لاستقبال الرسائل...")
 
-    # الكولباك
-    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
-    application.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
-    application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|language)$"))
-    application.add_handler(CallbackQueryHandler(settings_menu_callback, pattern="^settings:menu$"))
-    application.add_handler(CallbackQueryHandler(toggle_auto_publish_callback, pattern="^settings:toggle_auto_publish$"))
-    application.add_handler(CallbackQueryHandler(toggle_auto_recycle_callback, pattern="^settings:toggle_auto_recycle$"))
-    application.add_handler(CallbackQueryHandler(trial_callback, pattern="^trial$"))
-    application.add_handler(CallbackQueryHandler(subscribe_menu_callback, pattern="^subscribe:menu$"))
-    application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern="^admin:panel$"))
-    application.add_handler(CallbackQueryHandler(contests_menu_callback, pattern="^contests_menu$"))
-    application.add_handler(CallbackQueryHandler(contest_join_callback, pattern="^contest_join:"))
-    application.add_handler(CallbackQueryHandler(contest_winners_callback, pattern="^contest_winners$"))
-    application.add_handler(CallbackQueryHandler(contests_back_callback, pattern="^contests_back$"))
-    application.add_handler(CallbackQueryHandler(my_groups_callback, pattern="^groups:my_groups$"))
-    application.add_handler(CallbackQueryHandler(group_settings_callback, pattern="^groups:settings:"))
-    application.add_handler(CallbackQueryHandler(security_links_callback, pattern="^security:links:"))
-    application.add_handler(CallbackQueryHandler(security_mentions_callback, pattern="^security:mentions:"))
-    application.add_handler(CallbackQueryHandler(security_stickers_callback, pattern="^security:stickers:"))
-    application.add_handler(CallbackQueryHandler(security_videos_callback, pattern="^security:videos:"))
-    application.add_handler(CallbackQueryHandler(add_channel_callback, pattern="^channels:add$"))
-    application.add_handler(CallbackQueryHandler(my_channels_callback, pattern="^channels:my_channels$"))
-    application.add_handler(CallbackQueryHandler(select_channel_callback, pattern="^channels:select:"))
-    application.add_handler(CallbackQueryHandler(delete_channel_callback, pattern="^channels:delete:"))
-    application.add_handler(CallbackQueryHandler(add_15_posts_callback, pattern="^posts:add_15$"))
-    application.add_handler(CallbackQueryHandler(help_callback, pattern="^help$"))
+    # بدء البوت
+    await application.run_polling(drop_pending_updates=True)
 
-    # الرسائل
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
-
-    # بدء خادم الويب أولاً لضمان فتح المنفذ
-    asyncio.create_task(start_web_server())
-    await asyncio.sleep(0.2)  # فرصة لبدء الاستماع
-
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
-    await application.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
-
+# ===================== نقطة الدخول =====================
 if __name__ == "__main__":
     try:
-        lock_socket = check_single_instance()
-        if lock_socket is False:
-            print("❌ البوت يعمل بالفعل!"); sys.exit(1)
         asyncio.run(main())
     except KeyboardInterrupt:
         print("🛑 تم إيقاف البوت")
     except Exception as e:
-        print(f"❌ خطأ فادح: {e}")
+        print(f"❌ خطأ: {e}")
         traceback.print_exc()
         sys.exit(1)
