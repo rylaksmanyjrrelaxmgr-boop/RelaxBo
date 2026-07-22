@@ -1,27 +1,9 @@
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-22 04:51:06
-# SIGNATURE: 1caa5f57af389d01
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-21 00:21:03
-# SIGNATURE: 975f8ac4a456cd74
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.3 - إضافة أزرار حذف الفيديوهات ورسائل الخدمة والملفات
+الإصدار: 19.3.3 - إضافة أزرار حذف الفيديوهات ورسائل الخدمة والملفات والملصقات
 المطور: @RelaxMgr
 """
 
@@ -2476,16 +2458,12 @@ class CallbackData:
     NSFW_SETTINGS = "nsfw_settings"
     NSFW_TOGGLE = "nsfw_toggle"
     NSFW_THRESHOLD_SET = "nsfw_threshold_set"
-    # الأزرار الجديدة لحذف الفيديوهات ورسائل الخدمة والملفات
+    # الأزرار الجديدة
     SECURITY_DELETE_VIDEOS_PREFIX = "security:delete_videos:"
     SECURITY_DELETE_SERVICE_PREFIX = "security:delete_service:"
     SECURITY_DELETE_DOCUMENTS_PREFIX = "security:delete_documents:"
     SECURITY_DELETE_STICKERS_PREFIX = "security:delete_stickers:"
-    ALTER TABLE group_security ADD COLUMN delete_videos INTEGER DEFAULT 0;
-    ALTER TABLE group_security ADD COLUMN delete_service INTEGER DEFAULT 0;
-    ALTER TABLE group_security ADD COLUMN delete_documents INTEGER DEFAULT 0;
-    ALTER TABLE group_security ADD COLUMN delete_stickers INTEGER DEFAULT 0;
-# ===================== نظام إدارة الحالات المتقدم =====================-
+# ===================== نظام إدارة الحالات المتقدم =====================
 class UserState(Enum):
     NONE = auto()
     ADDING_POSTS = auto()
@@ -2554,1670 +2532,6 @@ class StateDispatcher:
         return False
 
 state_dispatcher = StateDispatcher()
-
-# ===================== واجهة الويب المحسّنة (مع دعم Render) =====================
-
-# ===== تكوين Jinja2 =====
-template_env = None
-if JINJA2_AVAILABLE:
-    try:
-        template_loader = jinja2.FileSystemLoader(str(TEMPLATES_PATH))
-        template_env = jinja2.Environment(loader=template_loader, autoescape=True)
-        print("✅ تم تحميل Jinja2 بنجاح")
-    except Exception as e:
-        print(f"⚠️ فشل تحميل Jinja2: {e}")
-        JINJA2_AVAILABLE = False
-else:
-    print("⚠️ Jinja2 غير متاح - سيتم استخدام HTML النقي")
-
-# ===== إنشاء ملفات HTML =====
-def create_web_templates():
-    """إنشاء ملفات HTML لواجهة الويب (متوافق مع Render)"""
-
-    index_html = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ريلاكس مانيجر - لوحة التحكم</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        :root {
-            --primary: #2d3436;
-            --secondary: #0984e3;
-            --success: #00b894;
-            --danger: #e17055;
-            --warning: #fdcb6e;
-            --info: #00cec9;
-            --dark: #2d3436;
-            --light: #dfe6e9;
-        }
-        [data-theme="dark"] {
-            --primary: #dfe6e9;
-            --dark: #1a1a2e;
-            --light: #2d3436;
-        }
-        body {
-            background: #f5f6fa;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            transition: background 0.3s, color 0.3s;
-        }
-        [data-theme="dark"] body {
-            background: #1a1a2e;
-            color: #dfe6e9;
-        }
-        .sidebar {
-            min-height: 100vh;
-            background: var(--dark);
-            color: white;
-            padding: 20px;
-            position: fixed;
-            right: 0;
-            top: 0;
-            width: 250px;
-            z-index: 1000;
-            overflow-y: auto;
-            box-shadow: -2px 0 10px rgba(0,0,0,0.1);
-            transition: background 0.3s;
-        }
-        .sidebar .brand {
-            font-size: 24px;
-            font-weight: bold;
-            padding: 20px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-            margin-bottom: 20px;
-            color: #fff;
-        }
-        .sidebar .brand i {
-            color: var(--secondary);
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.7);
-            padding: 12px 15px;
-            border-radius: 10px;
-            margin-bottom: 5px;
-            transition: all 0.3s;
-        }
-        .sidebar .nav-link:hover {
-            background: rgba(255,255,255,0.1);
-            color: white;
-        }
-        .sidebar .nav-link.active {
-            background: var(--secondary);
-            color: white;
-        }
-        .sidebar .nav-link i {
-            margin-left: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        .main-content {
-            margin-right: 250px;
-            padding: 20px;
-            min-height: 100vh;
-        }
-        .stat-card {
-            background: white;
-            border-radius: 15px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-            transition: all 0.3s;
-            border-right: 4px solid var(--secondary);
-        }
-        [data-theme="dark"] .stat-card {
-            background: #2d3436;
-            color: #dfe6e9;
-        }
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-        }
-        .stat-card .stat-icon {
-            font-size: 32px;
-            margin-bottom: 10px;
-        }
-        .stat-card .stat-number {
-            font-size: 28px;
-            font-weight: bold;
-        }
-        .stat-card .stat-label {
-            color: #636e72;
-            font-size: 14px;
-        }
-        [data-theme="dark"] .stat-card .stat-label {
-            color: #b2bec3;
-        }
-        .stat-card.primary { border-right-color: var(--secondary); }
-        .stat-card.success { border-right-color: var(--success); }
-        .stat-card.danger { border-right-color: var(--danger); }
-        .stat-card.warning { border-right-color: var(--warning); }
-        .stat-card.info { border-right-color: var(--info); }
-        .card {
-            border-radius: 15px;
-            border: none;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        [data-theme="dark"] .card {
-            background: #2d3436;
-            color: #dfe6e9;
-        }
-        .card-header {
-            background: white;
-            border-bottom: 1px solid #ecf0f1;
-            border-radius: 15px 15px 0 0 !important;
-            padding: 15px 20px;
-            font-weight: bold;
-        }
-        [data-theme="dark"] .card-header {
-            background: #2d3436;
-            border-bottom-color: #3d3d4e;
-        }
-        .table {
-            font-size: 14px;
-        }
-        [data-theme="dark"] .table {
-            color: #dfe6e9;
-        }
-        .table th {
-            border-top: none;
-            color: #636e72;
-            font-weight: 600;
-        }
-        [data-theme="dark"] .table th {
-            color: #b2bec3;
-        }
-        .status-badge {
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .status-badge.active { background: #d4edda; color: #155724; }
-        .status-badge.banned { background: #f8d7da; color: #721c24; }
-        .status-badge.pending { background: #fff3cd; color: #856404; }
-        .status-badge.success { background: #d4edda; color: #155724; }
-        .status-badge.danger { background: #f8d7da; color: #721c24; }
-        .status-badge.warning { background: #fff3cd; color: #856404; }
-        [data-theme="dark"] .status-badge.active { background: #1a3a2a; color: #00b894; }
-        [data-theme="dark"] .status-badge.banned { background: #3a1a1a; color: #e17055; }
-        [data-theme="dark"] .status-badge.pending { background: #3a3a1a; color: #fdcb6e; }
-        .loading-spinner {
-            display: none;
-            text-align: center;
-            padding: 20px;
-        }
-        .toast-container {
-            position: fixed;
-            bottom: 20px;
-            left: 20px;
-            z-index: 9999;
-        }
-        .profile-img {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: var(--secondary);
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-        }
-        .webhook-status {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 5px;
-        }
-        .webhook-status.online { background: #00b894; }
-        .webhook-status.offline { background: #e17055; }
-        .theme-toggle {
-            cursor: pointer;
-            padding: 8px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.1);
-            transition: all 0.3s;
-        }
-        .theme-toggle:hover {
-            background: rgba(255,255,255,0.2);
-        }
-        .export-btn {
-            cursor: pointer;
-            padding: 5px 15px;
-            border-radius: 20px;
-            background: var(--secondary);
-            color: white;
-            border: none;
-            font-size: 12px;
-            transition: all 0.3s;
-        }
-        .export-btn:hover {
-            opacity: 0.8;
-        }
-        .chart-container {
-            position: relative;
-            height: 300px;
-            margin: 20px 0;
-        }
-        @media (max-width: 768px) {
-            .sidebar {
-                position: static;
-                width: 100%;
-                min-height: auto;
-                padding: 10px;
-            }
-            .main-content {
-                margin-right: 0;
-                padding: 10px;
-            }
-        }
-        .render-badge {
-            position: fixed;
-            bottom: 10px;
-            right: 260px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 12px;
-            z-index: 999;
-        }
-        [data-theme="dark"] .render-badge {
-            background: rgba(255,255,255,0.1);
-        }
-    </style>
-</head>
-<body>
-<div class="render-badge">🚀 ريلاكس مانيجر v19.3.3</div>
-<div class="sidebar">
-    <div class="brand text-center">
-        <i class="bi bi-robot"></i> ريلاكس مانيجر
-    </div>
-    <nav class="nav flex-column">
-        <a class="nav-link active" href="#" data-page="dashboard">
-            <i class="bi bi-speedometer2"></i> لوحة التحكم
-        </a>
-        <a class="nav-link" href="#" data-page="users">
-            <i class="bi bi-people"></i> المستخدمين
-        </a>
-        <a class="nav-link" href="#" data-page="channels">
-            <i class="bi bi-broadcast"></i> القنوات
-        </a>
-        <a class="nav-link" href="#" data-page="groups">
-            <i class="bi bi-chat-dots"></i> المجموعات
-        </a>
-        <a class="nav-link" href="#" data-page="posts">
-            <i class="bi bi-file-post"></i> المنشورات
-        </a>
-        <a class="nav-link" href="#" data-page="contests">
-            <i class="bi bi-trophy"></i> المسابقات
-        </a>
-        <a class="nav-link" href="#" data-page="logs">
-            <i class="bi bi-journal-text"></i> السجلات
-        </a>
-        <a class="nav-link" href="#" data-page="backups">
-            <i class="bi bi-archive"></i> النسخ الاحتياطية
-        </a>
-        <a class="nav-link" href="#" data-page="settings">
-            <i class="bi bi-gear"></i> الإعدادات
-        </a>
-        <hr class="border-secondary">
-        <div class="d-flex justify-content-between align-items-center px-3 py-2">
-            <span class="text-light small">🌙 الوضع</span>
-            <span class="theme-toggle" onclick="toggleTheme()">
-                <i class="bi bi-moon-fill" id="theme-icon"></i>
-            </span>
-        </div>
-        <a class="nav-link text-danger" href="#" onclick="logout()">
-            <i class="bi bi-box-arrow-left"></i> تسجيل الخروج
-        </a>
-    </nav>
-</div>
-<div class="main-content">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2 id="page-title">لوحة التحكم</h2>
-        <div class="d-flex align-items-center">
-            <button class="btn btn-sm btn-outline-primary me-2" onclick="exportData()">
-                <i class="bi bi-download"></i> تصدير
-            </button>
-            <span class="me-3">
-                <span class="webhook-status online" id="ws-status"></span>
-                <span id="ws-status-text">متصل</span>
-            </span>
-            <div class="profile-img" id="user-profile">A</div>
-        </div>
-    </div>
-    <div class="loading-spinner" id="loading-spinner">
-        <div class="spinner-border text-primary" role="status">
-            <span class="visually-hidden">جاري التحميل...</span>
-        </div>
-        <p class="mt-2">جاري تحميل البيانات...</p>
-    </div>
-    <div id="page-dashboard" class="page-content">
-        <div class="row" id="stats-cards">
-            <div class="col-md-3">
-                <div class="stat-card primary">
-                    <div class="stat-icon"><i class="bi bi-people text-primary"></i></div>
-                    <div class="stat-number" id="stat-users">0</div>
-                    <div class="stat-label">المستخدمين</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card success">
-                    <div class="stat-icon"><i class="bi bi-broadcast text-success"></i></div>
-                    <div class="stat-number" id="stat-channels">0</div>
-                    <div class="stat-label">القنوات</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card warning">
-                    <div class="stat-icon"><i class="bi bi-chat-dots text-warning"></i></div>
-                    <div class="stat-number" id="stat-groups">0</div>
-                    <div class="stat-label">المجموعات</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card danger">
-                    <div class="stat-icon"><i class="bi bi-file-post text-danger"></i></div>
-                    <div class="stat-number" id="stat-posts">0</div>
-                    <div class="stat-label">منشورات غير منشورة</div>
-                </div>
-            </div>
-        </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-graph-up me-2"></i>نمو المستخدمين
-                    </div>
-                    <div class="card-body">
-                        <div class="chart-container">
-                            <canvas id="userGrowthChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-pie-chart me-2"></i>توزيع المنشورات
-                    </div>
-                    <div class="card-body">
-                        <div class="chart-container">
-                            <canvas id="postsDistributionChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-info-circle me-2"></i>معلومات النظام
-                    </div>
-                    <div class="card-body" id="system-info">
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>حالة البوت</span>
-                            <span class="status-badge success">🟢 يعمل</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>الإصدار</span>
-                            <span>19.3.3</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>وقت التشغيل</span>
-                            <span id="uptime">0 ساعة</span>
-                        </div>
-                        <div class="d-flex justify-content-between border-bottom py-2">
-                            <span>استخدام الذاكرة</span>
-                            <span id="memory-usage">0%</span>
-                        </div>
-                        <div class="d-flex justify-content-between py-2">
-                            <span>قاعدة البيانات</span>
-                            <span class="status-badge success" id="db-status">✅ سليمة</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-activity me-2"></i>النشاطات الأخيرة
-                    </div>
-                    <div class="card-body" id="recent-activity">
-                        <div class="text-muted">لا توجد نشاطات حديثة</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-users" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-people me-2"></i>قائمة المستخدمين</span>
-                <div>
-                    <input type="text" class="form-control form-control-sm" id="user-search" placeholder="بحث..." style="width:200px;display:inline-block;">
-                    <button class="btn btn-sm btn-primary" onclick="refreshUsers()"><i class="bi bi-arrow-clockwise"></i></button>
-                    <button class="btn btn-sm btn-success" onclick="exportData('users')"><i class="bi bi-download"></i></button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="users-table">
-                        <thead>
-                            <tr><th>#</th><th>المعرف</th><th>الاسم</th><th>الحالة</th><th>النقاط</th><th>المستوى</th><th>الإجراءات</th></tr>
-                        </thead>
-                        <tbody id="users-tbody">
-                            <tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-channels" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-broadcast me-2"></i>قنوات المستخدمين</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshChannels()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="channels-table">
-                        <thead>
-                            <tr><th>#</th><th>المستخدم</th><th>القناة</th><th>الاسم</th><th>الحالة</th></tr>
-                        </thead>
-                        <tbody id="channels-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-groups" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-chat-dots me-2"></i>المجموعات</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshGroups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="groups-table">
-                        <thead>
-                            <tr><th>#</th><th>المعرف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th></tr>
-                        </thead>
-                        <tbody id="groups-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-posts" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-file-post me-2"></i>المنشورات غير المنشورة</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshPosts()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="posts-table">
-                        <thead>
-                            <tr><th>#</th><th>القناة</th><th>النص</th><th>النوع</th><th>التاريخ</th></tr>
-                        </thead>
-                        <tbody id="posts-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-contests" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-trophy me-2"></i>المسابقات</span>
-                <button class="btn btn-sm btn-primary" onclick="refreshContests()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="contests-table">
-                        <thead>
-                            <tr><th>#</th><th>العنوان</th><th>الجائزة</th><th>المشاركون</th><th>التاريخ</th><th>الحالة</th></tr>
-                        </thead>
-                        <tbody id="contests-tbody">
-                            <tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-logs" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-journal-text me-2"></i>سجلات النظام</span>
-                <div>
-                    <button class="btn btn-sm btn-primary" onclick="refreshLogs()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                    <button class="btn btn-sm btn-danger" onclick="clearLogs()"><i class="bi bi-trash"></i> مسح</button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="logs-table">
-                        <thead>
-                            <tr><th>الوقت</th><th>المستوى</th><th>الرسالة</th></tr>
-                        </thead>
-                        <tbody id="logs-tbody">
-                            <tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-backups" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-archive me-2"></i>النسخ الاحتياطية</span>
-                <div>
-                    <button class="btn btn-sm btn-success" onclick="createBackup()"><i class="bi bi-plus"></i> نسخة جديدة</button>
-                    <button class="btn btn-sm btn-primary" onclick="refreshBackups()"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover" id="backups-table">
-                        <thead>
-                            <tr><th>#</th><th>الملف</th><th>الحجم</th><th>التاريخ</th><th>الإجراءات</th></tr>
-                        </thead>
-                        <tbody id="backups-tbody">
-                            <tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="page-settings" class="page-content" style="display:none;">
-        <div class="card">
-            <div class="card-header">
-                <i class="bi bi-gear me-2"></i>إعدادات البوت
-            </div>
-            <div class="card-body">
-                <form id="settings-form">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label">اسم البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-name" value="ريلاكس مانيجر">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">معرف البوت</label>
-                                <input type="text" class="form-control" id="setting-bot-username" value="Reelaaaxbot">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">وقت النشر (ثانية)</label>
-                                <input type="number" class="form-control" id="setting-publish-interval" value="720">
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label class="form-label">قناة التحديثات</label>
-                                <input type="text" class="form-control" id="setting-updates-channel" placeholder="@channel">
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-force-subscribe">
-                                    <label class="form-check-label">الاشتراك الإجباري</label>
-                                </div>
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-auto-backup">
-                                    <label class="form-check-label">النسخ الاحتياطي التلقائي</label>
-                                </div>
-                            </div>
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="setting-nsfw">
-                                    <label class="form-check-label">كشف NSFW</label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <button type="submit" class="btn btn-primary">حفظ الإعدادات</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-<div class="toast-container">
-    <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-        <div class="toast-header">
-            <strong class="me-auto"><i class="bi bi-bell"></i> إشعار</strong>
-            <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
-        </div>
-        <div class="toast-body" id="toast-body">رسالة</div>
-    </div>
-</div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-let currentTheme = localStorage.getItem('theme') || 'light';
-function toggleTheme() {
-    currentTheme = currentTheme === 'light' ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', currentTheme);
-    localStorage.setItem('theme', currentTheme);
-    document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
-}
-document.addEventListener('DOMContentLoaded', function() {
-    document.documentElement.setAttribute('data-theme', currentTheme);
-    document.getElementById('theme-icon').className = currentTheme === 'dark' ? 'bi bi-sun-fill' : 'bi bi-moon-fill';
-});
-function exportData(type) {
-    let url = '/api/export';
-    if (type) { url += '?type=' + type; }
-    window.location.href = url;
-}
-let ws = null;
-let wsReconnectAttempts = 0;
-const MAX_WS_RECONNECT = 5;
-function connectWebSocket() {
-    const token = '{{ WEB_SECRET_KEY }}';
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws_extended?token=${encodeURIComponent(token)}`;
-    ws = new WebSocket(wsUrl);
-    ws.onopen = function() {
-        console.log('✅ WebSocket متصل');
-        document.getElementById('ws-status').className = 'webhook-status online';
-        document.getElementById('ws-status-text').textContent = 'متصل';
-        wsReconnectAttempts = 0;
-    };
-    ws.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-        } catch(e) {
-            console.error('خطأ في تحليل رسالة WebSocket:', e);
-        }
-    };
-    ws.onclose = function() {
-        console.log('❌ WebSocket مغلق');
-        document.getElementById('ws-status').className = 'webhook-status offline';
-        document.getElementById('ws-status-text').textContent = 'غير متصل';
-        if (wsReconnectAttempts < MAX_WS_RECONNECT) {
-            wsReconnectAttempts++;
-            setTimeout(connectWebSocket, 3000 * wsReconnectAttempts);
-        }
-    };
-    ws.onerror = function(error) {
-        console.error('خطأ في WebSocket:', error);
-    };
-}
-function handleWebSocketMessage(data) {
-    switch(data.type) {
-        case 'stats': updateStats(data.data); break;
-        case 'broadcast': showToast(data.data.message || 'تم استلام تحديث جديد'); break;
-        case 'pong': break;
-        default: console.log('رسالة غير معروفة:', data);
-    }
-}
-function showToast(message, type = 'info') {
-    const toast = document.getElementById('liveToast');
-    const body = document.getElementById('toast-body');
-    body.textContent = message;
-    const bsToast = new bootstrap.Toast(toast, { delay: 3000 });
-    bsToast.show();
-}
-function updateStats(data) {
-    document.getElementById('stat-users').textContent = data.total_users || 0;
-    document.getElementById('stat-channels').textContent = data.channels || 0;
-    document.getElementById('stat-groups').textContent = data.groups || 0;
-    document.getElementById('stat-posts').textContent = data.pending_posts || 0;
-}
-let userGrowthChart = null;
-let postsDistributionChart = null;
-function initCharts() {
-    const ctx1 = document.getElementById('userGrowthChart').getContext('2d');
-    userGrowthChart = new Chart(ctx1, {
-        type: 'line',
-        data: { labels: [], datasets: [{ label: 'المستخدمين', data: [], borderColor: '#0984e3', backgroundColor: 'rgba(9, 132, 227, 0.1)', fill: true, tension: 0.4 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } }, scales: { y: { beginAtZero: true, ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } }, x: { ticks: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
-    });
-    const ctx2 = document.getElementById('postsDistributionChart').getContext('2d');
-    postsDistributionChart = new Chart(ctx2, {
-        type: 'doughnut',
-        data: { labels: ['منشورة', 'غير منشورة'], datasets: [{ data: [0, 0], backgroundColor: ['#00b894', '#e17055'], borderWidth: 2, borderColor: currentTheme === 'dark' ? '#2d3436' : '#ffffff' }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: currentTheme === 'dark' ? '#dfe6e9' : '#2d3436' } } } }
-    });
-}
-function updateCharts(userGrowth, postsDistribution) {
-    if (userGrowthChart) {
-        userGrowthChart.data.labels = userGrowth.labels || [];
-        userGrowthChart.data.datasets[0].data = userGrowth.data || [];
-        userGrowthChart.update();
-    }
-    if (postsDistributionChart) {
-        postsDistributionChart.data.datasets[0].data = [postsDistribution.published || 0, postsDistribution.unpublished || 0];
-        postsDistributionChart.update();
-    }
-}
-document.querySelectorAll('.sidebar .nav-link').forEach(link => {
-    link.addEventListener('click', function(e) {
-        e.preventDefault();
-        document.querySelectorAll('.sidebar .nav-link').forEach(l => l.classList.remove('active'));
-        this.classList.add('active');
-        const page = this.dataset.page;
-        document.querySelectorAll('.page-content').forEach(p => p.style.display = 'none');
-        const targetPage = document.getElementById(`page-${page}`);
-        if (targetPage) {
-            targetPage.style.display = 'block';
-            document.getElementById('page-title').textContent = this.textContent.trim();
-            switch(page) {
-                case 'dashboard': refreshDashboard(); break;
-                case 'users': refreshUsers(); break;
-                case 'channels': refreshChannels(); break;
-                case 'groups': refreshGroups(); break;
-                case 'posts': refreshPosts(); break;
-                case 'contests': refreshContests(); break;
-                case 'logs': refreshLogs(); break;
-                case 'backups': refreshBackups(); break;
-                case 'settings': loadSettings(); break;
-            }
-        }
-    });
-});
-function refreshDashboard() {
-    fetch('/api/stats').then(res => res.json()).then(data => { updateStats(data); fetch('/api/charts').then(res => res.json()).then(chartData => { updateCharts(chartData.user_growth, chartData.posts_distribution); }).catch(err => console.error('خطأ في تحميل الرسوم البيانية:', err)); }).catch(err => console.error('خطأ في تحميل الإحصائيات:', err));
-    fetch('/api/system-info').then(res => res.json()).then(data => { document.getElementById('uptime').textContent = data.uptime || '0 ساعة'; document.getElementById('memory-usage').textContent = data.memory || '0%'; }).catch(err => console.error('خطأ في تحميل معلومات النظام:', err));
-}
-function refreshUsers() {
-    const tbody = document.getElementById('users-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/users').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد مستخدمين</td></tr>'; return; }
-        tbody.innerHTML = data.map((user, i) => `<tr><td>${i+1}</td><td><code>${user.user_id}</code></td><td>${user.first_name || 'غير معروف'}</td><td><span class="status-badge ${user.banned ? 'danger' : 'success'}">${user.banned ? '🚫 محظور' : '✅ نشط'}</span></td><td>${user.points || 0}</td><td>${user.level || 1}</td><td><button class="btn btn-sm btn-${user.banned ? 'success' : 'danger'}" onclick="toggleBan(${user.user_id})">${user.banned ? '🔓 إلغاء الحظر' : '🚫 حظر'}</button></td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل المستخدمين:', err); tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function toggleBan(userId) {
-    fetch(`/api/users/${userId}/toggle-ban`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || 'تم تغيير الحالة'); refreshUsers(); }).catch(err => showToast('❌ فشل تغيير الحالة', 'error'));
-}
-function refreshChannels() {
-    const tbody = document.getElementById('channels-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/channels').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد قنوات</td></tr>'; return; }
-        tbody.innerHTML = data.map((ch, i) => `<tr><td>${i+1}</td><td><code>${ch.user_id}</code></td><td><code>${ch.channel_id}</code></td><td>${ch.channel_name || ch.channel_id}</td><td><span class="status-badge ${ch.banned ? 'danger' : 'success'}">${ch.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل القنوات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function refreshGroups() {
-    const tbody = document.getElementById('groups-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/groups').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد مجموعات</td></tr>'; return; }
-        tbody.innerHTML = data.map((g, i) => `<tr><td>${i+1}</td><td><code>${g.chat_id}</code></td><td>${g.chat_name || g.chat_id}</td><td><code>${g.added_by}</code></td><td><span class="status-badge ${g.banned ? 'danger' : 'success'}">${g.banned ? '⛔ محظورة' : '✅ نشطة'}</span></td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل المجموعات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function refreshPosts() {
-    const tbody = document.getElementById('posts-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/posts').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد منشورات غير منشورة</td></tr>'; return; }
-        tbody.innerHTML = data.map((p, i) => `<tr><td>${i+1}</td><td>${p.channel_name || p.channel_id}</td><td>${(p.text || '').substring(0, 50)}${(p.text || '').length > 50 ? '...' : ''}</td><td><span class="badge bg-secondary">${p.media_type || 'text'}</span></td><td>${p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG') : '-'}</td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل المنشورات:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function refreshContests() {
-    const tbody = document.getElementById('contests-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/contests').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">لا توجد مسابقات</td></tr>'; return; }
-        tbody.innerHTML = data.map((c, i) => `<tr><td>${i+1}</td><td>${c.title || 'بدون عنوان'}</td><td>${c.prize || 'غير محددة'}</td><td>${c.participants || 0}</td><td>${c.end_date ? new Date(c.end_date).toLocaleDateString('ar-EG') : '-'}</td><td><span class="status-badge ${c.status === 'active' ? 'success' : 'secondary'}">${c.status === 'active' ? 'نشطة' : 'منتهية'}</span></td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل المسابقات:', err); tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function refreshLogs() {
-    const tbody = document.getElementById('logs-tbody');
-    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/logs').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">لا توجد سجلات</td></tr>'; return; }
-        tbody.innerHTML = data.map(log => { const level = log.level || 'INFO'; const levelClass = { 'ERROR': 'danger', 'WARNING': 'warning', 'INFO': 'info', 'DEBUG': 'secondary' }[level] || 'info'; return `<tr><td>${log.time || '-'}</td><td><span class="badge bg-${levelClass}">${level}</span></td><td>${log.message || ''}</td></tr>`; }).join('');
-    }).catch(err => { console.error('خطأ في تحميل السجلات:', err); tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function clearLogs() {
-    if (!confirm('هل أنت متأكد من مسح جميع السجلات؟')) return;
-    fetch('/api/logs', { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || 'تم مسح السجلات'); refreshLogs(); }).catch(err => showToast('❌ فشل مسح السجلات', 'error'));
-}
-function refreshBackups() {
-    const tbody = document.getElementById('backups-tbody');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">جاري التحميل...</td></tr>';
-    fetch('/api/backups').then(res => res.json()).then(data => {
-        if (!data || data.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">لا توجد نسخ احتياطية</td></tr>'; return; }
-        tbody.innerHTML = data.map((b, i) => `<tr><td>${i+1}</td><td>${b.name || 'غير معروف'}</td><td>${b.size ? (b.size / 1024).toFixed(2) + ' KB' : '-'}</td><td>${b.date || '-'}</td><td><button class="btn btn-sm btn-success" onclick="restoreBackup('${b.name}')"><i class="bi bi-arrow-counterclockwise"></i> استعادة</button> <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')"><i class="bi bi-trash"></i> حذف</button></td></tr>`).join('');
-    }).catch(err => { console.error('خطأ في تحميل النسخ الاحتياطية:', err); tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">❌ فشل التحميل</td></tr>'; });
-}
-function createBackup() {
-    fetch('/api/backups', { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم إنشاء نسخة احتياطية'); refreshBackups(); }).catch(err => showToast('❌ فشل إنشاء النسخة', 'error'));
-}
-function restoreBackup(name) {
-    if (!confirm(`هل أنت متأكد من استعادة النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم استعادة النسخة'); refreshBackups(); }).catch(err => showToast('❌ فشل استعادة النسخة', 'error'));
-}
-function deleteBackup(name) {
-    if (!confirm(`هل أنت متأكد من حذف النسخة ${name}؟`)) return;
-    fetch(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم حذف النسخة'); refreshBackups(); }).catch(err => showToast('❌ فشل حذف النسخة', 'error'));
-}
-function loadSettings() {
-    fetch('/api/settings').then(res => res.json()).then(data => {
-        if (data.bot_name) document.getElementById('setting-bot-name').value = data.bot_name;
-        if (data.bot_username) document.getElementById('setting-bot-username').value = data.bot_username;
-        if (data.publish_interval) document.getElementById('setting-publish-interval').value = data.publish_interval;
-        if (data.updates_channel) document.getElementById('setting-updates-channel').value = data.updates_channel;
-        document.getElementById('setting-force-subscribe').checked = data.force_subscribe || false;
-        document.getElementById('setting-auto-backup').checked = data.auto_backup || false;
-        document.getElementById('setting-nsfw').checked = data.nsfw_enabled || false;
-    }).catch(err => console.error('خطأ في تحميل الإعدادات:', err));
-}
-document.getElementById('settings-form').addEventListener('submit', function(e) {
-    e.preventDefault();
-    const data = {
-        bot_name: document.getElementById('setting-bot-name').value,
-        bot_username: document.getElementById('setting-bot-username').value,
-        publish_interval: parseInt(document.getElementById('setting-publish-interval').value) || 720,
-        updates_channel: document.getElementById('setting-updates-channel').value,
-        force_subscribe: document.getElementById('setting-force-subscribe').checked,
-        auto_backup: document.getElementById('setting-auto-backup').checked,
-        nsfw_enabled: document.getElementById('setting-nsfw').checked
-    };
-    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(res => res.json()).then(data => { showToast(data.message || '✅ تم حفظ الإعدادات'); }).catch(err => showToast('❌ فشل حفظ الإعدادات', 'error'));
-});
-function logout() {
-    if (confirm('هل أنت متأكد من تسجيل الخروج؟')) {
-        document.cookie = 'session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-        window.location.href = '/logout';
-    }
-}
-document.getElementById('user-search').addEventListener('input', function() {
-    const query = this.value.toLowerCase();
-    const rows = document.querySelectorAll('#users-tbody tr');
-    rows.forEach(row => {
-        const text = row.textContent.toLowerCase();
-        row.style.display = text.includes(query) ? '' : 'none';
-    });
-});
-setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-    }
-}, 30000);
-setInterval(() => {
-    const activePage = document.querySelector('.sidebar .nav-link.active');
-    if (activePage) {
-        const page = activePage.dataset.page;
-        switch(page) {
-            case 'dashboard': refreshDashboard(); break;
-            case 'users': refreshUsers(); break;
-            case 'channels': refreshChannels(); break;
-            case 'groups': refreshGroups(); break;
-            case 'posts': refreshPosts(); break;
-            case 'contests': refreshContests(); break;
-            case 'logs': refreshLogs(); break;
-            case 'backups': refreshBackups(); break;
-        }
-    }
-}, 30000);
-document.addEventListener('DOMContentLoaded', function() {
-    connectWebSocket();
-    initCharts();
-    refreshDashboard();
-    document.getElementById('page-dashboard').style.display = 'block';
-});
-</script>
-</body>
-</html>"""
-
-    try:
-        with open(TEMPLATES_PATH / "index.html", "w", encoding="utf-8") as f:
-            f.write(index_html)
-        logger.info("✅ تم إنشاء قالب HTML لواجهة الويب")
-        return True
-    except Exception as e:
-        logger.error(f"❌ فشل إنشاء قالب HTML: {e}")
-        return False
-
-# محاولة إنشاء القوالب
-try:
-    create_web_templates()
-except Exception as e:
-    print(f"⚠️ فشل إنشاء قوالب الويب: {e}")
-
-# ===== واجهة الويب =====
-web_app = web.Application()
-
-# نقطة فحص الصحة لـ Render
-async def health_check(request):
-    return web.Response(text="OK", status=200)
-web_app.router.add_get('/health', health_check)
-WEB_SESSIONS = {}
-WEB_SESSION_TIMEOUT = 3600
-WEB_RATE_LIMITS = defaultdict(list)
-WEB_RATE_LIMIT = 100
-WEB_RATE_WINDOW = 60
-
-def generate_session_id() -> str:
-    return secrets.token_urlsafe(32)
-
-def create_session(user_data: dict) -> str:
-    session_id = generate_session_id()
-    WEB_SESSIONS[session_id] = {
-        'user_data': user_data,
-        'created_at': time_module.time(),
-        'last_activity': time_module.time()
-    }
-    return session_id
-
-def get_session(session_id: str) -> dict | None:
-    if session_id not in WEB_SESSIONS:
-        return None
-    session = WEB_SESSIONS[session_id]
-    if time_module.time() - session['last_activity'] > WEB_SESSION_TIMEOUT:
-        del WEB_SESSIONS[session_id]
-        return None
-    session['last_activity'] = time_module.time()
-    return session['user_data']
-
-def delete_session(session_id: str):
-    if session_id in WEB_SESSIONS:
-        del WEB_SESSIONS[session_id]
-
-def check_rate_limit(ip: str) -> bool:
-    now = time_module.time()
-    WEB_RATE_LIMITS[ip] = [t for t in WEB_RATE_LIMITS[ip] if now - t < WEB_RATE_WINDOW]
-    if len(WEB_RATE_LIMITS[ip]) >= WEB_RATE_LIMIT:
-        return False
-    WEB_RATE_LIMITS[ip].append(now)
-    return True
-
-def check_web_auth(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        session = get_session(session_id)
-        if session:
-            return True
-
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            encoded = auth_header.split(' ')[1]
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == "admin" and password == "mmmmm739377114":
-                return True
-        except:
-            pass
-    return False
-
-@web.middleware
-async def auth_middleware(request, handler):
-    # السماح للـ API والملفات الثابتة
-    if request.path.startswith('/api/') or request.path.startswith('/static/') or request.path in ['/login', '/logout', '/health', '/ws', '/ws_extended']:
-        return await handler(request)
-    if not check_web_auth(request):
-        return web.Response(status=401, text="🔒 مطلوب مصادقة")
-    return await handler(request)
-
-web_app.middlewares.append(auth_middleware)
-
-  # تم تعطيل المصادقة
-
-# ===== API Handlers =====
-async def api_stats_handler(request):
-    try:
-        total, banned, posts, groups, channels = await db_stats()
-        return web.json_response({
-            'total_users': total,
-            'active_users': total - banned,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_charts_handler(request):
-    try:
-        user_growth = {'labels': [], 'data': []}
-        try:
-            async def _get_user_growth(conn):
-                cur = await conn.execute("""
-                    SELECT date(last_updated) as date, COUNT(*) as count
-                    FROM users_cache
-                    WHERE last_updated >= datetime('now', '-30 days')
-                    GROUP BY date(last_updated)
-                    ORDER BY date
-                """)
-                return await cur.fetchall()
-            growth_data = await execute_db(_get_user_growth)
-            for row in growth_data:
-                user_growth['labels'].append(row[0])
-                user_growth['data'].append(row[1])
-        except:
-            pass
-
-        posts_distribution = {'published': 0, 'unpublished': 0}
-        try:
-            async def _get_posts_dist(conn):
-                cur = await conn.execute("SELECT published, COUNT(*) FROM posts GROUP BY published")
-                return await cur.fetchall()
-            dist_data = await execute_db(_get_posts_dist)
-            for row in dist_data:
-                if row[0] == 1:
-                    posts_distribution['published'] = row[1]
-                else:
-                    posts_distribution['unpublished'] = row[1]
-        except:
-            pass
-
-        return web.json_response({
-            'user_growth': user_growth,
-            'posts_distribution': posts_distribution
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_export_handler(request):
-    try:
-        export_type = request.query.get('type', 'all')
-        import csv
-        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8')
-
-        if export_type == 'users' or export_type == 'all':
-            users = await db_get_all_users()
-            writer = csv.writer(temp_file)
-            writer.writerow(['User ID', 'Banned'])
-            for user_id, banned in users:
-                writer.writerow([user_id, banned])
-            temp_file.write('\n')
-
-        if export_type == 'channels' or export_type == 'all':
-            channels = await db_get_all_user_channels_no_limit()
-            writer = csv.writer(temp_file)
-            writer.writerow(['User ID', 'Channel DB ID', 'Channel ID', 'Channel Name', 'Banned'])
-            for user_id, ch_id, ch_tele, ch_name, banned in channels:
-                writer.writerow([user_id, ch_id, ch_tele, ch_name, banned])
-            temp_file.write('\n')
-
-        if export_type == 'groups' or export_type == 'all':
-            groups = await db_get_all_groups()
-            writer = csv.writer(temp_file)
-            writer.writerow(['Chat ID', 'Chat Name', 'Username', 'Added By', 'Added At', 'Banned'])
-            for chat_id, chat_name, username, added_by, added_at, banned in groups:
-                writer.writerow([chat_id, chat_name, username, added_by, added_at, banned])
-            temp_file.write('\n')
-
-        if export_type == 'posts' or export_type == 'all':
-            async def _get_posts(conn):
-                cur = await conn.execute("SELECT p.id, p.text, p.media_type, p.published, p.created_at, uc.channel_id FROM posts p JOIN user_channels uc ON p.channel_db_id = uc.id LIMIT 1000")
-                return await cur.fetchall()
-            posts = await execute_db(_get_posts)
-            writer = csv.writer(temp_file)
-            writer.writerow(['Post ID', 'Text', 'Media Type', 'Published', 'Created At', 'Channel ID'])
-            for post in posts:
-                writer.writerow([post[0], post[1][:100] if post[1] else '', post[2], post[3], post[4], post[5]])
-
-        temp_file.close()
-        with open(temp_file.name, 'rb') as f:
-            data = f.read()
-        os.unlink(temp_file.name)
-
-        filename = f"export_{export_type}_{mecca_now().strftime('%Y%m%d_%H%M%S')}.csv"
-        return web.Response(body=data, headers={
-            'Content-Type': 'text/csv',
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_users_handler(request):
-    try:
-        users = await db_get_all_users()
-        result = []
-        for user_id, banned in users:
-            level_data = await db_get_user_level(user_id)
-            result.append({
-                'user_id': user_id,
-                'banned': banned == 1,
-                'points': level_data['points'],
-                'level': level_data['level'],
-                'first_name': 'مستخدم'
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_user_toggle_ban_handler(request):
-    try:
-        user_id = int(request.match_info['user_id'])
-        users = await db_get_all_users()
-        user_exists = any(u[0] == user_id for u in users)
-        if not user_exists:
-            return web.json_response({'error': 'المستخدم غير موجود'}, status=404)
-        current_ban = await db_is_banned(user_id)
-        await db_set_ban(user_id, not current_ban)
-        return web.json_response({
-            'success': True,
-            'message': f'تم {"حظر" if not current_ban else "إلغاء حظر"} المستخدم'
-        })
-    except ValueError:
-        return web.json_response({'error': 'معرف غير صالح'}, status=400)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_channels_handler(request):
-    try:
-        channels = await db_get_all_user_channels_no_limit()
-        result = []
-        for user_id, ch_id, ch_tele, ch_name, banned in channels:
-            result.append({
-                'user_id': user_id,
-                'channel_id': ch_tele,
-                'channel_name': ch_name,
-                'banned': banned == 1
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_groups_handler(request):
-    try:
-        groups = await db_get_all_groups()
-        result = []
-        for chat_id, chat_name, username, added_by, added_at, banned in groups:
-            result.append({
-                'chat_id': chat_id,
-                'chat_name': chat_name,
-                'username': username,
-                'added_by': added_by,
-                'added_at': added_at,
-                'banned': banned == 1
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_posts_handler(request):
-    try:
-        async def _get_posts(conn):
-            cur = await conn.execute("""
-                SELECT p.id, p.channel_db_id, p.text, p.media_type, p.created_at,
-                       uc.channel_id, uc.channel_name
-                FROM posts p
-                JOIN user_channels uc ON p.channel_db_id = uc.id
-                WHERE p.published = 0
-                ORDER BY p.created_at DESC
-                LIMIT 100
-            """)
-            return await cur.fetchall()
-        posts = await execute_db(_get_posts)
-        result = []
-        for post in posts:
-            result.append({
-                'id': post[0],
-                'channel_db_id': post[1],
-                'text': post[2],
-                'media_type': post[3],
-                'created_at': post[4],
-                'channel_id': post[5],
-                'channel_name': post[6]
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_contests_handler(request):
-    try:
-        contests = await db_get_active_contests_with_participants(limit=20)
-        result = []
-        for contest in contests:
-            result.append({
-                'id': contest[0],
-                'title': contest[1],
-                'description': contest[2],
-                'prize': contest[3],
-                'end_date': contest[4],
-                'participants': contest[5] if len(contest) > 5 else 0,
-                'status': 'active'
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_logs_handler(request):
-    try:
-        limit = int(request.query.get('limit', 50))
-        logs = []
-        if LOG_PATH.exists():
-            with open(LOG_PATH, 'r', encoding='utf-8') as f:
-                lines = f.readlines()[-limit:]
-                for line in lines:
-                    try:
-                        parts = line.strip().split(' - ', 3)
-                        if len(parts) >= 4:
-                            logs.append({
-                                'time': parts[0],
-                                'level': parts[1] if len(parts) > 1 else 'INFO',
-                                'message': parts[-1]
-                            })
-                        else:
-                            logs.append({
-                                'time': '',
-                                'level': 'INFO',
-                                'message': line.strip()
-                            })
-                    except:
-                        logs.append({
-                            'time': '',
-                            'level': 'INFO',
-                            'message': line.strip()
-                        })
-        return web.json_response(logs)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_logs_delete_handler(request):
-    try:
-        if LOG_PATH.exists():
-            with open(LOG_PATH, 'w', encoding='utf-8') as f:
-                f.write('')
-        return web.json_response({'success': True, 'message': 'تم مسح السجلات'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backups_handler(request):
-    try:
-        backups = await list_backups()
-        result = []
-        for backup in backups:
-            stat = backup.stat()
-            result.append({
-                'name': backup.name,
-                'size': stat.st_size,
-                'date': datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        return web.json_response(result)
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_create_handler(request):
-    try:
-        backup_path = await create_backup()
-        return web.json_response({
-            'success': True,
-            'message': '✅ تم إنشاء نسخة احتياطية',
-            'file': backup_path.name
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_restore_handler(request):
-    try:
-        name = request.match_info['name']
-        backup_path = BACKUP_DIR / name
-        if not backup_path.exists():
-            return web.json_response({'error': 'الملف غير موجود'}, status=404)
-        await restore_backup(backup_path)
-        return web.json_response({'success': True, 'message': '✅ تم استعادة النسخة'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_backup_delete_handler(request):
-    try:
-        name = request.match_info['name']
-        backup_path = BACKUP_DIR / name
-        if not backup_path.exists():
-            return web.json_response({'error': 'الملف غير موجود'}, status=404)
-        backup_path.unlink()
-        return web.json_response({'success': True, 'message': '✅ تم حذف النسخة'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_settings_handler(request):
-    try:
-        publish_interval = await db_get_publish_interval()
-        updates_channel = await db_get_updates_channel()
-        force_subscribe = await db_get_force_subscribe_status()
-        auto_backup = await db_get_auto_backup()
-        return web.json_response({
-            'bot_name': BOT_NAME,
-            'bot_username': BOT_USERNAME,
-            'publish_interval': publish_interval,
-            'updates_channel': updates_channel or '',
-            'force_subscribe': force_subscribe,
-            'auto_backup': auto_backup,
-            'nsfw_enabled': NSFW_ENABLED
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_settings_update_handler(request):
-    try:
-        data = await request.json()
-        if 'publish_interval' in data:
-            seconds = int(data['publish_interval']) * 60
-            await db_set_publish_interval_seconds(seconds, PRIMARY_OWNER_ID, is_admin=True)
-        if 'updates_channel' in data:
-            channel = data['updates_channel'].strip()
-            if channel:
-                if channel.startswith('@'):
-                    channel = channel[1:]
-                await db_set_updates_channel(channel)
-        if 'force_subscribe' in data:
-            await db_set_force_subscribe_status(data['force_subscribe'])
-        if 'auto_backup' in data:
-            await db_set_auto_backup(data['auto_backup'])
-        if 'nsfw_enabled' in data:
-            global NSFW_ENABLED
-            NSFW_ENABLED = data['nsfw_enabled']
-            os.environ["NSFW_ENABLED"] = "True" if NSFW_ENABLED else "False"
-        return web.json_response({'success': True, 'message': '✅ تم حفظ الإعدادات'})
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def api_system_info_handler(request):
-    try:
-        ram = get_ram_usage()
-        uptime = time_module.time() - getattr(api_system_info_handler, 'start_time', time_module.time())
-        uptime_hours = int(uptime / 3600)
-        uptime_minutes = int((uptime % 3600) / 60)
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        return web.json_response({
-            'uptime': f'{uptime_hours} ساعة {uptime_minutes} دقيقة',
-            'memory': f"{ram['percent']}%",
-            'db_status': '✅ سليمة' if db_healthy else '❌ تالفة',
-            'telegram_status': '✅ متصل' if tg_healthy else '❌ غير متصل',
-            'version': '19.3.3',
-            'platform': platform.platform()
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-# ===== Web Routes =====
-async def root_handler(request):
-    if not check_web_auth(request):
-        return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="البوت"'})
-    try:
-        if check_web_auth(request):
-            session_id = request.cookies.get('session_id')
-            if JINJA2_AVAILABLE and template_env:
-                try:
-                    template = template_env.get_template('index.html')
-                    html = template.render(
-                        WEB_SECRET_KEY=WEB_SECRET_KEY,
-                        BOT_NAME=BOT_NAME,
-                        BOT_USERNAME=BOT_USERNAME
-                    )
-                    return web.Response(text=html, content_type='text/html')
-                except Exception as e:
-                    logger.error(f"خطأ في عرض القالب: {e}")
-            try:
-                with open(TEMPLATES_PATH / "index.html", "r", encoding='utf-8') as f:
-                    html = f.read()
-                    html = html.replace("{{ WEB_SECRET_KEY }}", WEB_SECRET_KEY)
-                    html = html.replace("{{ BOT_NAME }}", BOT_NAME)
-                    html = html.replace("{{ BOT_USERNAME }}", BOT_USERNAME)
-                    return web.Response(text=html, content_type='text/html')
-            except:
-                return web.Response(text="""<!DOCTYPE html><html><head><title>ريلاكس مانيجر</title></head>
-                <body><h1>🚀 ريلاكس مانيجر يعمل!</h1><p>الرجاء تسجيل الدخول</p></body></html>""", content_type='text/html')
-        else:
-            return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="البوت"'})
-    except Exception as e:
-        logger.error(f"خطأ في عرض الصفحة الرئيسية: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
-async def login_handler(request):
-    try:
-        if request.method == 'POST':
-            data = await request.post()
-            username = data.get('username', '')
-            password = data.get('password', '')
-            if username == "admin" and password == "mmmmm739377114":
-                session_id = create_session({'username': username})
-                response = web.Response(status=302, headers={'Location': '/'})
-                response.set_cookie('session_id', session_id, httponly=True, max_age=WEB_SESSION_TIMEOUT)
-                return response
-            return web.Response(text='❌ اسم المستخدم أو كلمة المرور غير صحيحة', status=401)
-        html = """
-        <!DOCTYPE html>
-        <html lang="ar" dir="rtl">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>تسجيل الدخول - ريلاكس مانيجر</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <style>
-                body { background: #f5f6fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-                .login-card { background: white; border-radius: 20px; padding: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
-                .login-card .brand { font-size: 28px; font-weight: bold; color: #2d3436; margin-bottom: 30px; text-align: center; }
-                .login-card .brand i { color: #0984e3; }
-            </style>
-        </head>
-        <body>
-            <div class="login-card">
-                <div class="brand"><i class="bi bi-robot"></i> ريلاكس مانيجر</div>
-                <h5 class="text-center mb-4">🔐 تسجيل الدخول</h5>
-                <form method="POST">
-                    <div class="mb-3"><label class="form-label">اسم المستخدم</label><input type="text" name="username" class="form-control" required autofocus></div>
-                    <div class="mb-3"><label class="form-label">كلمة المرور</label><input type="password" name="password" class="form-control" required></div>
-                    <button type="submit" class="btn btn-primary w-100">دخول</button>
-                </form>
-                <hr><p class="text-center text-muted small">© 2026 ريلاكس مانيجر - الإصدار 19.3.3</p>
-            </div>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-        </body>
-        </html>
-        """
-        return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        logger.error(f"خطأ في صفحة تسجيل الدخول: {e}")
-        return web.Response(text=f"❌ حدث خطأ: {e}", status=500)
-
-async def logout_handler(request):
-    session_id = request.cookies.get('session_id')
-    if session_id:
-        delete_session(session_id)
-    response = web.Response(status=302, headers={'Location': '/login'})
-    response.del_cookie('session_id')
-    return response
-
-async def health_check_handler(request):
-    try:
-        db_healthy = await check_database_health()
-        tg_healthy = await check_telegram_health()
-        ram = get_ram_usage()
-        checks = {
-            'database': db_healthy,
-            'telegram_api': tg_healthy,
-            'memory': ram,
-            'uptime': time_module.time() - getattr(health_check_handler, 'start_time', time_module.time())
-        }
-        status = 200 if all([checks['database'], checks['telegram_api']]) else 503
-        return web.json_response({
-            'status': 'healthy' if status == 200 else 'unhealthy',
-            'checks': checks
-        }, status=status)
-    except Exception as e:
-        return web.json_response({
-            'status': 'unhealthy',
-            'error': str(e)
-        }, status=503)
-
-# ===== تسجيل المسارات =====
-web_app.router.add_get('/', root_handler)
-web_app.router.add_get('/login', login_handler)
-web_app.router.add_post('/login', login_handler)
-web_app.router.add_get('/logout', logout_handler)
-web_app.router.add_get('/health', health_check_handler)
-
-# ===== API Routes =====
-web_app.router.add_get('/api/stats', api_stats_handler)
-web_app.router.add_get('/api/charts', api_charts_handler)
-web_app.router.add_get('/api/export', api_export_handler)
-web_app.router.add_get('/api/users', api_users_handler)
-web_app.router.add_post('/api/users/{user_id}/toggle-ban', api_user_toggle_ban_handler)
-web_app.router.add_get('/api/channels', api_channels_handler)
-web_app.router.add_get('/api/groups', api_groups_handler)
-web_app.router.add_get('/api/posts', api_posts_handler)
-web_app.router.add_get('/api/contests', api_contests_handler)
-web_app.router.add_get('/api/logs', api_logs_handler)
-web_app.router.add_delete('/api/logs', api_logs_delete_handler)
-web_app.router.add_get('/api/backups', api_backups_handler)
-web_app.router.add_post('/api/backups', api_backup_create_handler)
-web_app.router.add_post('/api/backups/{name}/restore', api_backup_restore_handler)
-web_app.router.add_delete('/api/backups/{name}', api_backup_delete_handler)
-web_app.router.add_get('/api/settings', api_settings_handler)
-web_app.router.add_post('/api/settings', api_settings_update_handler)
-web_app.router.add_get('/api/system-info', api_system_info_handler)
-
-# ===== WebSocket Manager =====
-class WebSocketManager:
-    def __init__(self):
-        self.connections = set()
-        self.lock = asyncio.Lock()
-
-    async def broadcast(self, data: dict):
-        async with self.lock:
-            if not self.connections:
-                return
-            message = json.dumps(data)
-            to_remove = []
-            for ws in self.connections:
-                try:
-                    await ws.send_str(message)
-                except:
-                    to_remove.append(ws)
-            for ws in to_remove:
-                self.connections.discard(ws)
-
-    async def handler(self, request):
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        async with self.lock:
-            self.connections.add(ws)
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                        if data.get('type') == 'ping':
-                            await ws.send_str(json.dumps({'type': 'pong'}))
-                    except:
-                        pass
-                elif msg.type == WSMsgType.ERROR:
-                    logger.error(f"خطأ في WebSocket: {ws.exception()}")
-        finally:
-            async with self.lock:
-                self.connections.discard(ws)
-        return ws
-
-ws_manager = WebSocketManager()
-web_app.router.add_get('/ws', ws_manager.handler)
-
-# ===== WebSocket Extended =====
-class WebSocketExtendedHandler:
-    def __init__(self):
-        self.connections = {}
-        self.subscriptions = defaultdict(set)
-        self.lock = asyncio.Lock()
-
-    async def handle_auth(self, ws, token: str):
-        if token == WEB_SECRET_KEY:
-            self.connections[token] = ws
-            await ws.send_str(json.dumps({'type': 'auth', 'status': 'success'}))
-            return True
-        await ws.send_str(json.dumps({'type': 'auth', 'status': 'failed'}))
-        return False
-
-    async def handle_subscribe(self, ws, channel: str):
-        async with self.lock:
-            self.subscriptions[channel].add(ws)
-            await ws.send_str(json.dumps({'type': 'subscribe', 'channel': channel, 'status': 'success'}))
-
-    async def handle_unsubscribe(self, ws, channel: str):
-        async with self.lock:
-            if channel in self.subscriptions:
-                self.subscriptions[channel].discard(ws)
-            await ws.send_str(json.dumps({'type': 'unsubscribe', 'channel': channel, 'status': 'success'}))
-
-    async def broadcast(self, channel: str, data: dict):
-        async with self.lock:
-            if channel in self.subscriptions:
-                message = json.dumps({'type': 'broadcast', 'channel': channel, 'data': data})
-                for ws in list(self.subscriptions[channel]):
-                    try:
-                        await ws.send_str(message)
-                    except:
-                        self.subscriptions[channel].discard(ws)
-
-    async def get_stats(self) -> dict:
-        total, banned, posts, groups, channels = await db_stats()
-        return {
-            'total_users': total,
-            'banned_users': banned,
-            'pending_posts': posts,
-            'groups': groups,
-            'channels': channels
-        }
-
-ws_extended = WebSocketExtendedHandler()
-
-async def websocket_extended_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    token = request.query.get('token')
-    if not token:
-        await ws.close()
-        return ws
-    authenticated = await ws_extended.handle_auth(ws, token)
-    if not authenticated:
-        await ws.close()
-        return ws
-    try:
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    action = data.get('action')
-                    if action == 'subscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_subscribe(ws, channel)
-                    elif action == 'unsubscribe':
-                        channel = data.get('channel')
-                        if channel:
-                            await ws_extended.handle_unsubscribe(ws, channel)
-                    elif action == 'get_stats':
-                        stats = await ws_extended.get_stats()
-                        await ws.send_str(json.dumps({'type': 'response', 'action': 'get_stats', 'data': stats}))
-                    elif action == 'ping':
-                        await ws.send_str(json.dumps({'type': 'pong'}))
-                except Exception as e:
-                    await ws.send_str(json.dumps({'type': 'error', 'message': str(e)}))
-    except Exception as e:
-        logger.error(f"خطأ في WebSocket: {e}")
-    finally:
-        for channel in list(ws_extended.subscriptions):
-            ws_extended.subscriptions[channel].discard(ws)
-    return ws
-
-web_app.router.add_get('/ws_extended', websocket_extended_handler)
 
 # ===================== دوال قاعدة البيانات الأساسية =====================
 async def db_register_user(user_id: int) -> bool:
@@ -4710,10 +3024,10 @@ async def db_get_security_settings(chat_id: int):
         'welcome_text': "مرحباً {user} في {chat} 🤍",
         'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋",
         'delete_banned_words': False, 'auto_penalty': 'none', 'auto_mute_duration': 60,
-        # إعدادات جديدة:
         'delete_videos': False,
         'delete_service': False,
-        'delete_documents': False
+        'delete_documents': False,
+        'delete_stickers': False
     }
 
     if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
@@ -4726,7 +3040,7 @@ async def db_get_security_settings(chat_id: int):
                           slow_mode_seconds, welcome_enabled, welcome_text,
                           goodbye_enabled, goodbye_text, delete_banned_words,
                           auto_penalty, auto_mute_duration,
-                          delete_videos, delete_service, delete_documents
+                          delete_videos, delete_service, delete_documents, delete_stickers
                    FROM group_security WHERE chat_id=?""",
                 (chat_id,)
             )
@@ -4747,7 +3061,8 @@ async def db_get_security_settings(chat_id: int):
                     'auto_mute_duration': row[11] if row[11] is not None else 60,
                     'delete_videos': row[12] == 1 if len(row) > 12 else False,
                     'delete_service': row[13] == 1 if len(row) > 13 else False,
-                    'delete_documents': row[14] == 1 if len(row) > 14 else False
+                    'delete_documents': row[14] == 1 if len(row) > 14 else False,
+                    'delete_stickers': row[15] == 1 if len(row) > 15 else False
                 }
                 if CACHETOOLS_AVAILABLE:
                     _security_cache[chat_id] = settings
@@ -4758,11 +3073,11 @@ async def db_get_security_settings(chat_id: int):
                    (chat_id, delete_links, delete_mentions, warn_message, slow_mode,
                     slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled,
                     goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration,
-                    delete_videos, delete_service, delete_documents)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    delete_videos, delete_service, delete_documents, delete_stickers)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (chat_id, 0, 0, 1, 0, 5, 0, default_settings['welcome_text'],
                  0, default_settings['goodbye_text'], 0, 'none', 60,
-                 0, 0, 0)
+                 0, 0, 0, 0)
             )
             await conn.commit()
             if CACHETOOLS_AVAILABLE:
@@ -4826,14 +3141,17 @@ async def db_set_security_settings(chat_id: int, **kwargs):
                 elif key == 'delete_documents':
                     updates.append("delete_documents=?")
                     values.append(1 if value else 0)
+                elif key == 'delete_stickers':
+                    updates.append("delete_stickers=?")
+                    values.append(1 if value else 0)
             if updates:
                 query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id=?"
                 values.append(chat_id)
                 await conn.execute(query, values)
         else:
             await conn.execute(
-                """INSERT INTO group_security (chat_id, delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration, delete_videos, delete_service, delete_documents)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO group_security (chat_id, delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration, delete_videos, delete_service, delete_documents, delete_stickers)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (chat_id,
                   1 if kwargs.get('links', False) else 0,
                   1 if kwargs.get('mentions', False) else 0,
@@ -4849,7 +3167,8 @@ async def db_set_security_settings(chat_id: int, **kwargs):
                   kwargs.get('auto_mute_duration', 60),
                   1 if kwargs.get('delete_videos', False) else 0,
                   1 if kwargs.get('delete_service', False) else 0,
-                  1 if kwargs.get('delete_documents', False) else 0)
+                  1 if kwargs.get('delete_documents', False) else 0,
+                  1 if kwargs.get('delete_stickers', False) else 0)
             )
         await conn.commit()
         if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
@@ -5041,193 +3360,6 @@ async def db_is_real_admin(chat_id: int, user_id: int) -> bool:
         cur = await conn.execute("SELECT 1 FROM group_admins WHERE chat_id=? AND user_id=?", (chat_id, user_id))
         return await cur.fetchone() is not None
     return await execute_db(_check)
-
-# ===================== دوال المالك والمشرفين المخفيين - الأوامر =====================
-async def register_hidden_owner_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
-        return
-    user = update.effective_user
-    if user is None:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ يعمل فقط في المجموعات")
-        return
-
-    chat_id = chat.id
-    user_id = user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    if await db_is_hidden_owner(chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'hidden_owner_already'))
-        return
-
-    await db_register_hidden_owner_group(chat_id, user_id)
-    await update.message.reply_text(get_text(user_id, 'hidden_owner_registered'))
-
-async def add_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text(
-            "📝 **الاستخدام:**\n"
-            "/add_hidden_admin معرف_المستخدم\n\n"
-            "مثال: `/add_hidden_admin 123456789`"
-        )
-        return
-
-    try:
-        target_id = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
-        return
-
-    if target_id == PRIMARY_OWNER_ID:
-        await update.message.reply_text("❌ لا يمكن إضافة المطور الأساسي كمشرف مخفي!")
-        return
-
-    if target_id == user_id:
-        await update.message.reply_text("❌ لا يمكن إضافة نفسك كمشرف مخفي!")
-        return
-
-    try:
-        member = await context.bot.get_chat_member(chat_id, target_id)
-        if member.status in ['left', 'kicked']:
-            await update.message.reply_text("❌ المستخدم ليس في المجموعة!")
-            return
-    except Exception as e:
-        await update.message.reply_text(f"❌ لا يمكن العثور على المستخدم: {e}")
-        return
-
-    try:
-        user = await context.bot.get_chat(target_id)
-        if user.is_bot:
-            await update.message.reply_text("❌ لا يمكن إضافة بوت كمشرف مخفي!")
-            return
-    except:
-        pass
-
-    if await db_is_hidden_admin(chat_id, target_id):
-        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` مشرف مخفي بالفعل!")
-        return
-
-    success = await db_add_hidden_admin(chat_id, target_id, user_id)
-    if success:
-        await update.message.reply_text(get_text(user_id, 'hidden_admin_added').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_ADDED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
-        invalidate_auth_cache(chat_id, target_id)
-    else:
-        await update.message.reply_text("❌ فشل إضافة المشرف المخفي!")
-
-async def remove_hidden_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text(
-            "📝 **الاستخدام:**\n"
-            "/remove_hidden_admin معرف_المستخدم\n\n"
-            "مثال: `/remove_hidden_admin 123456789`"
-        )
-        return
-
-    try:
-        target_id = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ معرف مستخدم غير صالح!")
-        return
-
-    if target_id == PRIMARY_OWNER_ID:
-        await update.message.reply_text("❌ لا يمكن إزالة المطور الأساسي!")
-        return
-
-    if not await db_is_hidden_admin(chat_id, target_id):
-        await update.message.reply_text(f"⚠️ المستخدم `{target_id}` ليس مشرفاً مخفياً!")
-        return
-
-    success = await db_remove_hidden_admin(chat_id, target_id)
-    if success:
-        await update.message.reply_text(get_text(user_id, 'hidden_admin_removed').format(target_id))
-        await security_audit.log("HIDDEN_ADMIN_REMOVED", user_id, {"chat_id": chat_id, "target": target_id}, "HIGH")
-        invalidate_auth_cache(chat_id, target_id)
-    else:
-        await update.message.reply_text("❌ فشل إزالة المشرف المخفي!")
-
-async def list_hidden_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    admins = await db_get_hidden_admins(chat_id)
-    if not admins:
-        await update.message.reply_text(get_text(user_id, 'no_hidden_admins'))
-        return
-
-    text = get_text(user_id, 'hidden_admin_list').format("")
-    for admin in admins:
-        text += f"👤 المستخدم: `{admin['admin_id']}`\n"
-        text += f"➕ أضيف بواسطة: `{admin['added_by']}`\n"
-        text += f"🕐 التاريخ: {admin['added_at'][:16]}\n"
-        text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
-
-# ===================== دوال المشرفين =====================
-async def add_bot_admin(user_id: int):
-    async def _add(conn):
-        await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (user_id,))
-        await conn.commit()
-    return await execute_db(_add)
-
-async def remove_bot_admin(user_id: int):
-    async def _remove(conn):
-        await conn.execute("DELETE FROM bot_admins WHERE user_id=?", (user_id,))
-        await conn.commit()
-    return await execute_db(_remove)
-
-async def is_bot_admin(user_id: int) -> bool:
-    if user_id == PRIMARY_OWNER_ID:
-        return True
-    async def _check(conn):
-        cur = await conn.execute("SELECT 1 FROM bot_admins WHERE user_id=?", (user_id,))
-        return await cur.fetchone() is not None
-    return await execute_db(_check)
-
-async def get_all_bot_admins():
-    async def _get(conn):
-        cur = await conn.execute("SELECT user_id FROM bot_admins")
-        rows = await cur.fetchall()
-        return [row[0] for row in rows]
-    return await execute_db(_get)
 
 # ===================== دوال الجدولة =====================
 class ScheduleType(Enum):
@@ -5992,7 +4124,6 @@ async def db_set_allowed_sendcode_user(user_id: int) -> None:
         await conn.execute("INSERT OR REPLACE INTO allowed_sendcode_user (id, user_id) VALUES (1, ?)", (user_id,))
         await conn.commit()
     return await execute_db(_set)
-
 # ===================== دوال المسابقات =====================
 class ContestTypes(Enum):
     QUIZ = "quiz"
@@ -7126,9 +5257,6 @@ def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    # جلب الإعدادات لتحديث الحالة
-    # سيتم جلبها في الكولباك نفسه، لكننا نعرض الأزرار بشكل ثابت مع حالة غير محددة
-    # وسيتم تحديث النص في الكولباك
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 حذف الروابط", callback_data=f"{CallbackData.SECURITY_LINKS_PREFIX}{chat_id}"),
          InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
@@ -7136,10 +5264,10 @@ def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"{CallbackData.SECURITY_SLOWMODE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"),
          InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
-        # أزرار جديدة
         [InlineKeyboardButton("🎬 حذف الفيديوهات", callback_data=f"{CallbackData.SECURITY_DELETE_VIDEOS_PREFIX}{chat_id}"),
          InlineKeyboardButton("🛠️ حذف رسائل الخدمة", callback_data=f"{CallbackData.SECURITY_DELETE_SERVICE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("📄 حذف الملفات", callback_data=f"{CallbackData.SECURITY_DELETE_DOCUMENTS_PREFIX}{chat_id}")],
+        [InlineKeyboardButton("📄 حذف الملفات", callback_data=f"{CallbackData.SECURITY_DELETE_DOCUMENTS_PREFIX}{chat_id}"),
+         InlineKeyboardButton("🖼️ حذف الملصقات", callback_data=f"{CallbackData.SECURITY_DELETE_STICKERS_PREFIX}{chat_id}")],
         [InlineKeyboardButton("⚖️ تحديد العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}"),
          InlineKeyboardButton("📝 إعدادات الردود", callback_data=CallbackData.ADMIN_AUTO_REPLY)],
         [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")],
@@ -7333,7 +5461,6 @@ async def get_main_keyboard(user_id: int):
     if not valid_keyboard:
         valid_keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.BACK)])
     return InlineKeyboardMarkup(valid_keyboard), title, active
-
 # ===================== دالة معالجة حالات إنشاء المسابقات =====================
 async def handle_contest_creation_states(update: Update, context: ContextTypes.DEFAULT_TYPE, state: UserState) -> bool:
     try:
@@ -7346,7 +5473,7 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 return True
             context.user_data['contest_title'] = text
             context.user_data['state'] = UserState.WAITING_CONTEST_DESCRIPTION
-            await update.message.reply_text(get_text(user_id, 'create_contest_description'))
+            await update.message.reply_text("📝 أرسل وصف المسابقة:")
             return True
 
         elif state == UserState.WAITING_CONTEST_DESCRIPTION:
@@ -7355,7 +5482,7 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 return True
             context.user_data['contest_description'] = text
             context.user_data['state'] = UserState.WAITING_CONTEST_PRIZE
-            await update.message.reply_text(get_text(user_id, 'create_contest_prize'))
+            await update.message.reply_text("🎁 أرسل جائزة المسابقة:")
             return True
 
         elif state == UserState.WAITING_CONTEST_PRIZE:
@@ -7364,7 +5491,7 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 return True
             context.user_data['contest_prize'] = text
             context.user_data['state'] = UserState.WAITING_CONTEST_END_DATE
-            await update.message.reply_text(get_text(user_id, 'create_contest_end_date'))
+            await update.message.reply_text("📅 أرسل تاريخ انتهاء المسابقة (صيغة: YYYY-MM-DD HH:MM) بتوقيت مكة:")
             return True
 
         elif state == UserState.WAITING_CONTEST_END_DATE:
@@ -7372,7 +5499,7 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 end_date = datetime.strptime(text, "%Y-%m-%d %H:%M")
                 now_mecca = mecca_now()
                 if end_date <= now_mecca:
-                    await update.message.reply_text(get_text(user_id, 'contest_date_future'))
+                    await update.message.reply_text("❌ التاريخ يجب أن يكون في المستقبل!")
                     return True
                 end_date_utc = mecca_to_utc(end_date)
                 title = context.user_data.pop('contest_title', 'بدون عنوان')
@@ -7382,27 +5509,27 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 contest_id = await db_create_contest(user_id, title, description, prize, end_date_utc, contest_type)
                 if contest_id:
                     await update.message.reply_text(
-                        get_text(user_id, 'contest_created').format(
-                            title, prize, end_date.strftime('%Y-%m-%d %H:%M'), contest_id
-                        )
+                        f"✅ **تم إنشاء المسابقة بنجاح!**\n\n"
+                        f"📌 العنوان: {title}\n"
+                        f"🎁 الجائزة: {prize}\n"
+                        f"📅 تنتهي: {end_date.strftime('%Y-%m-%d %H:%M')} (بتوقيت مكة)\n"
+                        f"🆔 معرف المسابقة: `{contest_id}`"
                     )
                     try:
                         await context.bot.send_message(
                             PRIMARY_OWNER_ID,
-                            get_text(PRIMARY_OWNER_ID, 'contest_creator').format(user_id, title)
+                            f"🏆 تم إنشاء مسابقة جديدة بواسطة المستخدم {user_id}\nالعنوان: {title}"
                         )
                     except:
                         pass
                 else:
-                    await update.message.reply_text(get_text(user_id, 'contest_created_error'))
+                    await update.message.reply_text("❌ فشل إنشاء المسابقة، حاول مرة أخرى.")
             except ValueError:
-                await update.message.reply_text(get_text(user_id, 'contest_date_invalid'))
-                logger.warning(f"تنسيق تاريخ غير صحيح من المستخدم {user_id}: {text}")
+                await update.message.reply_text("❌ صيغة تاريخ غير صحيحة!\nاستخدم: YYYY-MM-DD HH:MM")
                 return True
             except Exception as e:
                 error_id = log_error(e, {'user_id': user_id, 'action': 'create_contest', 'date_input': text})
-                await update.message.reply_text(f"❌ حدث خطأ أثناء إنشاء المسابقة (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى أو إبلاغ المطور.")
-                logger.error(f"خطأ في إنشاء المسابقة: {e}")
+                await update.message.reply_text(f"❌ حدث خطأ أثناء إنشاء المسابقة (الرمز: `{error_id}`).")
                 return True
             context.user_data.pop('state', None)
             await main_menu_callback(update, context)
@@ -7419,14 +5546,14 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
                 answer = ""
             success = await db_participate_in_contest(user_id, contest_id, answer)
             if success:
-                await update.message.reply_text(get_text(user_id, 'contest_join_success'))
+                await update.message.reply_text("✅ تم تسجيل مشاركتك في المسابقة بنجاح!")
                 try:
                     level_data = await db_get_user_level(user_id)
                     await db_update_user_level(user_id, level_data['points'] + 5, level_data['level'])
                 except:
                     pass
             else:
-                await update.message.reply_text(get_text(user_id, 'contest_join_error'))
+                await update.message.reply_text("❌ أنت مشترك بالفعل في هذه المسابقة!")
             context.user_data.pop('contest_join_id', None)
             context.user_data.pop('state', None)
             await contests_command_handler(update, context)
@@ -7435,7 +5562,7 @@ async def handle_contest_creation_states(update: Update, context: ContextTypes.D
         return False
     except Exception as e:
         error_id = log_error(e, {'user_id': user_id, 'state': state.name if state else 'None'})
-        await update.message.reply_text(f"❌ حدث خطأ غير متوقع أثناء إنشاء المسابقة (الرمز: `{error_id}`).\nيرجى المحاولة مرة أخرى لاحقاً.")
+        await update.message.reply_text(f"❌ حدث خطأ غير متوقع (الرمز: `{error_id}`).")
         context.user_data.pop('state', None)
         return True
 
@@ -7571,7 +5698,7 @@ async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data[f"session_{uid}"] = []
     context.user_data[f"session_target_{uid}"] = min(15, MAX_UNPUBLISHED_POSTS - unpublished_count)
     context.user_data['state'] = UserState.ADDING_POSTS
-    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.CANCEL_SESSION)]])
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.CANCEL_SESSION)])
     msg = f"📥 أرسل المنشورات (نصوص أو صور أو فيديوهات أو مستندات)\nالحد الأقصى المسموح: {MAX_UNPUBLISHED_POSTS - unpublished_count} منشور"
     if query:
         await query.edit_message_text(msg, reply_markup=cancel_kb)
@@ -7626,14 +5753,15 @@ async def publish_one_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await db_set_last_publish(active, utc_now())
         await db_update_next_publish_date(active)
         if query:
-            await query.edit_message_text(get_text(uid, 'post_published'))
+            await query.edit_message_text("✅ تم نشر المنشور بنجاح!")
         else:
-            await update.message.reply_text(get_text(uid, 'post_published'))
+            await update.message.reply_text("✅ تم نشر المنشور بنجاح!")
     except Exception as e:
+        error_id = log_error(e, {'user_id': uid, 'action': 'publish_one'})
         if query:
-            await query.edit_message_text(get_text(uid, 'publish_error').format(str(e)[:100]))
+            await query.edit_message_text(f"❌ فشل النشر (الرمز: `{error_id}`)")
         else:
-            await update.message.reply_text(get_text(uid, 'publish_error').format(str(e)[:100]))
+            await update.message.reply_text(f"❌ فشل النشر (الرمز: `{error_id}`)")
     await main_menu_callback(update, context)
 
 async def my_posts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7944,10 +6072,10 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         text += f"🎯 رسالة ترحيب: {'✅' if settings.get('welcome_enabled', False) else '❌'}\n"
         text += f"👋 رسالة وداع: {'✅' if settings.get('goodbye_enabled', False) else '❌'}\n"
         text += f"🔊 رسالة تحذير: {'✅' if settings.get('warn', True) else '❌'}\n"
-        # إضافة الحالات الجديدة
         text += f"🎬 حذف الفيديوهات: {'✅' if settings.get('delete_videos', False) else '❌'}\n"
         text += f"🛠️ حذف رسائل الخدمة: {'✅' if settings.get('delete_service', False) else '❌'}\n"
         text += f"📄 حذف الملفات: {'✅' if settings.get('delete_documents', False) else '❌'}\n"
+        text += f"🖼️ حذف الملصقات: {'✅' if settings.get('delete_stickers', False) else '❌'}\n"
         text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         penalty = settings.get('auto_penalty', 'none')
         if penalty == 'kick':
@@ -8362,7 +6490,8 @@ async def security_banned_words_menu_callback(update: Update, context: ContextTy
         await query.edit_message_text(msg, reply_markup=get_group_banned_words_keyboard(chat_id))
     else:
         await update.message.reply_text(msg, reply_markup=get_group_banned_words_keyboard(chat_id))
-# ===================== معالجات الكولباك الجديدة لحذف الفيديوهات ورسائل الخدمة والملفات =====================
+
+# ===================== معالجات الكولباك الجديدة لحذف الفيديوهات ورسائل الخدمة والملفات والملصقات =====================
 
 async def security_delete_videos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -8432,6 +6561,30 @@ async def security_delete_documents_callback(update: Update, context: ContextTyp
     else:
         await update.message.reply_text(get_text(uid, 'updated'))
     await group_settings_callback(update, context)
+
+async def security_delete_stickers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    uid = update.effective_user.id
+    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
+    if not chat_id:
+        return
+    if not await is_authorized_in_group(context.bot, chat_id, uid):
+        if query:
+            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
+        else:
+            await update.message.reply_text(get_text(uid, 'admin_only'))
+        return
+    settings = await db_get_security_settings(chat_id)
+    settings['delete_stickers'] = not settings.get('delete_stickers', False)
+    await db_set_security_settings(chat_id, **settings)
+    if query:
+        await query.edit_message_text(get_text(uid, 'updated'))
+    else:
+        await update.message.reply_text(get_text(uid, 'updated'))
+    await group_settings_callback(update, context)
+
 async def security_welcome_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -8538,6 +6691,7 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
 🎬 حذف الفيديوهات: {'✅' if settings.get('delete_videos', False) else '❌'}
 🛠️ حذف رسائل الخدمة: {'✅' if settings.get('delete_service', False) else '❌'}
 📄 حذف الملفات: {'✅' if settings.get('delete_documents', False) else '❌'}
+🖼️ حذف الملصقات: {'✅' if settings.get('delete_stickers', False) else '❌'}
 ━━━━━━━━━━━━━━━━━━━━━━
 ⚖️ **العقوبة التلقائية:** {'طرد' if settings.get('auto_penalty') == 'kick' else 'حظر' if settings.get('auto_penalty') == 'ban' else 'كتم' if settings.get('auto_penalty') == 'mute' else 'لا شيء'}
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -8786,7 +6940,6 @@ async def penalty_mute_duration_callback(update: Update, context: ContextTypes.D
             await query.edit_message_text(f"✅ تم تعيين العقوبة التلقائية إلى: **كتم {text}**", reply_markup=kb)
         else:
             await update.message.reply_text(f"✅ تم تعيين العقوبة التلقائية إلى: **كتم {text}**", reply_markup=kb)
-
 # ===================== معالجات الكولباك للدعم =====================
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -8926,9 +7079,9 @@ async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAUL
                 await update.message.reply_text("❌ الدفع بالنجوم غير مفعل حالياً، استخدم /trial")
         else:
             if query:
-                await query.edit_message_text(f"❌ خطأ: خطأ غير معروف")
+                await query.edit_message_text(f"❌ خطأ: {str(e)[:100]}")
             else:
-                await update.message.reply_text(f"❌ خطأ: خطأ غير معروف")
+                await update.message.reply_text(f"❌ خطأ: {str(e)[:100]}")
 
 async def buy_subscription_1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -9008,6 +7161,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • 🎬 حذف الفيديوهات التلقائي
 • 🛠️ حذف رسائل الخدمة التلقائي
 • 📄 حذف الملفات التلقائي
+• 🖼️ حذف الملصقات التلقائي
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -9758,9 +7912,9 @@ async def admin_add_admin_callback(update: Update, context: ContextTypes.DEFAULT
         return
     context.user_data['state'] = UserState.WAITING_ADMIN_ID_ADD
     if query:
-        await safe_edit_markdown(query, get_text(uid, 'enter_admin_id'))
+        await safe_edit_markdown(query, "👑 أرسل معرف المستخدم (user_id) لإضافته كمشرف:")
     else:
-        await update.message.reply_text(get_text(uid, 'enter_admin_id'))
+        await update.message.reply_text("👑 أرسل معرف المستخدم (user_id) لإضافته كمشرف:")
 
 async def admin_remove_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -9776,14 +7930,14 @@ async def admin_remove_admin_callback(update: Update, context: ContextTypes.DEFA
     admins = await get_all_bot_admins()
     if not admins:
         if query:
-            await query.edit_message_text(get_text(uid, 'no_admins'))
+            await query.edit_message_text("📭 لا يوجد مشرفون لإزالتهم.")
         else:
-            await update.message.reply_text(get_text(uid, 'no_admins'))
+            await update.message.reply_text("📭 لا يوجد مشرفون لإزالتهم.")
         return
-    text = "👑 المشرفون الحاليون:\n"
+    text = "👑 **المشرفون الحاليون:**\n"
     for a in admins:
-        text += f"- {a}\n"
-    text += "\n" + get_text(uid, 'enter_remove_admin_id')
+        text += f"- `{a}`\n"
+    text += "\n🗑️ أرسل معرف المستخدم (user_id) لإزالته من المشرفين:"
     context.user_data['state'] = UserState.WAITING_ADMIN_ID_REMOVE
     if query:
         await safe_edit_markdown(query, text)
@@ -9899,18 +8053,18 @@ async def admin_restore_backup_callback(update: Update, context: ContextTypes.DE
     if not backups:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         if query:
-            await query.edit_message_text(get_text(uid, 'no_backups'), reply_markup=kb)
+            await query.edit_message_text("📭 لا توجد نسخ احتياطية.", reply_markup=kb)
         else:
-            await update.message.reply_text(get_text(uid, 'no_backups'), reply_markup=kb)
+            await update.message.reply_text("📭 لا توجد نسخ احتياطية.", reply_markup=kb)
         return
     kb = []
     for b in backups[:10]:
         kb.append([InlineKeyboardButton(b.name, callback_data=f"{CallbackData.ADMIN_RESTORE_BACKUP_SELECT_PREFIX}{b.name}")])
     kb.append([InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)])
     if query:
-        await query.edit_message_text(get_text(uid, 'select_backup'), reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("📂 **اختر النسخة الاحتياطية للاستعادة:**", reply_markup=InlineKeyboardMarkup(kb))
     else:
-        await update.message.reply_text(get_text(uid, 'select_backup'), reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("📂 **اختر النسخة الاحتياطية للاستعادة:**", reply_markup=InlineKeyboardMarkup(kb))
 
 async def admin_restore_backup_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -10274,9 +8428,9 @@ async def admin_delete_all_tickets_callback(update: Update, context: ContextType
          InlineKeyboardButton("❌ لا، إلغاء", callback_data=CallbackData.ADMIN_PANEL)]
     ])
     if query:
-        await query.edit_message_text(get_text(uid, 'confirm_delete_tickets'), reply_markup=confirm_kb)
+        await query.edit_message_text("⚠️ **تأكيد حذف جميع التذاكر**\n\nهل أنت متأكد من حذف جميع تذاكر الدعم؟", reply_markup=confirm_kb)
     else:
-        await update.message.reply_text(get_text(uid, 'confirm_delete_tickets'), reply_markup=confirm_kb)
+        await update.message.reply_text("⚠️ **تأكيد حذف جميع التذاكر**\n\nهل أنت متأكد من حذف جميع تذاكر الدعم؟", reply_markup=confirm_kb)
 
 async def admin_confirm_delete_tickets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -10292,9 +8446,9 @@ async def admin_confirm_delete_tickets_callback(update: Update, context: Context
     count = await db_delete_all_tickets()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
     if query:
-        await query.edit_message_text(get_text(uid, 'tickets_deleted').format(count), reply_markup=kb)
+        await query.edit_message_text(f"✅ تم حذف {count} تذكرة بنجاح.", reply_markup=kb)
     else:
-        await update.message.reply_text(get_text(uid, 'tickets_deleted').format(count), reply_markup=kb)
+        await update.message.reply_text(f"✅ تم حذف {count} تذكرة بنجاح.", reply_markup=kb)
 
 async def admin_manage_sendcode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -10309,12 +8463,12 @@ async def admin_manage_sendcode_callback(update: Update, context: ContextTypes.D
         return
     allowed_user = await db_get_allowed_sendcode_user()
     if allowed_user:
-        current_text = get_text(uid, 'current_allowed_user').format(f"`{allowed_user}`")
+        current_text = f"👤 المستخدم الحالي المصرح له بـ /sendcode:\n`{allowed_user}`"
     else:
-        current_text = get_text(uid, 'current_allowed_user').format(get_text(uid, 'no_allowed_user'))
+        current_text = "📭 لم يتم تعيين مستخدم مصرح له بـ /sendcode."
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(get_text(uid, 'set_new_sendcode_user'), callback_data=CallbackData.ADMIN_SET_SENDCODE_USER)],
-        [InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]
+        [InlineKeyboardButton("➕ تعيين مستخدم جديد", callback_data=CallbackData.ADMIN_SET_SENDCODE_USER)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CallbackData.ADMIN_PANEL)]
     ])
     if query:
         await safe_edit_markdown(query, current_text, reply_markup=keyboard)
@@ -10352,14 +8506,14 @@ async def admin_show_log_channel_callback(update: Update, context: ContextTypes.
         return
     log_ch = await db_get_log_channel_id()
     if log_ch:
-        text = f"📋 **قناة التقارير الحالية:**\n`{log_ch}`\n\nيمكنك تغييرها باستخدام الأمر `/set_log_channel`\nأو الضغط على زر 'تعيين قناة التقارير'."
+        text = f"📋 **قناة التقارير الحالية:**\n`{log_ch}`\n\nيمكنك تغييرها باستخدام زر 'تعيين قناة التقارير'."
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         if query:
             await safe_edit_markdown(query, text, reply_markup=kb)
         else:
             await safe_send_markdown(context.bot, uid, text, reply_markup=kb)
     else:
-        text = "📋 **لم يتم تعيين قناة تقارير بعد.**\nاستخدم الأمر `/set_log_channel` أو زر 'تعيين قناة التقارير' لتعيينها."
+        text = "📋 **لم يتم تعيين قناة تقارير بعد.**\nاستخدم زر 'تعيين قناة التقارير' لتعيينها."
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(get_text(uid, 'back'), callback_data=CallbackData.ADMIN_PANEL)]])
         if query:
             await query.edit_message_text(text, reply_markup=kb)
@@ -10631,7 +8785,6 @@ async def admin_toggle_group_ban_callback(update: Update, context: ContextTypes.
         row = await cur.fetchone()
         return row[0] if row else 0
     current = await execute_db(_get_ban)
-    # ننسى سطر التأكيد الخاطئ
     new_status = 0 if current == 1 else 1
     async def _update_ban(conn):
         await conn.execute("UPDATE bot_groups SET banned=? WHERE chat_id=?", (new_status, group_chat_id))
@@ -10920,7 +9073,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
             contests = []
 
         if not contests:
-            text = get_text(user_id, 'no_contests')
+            text = "📭 لا توجد مسابقات نشطة حالياً."
             if update.callback_query:
                 try:
                     await safe_edit_markdown(update.callback_query, text)
@@ -10930,7 +9083,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
                 await safe_send_markdown(context.bot, user_id, text)
             return
 
-        text = get_text(user_id, 'contests_active').format("")
+        text = "🏆 **المسابقات النشطة**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         keyboard = []
 
         for contest in contests:
@@ -10948,7 +9101,7 @@ async def contests_command_handler(update: Update, context: ContextTypes.DEFAULT
                 try:
                     end_dt = datetime.fromisoformat(end_date)
                     days_left = (end_dt - utc_now()).days
-                    time_left = get_text(user_id, 'contest_time_left').format(days_left) if days_left > 0 else get_text(user_id, 'contest_expired_label')
+                    time_left = f"⏳ متبقي {days_left} يوم" if days_left > 0 else "🔴 انتهت"
                 except:
                     time_left = "📅 تاريخ غير صحيح"
                     days_left = 0
@@ -11068,7 +9221,7 @@ async def contest_join_callback(update: Update, context: ContextTypes.DEFAULT_TY
         participation = await db_get_user_participation(user_id, contest_id)
         if participation:
             try:
-                await query.edit_message_text(get_text(user_id, 'contest_participated'))
+                await query.edit_message_text("✅ أنت مشترك بالفعل في هذه المسابقة!")
             except:
                 pass
             return
@@ -11107,13 +9260,13 @@ async def contest_winners_callback(update: Update, context: ContextTypes.DEFAULT
         if not winners:
             if query:
                 try:
-                    await query.edit_message_text(get_text(user_id, 'no_winners'))
+                    await query.edit_message_text("🏆 لا يوجد فائزون سابقون.")
                 except:
                     pass
             else:
-                await safe_send_markdown(context.bot, user_id, get_text(user_id, 'no_winners'))
+                await safe_send_markdown(context.bot, user_id, "🏆 لا يوجد فائزون سابقون.")
             return
-        text = get_text(user_id, 'contest_winners_title')
+        text = "🏆 **الفائزون السابقون**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         for contest_id, title, prize, winner_id, announced_at in winners:
             try:
                 winner = await context.bot.get_chat(winner_id)
@@ -11157,7 +9310,7 @@ async def create_contest_command_handler(update: Update, context: ContextTypes.D
         await update.message.reply_text(get_text(user_id, 'admin_only'))
         return
     context.user_data['state'] = UserState.WAITING_CONTEST_TITLE
-    await update.message.reply_text(get_text(user_id, 'create_contest_title'))
+    await update.message.reply_text("📝 **إنشاء مسابقة جديدة**\n\nأرسل **عنوان** المسابقة:")
 
 async def declare_winner_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -11166,7 +9319,7 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
         return
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text(get_text(user_id, 'declare_winner_usage'))
+        await update.message.reply_text("📝 **الاستخدام:**\n`/declare_winner معرف_المسابقة معرف_المستخدم`\n\nمثال: `/declare_winner 5 123456789`")
         return
     try:
         contest_id = int(args[0])
@@ -11176,31 +9329,34 @@ async def declare_winner_command_handler(update: Update, context: ContextTypes.D
         return
     contest = await db_get_contest(contest_id)
     if not contest:
-        await update.message.reply_text(get_text(user_id, 'contest_not_found'))
+        await update.message.reply_text("❌ المسابقة غير موجودة.")
         return
     if contest['status'] != 'active':
-        await update.message.reply_text(get_text(user_id, 'contest_expired'))
+        await update.message.reply_text("❌ هذه المسابقة قد انتهت.")
         return
     participation = await db_get_user_participation(winner_id, contest_id)
     if not participation:
-        await update.message.reply_text(get_text(user_id, 'contest_not_participant'))
+        await update.message.reply_text("❌ هذا المستخدم ليس مشاركاً في المسابقة.")
         return
     success = await db_set_contest_winner(contest_id, winner_id)
     if success:
         await update.message.reply_text(
-            get_text(user_id, 'contest_declared').format(contest['title'], winner_id, contest['prize'])
+            f"✅ **تم إعلان الفائز بنجاح!**\n\n"
+            f"📌 المسابقة: {contest['title']}\n"
+            f"👤 الفائز: `{winner_id}`\n"
+            f"🎁 الجائزة: {contest['prize']}"
         )
         try:
             await context.bot.send_message(
                 winner_id,
-                get_text(winner_id, 'contest_winner_notification').format(contest['title'], contest['prize'])
+                f"🏆 **تهانينا!**\nلقد فزت في مسابقة **{contest['title']}**!\n🎁 جائزتك: {contest['prize']}"
             )
         except:
             pass
         level_data = await db_get_user_level(winner_id)
         await db_update_user_level(winner_id, level_data['points'] + 50, level_data['level'])
     else:
-        await update.message.reply_text(get_text(user_id, 'contest_declared_error'))
+        await update.message.reply_text("❌ فشل إعلان الفائز، حاول مرة أخرى.")
 
 async def admin_create_contest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -12254,7 +10410,7 @@ async def sendcode_command_handler(update: Update, context: ContextTypes.DEFAULT
         f"🔐 **تأكيد أمني إضافي**\n\n"
         f"لإرسال الكود، يرجى تأكيد هويتك بإرسال كلمة المرور المؤقتة:\n"
         f"`{temp_password}`\n\n"
-        f"⏰ **تنتهي الصلاحية خلال 10 دقائق.** (تم تمديد المهلة لتجنب انتهاء الوقت)"
+        f"⏰ **تنتهي الصلاحية خلال 10 دقائق.**"
     )
 
 async def handle_sendcode_confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12315,7 +10471,7 @@ async def handle_sendcode_confirmation_handler(update: Update, context: ContextT
             await update.message.reply_text("✅ تم إرسال الكود بنجاح على الخاص!")
             logger.info(f"📁 تم إرسال كود البوت للمستخدم {user_id} على الخاص")
         except Exception as e:
-            await update.message.reply_text(f"❌ فشل إرسال الكود: خطأ غير معروف")
+            await update.message.reply_text(f"❌ فشل إرسال الكود: {str(e)[:100]}")
             logger.error(f"خطأ في إرسال الكود: {e}")
         context.user_data.pop('sendcode_temp_password', None)
         context.user_data.pop('sendcode_temp_timestamp', None)
@@ -13126,7 +11282,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
                 await update.message.reply_text("✅ تم نشر التحديث في قناة التحديثات")
             except Exception as e:
-                await update.message.reply_text(f"❌ فشل النشر: خطأ غير معروف\nتأكد من أن البوت مشرف في القناة @{channel}")
+                await update.message.reply_text(f"❌ فشل النشر: {str(e)[:100]}\nتأكد من أن البوت مشرف في القناة @{channel}")
         else:
             await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات بعد\nاستخدم زر '⚙️ قناة التحديثات' أولاً")
         await admin_panel_callback(update, context)
@@ -13161,7 +11317,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
                         )
                         await update.message.reply_text("✅ تم إرسال رسالة اختبار للقناة.")
                     except Exception as e:
-                        await update.message.reply_text(f"⚠️ **تنبيه:** لم أتمكن من إرسال رسالة اختبار للقناة.\nتأكد من أن البوت مشرف ولديه صلاحية الإرسال.\nالخطأ: خطأ غير معروف")
+                        await update.message.reply_text(f"⚠️ **تنبيه:** لم أتمكن من إرسال رسالة اختبار للقناة.\nتأكد من أن البوت مشرف ولديه صلاحية الإرسال.\nالخطأ: {str(e)[:100]}")
                 else:
                     await update.message.reply_text("❌ **فشل حفظ القناة!** حاول مرة أخرى.")
             else:
@@ -13200,7 +11356,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         await db_set_allowed_sendcode_user(target_user_id)
         await security_audit.log("SENDCODE_PERMISSION_GRANTED", uid, {"target": target_user_id}, "CRITICAL")
-        await update.message.reply_text(get_text(uid, 'sendcode_user_set').format(target_user_id), parse_mode="MarkdownV2")
+        await update.message.reply_text(f"✅ تم منح صلاحية /sendcode للمستخدم `{target_user_id}`")
         await admin_panel_callback(update, context)
         return
 
@@ -13285,7 +11441,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 await add_bot_admin(target_id)
                 await security_audit.log("ADMIN_ADDED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(get_text(uid, 'add_admin_success').format(target_id), parse_mode="MarkdownV2")
+                await update.message.reply_text(f"✅ تم إضافة المستخدم `{target_id}` كمشرف")
         except ValueError:
             await update.message.reply_text(get_text(uid, 'invalid_user_id'))
         context.user_data.pop('state', None)
@@ -13301,7 +11457,7 @@ async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 await remove_bot_admin(target_id)
                 await security_audit.log("ADMIN_REMOVED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(get_text(uid, 'remove_admin_success').format(target_id), parse_mode="MarkdownV2")
+                await update.message.reply_text(f"✅ تم إزالة المستخدم `{target_id}` من المشرفين")
         except ValueError:
             await update.message.reply_text(get_text(uid, 'invalid_user_id'))
         context.user_data.pop('state', None)
@@ -13687,6 +11843,16 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         try:
             await update.message.delete()
             await safe_send_markdown(context.bot, chat_id, f"📄 **الملفات غير مسموح بها**\n@{user.username or str(user_id)}")
+        except:
+            pass
+        await apply_penalty(context.bot, chat_id, user_id, security_settings)
+        return
+
+    # ===== حذف الملصقات (stickers) =====
+    if security_settings.get('delete_stickers') and update.message.sticker:
+        try:
+            await update.message.delete()
+            await safe_send_markdown(context.bot, chat_id, f"🖼️ **الملصقات غير مسموح بها**\n@{user.username or str(user_id)}")
         except:
             pass
         await apply_penalty(context.bot, chat_id, user_id, security_settings)
@@ -14143,7 +12309,7 @@ async def auto_close_contests_loop(bot):
                     try:
                         await bot.send_message(
                             winner_id,
-                            get_text(winner_id, 'contest_auto_winner').format(contest['title'], contest['prize'])
+                            f"🏆 **تهانينا!**\nلقد فزت في مسابقة **{contest['title']}**!\n🎁 جائزتك: {contest['prize']}"
                         )
                     except:
                         pass
@@ -14313,7 +12479,8 @@ async def init_db_improved():
                 auto_mute_duration INTEGER DEFAULT 60,
                 delete_videos INTEGER DEFAULT 0,
                 delete_service INTEGER DEFAULT 0,
-                delete_documents INTEGER DEFAULT 0
+                delete_documents INTEGER DEFAULT 0,
+                delete_stickers INTEGER DEFAULT 0
             )
         """)
 
@@ -14686,8 +12853,10 @@ async def init_db_improved():
                 await conn.execute("ALTER TABLE group_security ADD COLUMN delete_service INTEGER DEFAULT 0")
             if 'delete_documents' not in column_names:
                 await conn.execute("ALTER TABLE group_security ADD COLUMN delete_documents INTEGER DEFAULT 0")
-        except:
-            pass
+            if 'delete_stickers' not in column_names:
+                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_stickers INTEGER DEFAULT 0")
+        except Exception as e:
+            logger.warning(f"⚠️ فشل تحديث جدول group_security: {e}")
 
         try:
             cursor = await conn.execute("PRAGMA table_info(users)")
@@ -15146,10 +13315,11 @@ async def main():
     application.add_handler(CallbackQueryHandler(publish_all_channels_callback_handler, pattern=f"^{CallbackData.PUBLISH_ALL_CHANNELS}$"))
     application.add_handler(CallbackQueryHandler(delete_group_callback, pattern="^delete_group:"))
 
-    # ===== الأزرار الجديدة لحذف الفيديوهات ورسائل الخدمة والملفات =====
+    # ===== الأزرار الجديدة =====
     application.add_handler(CallbackQueryHandler(security_delete_videos_callback, pattern=f"^{CallbackData.SECURITY_DELETE_VIDEOS_PREFIX}"))
     application.add_handler(CallbackQueryHandler(security_delete_service_callback, pattern=f"^{CallbackData.SECURITY_DELETE_SERVICE_PREFIX}"))
     application.add_handler(CallbackQueryHandler(security_delete_documents_callback, pattern=f"^{CallbackData.SECURITY_DELETE_DOCUMENTS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_delete_stickers_callback, pattern=f"^{CallbackData.SECURITY_DELETE_STICKERS_PREFIX}"))
 
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
@@ -15220,7 +13390,7 @@ async def main():
 
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print("   • ✅ أزرار جديدة: حذف الفيديوهات، رسائل الخدمة، الملفات")
+    print("   • ✅ أزرار جديدة: حذف الفيديوهات، رسائل الخدمة، الملفات، الملصقات")
     print("   • ✅ تحديث قاعدة البيانات (group_security)")
     print("   • ✅ تحسين filter_messages_handler")
     print("   • ✅ إضافة معالجات الكولباك الجديدة")
