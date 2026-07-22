@@ -23,7 +23,7 @@ from utils import (
     utc_now, mecca_now, utc_now_iso,
     utc_to_mecca, mecca_to_utc,
     is_authorized_in_group, check_bot_permissions,
-    get_main_keyboard, security_keyboard, get_admin_keyboard,
+     security_keyboard, get_admin_keyboard,
     get_replies_keyboard, get_banned_words_admin_keyboard,
     penalty_keyboard, mute_duration_keyboard,
     get_auto_reply_keyboard, get_user_auto_reply_keyboard,
