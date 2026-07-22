@@ -800,3 +800,15 @@ async def clear_all_posts_callback(update, context): pass
 async def my_pending_stats_callback(update, context): pass
 async def my_full_stats_callback(update, context): pass
 async def delete_group_callback(update, context): pass
+
+# ===================== توجيه الرسائل الخاصة =====================
+async def private_message_router(update, context):
+    try:
+        from database import db_is_creating_contest
+        user_id = update.effective_user.id
+        if await db_is_creating_contest(user_id):
+            return await handle_contest_creation_states(update, context)
+    except (ImportError, AttributeError):
+        if context.user_data.get("creating_contest"):
+            return await handle_contest_creation_states(update, context)
+    return await message_handler_main(update, context)

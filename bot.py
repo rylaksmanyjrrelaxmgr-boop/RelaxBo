@@ -29,20 +29,6 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# ===================== دالة توجيه الرسائل الخاصة (موجودة هنا مش في handlers) =====================
-async def private_message_router(update, context):
-    try:
-        from database import db_is_creating_contest
-        user_id = update.effective_user.id
-        if await db_is_creating_contest(user_id):
-            return await handle_contest_creation_states(update, context)
-    except (ImportError, AttributeError):
-        if context.user_data.get("creating_contest"):
-            return await handle_contest_creation_states(update, context)
-    return await message_handler_main(update, context)
-
-# ===================== الدالة الرئيسية =====================
-
 async def main():
     await init_db_improved()
     await import_banned_words_on_startup()
@@ -56,7 +42,7 @@ async def main():
     application = Application.builder().token(TOKEN).request(request).build()
     application.add_error_handler(global_error_handler)
 
-    # الأوامر
+    # الأوامر الأساسية - نفس النسخة الأصلية
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
     application.add_handler(CommandHandler("syncgroup", syncgroup_command_handler))
@@ -93,7 +79,7 @@ async def main():
     application.add_handler(CommandHandler("set_rules", set_rules_command_handler))
     application.add_handler(CommandHandler("rules", rules_command_handler))
 
-    # الكولباك
+    # الكولباك الأساسية
     application.add_handler(CallbackQueryHandler(lang_callback_handler, pattern="^lang_"))
     application.add_handler(CallbackQueryHandler(handle_text_callbacks, pattern="^(rank|top|schedule_post|language)$"))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
@@ -228,7 +214,7 @@ async def main():
     application.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added))
 
-    # الرسائل
+    # الرسائل (باستخدام private_message_router من handlers.py)
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
     application.add_handler(MessageHandler(filters.CAPTION & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
