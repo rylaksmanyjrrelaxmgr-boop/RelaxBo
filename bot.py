@@ -3,24 +3,20 @@
 import os
 os.environ['PTB_DISABLE_SIGNAL_HANDLER'] = 'true'
 
-import asyncio, sys, traceback, logging
+import asyncio, sys, traceback
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from telegram import Bot
-from telegram.ext import Application
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
 from constants import TOKEN, BOT_NAME, MAX_CONNECTIONS, USE_PROXY, PROXY_URL, POLL_INTERVAL
-from utils import check_single_instance, advanced_logger, logger
+from utils import check_single_instance
 from database import db, init_db_improved
 from security import import_banned_words_on_startup
 from handlers import *
-from tasks import BackgroundTaskManager
 from web import start_web_server
-
-# إعداد التسجيل
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 async def main():
     # تهيئة قاعدة البيانات
@@ -41,7 +37,7 @@ async def main():
     bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # تسجيل جميع المعالجات (باستخدام نفس القائمة السابقة)
+    # تسجيل المعالجات الأساسية
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("help", help_command_handler))
     application.add_handler(CommandHandler("language", language_command_handler))
@@ -110,8 +106,9 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_router))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, filter_messages_handler))
 
-    # بدء خادم الويب
+    # بدء خادم الويب أولاً لضمان فتح المنفذ
     asyncio.create_task(start_web_server())
+    await asyncio.sleep(0.2)  # فرصة لبدء الاستماع
 
     print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
     await application.run_polling(drop_pending_updates=True, poll_interval=POLL_INTERVAL)
