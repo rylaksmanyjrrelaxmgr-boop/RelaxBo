@@ -800,3 +800,6 @@ async def clear_all_posts_callback(update, context): pass
 async def my_pending_stats_callback(update, context): pass
 async def my_full_stats_callback(update, context): pass
 async def delete_group_callback(update, context): pass
+async def private_message_router(update, context):
+    """موجه الرسائل الخاصة"""
+    return await message_handler_main(update, context)
