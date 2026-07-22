@@ -2480,7 +2480,7 @@ class CallbackData:
     SECURITY_DELETE_VIDEOS_PREFIX = "security:delete_videos:"
     SECURITY_DELETE_SERVICE_PREFIX = "security:delete_service:"
     SECURITY_DELETE_DOCUMENTS_PREFIX = "security:delete_documents:"
-    SECURITY_DELETE_STICKERS_PREFIX = "security:delete_stickers:" ALTER TABLE group_security ADD COLUMN delete_videos INTEGER DEFAULT 0; 
+    SECURITY_DELETE_STICKERS_PREFIX = "security:delete_stickers:"
     ALTER TABLE group_security ADD COLUMN delete_videos INTEGER DEFAULT 0;
     ALTER TABLE group_security ADD COLUMN delete_service INTEGER DEFAULT 0;
     ALTER TABLE group_security ADD COLUMN delete_documents INTEGER DEFAULT 0;
