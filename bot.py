@@ -5698,7 +5698,7 @@ async def add_15_posts_callback(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data[f"session_{uid}"] = []
     context.user_data[f"session_target_{uid}"] = min(15, MAX_UNPUBLISHED_POSTS - unpublished_count)
     context.user_data['state'] = UserState.ADDING_POSTS
-    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.CANCEL_SESSION)])
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.CANCEL_SESSION)]])
     msg = f"📥 أرسل المنشورات (نصوص أو صور أو فيديوهات أو مستندات)\nالحد الأقصى المسموح: {MAX_UNPUBLISHED_POSTS - unpublished_count} منشور"
     if query:
         await query.edit_message_text(msg, reply_markup=cancel_kb)
