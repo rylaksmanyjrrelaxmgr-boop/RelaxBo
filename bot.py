@@ -11816,25 +11816,13 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # ===== حذف رسائل الخدمة =====
-# تم إزالة الكود القديم واستبداله بالدالة الجديدة
-        is_service = (
-            update.message.new_chat_members or
-            update.message.left_chat_member or
-            update.message.new_chat_title or
-            update.message.new_chat_photo or
-            update.message.delete_chat_photo or
-            update.message.group_chat_created or
-            update.message.supergroup_chat_created or
-            update.message.channel_chat_created or
-            update.message.message_auto_delete_timer_changed or
-            update.message.pinned_message
-        )
-        if is_service:
-            try:
-                await update.message.delete()
-            except:
-                pass
-            return
+if security_settings.get('delete_service'):
+    if is_service_message(update.message):
+        try:
+            await update.message.delete()
+        except:
+            pass
+        return
     is_service = (
         update.message.new_chat_members or
         update.message.new_chat_title or
