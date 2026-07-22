@@ -1,3 +1,12 @@
+# ============================================================
+# ORIGINAL_OWNER: 8290212138
+# GENERATED_AT: 2026-07-22 18:23:37
+# SIGNATURE: 0c400ba11cf2cc84
+# ============================================================
+# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
+# لا تشاركه مع أي شخص غير موثوق
+# ============================================================
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -1529,7 +1538,6 @@ class ErrorHandler:
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                    pass
                 return await func(*args, **kwargs)
             except (TimedOut, NetworkError) as e:
                 last_error = e
@@ -1556,7 +1564,6 @@ class ErrorHandler:
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                    pass
                 return func(*args, **kwargs)
             except Exception as e:
                 last_error = e
@@ -1779,14 +1786,12 @@ async def safe_edit_markdown(query, text: str, reply_markup=None, **kwargs):
 
 async def safe_send_error(bot, chat_id: int, text: str):
     try:
-            pass
         return await safe_send_markdown(bot, chat_id, text)
     except Exception as e:
         logger.warning(f"فشل إرسال تقرير الخطأ: {e}")
         plain_text = re.sub(r'[*_`\[\]()~>#+\-=|{}.!\\]', '', text)
         plain_text = plain_text.replace("\\", "")
         try:
-                pass
             return await bot.send_message(chat_id=chat_id, text=plain_text[:4000])
         except Exception as e2:
             return await bot.send_message(chat_id=chat_id, text=text[:4000], parse_mode=None)
@@ -2011,7 +2016,6 @@ db_pool = DatabasePool(max_connections=MAX_CONNECTIONS)
 async def execute_db(func: Callable):
     conn = await db_pool.get_connection()
     try:
-            pass
         return await func(conn)
     except Exception as e:
         logger.error(f"خطأ في قاعدة البيانات: {e}")
@@ -2132,7 +2136,6 @@ def decrypt_db_backup(encrypted_path: Path) -> bytes:
 def compress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-                pass
             return ZSTD_COMPRESSOR.compress(data)
         except:
             pass
@@ -2141,7 +2144,6 @@ def compress_backup(data: bytes) -> bytes:
 def decompress_backup(data: bytes) -> bytes:
     if ZSTD_AVAILABLE:
         try:
-                pass
             return ZSTD_DECOMPRESSOR.decompress(data)
         except:
             pass
@@ -2151,7 +2153,6 @@ def decompress_backup(data: bytes) -> bytes:
 async def retry_with_jitter(func: Callable, max_retries: int = 5, base_delay: float = 1) -> Any:
     for attempt in range(max_retries):
         try:
-                pass
             return await func()
         except Exception as e:
             if attempt == max_retries - 1:
@@ -2168,7 +2169,6 @@ def retry(max_retries=3, delay=1, backoff=2, exceptions=(Exception,)):
             _delay = delay
             for attempt in range(max_retries):
                 try:
-                        pass
                     return await func(*args, **kwargs)
                 except exceptions as e:
                     if attempt == max_retries - 1:
@@ -4604,7 +4604,6 @@ def parse_days_of_week_safe(days_str):
     if not days_str:
         return []
     try:
-            pass
         return json.loads(days_str)
     except:
         return []
@@ -4613,7 +4612,6 @@ def parse_dates_safe(dates_str):
     if not dates_str:
         return []
     try:
-            pass
         return json.loads(dates_str)
     except:
         return []
@@ -11827,25 +11825,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # ===== حذف رسائل الخدمة =====
-if security_settings.get('delete_service'):
-    if is_service_message(update.message):
-        try:
-            await update.message.delete()
-        except:
-            pass
-        return
-    is_service = (
-        update.message.new_chat_members or
-        update.message.new_chat_title or
-        update.message.new_chat_photo or
-        update.message.delete_chat_photo or
-        update.message.group_chat_created or
-        update.message.supergroup_chat_created or
-        update.message.channel_chat_created or
-        update.message.message_auto_delete_timer_changed or
-        update.message.pinned_message
-    )
-    if is_service:
+    if security_settings.get('delete_service') and update.message.service_message:
         try:
             await update.message.delete()
         except:
@@ -13436,44 +13416,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"❌ خطأ فادح: {e}")
         import traceback
-
-# ===== دوال حذف رسائل الخدمة (تمت إضافتها تلقائيًا) =====
-def is_service_message(message):
-    """تعيد True إذا كانت الرسالة خدمية"""
-    return any((
-        message.new_chat_members,
-        message.left_chat_member,
-        message.new_chat_title,
-        message.new_chat_photo,
-        message.delete_chat_photo,
-        message.group_chat_created,
-        message.supergroup_chat_created,
-        message.channel_chat_created,
-        message.message_auto_delete_timer_changed,
-        message.pinned_message,
-        message.video_chat_started,
-        message.video_chat_ended,
-        message.video_chat_participants_invited,
-        message.forum_topic_created,
-        message.forum_topic_edited,
-        message.forum_topic_closed,
-        message.forum_topic_reopened,
-        message.general_forum_topic_hidden,
-        message.general_forum_topic_unhidden,
-        message.write_access_allowed,
-        message.proximity_alert_triggered,
-        message.boost_added,
-        message.web_app_data,
-    ))
-
-async def delete_service_messages(update, context):
-    if update.message and is_service_message(update.message):
-        try:
-            await update.message.delete()
-        except:
-            pass
-# ========================================================
-
         traceback.print_exc()
         sys.exit(1)
 
