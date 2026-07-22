@@ -11816,7 +11816,7 @@ async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # ===== حذف رسائل الخدمة =====
-    if security_settings.get('delete_service'):
+if security_settings.get('delete_service'):
     if update.message.new_chat_members or update.message.left_chat_member:
         try:
             await update.message.delete()
