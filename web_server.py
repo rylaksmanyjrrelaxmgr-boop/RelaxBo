@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 5.4 (مع إصلاح الجداول غير الموجودة)
-ريلاكس مانيجر · إدارة متقدمة للمستخدمين والقنوات والمجموعات
+نظام الحظر المتطور - الإصدار 5.5 (عرض جميع المجموعات والقنوات والمستخدمين)
+ريلاكس مانيجر · إدارة متقدمة مع عرض كامل للبيانات
 """
 
 import os
@@ -52,7 +52,6 @@ async def is_admin(user_id: int) -> bool:
 
 async def init_db():
     async with await get_db() as conn:
-        # جدول المستخدمين المحظورين
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_users (
                 user_id INTEGER PRIMARY KEY,
@@ -63,7 +62,6 @@ async def init_db():
                 severity TEXT DEFAULT 'ban'
             )
         """)
-        # جدول القنوات المحظورة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_channels (
                 channel_id INTEGER PRIMARY KEY,
@@ -72,7 +70,6 @@ async def init_db():
                 blocked_at TIMESTAMP
             )
         """)
-        # جدول المجموعات المحظورة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_groups (
                 chat_id INTEGER PRIMARY KEY,
@@ -81,7 +78,6 @@ async def init_db():
                 blocked_at TIMESTAMP
             )
         """)
-        # جدول سجل الحظر
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS block_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +90,8 @@ async def init_db():
             )
         """)
         await conn.commit()
+
+# ========== دوال الحظر (نفسها) ==========
 
 async def db_block_user(user_id, reason, admin_id=1, severity="ban", duration_minutes=None):
     async with await get_db() as conn:
@@ -145,7 +143,8 @@ async def db_log_block_action(action, target, admin_id, reason, extra=""):
         )
         await conn.commit()
 
-# دوال لجلب البيانات مع معالجة الجداول غير الموجودة
+# ========== دوال جلب البيانات المحظورة ==========
+
 async def db_get_blocked_users(limit=100):
     try:
         async with await get_db() as conn:
@@ -154,8 +153,7 @@ async def db_get_blocked_users(limit=100):
                 (limit,)
             )
             return await cur.fetchall()
-    except Exception as e:
-        logger.warning(f"خطأ في جلب المستخدمين المحظورين: {e}")
+    except:
         return []
 
 async def db_get_blocked_channels(limit=100):
@@ -166,8 +164,7 @@ async def db_get_blocked_channels(limit=100):
                 (limit,)
             )
             return await cur.fetchall()
-    except Exception as e:
-        logger.warning(f"خطأ في جلب القنوات المحظورة: {e}")
+    except:
         return []
 
 async def db_get_blocked_groups(limit=100):
@@ -178,8 +175,7 @@ async def db_get_blocked_groups(limit=100):
                 (limit,)
             )
             return await cur.fetchall()
-    except Exception as e:
-        logger.warning(f"خطأ في جلب المجموعات المحظورة: {e}")
+    except:
         return []
 
 async def db_get_block_logs(limit=200, action=None):
@@ -196,8 +192,83 @@ async def db_get_block_logs(limit=200, action=None):
                     (limit,)
                 )
             return await cur.fetchall()
+    except:
+        return []
+
+# ========== دوال جلب ALL البيانات (جديدة) ==========
+
+async def db_get_all_groups(limit=200):
+    """جلب جميع المجموعات من قاعدة البيانات مع حالة الحظر"""
+    try:
+        async with await get_db() as conn:
+            cur = await conn.execute("""
+                SELECT 
+                    g.chat_id,
+                    g.chat_name,
+                    g.username,
+                    g.added_by,
+                    g.added_at,
+                    g.banned,
+                    CASE WHEN bg.chat_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
+                    bg.reason as block_reason
+                FROM bot_groups g
+                LEFT JOIN blocked_groups bg ON g.chat_id = bg.chat_id
+                ORDER BY g.chat_name
+                LIMIT ?
+            """, (limit,))
+            return await cur.fetchall()
     except Exception as e:
-        logger.warning(f"خطأ في جلب سجل الحظر: {e}")
+        logger.error(f"خطأ في جلب جميع المجموعات: {e}")
+        return []
+
+async def db_get_all_channels(limit=200):
+    """جلب جميع القنوات من قاعدة البيانات مع حالة الحظر"""
+    try:
+        async with await get_db() as conn:
+            cur = await conn.execute("""
+                SELECT 
+                    c.id,
+                    c.user_id,
+                    c.channel_id,
+                    c.channel_name,
+                    c.created_at,
+                    c.banned,
+                    CASE WHEN bc.channel_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
+                    bc.reason as block_reason
+                FROM user_channels c
+                LEFT JOIN blocked_channels bc ON c.channel_id = bc.channel_id
+                ORDER BY c.channel_name
+                LIMIT ?
+            """, (limit,))
+            return await cur.fetchall()
+    except Exception as e:
+        logger.error(f"خطأ في جلب جميع القنوات: {e}")
+        return []
+
+async def db_get_all_users(limit=200):
+    """جلب جميع المستخدمين من قاعدة البيانات مع حالة الحظر"""
+    try:
+        async with await get_db() as conn:
+            cur = await conn.execute("""
+                SELECT 
+                    u.user_id,
+                    u.auto_publish,
+                    u.banned as user_banned,
+                    u.trial_used,
+                    u.subscription_end,
+                    u.auto_reply_enabled,
+                    u.auto_recycle,
+                    CASE WHEN bu.user_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
+                    bu.reason as block_reason,
+                    bu.severity as block_severity
+                FROM users u
+                LEFT JOIN blocked_users bu ON u.user_id = bu.user_id
+                ORDER BY u.user_id
+                LIMIT ?
+            """, (limit,))
+            return await cur.fetchall()
+    except Exception as e:
+        logger.error(f"خطأ في جلب جميع المستخدمين: {e}")
         return []
 
 async def db_stats():
@@ -257,7 +328,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v5.4</title>
+    <title>نظام الحظر المتطور v5.5</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -403,6 +474,8 @@ HTML_TEMPLATE = """
         .badge-success { background: rgba(63,185,80,0.15); color: var(--success); }
         .badge-warning { background: rgba(210,153,34,0.15); color: var(--warning); }
         .badge-info { background: rgba(88,166,255,0.15); color: var(--accent); }
+        .status-blocked { color: var(--danger); font-weight: 600; }
+        .status-active { color: var(--success); font-weight: 600; }
         .form-group {
             display: flex;
             gap: 10px;
@@ -473,6 +546,7 @@ HTML_TEMPLATE = """
         .severity-mute { color: #d29922; }
         .severity-ban { color: var(--danger); }
         .severity-permanent { color: #ff0000; }
+        .table-wrap { overflow-x: auto; }
         @media (max-width: 768px) {
             .header { flex-direction: column; text-align: center; }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
@@ -491,49 +565,77 @@ HTML_TEMPLATE = """
         <div class="header">
             <div>
                 <h1>🛡️ نظام الحظر المتطور</h1>
-                <div class="subtitle">ريلاكس مانيجر · المطور الأساسي فقط يمكنه الحظر</div>
+                <div class="subtitle">ريلاكس مانيجر · عرض جميع المجموعات والقنوات والمستخدمين</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span class="version-badge">v5.4</span>
+                <span class="version-badge">v5.5</span>
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <span style="font-size:12px;color:var(--text-muted);" id="lastUpdate"></span>
             </div>
         </div>
 
+        <!-- الإحصائيات -->
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><span class="icon">👤</span><div class="num" id="totalUsers">-</div><div class="label">إجمالي المستخدمين</div></div>
             <div class="stat-card"><span class="icon">🚫</span><div class="num danger" id="blockedUsers">-</div><div class="label">مستخدمون محظورون</div></div>
             <div class="stat-card"><span class="icon">📺</span><div class="num" id="totalChannels">-</div><div class="label">القنوات المضافة</div></div>
+            <div class="stat-card"><span class="icon">🚫📺</span><div class="num danger" id="blockedChannels">-</div><div class="label">قنوات محظورة</div></div>
             <div class="stat-card"><span class="icon">👥</span><div class="num" id="totalGroups">-</div><div class="label">المجموعات المضافة</div></div>
+            <div class="stat-card"><span class="icon">🚫👥</span><div class="num danger" id="blockedGroups">-</div><div class="label">مجموعات محظورة</div></div>
             <div class="stat-card"><span class="icon">📝</span><div class="num warning" id="pendingPosts">-</div><div class="label">منشورات غير منشورة</div></div>
             <div class="stat-card"><span class="icon">📊</span><div class="num success" id="todayBlocks">-</div><div class="label">حظر اليوم</div></div>
-            <div class="stat-card"><span class="icon">📢</span><div class="num info" id="updatesChannel" style="font-size:18px;">-</div><div class="label">قناة التحديثات</div></div>
+            <div class="stat-card"><span class="icon">📢</span><div class="num info" id="updatesChannel" style="font-size:16px;">-</div><div class="label">قناة التحديثات</div></div>
         </div>
 
+        <!-- التبويبات -->
         <div class="tabs">
-            <button class="tab-btn active" data-tab="users">👤 المستخدمين</button>
-            <button class="tab-btn" data-tab="channels">📺 القنوات</button>
-            <button class="tab-btn" data-tab="groups">👥 المجموعات</button>
-            <button class="tab-btn" data-tab="logs">📋 السجل</button>
+            <button class="tab-btn active" data-tab="all_groups">👥 جميع المجموعات</button>
+            <button class="tab-btn" data-tab="all_channels">📺 جميع القنوات</button>
+            <button class="tab-btn" data-tab="all_users">👤 جميع المستخدمين</button>
+            <button class="tab-btn" data-tab="blocked_users">🚫 مستخدمون محظورون</button>
+            <button class="tab-btn" data-tab="logs">📋 سجل الحظر</button>
             <button class="tab-btn" data-tab="add">➕ إضافة حظر</button>
         </div>
 
-        <div class="tab-content active" id="tab-users">
+        <!-- تبويب جميع المجموعات -->
+        <div class="tab-content active" id="tab-all_groups">
             <div class="actions-row">
-                <input class="search-box" id="userSearch" placeholder="🔍 بحث..." oninput="filterTable('usersTable', this.value)">
-                <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="userCount">0</span></span>
+                <input class="search-box" id="groupSearch" placeholder="🔍 بحث عن مجموعة..." oninput="filterTable('allGroupsTable', this.value)">
+                <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allGroupsCount">0</span></span>
             </div>
-            <div id="usersTable"><div class="empty-state">جاري التحميل...</div></div>
+            <div class="table-wrap">
+                <div id="allGroupsTable"><div class="empty-state">جاري التحميل...</div></div>
+            </div>
         </div>
 
-        <div class="tab-content" id="tab-channels">
-            <div id="channelsTable"><div class="empty-state">جاري التحميل...</div></div>
+        <!-- تبويب جميع القنوات -->
+        <div class="tab-content" id="tab-all_channels">
+            <div class="actions-row">
+                <input class="search-box" id="channelSearch" placeholder="🔍 بحث عن قناة..." oninput="filterTable('allChannelsTable', this.value)">
+                <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allChannelsCount">0</span></span>
+            </div>
+            <div class="table-wrap">
+                <div id="allChannelsTable"><div class="empty-state">جاري التحميل...</div></div>
+            </div>
         </div>
 
-        <div class="tab-content" id="tab-groups">
-            <div id="groupsTable"><div class="empty-state">جاري التحميل...</div></div>
+        <!-- تبويب جميع المستخدمين -->
+        <div class="tab-content" id="tab-all_users">
+            <div class="actions-row">
+                <input class="search-box" id="userSearch" placeholder="🔍 بحث عن مستخدم..." oninput="filterTable('allUsersTable', this.value)">
+                <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allUsersCount">0</span></span>
+            </div>
+            <div class="table-wrap">
+                <div id="allUsersTable"><div class="empty-state">جاري التحميل...</div></div>
+            </div>
         </div>
 
+        <!-- تبويب المستخدمين المحظورين -->
+        <div class="tab-content" id="tab-blocked_users">
+            <div id="blockedUsersTable"><div class="empty-state">جاري التحميل...</div></div>
+        </div>
+
+        <!-- تبويب السجل -->
         <div class="tab-content" id="tab-logs">
             <div class="actions-row">
                 <select id="logFilter" onchange="refreshData()" style="padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);">
@@ -549,6 +651,7 @@ HTML_TEMPLATE = """
             <div id="logsTable"><div class="empty-state">جاري التحميل...</div></div>
         </div>
 
+        <!-- تبويب إضافة حظر -->
         <div class="tab-content" id="tab-add">
             <h3 style="color:var(--accent);margin-bottom:12px;">➕ إضافة حظر جديد</h3>
             <div class="form-group">
@@ -611,12 +714,12 @@ HTML_TEMPLATE = """
 
         function renderTable(data, cols, actions) {
             if (!data || !data.length) return '<div class="empty-state">📭 لا توجد بيانات</div>';
-            let html = `<table><thead><tr>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr></thead><tbody>`;
+            let html = `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr></thead><tbody>`;
             data.forEach(row => {
                 html += '<tr>';
                 cols.forEach(c => {
                     let val = row[c.key] !== undefined && row[c.key] !== null ? row[c.key] : '-';
-                    if (['blocked_at','created_at','expires_at'].includes(c.key) && val) {
+                    if (['blocked_at','created_at','expires_at','added_at'].includes(c.key) && val) {
                         try { val = new Date(val).toLocaleString('ar-EG'); } catch(e){}
                     }
                     if (c.key === 'severity' && val) val = `<span class="${severityClass(val)}">${severityLabel(val)}</span>`;
@@ -625,12 +728,20 @@ HTML_TEMPLATE = """
                         const cl = colors[val] || 'info';
                         val = `<span class="badge badge-${cl}">${val}</span>`;
                     }
+                    if (c.key === 'is_blocked' || c.key === 'banned') {
+                        if (val == 1 || val == '1') val = '<span class="status-blocked">🚫 محظور</span>';
+                        else val = '<span class="status-active">✅ نشط</span>';
+                    }
+                    if (c.key === 'user_banned') {
+                        if (val == 1) val = '<span class="status-blocked">🚫 محظور</span>';
+                        else val = '<span class="status-active">✅ نشط</span>';
+                    }
                     html += `<td>${val}</td>`;
                 });
                 if (actions) html += `<td>${actions(row)}</td>`;
                 html += '</tr>';
             });
-            html += '</tbody></table>';
+            html += '</tbody></table></div>';
             return html;
         }
 
@@ -639,6 +750,8 @@ HTML_TEMPLATE = """
                 const stats = await fetchJSON('/api/stats');
                 document.getElementById('totalUsers').textContent = stats.total_users || 0;
                 document.getElementById('blockedUsers').textContent = stats.blocked_users || 0;
+                document.getElementById('blockedChannels').textContent = stats.blocked_channels || 0;
+                document.getElementById('blockedGroups').textContent = stats.blocked_groups || 0;
                 document.getElementById('totalChannels').textContent = stats.total_channels || 0;
                 document.getElementById('totalGroups').textContent = stats.total_groups || 0;
                 document.getElementById('pendingPosts').textContent = stats.pending_posts || 0;
@@ -649,27 +762,32 @@ HTML_TEMPLATE = """
                 const filter = document.getElementById('logFilter')?.value || 'all';
                 const qs = filter !== 'all' ? '?action=' + filter : '';
 
-                const [users, channels, groups, logs] = await Promise.all([
+                const [allGroups, allChannels, allUsers, blockedUsers, logs] = await Promise.all([
+                    fetchJSON('/api/all_groups'),
+                    fetchJSON('/api/all_channels'),
+                    fetchJSON('/api/all_users'),
                     fetchJSON('/api/blocked_users'),
-                    fetchJSON('/api/blocked_channels'),
-                    fetchJSON('/api/blocked_groups'),
                     fetchJSON('/api/block_logs' + qs)
                 ]);
 
-                document.getElementById('userCount').textContent = users.length;
-                document.getElementById('usersTable').innerHTML = renderTable(users,
+                document.getElementById('allGroupsCount').textContent = allGroups.length;
+                document.getElementById('allGroupsTable').innerHTML = renderTable(allGroups,
+                    [{key:'chat_id',label:'المعرف'},{key:'chat_name',label:'الاسم'},{key:'username',label:'المعرف العام'},{key:'added_by',label:'أضيف بواسطة'},{key:'added_at',label:'تاريخ الإضافة'},{key:'is_blocked',label:'الحالة'}]
+                );
+
+                document.getElementById('allChannelsCount').textContent = allChannels.length;
+                document.getElementById('allChannelsTable').innerHTML = renderTable(allChannels,
+                    [{key:'channel_id',label:'المعرف'},{key:'channel_name',label:'الاسم'},{key:'user_id',label:'المالك'},{key:'created_at',label:'تاريخ الإضافة'},{key:'is_blocked',label:'الحالة'}]
+                );
+
+                document.getElementById('allUsersCount').textContent = allUsers.length;
+                document.getElementById('allUsersTable').innerHTML = renderTable(allUsers,
+                    [{key:'user_id',label:'المعرف'},{key:'auto_publish',label:'نشر تلقائي'},{key:'user_banned',label:'محظور'},{key:'trial_used',label:'التجربة'},{key:'is_blocked',label:'محظور من الحظر'}]
+                );
+
+                document.getElementById('blockedUsersTable').innerHTML = renderTable(blockedUsers,
                     [{key:'user_id',label:'المعرف'},{key:'reason',label:'السبب'},{key:'severity',label:'الخطورة'},{key:'blocked_by',label:'بواسطة'},{key:'blocked_at',label:'التاريخ'}],
                     row => `<button class="btn btn-success" onclick="unblock('user',${row.user_id})">🔓 إلغاء</button>`
-                );
-
-                document.getElementById('channelsTable').innerHTML = renderTable(channels,
-                    [{key:'channel_id',label:'المعرف'},{key:'reason',label:'السبب'},{key:'blocked_by',label:'بواسطة'},{key:'blocked_at',label:'التاريخ'}],
-                    row => `<button class="btn btn-success" onclick="unblock('channel',${row.channel_id})">🔓 إلغاء</button>`
-                );
-
-                document.getElementById('groupsTable').innerHTML = renderTable(groups,
-                    [{key:'chat_id',label:'المعرف'},{key:'reason',label:'السبب'},{key:'blocked_by',label:'بواسطة'},{key:'blocked_at',label:'التاريخ'}],
-                    row => `<button class="btn btn-success" onclick="unblock('group',${row.chat_id})">🔓 إلغاء</button>`
                 );
 
                 document.getElementById('logsTable').innerHTML = renderTable(logs,
@@ -682,7 +800,9 @@ HTML_TEMPLATE = """
         }
 
         function filterTable(tableId, query) {
-            const table = document.getElementById(tableId);
+            const container = document.getElementById(tableId);
+            if (!container) return;
+            const table = container.querySelector('table');
             if (!table) return;
             const rows = table.querySelectorAll('tbody tr');
             const q = query.toLowerCase();
@@ -765,10 +885,12 @@ async def index_handler(request):
     return web.Response(text=HTML_TEMPLATE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.4"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.5"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats())
+
+# ===== نقاط النهاية للمحظورين =====
 
 async def api_blocked_users(request):
     return web.json_response([dict(u) for u in await db_get_blocked_users(200)])
@@ -778,6 +900,17 @@ async def api_blocked_channels(request):
 
 async def api_blocked_groups(request):
     return web.json_response([dict(g) for g in await db_get_blocked_groups(100)])
+
+# ===== نقاط النهاية لجميع البيانات (جديدة) =====
+
+async def api_all_groups(request):
+    return web.json_response([dict(g) for g in await db_get_all_groups(200)])
+
+async def api_all_channels(request):
+    return web.json_response([dict(c) for c in await db_get_all_channels(200)])
+
+async def api_all_users(request):
+    return web.json_response([dict(u) for u in await db_get_all_users(200)])
 
 async def api_block_logs(request):
     action = request.query.get('action')
@@ -852,6 +985,9 @@ app.router.add_get('/api/stats', stats_handler)
 app.router.add_get('/api/blocked_users', api_blocked_users)
 app.router.add_get('/api/blocked_channels', api_blocked_channels)
 app.router.add_get('/api/blocked_groups', api_blocked_groups)
+app.router.add_get('/api/all_groups', api_all_groups)
+app.router.add_get('/api/all_channels', api_all_channels)
+app.router.add_get('/api/all_users', api_all_users)
 app.router.add_get('/api/block_logs', api_block_logs)
 app.router.add_post('/api/block', api_block)
 app.router.add_post('/api/unblock', api_unblock)
@@ -870,7 +1006,7 @@ def start_web_server_background(port=None):
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v5.4 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v5.5 يعمل على http://0.0.0.0:{port}")
         except OSError as e:
             if "address already in use" in str(e):
                 site = web.TCPSite(runner, '0.0.0.0', 0)
@@ -888,12 +1024,12 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v5.4")
+    logger.info("🚀 تم تشغيل نظام الحظر v5.5")
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v5.4 متاح على http://0.0.0.0:{port}")
+    print(f"🌐 نظام الحظر v5.5 متاح على http://0.0.0.0:{port}")
     try:
         while True:
             time.sleep(1)
