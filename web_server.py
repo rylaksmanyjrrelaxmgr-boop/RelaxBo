@@ -29,7 +29,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot_data.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # ===================== المصادقة =====================
-ADMIN_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "admin123")  # غيّر في .env
+ADMIN_PASSWORD = os.getenv("WEB_PASSWORD", "mmmmm739377114")
 ENABLE_2FA = os.getenv("ENABLE_2FA", "False").lower() == "true"
 ADMIN_2FA_SECRET = os.getenv("ADMIN_2FA_SECRET", "")
 if ENABLE_2FA and not ADMIN_2FA_SECRET:
@@ -43,7 +43,7 @@ if ENABLE_2FA and not ADMIN_2FA_SECRET:
 
 SESSION_SECRET = secrets.token_urlsafe(32)
 _sessions = {}
-_SESSION_TIMEOUT = 3600  # ساعة
+_SESSION_TIMEOUT = 3600
 _SERVER_STARTED = False
 _SERVER_LOCK = threading.Lock()
 
@@ -89,7 +89,6 @@ async def get_db():
     await conn.execute("PRAGMA cache_size=-64000")
     return conn
 
-# دوال البيانات (مع التخزين المؤقت)
 async def db_stats_cached():
     cached = stats_cache.get("stats")
     if cached is not None:
@@ -111,7 +110,6 @@ async def db_stats_uncached():
             today_blocks = 0
             updates_channel = "غير محددة"
 
-            # تحقق من وجود الجداول
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
             if await cur.fetchone():
                 total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
@@ -250,7 +248,6 @@ async def db_get_all_users_uncached(limit=200):
     except:
         return []
 
-# دوال الحظر
 async def db_block_user(user_id, reason, admin_id=1, severity="ban", duration_minutes=None):
     async with await get_db() as conn:
         expires = None
@@ -373,14 +370,11 @@ def clear_expired_sessions():
         del _sessions[sid]
 
 async def check_auth(request):
-    # السماح بالوصول إلى /health بدون مصادقة
     if request.path in ['/health']:
         return True
-    # التحقق من وجود كلمة مرور في الرأس (للاستخدام مع API)
     password = request.headers.get('X-Admin-Password')
     if password and password == ADMIN_PASSWORD:
         return True
-    # التحقق من وجود cookie session_id
     session_id = request.cookies.get('session_id')
     if session_id and validate_session(session_id):
         return True
@@ -393,16 +387,13 @@ app = web.Application()
 async def auth_middleware(request, handler):
     if await check_auth(request):
         return await handler(request)
-    # إذا كان طلب JSON نعيد 401
     if request.path.startswith('/api/'):
         return web.json_response({'error': 'غير مصرح', 'code': 'UNAUTHORIZED'}, status=401)
     return web.Response(text=LOGIN_PAGE, content_type='text/html', status=401)
 
 app.middlewares.append(auth_middleware)
 
-# ===================== صفحات HTML =====================
-
-LOGIN_PAGE = """
+LOGIN_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
@@ -429,9 +420,9 @@ LOGIN_PAGE = """
     </div>
 </body>
 </html>
-"""
+'''
 
-MAIN_PAGE = """
+MAIN_PAGE = '''
 <!DOCTYPE html>
 <html dir="rtl">
 <head>
@@ -493,10 +484,6 @@ MAIN_PAGE = """
         .form-group input, .form-group textarea, .form-group select { padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); flex: 1; }
         .table-wrap { overflow-x: auto; }
         .chart-container { height: 300px; margin: 20px 0; }
-        .badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; }
-        .badge-danger { background: var(--danger); color: #fff; }
-        .badge-success { background: var(--success); color: var(--bg); }
-        .badge-warning { background: var(--warning); color: var(--bg); }
         @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
     </style>
 </head>
@@ -513,7 +500,6 @@ MAIN_PAGE = """
             </div>
         </div>
 
-        <!-- الإحصائيات -->
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><span class="icon">👤</span><div class="num" id="totalUsers">-</div><div class="label">إجمالي المستخدمين</div></div>
             <div class="stat-card"><span class="icon">🚫</span><div class="num danger" id="blockedUsers">-</div><div class="label">مستخدمون محظورون</div></div>
@@ -526,12 +512,10 @@ MAIN_PAGE = """
             <div class="stat-card"><span class="icon">📢</span><div class="num info" id="updatesChannel" style="font-size:16px;">-</div><div class="label">قناة التحديثات</div></div>
         </div>
 
-        <!-- الرسم البياني -->
         <div id="chartContainer" style="display:none;" class="chart-container">
             <canvas id="statsChart"></canvas>
         </div>
 
-        <!-- التبويبات -->
         <div class="tabs">
             <button class="tab-btn active" data-tab="all_groups">👥 جميع المجموعات</button>
             <button class="tab-btn" data-tab="all_channels">📺 جميع القنوات</button>
@@ -541,7 +525,6 @@ MAIN_PAGE = """
             <button class="tab-btn" data-tab="add">➕ إضافة حظر</button>
         </div>
 
-        <!-- المحتوى -->
         <div class="tab-content active" id="tab-all_groups">
             <div class="actions-row">
                 <input class="search-box" id="groupSearch" placeholder="🔍 بحث..." oninput="filterTable('allGroupsTable', this.value)">
@@ -829,7 +812,6 @@ MAIN_PAGE = """
             document.getElementById('addResult').innerHTML = '';
         }
 
-        // تبديل التبويبات
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', function() {
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -844,7 +826,7 @@ MAIN_PAGE = """
     </script>
 </body>
 </html>
-"""
+'''
 
 # ===================== نقاط النهاية =====================
 
@@ -998,7 +980,7 @@ app.router.add_get('/api/export_csv', api_export_csv)
 app.router.add_post('/api/block', api_block)
 app.router.add_post('/api/unblock', api_unblock)
 
-# ===================== تشغيل الخادم (مع منع التكرار) =====================
+# ===================== تشغيل الخادم =====================
 
 def start_web_server_background(port=None):
     global _SERVER_STARTED
