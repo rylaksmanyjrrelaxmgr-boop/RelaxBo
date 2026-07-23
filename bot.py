@@ -13589,7 +13589,7 @@ async def main():
     task_manager.create_task(run_scheduled_posts_loop_improved(application.bot))
     task_manager.create_task(send_reminders_loop_improved(application.bot))
     task_manager.create_task(cleanup_expired_sessions_improved())
-    task_manager.create_task(start_web_server())
+    #task_manager.create_task(start_web_server())
     task_manager.create_task(self_ping_loop())
     task_manager.create_task(broadcast_stats_periodically())
     task_manager.create_task(cleanup_points_cache())
