@@ -13536,7 +13536,10 @@ async def main():
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
 
     # ===== إضافة معالج حذف رسائل الخدمة المنفصل =====
-    application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
+    application.add_handler(MessageHandler(
+    filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+    delete_service_messages
+))
 
     commands = [
         BotCommand("start", "بدء البوت"),
