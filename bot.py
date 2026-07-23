@@ -1,3 +1,12 @@
+# ============================================================
+# ORIGINAL_OWNER: 8290212138
+# GENERATED_AT: 2026-07-23 14:38:57
+# SIGNATURE: c41959c0f42fc23f
+# ============================================================
+# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
+# لا تشاركه مع أي شخص غير موثوق
+# ============================================================
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -219,7 +228,7 @@ def load_all_languages():
     """تحميل جميع ملفات اللغة"""
     global _lang_data
     for lang_file in LANG_PATH.glob("*.json"):
-        lang = lang_file.stem
+        lang = lang_file.step
         try:
             with open(lang_file, 'r', encoding='utf-8') as f:
                 _lang_data[lang] = json.load(f)
@@ -7641,7 +7650,6 @@ async def admin_all_channels_callback(update: Update, context: ContextTypes.DEFA
         await safe_edit_markdown(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await safe_send_markdown(context.bot, uid, text, reply_markup=InlineKeyboardMarkup(keyboard))
-
 async def admin_banned_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -13457,3 +13465,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
