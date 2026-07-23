@@ -10962,23 +10962,139 @@ async def detect_owner_type(bot, chat_id):
 # ============================================================
 
 async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف رسائل الخدمة (دخول/مغادرة الأعضاء)"""
+    """
+    حذف رسائل الخدمة (دخول/مغادرة الأعضاء، تغيير الصورة، تغيير الاسم، إلخ)
+    الإصدار المطور: 2.0
+    """
+    
+    # ============================================================
+    # 1. التحقق من وجود البيانات الأساسية
+    # ============================================================
     if not update.message or not update.effective_chat:
         return
-    if not update.message.service_message:
-        return
+    
     chat_id = update.effective_chat.id
+    message = update.message
+    
+    # ============================================================
+    # 2. جلب إعدادات المجموعة من قاعدة البيانات (مع تخزين مؤقت)
+    # ============================================================
     try:
         settings = await db_get_security_settings(chat_id)
         if not settings.get('delete_service', False):
             return
-    except:
-        return
-    try:
-        await update.message.delete()
-        logger.info(f"🗑️ تم حذف رسالة خدمة في المجموعة {chat_id}")
     except Exception as e:
-        logger.debug(f"فشل حذف رسالة خدمة: {e}")
+        logger.error(f"[delete_service] خطأ في جلب الإعدادات للمجموعة {chat_id}: {e}")
+        return
+    
+    # ============================================================
+    # 3. التحقق من أن الرسالة هي رسالة خدمة (طريقة شاملة)
+    # ============================================================
+    
+    # 3.1 التحقق المباشر من خاصية service_message
+    is_service = bool(message.service_message)
+    
+    # 3.2 التحقق من أنواع رسائل الخدمة المختلفة
+    service_flags = [
+        message.new_chat_members,           # أعضاء جدد انضموا
+        message.left_chat_member,           # عضو غادر
+        message.new_chat_photo,             # صورة جديدة للمجموعة
+        message.delete_chat_photo,          # حذف صورة المجموعة
+        message.group_chat_created,         # إنشاء المجموعة
+        message.supergroup_chat_created,    # إنشاء سوبر جروب
+        message.channel_chat_created,       # إنشاء قناة
+        message.migrate_to_chat_id,         # ترقية إلى سوبر جروب
+        message.migrate_from_chat_id,       # ترقية من جروب عادي
+        message.pinned_message,             # رسالة مثبتة (خدمة)
+        message.successful_payment,         # دفع ناجح
+        message.invoice,                    # فاتورة
+        message.connected_website,          # موقع متصل
+        message.boost_added,                # تعزيز المجموعة (جديد)
+    ]
+    
+    # إذا كان أي من هذه القيم موجودة (غير None/False)، فهي رسالة خدمة
+    if any(service_flags):
+        is_service = True
+    
+    # 3.3 التحقق من وجود أزرار (بعض رسائل الخدمة تحتوي عليها)
+    if hasattr(message, 'reply_markup') and message.reply_markup:
+        # رسائل الخدمة غالباً ليس لها أزرار عادية
+        pass
+    
+    # ============================================================
+    # 4. إذا لم تكن رسالة خدمة، نخرج من الدالة
+    # ============================================================
+    if not is_service:
+        return
+    
+    # ============================================================
+    # 5. محاولة حذف الرسالة مع إعادة المحاولة التلقائية
+    # ============================================================
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            await message.delete()
+            logger.info(f"🗑️ [delete_service] تم حذف رسالة خدمة في المجموعة {chat_id} (المحاولة {attempt+1})")
+            
+            # ============================================================
+            # 6. تسجيل العملية في قاعدة البيانات (تحليلات)
+            # ============================================================
+            try:
+                async def _log_deletion(conn):
+                    await conn.execute(
+                        "INSERT INTO moderation_log (chat_id, user_id, action, duration_minutes, reason, created_at) VALUES (?, ?, 'delete_service', 0, 'رسالة خدمة محذوفة تلقائياً', ?)",
+                        (chat_id, 0, utc_now_iso())
+                    )
+                    await conn.commit()
+                asyncio.create_task(execute_db(_log_deletion))
+            except Exception as e:
+                logger.debug(f"فشل تسجيل الحذف في السجل: {e}")
+            
+            return True  # تم الحذف بنجاح
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # ============================================================
+            # 7. معالجة الأخطاء المختلفة
+            # ============================================================
+            if "message can't be deleted" in error_msg:
+                logger.debug(f"⚠️ [delete_service] لا يمكن حذف رسالة الخدمة: قديمة جداً (المجموعة {chat_id})")
+                return False  # الرسالة قديمة جداً، لا يمكن حذفها
+                
+            elif "not enough rights" in error_msg or "bot is not admin" in error_msg:
+                logger.warning(f"⚠️ [delete_service] البوت ليس لديه صلاحية الحذف في المجموعة {chat_id}")
+                # محاولة إرسال تنبيه للمشرفين
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="⚠️ **تنبيه:** البوت يحتاج صلاحية 'حذف الرسائل' ليعمل بشكل صحيح.\nيرجى منح البوت الصلاحيات المطلوبة.",
+                        parse_mode="MarkdownV2"
+                    )
+                except:
+                    pass
+                return False
+                
+            elif "message_id_invalid" in error_msg:
+                logger.debug(f"⚠️ [delete_service] معرف الرسالة غير صالح (المجموعة {chat_id})")
+                return False
+                
+            elif "timeout" in error_msg or "timed out" in error_msg:
+                logger.warning(f"⏱️ [delete_service] انتهت المهلة في المحاولة {attempt+1} (المجموعة {chat_id})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))  # تأخير تصاعدي
+                    continue
+                return False
+                
+            else:
+                # خطأ غير معروف
+                logger.error(f"❌ [delete_service] فشل حذف رسالة خدمة (المجموعة {chat_id}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                return False
+    
+    return False
 
 # ============================================================
 # ===================== معالج الرسائل الرئيسي =====================
