@@ -228,7 +228,7 @@ def load_all_languages():
     """تحميل جميع ملفات اللغة"""
     global _lang_data
     for lang_file in LANG_PATH.glob("*.json"):
-        lang = lang_file.step
+        lang = lang_file.stem
         try:
             with open(lang_file, 'r', encoding='utf-8') as f:
                 _lang_data[lang] = json.load(f)
