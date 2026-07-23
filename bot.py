@@ -12287,19 +12287,12 @@ async def cleanup_expired_sessions_improved():
 
 async def broadcast_stats_periodically():
     while True:
-        await asyncio.sleep(5)
-#        total, banned, posts, groups, channels = await db_stats()
-        await ws_manager.broadcast({
-            'type': 'stats',
-            'data': {
-                'total_users': total,
-                'active_users': total - banned,
-                'banned_users': banned,
-                'pending_posts': posts,
-                'groups': groups,
-                'channels': channels
-            }
-        })
+        await asyncio.sleep(60)
+        try:
+            total, banned, posts, groups, channels = await db_stats()
+            logger.info(f"📊 إحصائيات: مستخدمين={total}, محظورين={banned}, منشورات={posts}, مجموعات={groups}, قنوات={channels}")
+        except Exception as e:
+            logger.error(f"خطأ في جمع الإحصائيات: {e}")
 
 async def auto_close_contests_loop(bot):
     while True:
