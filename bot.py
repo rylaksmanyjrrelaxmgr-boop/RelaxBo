@@ -12288,7 +12288,7 @@ async def cleanup_expired_sessions_improved():
 async def broadcast_stats_periodically():
     while True:
         await asyncio.sleep(5)
-        total, banned, posts, groups, channels = await db_stats()
+#        total, banned, posts, groups, channels = await db_stats()
         await ws_manager.broadcast({
             'type': 'stats',
             'data': {
