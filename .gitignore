@@ -41,3 +41,5 @@ tmp/
 *.tmp
 error_report.txt
 lang/
+bot.py.save
+bot.py.save
