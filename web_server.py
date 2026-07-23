@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 6.2 (المحسن بالكامل مع مصادقة موثوقة)
-ريلاكس مانيجر · إدارة متقدمة مع تحسينات الأمان والأداء والواجهة
+نظام الحظر المتطور - الإصدار 6.3 (يشتغل تلقائي حتى لو المنفذ مشغول)
+ريلاكس مانيجر · إدارة متقدمة
 """
 
 import os
@@ -14,12 +14,10 @@ import json
 import time
 import csv
 import io
-import hashlib
 import secrets
 from datetime import datetime, timedelta
-from functools import lru_cache
 from collections import OrderedDict
-from aiohttp import web, web_exceptions
+from aiohttp import web
 import aiosqlite
 
 logger = logging.getLogger(__name__)
@@ -28,29 +26,16 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot_data.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# ✅ استخدام WEB_PASSWORD من البيئة مع قيمة افتراضية آمنة
 ADMIN_PASSWORD = os.getenv("WEB_PASSWORD", "")
 if not ADMIN_PASSWORD:
     ADMIN_PASSWORD = secrets.token_urlsafe(16)
-    print(f"⚠️ لم يتم تعيين WEB_PASSWORD، تم إنشاء كلمة مرور مؤقتة: {ADMIN_PASSWORD}")
+    print(f"⚠️ تم إنشاء كلمة مرور مؤقتة: {ADMIN_PASSWORD}")
 
-# ✅ تسجيل كلمة المرور للتحقق
-print(f"🔐 كلمة المرور المستخدمة: {ADMIN_PASSWORD}")
-
-ENABLE_2FA = os.getenv("ENABLE_2FA", "False").lower() == "true"
-ADMIN_2FA_SECRET = os.getenv("ADMIN_2FA_SECRET", "")
-if ENABLE_2FA and not ADMIN_2FA_SECRET:
-    try:
-        import pyotp
-        ADMIN_2FA_SECRET = pyotp.random_base32()
-        logger.info(f"🔐 تم توليد مفتاح 2FA: {ADMIN_2FA_SECRET}")
-    except ImportError:
-        logger.warning("⚠️ pyotp غير مثبت، سيتم تعطيل 2FA")
-        ENABLE_2FA = False
+print(f"🔐 كلمة المرور: {ADMIN_PASSWORD}")
 
 SESSION_SECRET = secrets.token_urlsafe(32)
 _sessions = {}
-_SESSION_TIMEOUT = 3600  # ساعة
+_SESSION_TIMEOUT = 3600
 _SERVER_STARTED = False
 _SERVER_LOCK = threading.Lock()
 
@@ -379,17 +364,12 @@ def clear_expired_sessions():
 async def check_auth(request):
     if request.path in ['/health']:
         return True
-
-    # 1. التحقق من الرأس (Header)
     password = request.headers.get('X-Admin-Password')
     if password and password == ADMIN_PASSWORD:
         return True
-
-    # 2. التحقق من الجلسة (Cookie)
     session_id = request.cookies.get('session_id')
     if session_id and validate_session(session_id):
         return True
-
     return False
 
 # ===================== تطبيق الويب =====================
@@ -401,7 +381,6 @@ async def auth_middleware(request, handler):
         return await handler(request)
     if request.path.startswith('/api/'):
         return web.json_response({'error': 'غير مصرح', 'code': 'UNAUTHORIZED'}, status=401)
-    # ✅ إرجاع صفحة تسجيل الدخول بدلاً من 401 مباشرة
     return web.Response(text=LOGIN_PAGE, content_type='text/html', status=401)
 
 app.middlewares.append(auth_middleware)
@@ -443,7 +422,7 @@ MAIN_PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v6.2</title>
+    <title>نظام الحظر المتطور v6.3</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
@@ -505,7 +484,7 @@ MAIN_PAGE = """
 <body>
     <div class="container">
         <div class="header">
-            <div><h1 style="color:var(--accent);">🛡️ نظام الحظر المتطور v6.2</h1><div class="subtitle" style="color:var(--text-muted);">ريلاكس مانيجر · تحكم كامل</div></div>
+            <div><h1 style="color:var(--accent);">🛡️ نظام الحظر المتطور v6.3</h1><div class="subtitle" style="color:var(--text-muted);">ريلاكس مانيجر · تحكم كامل</div></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <button class="btn btn-primary" onclick="exportCSV()">📥 تصدير CSV</button>
@@ -846,20 +825,14 @@ MAIN_PAGE = """
 # ===================== نقاط النهاية =====================
 
 async def login_handler(request):
-    """معالج تسجيل الدخول - يدعم GET و POST"""
     if request.method == 'GET':
         return web.Response(text=LOGIN_PAGE, content_type='text/html')
-
     try:
-        # ✅ استقبال البيانات من النموذج
         data = await request.post()
         password = data.get('password', '')
-
         print(f"🔍 محاولة تسجيل الدخول: كلمة المرور المدخلة = '{password}'")
         print(f"🔍 كلمة المرور المتوقعة = '{ADMIN_PASSWORD}'")
-
         if password and password == ADMIN_PASSWORD:
-            # ✅ إنشاء جلسة
             session_id = create_session(1)
             response = web.HTTPFound('/panel')
             response.set_cookie('session_id', session_id, max_age=_SESSION_TIMEOUT, httponly=True, secure=True)
@@ -867,7 +840,6 @@ async def login_handler(request):
             return response
         else:
             print("❌ كلمة مرور خاطئة")
-            # إرجاع صفحة الدخول مع رسالة خطأ
             error_page = LOGIN_PAGE.replace('</form>', '</form><div class="error">❌ كلمة مرور خاطئة</div>')
             return web.Response(text=error_page, content_type='text/html', status=401)
     except Exception as e:
@@ -883,7 +855,7 @@ async def index_handler(request):
     return web.Response(text=MAIN_PAGE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "6.2"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "6.3"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats_cached())
@@ -1026,20 +998,28 @@ def start_web_server_background(port=None):
         asyncio.set_event_loop(loop)
         runner = web.AppRunner(app)
         loop.run_until_complete(runner.setup())
+        
+        # ✅ يحاول المنفذ المحدد، وإذا مشغول يختار منفذ عشوائي
+        actual_port = port
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v6.2 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v6.3 يعمل على http://0.0.0.0:{port}")
             print(f"✅ خادم الويب شغال على المنفذ {port}")
         except OSError as e:
             if "address already in use" in str(e):
+                print(f"⚠️ المنفذ {port} مشغول، جاري اختيار منفذ عشوائي...")
                 site = web.TCPSite(runner, '0.0.0.0', 0)
                 loop.run_until_complete(site.start())
-                actual = site._server.sockets[0].getsockname()[1]
-                logger.info(f"✅ يعمل على http://0.0.0.0:{actual} (منفذ عشوائي)")
-                print(f"✅ خادم الويب شغال على منفذ عشوائي: {actual}")
+                actual_port = site._server.sockets[0].getsockname()[1]
+                logger.info(f"✅ يعمل على http://0.0.0.0:{actual_port} (منفذ عشوائي)")
+                print(f"✅ خادم الويب شغال على منفذ عشوائي: {actual_port}")
             else:
                 raise
+        
+        # ✅ حفظ المنفذ الفعلي في متغير بيئة مؤقت عشان البوت الأساسي يعرفه
+        os.environ['WEB_PORT_ACTUAL'] = str(actual_port)
+        
         try:
             loop.run_forever()
         except KeyboardInterrupt:
@@ -1049,15 +1029,14 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v6.2")
-    print("🚀 نظام الحظر v6.2 بدأ العمل")
+    logger.info("🚀 تم تشغيل نظام الحظر v6.3")
+    print("🚀 نظام الحظر v6.3 بدأ العمل")
 
 if __name__ == '__main__':
-    # تأكد من وجود قاعدة البيانات
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v6.2 متاح على:")
+    print(f"🌐 نظام الحظر v6.3 متاح على:")
     print(f"   - http://0.0.0.0:{port}")
     print(f"   - http://0.0.0.0:{port}/panel")
     print(f"   - http://0.0.0.0:{port}/health")
