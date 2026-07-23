@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 5.6 (مع إنشاء الجداول تلقائياً)
+نظام الحظر المتطور - الإصدار 5.7 (النهائي)
 ريلاكس مانيجر · عرض جميع المجموعات والقنوات والمستخدمين
+المسارات: /  -  /panel  -  /web  -  /health
 """
 
 import os
@@ -18,14 +19,10 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-# ===================== إعدادات =====================
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot_data.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# ===================== المطور الأساسي =====================
 PRIMARY_OWNER_ID = int(os.getenv('MAIN_ADMIN_ID', 0))
-
-# ===================== دوال قاعدة البيانات =====================
 
 async def get_db():
     conn = await aiosqlite.connect(DB_PATH)
@@ -51,48 +48,22 @@ async def is_admin(user_id: int) -> bool:
     return False
 
 async def init_db():
-    """إنشاء الجداول الخاصة بالحظر إذا لم تكن موجودة"""
     async with await get_db() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_users (
-                user_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP,
-                expires_at TIMESTAMP,
-                severity TEXT DEFAULT 'ban'
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_channels (
-                channel_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_groups (
-                chat_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS block_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT,
-                target INTEGER,
-                admin_id INTEGER,
-                reason TEXT,
-                extra TEXT,
-                created_at TIMESTAMP
-            )
-        """)
+        await conn.execute("""CREATE TABLE IF NOT EXISTS blocked_users (
+            user_id INTEGER PRIMARY KEY, reason TEXT, blocked_by INTEGER,
+            blocked_at TIMESTAMP, expires_at TIMESTAMP, severity TEXT DEFAULT 'ban'
+        )""")
+        await conn.execute("""CREATE TABLE IF NOT EXISTS blocked_channels (
+            channel_id INTEGER PRIMARY KEY, reason TEXT, blocked_by INTEGER, blocked_at TIMESTAMP
+        )""")
+        await conn.execute("""CREATE TABLE IF NOT EXISTS blocked_groups (
+            chat_id INTEGER PRIMARY KEY, reason TEXT, blocked_by INTEGER, blocked_at TIMESTAMP
+        )""")
+        await conn.execute("""CREATE TABLE IF NOT EXISTS block_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, target INTEGER,
+            admin_id INTEGER, reason TEXT, extra TEXT, created_at TIMESTAMP
+        )""")
         await conn.commit()
-
-# ========== دوال الحظر ==========
 
 async def db_block_user(user_id, reason, admin_id=1, severity="ban", duration_minutes=None):
     async with await get_db() as conn:
@@ -112,10 +83,8 @@ async def db_unblock_user(user_id):
 
 async def db_block_channel(channel_id, reason, admin_id=1):
     async with await get_db() as conn:
-        await conn.execute(
-            "INSERT OR REPLACE INTO blocked_channels (channel_id, reason, blocked_by, blocked_at) VALUES (?, ?, ?, ?)",
-            (channel_id, reason, admin_id, datetime.utcnow().isoformat())
-        )
+        await conn.execute("INSERT OR REPLACE INTO blocked_channels (channel_id, reason, blocked_by, blocked_at) VALUES (?, ?, ?, ?)",
+            (channel_id, reason, admin_id, datetime.utcnow().isoformat()))
         await conn.commit()
 
 async def db_unblock_channel(channel_id):
@@ -125,10 +94,8 @@ async def db_unblock_channel(channel_id):
 
 async def db_block_group(chat_id, reason, admin_id=1):
     async with await get_db() as conn:
-        await conn.execute(
-            "INSERT OR REPLACE INTO blocked_groups (chat_id, reason, blocked_by, blocked_at) VALUES (?, ?, ?, ?)",
-            (chat_id, reason, admin_id, datetime.utcnow().isoformat())
-        )
+        await conn.execute("INSERT OR REPLACE INTO blocked_groups (chat_id, reason, blocked_by, blocked_at) VALUES (?, ?, ?, ?)",
+            (chat_id, reason, admin_id, datetime.utcnow().isoformat()))
         await conn.commit()
 
 async def db_unblock_group(chat_id):
@@ -138,21 +105,14 @@ async def db_unblock_group(chat_id):
 
 async def db_log_block_action(action, target, admin_id, reason, extra=""):
     async with await get_db() as conn:
-        await conn.execute(
-            "INSERT INTO block_logs (action, target, admin_id, reason, extra, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (action, target, admin_id, reason, extra, datetime.utcnow().isoformat())
-        )
+        await conn.execute("INSERT INTO block_logs (action, target, admin_id, reason, extra, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (action, target, admin_id, reason, extra, datetime.utcnow().isoformat()))
         await conn.commit()
-
-# ========== دوال جلب البيانات (مع try/except) ==========
 
 async def db_get_blocked_users(limit=100):
     try:
         async with await get_db() as conn:
-            cur = await conn.execute(
-                "SELECT user_id, reason, blocked_by, blocked_at, expires_at, severity FROM blocked_users ORDER BY blocked_at DESC LIMIT ?",
-                (limit,)
-            )
+            cur = await conn.execute("SELECT user_id, reason, blocked_by, blocked_at, expires_at, severity FROM blocked_users ORDER BY blocked_at DESC LIMIT ?", (limit,))
             return await cur.fetchall()
     except:
         return []
@@ -160,10 +120,7 @@ async def db_get_blocked_users(limit=100):
 async def db_get_blocked_channels(limit=100):
     try:
         async with await get_db() as conn:
-            cur = await conn.execute(
-                "SELECT channel_id, reason, blocked_by, blocked_at FROM blocked_channels ORDER BY blocked_at DESC LIMIT ?",
-                (limit,)
-            )
+            cur = await conn.execute("SELECT channel_id, reason, blocked_by, blocked_at FROM blocked_channels ORDER BY blocked_at DESC LIMIT ?", (limit,))
             return await cur.fetchall()
     except:
         return []
@@ -171,10 +128,7 @@ async def db_get_blocked_channels(limit=100):
 async def db_get_blocked_groups(limit=100):
     try:
         async with await get_db() as conn:
-            cur = await conn.execute(
-                "SELECT chat_id, reason, blocked_by, blocked_at FROM blocked_groups ORDER BY blocked_at DESC LIMIT ?",
-                (limit,)
-            )
+            cur = await conn.execute("SELECT chat_id, reason, blocked_by, blocked_at FROM blocked_groups ORDER BY blocked_at DESC LIMIT ?", (limit,))
             return await cur.fetchall()
     except:
         return []
@@ -183,46 +137,27 @@ async def db_get_block_logs(limit=200, action=None):
     try:
         async with await get_db() as conn:
             if action:
-                cur = await conn.execute(
-                    "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs WHERE action=? ORDER BY created_at DESC LIMIT ?",
-                    (action, limit)
-                )
+                cur = await conn.execute("SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs WHERE action=? ORDER BY created_at DESC LIMIT ?", (action, limit))
             else:
-                cur = await conn.execute(
-                    "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs ORDER BY created_at DESC LIMIT ?",
-                    (limit,)
-                )
+                cur = await conn.execute("SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs ORDER BY created_at DESC LIMIT ?", (limit,))
             return await cur.fetchall()
     except:
         return []
 
-# ========== دوال جلب جميع البيانات ==========
-
 async def db_get_all_groups(limit=200):
     try:
         async with await get_db() as conn:
-            # تأكد من وجود جدول bot_groups
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_groups'")
             if not await cur.fetchone():
                 return []
             cur = await conn.execute("""
-                SELECT 
-                    g.chat_id,
-                    g.chat_name,
-                    g.username,
-                    g.added_by,
-                    g.added_at,
-                    g.banned,
-                    CASE WHEN bg.chat_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
-                    bg.reason as block_reason
-                FROM bot_groups g
-                LEFT JOIN blocked_groups bg ON g.chat_id = bg.chat_id
-                ORDER BY g.chat_name
-                LIMIT ?
+                SELECT g.chat_id, g.chat_name, g.username, g.added_by, g.added_at, g.banned,
+                CASE WHEN bg.chat_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked, bg.reason as block_reason
+                FROM bot_groups g LEFT JOIN blocked_groups bg ON g.chat_id = bg.chat_id
+                ORDER BY g.chat_name LIMIT ?
             """, (limit,))
             return await cur.fetchall()
-    except Exception as e:
-        logger.error(f"خطأ في جلب جميع المجموعات: {e}")
+    except:
         return []
 
 async def db_get_all_channels(limit=200):
@@ -232,23 +167,13 @@ async def db_get_all_channels(limit=200):
             if not await cur.fetchone():
                 return []
             cur = await conn.execute("""
-                SELECT 
-                    c.id,
-                    c.user_id,
-                    c.channel_id,
-                    c.channel_name,
-                    c.created_at,
-                    c.banned,
-                    CASE WHEN bc.channel_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
-                    bc.reason as block_reason
-                FROM user_channels c
-                LEFT JOIN blocked_channels bc ON c.channel_id = bc.channel_id
-                ORDER BY c.channel_name
-                LIMIT ?
+                SELECT c.id, c.user_id, c.channel_id, c.channel_name, c.created_at, c.banned,
+                CASE WHEN bc.channel_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked, bc.reason as block_reason
+                FROM user_channels c LEFT JOIN blocked_channels bc ON c.channel_id = bc.channel_id
+                ORDER BY c.channel_name LIMIT ?
             """, (limit,))
             return await cur.fetchall()
-    except Exception as e:
-        logger.error(f"خطأ في جلب جميع القنوات: {e}")
+    except:
         return []
 
 async def db_get_all_users(limit=200):
@@ -258,31 +183,20 @@ async def db_get_all_users(limit=200):
             if not await cur.fetchone():
                 return []
             cur = await conn.execute("""
-                SELECT 
-                    u.user_id,
-                    u.auto_publish,
-                    u.banned as user_banned,
-                    u.trial_used,
-                    u.subscription_end,
-                    u.auto_reply_enabled,
-                    u.auto_recycle,
-                    CASE WHEN bu.user_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
-                    bu.reason as block_reason,
-                    bu.severity as block_severity
-                FROM users u
-                LEFT JOIN blocked_users bu ON u.user_id = bu.user_id
-                ORDER BY u.user_id
-                LIMIT ?
+                SELECT u.user_id, u.auto_publish, u.banned as user_banned, u.trial_used,
+                u.subscription_end, u.auto_reply_enabled, u.auto_recycle,
+                CASE WHEN bu.user_id IS NOT NULL THEN 1 ELSE 0 END as is_blocked,
+                bu.reason as block_reason, bu.severity as block_severity
+                FROM users u LEFT JOIN blocked_users bu ON u.user_id = bu.user_id
+                ORDER BY u.user_id LIMIT ?
             """, (limit,))
             return await cur.fetchall()
-    except Exception as e:
-        logger.error(f"خطأ في جلب جميع المستخدمين: {e}")
+    except:
         return []
 
 async def db_stats():
     try:
         async with await get_db() as conn:
-            # تحقق من وجود الجداول
             total_users = 0
             total_channels = 0
             total_groups = 0
@@ -293,37 +207,39 @@ async def db_stats():
             today_blocks = 0
             updates_channel = "غير محددة"
 
-            # جدول users
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
             if await cur.fetchone():
                 total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
-                blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] if (await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blocked_users'")).fetchone() else 0
 
-            # جدول user_channels
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blocked_users'")
+            if await cur.fetchone():
+                blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] or 0
+
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_channels'")
             if await cur.fetchone():
                 total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
 
-            # جدول bot_groups
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blocked_channels'")
+            if await cur.fetchone():
+                blocked_channels = (await conn.execute("SELECT COUNT(*) FROM blocked_channels")).fetchone()[0] or 0
+
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_groups'")
             if await cur.fetchone():
                 total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
 
-            # جدول posts
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blocked_groups'")
+            if await cur.fetchone():
+                blocked_groups = (await conn.execute("SELECT COUNT(*) FROM blocked_groups")).fetchone()[0] or 0
+
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
             if await cur.fetchone():
                 pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
 
-            # حظر اليوم
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='block_logs'")
             if await cur.fetchone():
                 today = datetime.utcnow().date().isoformat()
-                today_blocks = (await conn.execute(
-                    "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
-                    (today,)
-                )).fetchone()[0] or 0
+                today_blocks = (await conn.execute("SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?", (today,))).fetchone()[0] or 0
 
-            # قناة التحديثات
             cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
             if await cur.fetchone():
                 updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
@@ -358,141 +274,41 @@ async def db_stats():
 # ===================== تطبيق الويب =====================
 app = web.Application()
 
-# ===================== واجهة المستخدم =====================
-# (نفس HTML السابق مع التبويبات الجديدة، لكننا سنكتفي بنسخه مختصراً لتوفير المساحة، وسنضعه في متغير HTML_TEMPLATE)
-
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v5.6</title>
+    <title>نظام الحظر المتطور v5.7</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0d1117;
-            --card: #161b22;
-            --border: #30363d;
-            --accent: #58a6ff;
-            --success: #3fb950;
-            --danger: #f85149;
-            --warning: #d29922;
-            --info: #58a6ff;
-            --text: #c9d1d9;
-            --text-muted: #8b949e;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            padding: 20px;
-            min-height: 100vh;
-        }
+        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --accent: #58a6ff; --success: #3fb950; --danger: #f85149; --warning: #d29922; --info: #58a6ff; --text: #c9d1d9; --text-muted: #8b949e; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 20px; min-height: 100vh; }
         .container { max-width: 1400px; margin: auto; }
-        .header {
-            background: var(--card);
-            padding: 20px 25px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
+        .header { background: var(--card); padding: 20px 25px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         .header h1 { font-size: 24px; color: var(--accent); }
         .header .subtitle { font-size: 13px; color: var(--text-muted); }
-        .version-badge {
-            background: var(--accent);
-            color: var(--bg);
-            padding: 2px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .stat-card {
-            background: var(--card);
-            padding: 16px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            text-align: center;
-        }
-        .stat-card .num {
-            font-size: 28px;
-            font-weight: 700;
-            color: var(--accent);
-        }
+        .version-badge { background: var(--accent); color: var(--bg); padding: 2px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .stat-card { background: var(--card); padding: 16px; border-radius: 10px; border: 1px solid var(--border); text-align: center; }
+        .stat-card .num { font-size: 28px; font-weight: 700; color: var(--accent); }
         .stat-card .num.danger { color: var(--danger); }
         .stat-card .num.success { color: var(--success); }
         .stat-card .num.warning { color: var(--warning); }
         .stat-card .num.info { color: var(--info); }
         .stat-card .label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
         .stat-card .icon { font-size: 20px; display: block; margin-bottom: 4px; }
-        .tabs {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            margin-bottom: 16px;
-        }
-        .tab-btn {
-            padding: 8px 16px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: var(--card);
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
+        .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+        .tab-btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text-muted); cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.2s; }
         .tab-btn:hover { background: #21262d; }
-        .tab-btn.active {
-            background: var(--accent);
-            color: var(--bg);
-            border-color: var(--accent);
-        }
-        .tab-content {
-            display: none;
-            background: var(--card);
-            border-radius: 12px;
-            padding: 18px;
-            border: 1px solid var(--border);
-        }
+        .tab-btn.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+        .tab-content { display: none; background: var(--card); border-radius: 12px; padding: 18px; border: 1px solid var(--border); }
         .tab-content.active { display: block; }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-        }
-        th {
-            text-align: right;
-            padding: 10px 12px;
-            border-bottom: 2px solid var(--border);
-            color: var(--text-muted);
-            font-weight: 600;
-        }
-        td {
-            padding: 8px 12px;
-            border-bottom: 1px solid var(--border);
-            word-break: break-word;
-        }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: right; padding: 10px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 600; }
+        td { padding: 8px 12px; border-bottom: 1px solid var(--border); word-break: break-word; }
         tr:hover { background: rgba(255,255,255,0.03); }
-        .btn {
-            padding: 4px 12px;
-            border: none;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
+        .btn { padding: 4px 12px; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
         .btn-danger { background: var(--danger); color: #fff; }
         .btn-danger:hover { opacity: 0.85; }
         .btn-success { background: var(--success); color: var(--bg); }
@@ -501,85 +317,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .btn-primary:hover { opacity: 0.85; }
         .btn-warning { background: var(--warning); color: var(--bg); }
         .btn-warning:hover { opacity: 0.85; }
-        .badge {
-            display: inline-block;
-            padding: 1px 10px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: 600;
-        }
+        .badge { display: inline-block; padding: 1px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
         .badge-danger { background: rgba(248,81,73,0.15); color: var(--danger); }
         .badge-success { background: rgba(63,185,80,0.15); color: var(--success); }
         .badge-warning { background: rgba(210,153,34,0.15); color: var(--warning); }
         .badge-info { background: rgba(88,166,255,0.15); color: var(--accent); }
         .status-blocked { color: var(--danger); font-weight: 600; }
         .status-active { color: var(--success); font-weight: 600; }
-        .form-group {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-bottom: 12px;
-            align-items: center;
-        }
-        .form-group input, .form-group textarea, .form-group select {
-            padding: 8px 12px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text);
-            font-size: 13px;
-            flex: 1;
-            min-width: 180px;
-        }
-        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
-            outline: none;
-            border-color: var(--accent);
-        }
+        .form-group { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+        .form-group input, .form-group textarea, .form-group select { padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; flex: 1; min-width: 180px; }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
         .form-group textarea { min-height: 50px; }
         .form-group select { flex: 0 0 auto; min-width: 130px; }
         .form-group select option { background: var(--bg); }
-        .empty-state {
-            text-align: center;
-            padding: 30px;
-            color: var(--text-muted);
-            font-size: 14px;
-        }
-        .toast {
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 12px 28px;
-            border-radius: 8px;
-            z-index: 9999;
-            display: none;
-            font-weight: 600;
-            font-size: 14px;
-            animation: slideDown 0.3s ease;
-        }
+        .empty-state { text-align: center; padding: 30px; color: var(--text-muted); font-size: 14px; }
+        .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); padding: 12px 28px; border-radius: 8px; z-index: 9999; display: none; font-weight: 600; font-size: 14px; animation: slideDown 0.3s ease; }
         .toast.success { background: var(--success); color: var(--bg); }
         .toast.error { background: var(--danger); color: #fff; }
         .toast.info { background: var(--accent); color: var(--bg); }
-        @keyframes slideDown {
-            from { opacity: 0; transform: translateX(-50%) translateY(-15px); }
-            to { opacity: 1; transform: translateX(-50%) translateY(0); }
-        }
-        .search-box {
-            padding: 6px 12px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text);
-            width: 200px;
-        }
+        @keyframes slideDown { from { opacity: 0; transform: translateX(-50%) translateY(-15px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+        .search-box { padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); width: 200px; }
         .search-box:focus { border-color: var(--accent); outline: none; }
-        .actions-row {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-bottom: 12px;
-            align-items: center;
-        }
+        .actions-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
         .severity-warning { color: var(--warning); }
         .severity-mute { color: #d29922; }
         .severity-ban { color: var(--danger); }
@@ -606,13 +365,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="subtitle">ريلاكس مانيجر · عرض جميع المجموعات والقنوات والمستخدمين</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span class="version-badge">v5.6</span>
+                <span class="version-badge">v5.7</span>
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <span style="font-size:12px;color:var(--text-muted);" id="lastUpdate"></span>
             </div>
         </div>
 
-        <!-- الإحصائيات -->
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><span class="icon">👤</span><div class="num" id="totalUsers">-</div><div class="label">إجمالي المستخدمين</div></div>
             <div class="stat-card"><span class="icon">🚫</span><div class="num danger" id="blockedUsers">-</div><div class="label">مستخدمون محظورون</div></div>
@@ -625,7 +383,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="stat-card"><span class="icon">📢</span><div class="num info" id="updatesChannel" style="font-size:16px;">-</div><div class="label">قناة التحديثات</div></div>
         </div>
 
-        <!-- التبويبات -->
         <div class="tabs">
             <button class="tab-btn active" data-tab="all_groups">👥 جميع المجموعات</button>
             <button class="tab-btn" data-tab="all_channels">📺 جميع القنوات</button>
@@ -635,45 +392,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button class="tab-btn" data-tab="add">➕ إضافة حظر</button>
         </div>
 
-        <!-- تبويب جميع المجموعات -->
         <div class="tab-content active" id="tab-all_groups">
             <div class="actions-row">
-                <input class="search-box" id="groupSearch" placeholder="🔍 بحث عن مجموعة..." oninput="filterTable('allGroupsTable', this.value)">
+                <input class="search-box" id="groupSearch" placeholder="🔍 بحث..." oninput="filterTable('allGroupsTable', this.value)">
                 <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allGroupsCount">0</span></span>
             </div>
-            <div class="table-wrap">
-                <div id="allGroupsTable"><div class="empty-state">جاري التحميل...</div></div>
-            </div>
+            <div class="table-wrap"><div id="allGroupsTable"><div class="empty-state">جاري التحميل...</div></div></div>
         </div>
 
-        <!-- تبويب جميع القنوات -->
         <div class="tab-content" id="tab-all_channels">
             <div class="actions-row">
-                <input class="search-box" id="channelSearch" placeholder="🔍 بحث عن قناة..." oninput="filterTable('allChannelsTable', this.value)">
+                <input class="search-box" id="channelSearch" placeholder="🔍 بحث..." oninput="filterTable('allChannelsTable', this.value)">
                 <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allChannelsCount">0</span></span>
             </div>
-            <div class="table-wrap">
-                <div id="allChannelsTable"><div class="empty-state">جاري التحميل...</div></div>
-            </div>
+            <div class="table-wrap"><div id="allChannelsTable"><div class="empty-state">جاري التحميل...</div></div></div>
         </div>
 
-        <!-- تبويب جميع المستخدمين -->
         <div class="tab-content" id="tab-all_users">
             <div class="actions-row">
-                <input class="search-box" id="userSearch" placeholder="🔍 بحث عن مستخدم..." oninput="filterTable('allUsersTable', this.value)">
+                <input class="search-box" id="userSearch" placeholder="🔍 بحث..." oninput="filterTable('allUsersTable', this.value)">
                 <span style="font-size:12px;color:var(--text-muted);">إجمالي: <span id="allUsersCount">0</span></span>
             </div>
-            <div class="table-wrap">
-                <div id="allUsersTable"><div class="empty-state">جاري التحميل...</div></div>
-            </div>
+            <div class="table-wrap"><div id="allUsersTable"><div class="empty-state">جاري التحميل...</div></div></div>
         </div>
 
-        <!-- تبويب المستخدمين المحظورين -->
         <div class="tab-content" id="tab-blocked_users">
             <div id="blockedUsersTable"><div class="empty-state">جاري التحميل...</div></div>
         </div>
 
-        <!-- تبويب السجل -->
         <div class="tab-content" id="tab-logs">
             <div class="actions-row">
                 <select id="logFilter" onchange="refreshData()" style="padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);">
@@ -689,7 +435,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div id="logsTable"><div class="empty-state">جاري التحميل...</div></div>
         </div>
 
-        <!-- تبويب إضافة حظر -->
         <div class="tab-content" id="tab-add">
             <h3 style="color:var(--accent);margin-bottom:12px;">➕ إضافة حظر جديد</h3>
             <div class="form-group">
@@ -698,7 +443,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <option value="channel">📺 قناة</option>
                     <option value="group">👥 مجموعة</option>
                 </select>
-                <input type="text" id="targetId" placeholder="المعرف (مثال: 123456789)" dir="ltr">
+                <input type="text" id="targetId" placeholder="المعرف" dir="ltr">
             </div>
             <div class="form-group">
                 <select id="severity" style="flex:0 0 auto;min-width:130px;">
@@ -716,7 +461,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <button class="btn btn-danger" onclick="addBlock()">🚫 حظر</button>
                 <button class="btn btn-warning" onclick="clearForm()">🗑️ مسح</button>
             </div>
-            <div id="addResult" style="margin-top:8px;"></div>
+            <div id="addResult"></div>
         </div>
     </div>
 
@@ -763,15 +508,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     if (c.key === 'severity' && val) val = `<span class="${severityClass(val)}">${severityLabel(val)}</span>`;
                     if (c.key === 'action' && val) {
                         const colors = {BLOCK_USER:'danger',UNBLOCK_USER:'success',BLOCK_CHANNEL:'danger',UNBLOCK_CHANNEL:'success',BLOCK_GROUP:'danger',UNBLOCK_GROUP:'success'};
-                        const cl = colors[val] || 'info';
-                        val = `<span class="badge badge-${cl}">${val}</span>`;
+                        val = `<span class="badge badge-${colors[val] || 'info'}">${val}</span>`;
                     }
-                    if (c.key === 'is_blocked' || c.key === 'banned') {
+                    if (c.key === 'is_blocked' || c.key === 'banned' || c.key === 'user_banned') {
                         if (val == 1 || val == '1') val = '<span class="status-blocked">🚫 محظور</span>';
-                        else val = '<span class="status-active">✅ نشط</span>';
-                    }
-                    if (c.key === 'user_banned') {
-                        if (val == 1) val = '<span class="status-blocked">🚫 محظور</span>';
                         else val = '<span class="status-active">✅ نشط</span>';
                     }
                     html += `<td>${val}</td>`;
@@ -810,12 +550,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 document.getElementById('allGroupsCount').textContent = allGroups.length;
                 document.getElementById('allGroupsTable').innerHTML = renderTable(allGroups,
-                    [{key:'chat_id',label:'المعرف'},{key:'chat_name',label:'الاسم'},{key:'username',label:'المعرف العام'},{key:'added_by',label:'أضيف بواسطة'},{key:'added_at',label:'تاريخ الإضافة'},{key:'is_blocked',label:'الحالة'}]
+                    [{key:'chat_id',label:'المعرف'},{key:'chat_name',label:'الاسم'},{key:'username',label:'المعرف'},{key:'added_by',label:'أضيف بواسطة'},{key:'added_at',label:'التاريخ'},{key:'is_blocked',label:'الحالة'}]
                 );
 
                 document.getElementById('allChannelsCount').textContent = allChannels.length;
                 document.getElementById('allChannelsTable').innerHTML = renderTable(allChannels,
-                    [{key:'channel_id',label:'المعرف'},{key:'channel_name',label:'الاسم'},{key:'user_id',label:'المالك'},{key:'created_at',label:'تاريخ الإضافة'},{key:'is_blocked',label:'الحالة'}]
+                    [{key:'channel_id',label:'المعرف'},{key:'channel_name',label:'الاسم'},{key:'user_id',label:'المالك'},{key:'created_at',label:'التاريخ'},{key:'is_blocked',label:'الحالة'}]
                 );
 
                 document.getElementById('allUsersCount').textContent = allUsers.length;
@@ -844,9 +584,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!table) return;
             const rows = table.querySelectorAll('tbody tr');
             const q = query.toLowerCase();
-            rows.forEach(row => {
-                row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
-            });
+            rows.forEach(row => row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none');
         }
 
         async function unblock(type, id) {
@@ -923,7 +661,7 @@ async def index_handler(request):
     return web.Response(text=HTML_TEMPLATE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.6"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.7"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats())
@@ -1014,6 +752,7 @@ async def api_unblock(request):
 # ===================== تسجيل المسارات =====================
 app.router.add_get('/', index_handler)
 app.router.add_get('/panel', index_handler)
+app.router.add_get('/web', index_handler)
 app.router.add_get('/health', health_handler)
 app.router.add_get('/api/stats', stats_handler)
 app.router.add_get('/api/blocked_users', api_blocked_users)
@@ -1040,7 +779,7 @@ def start_web_server_background(port=None):
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v5.6 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v5.7 يعمل على http://0.0.0.0:{port}")
         except OSError as e:
             if "address already in use" in str(e):
                 site = web.TCPSite(runner, '0.0.0.0', 0)
@@ -1058,14 +797,17 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v5.6")
+    logger.info("🚀 تم تشغيل نظام الحظر v5.7")
 
 if __name__ == '__main__':
-    # تهيئة قاعدة البيانات قبل التشغيل
     asyncio.run(init_db())
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v5.6 متاح على http://0.0.0.0:{port}")
+    print(f"🌐 نظام الحظر v5.7 متاح على:")
+    print(f"   - http://0.0.0.0:{port}")
+    print(f"   - http://0.0.0.0:{port}/panel")
+    print(f"   - http://0.0.0.0:{port}/web")
+    print(f"   - http://0.0.0.0:{port}/health")
     try:
         while True:
             time.sleep(1)
