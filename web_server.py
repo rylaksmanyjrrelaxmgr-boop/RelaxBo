@@ -813,3 +813,4 @@ if __name__ == '__main__':
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n🛑 تم إيقاف النظام")
+# force update Thu Jul 23 14:09:57 +03 2026
