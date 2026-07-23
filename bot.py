@@ -1,5 +1,14 @@
 # ============================================================
 # ORIGINAL_OWNER: 8290212138
+# GENERATED_AT: 2026-07-23 17:38:13
+# SIGNATURE: d3fb90a7bdbd3786
+# ============================================================
+# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
+# لا تشاركه مع أي شخص غير موثوق
+# ============================================================
+
+# ============================================================
+# ORIGINAL_OWNER: 8290212138
 # GENERATED_AT: 2026-07-23 14:38:57
 # SIGNATURE: c41959c0f42fc23f
 # ============================================================
@@ -12847,6 +12856,78 @@ async def init_db_improved():
                 set_at TIMESTAMP
             )
         """)
+# ========== جداول الحظر المتقدم ==========
+await conn.execute("""
+    CREATE TABLE IF NOT EXISTS blocked_users (
+        user_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        blocked_by INTEGER,
+        blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP,
+        severity TEXT DEFAULT 'ban' CHECK(severity IN ('ban', 'mute', 'warn', 'kick')),
+        is_permanent INTEGER DEFAULT 1,
+        appeal_count INTEGER DEFAULT 0,
+        last_appeal_at TIMESTAMP,
+        notes TEXT,
+        FOREIGN KEY(blocked_by) REFERENCES users(user_id) ON DELETE SET NULL
+    )
+""")
+
+await conn.execute("""
+    CREATE TABLE IF NOT EXISTS blocked_channels (
+        channel_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        blocked_by INTEGER,
+        blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_permanent INTEGER DEFAULT 1,
+        expires_at TIMESTAMP,
+        auto_blocked INTEGER DEFAULT 0,
+        violation_count INTEGER DEFAULT 0,
+        notes TEXT,
+        FOREIGN KEY(blocked_by) REFERENCES users(user_id) ON DELETE SET NULL
+    )
+""")
+
+await conn.execute("""
+    CREATE TABLE IF NOT EXISTS blocked_groups (
+        chat_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        blocked_by INTEGER,
+        blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_permanent INTEGER DEFAULT 1,
+        expires_at TIMESTAMP,
+        auto_blocked INTEGER DEFAULT 0,
+        violation_count INTEGER DEFAULT 0,
+        notes TEXT,
+        FOREIGN KEY(blocked_by) REFERENCES users(user_id) ON DELETE SET NULL
+    )
+""")
+
+await conn.execute("""
+    CREATE TABLE IF NOT EXISTS block_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL CHECK(action IN ('block', 'unblock', 'expire', 'modify')),
+        target_type TEXT NOT NULL CHECK(target_type IN ('user', 'channel', 'group')),
+        target_id INTEGER NOT NULL,
+        admin_id INTEGER NOT NULL,
+        reason TEXT,
+        old_severity TEXT,
+        new_severity TEXT,
+        old_expiry TIMESTAMP,
+        new_expiry TIMESTAMP,
+        extra TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(admin_id) REFERENCES users(user_id) ON DELETE SET NULL
+    )
+""")
+
+# فهارس للحظر المتقدم
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_blocked_users_expiry ON blocked_users(expires_at)")
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_blocked_users_severity ON blocked_users(severity)")
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_blocked_channels_expiry ON blocked_channels(expires_at)")
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_blocked_groups_expiry ON blocked_groups(expires_at)")
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_block_logs_admin ON block_logs(admin_id, created_at)")
+await conn.execute("CREATE INDEX IF NOT EXISTS idx_block_logs_target ON block_logs(target_type, target_id)")
 
         # ========== الفهارس (Indexes) للتحسين ==========
 
