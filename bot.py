@@ -1,12 +1,3 @@
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-22 18:23:37
-# SIGNATURE: 0c400ba11cf2cc84
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -49,6 +40,7 @@ import gzip
 import zipfile
 import platform
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import types
@@ -1409,7 +1401,6 @@ def clean_text_for_telegram(text: str) -> str:
     if not text:
         return ""
     text = re.sub(r'[\u200b\u200c\u200d\u2060\uFEFF\u202a\u202b\u202c\u202d\u202e]', '', text)
-    text = text.replace('\ufeff', '').replace('\ufffc', '')
     return text
 
 def escape_markdown_v2(text: str) -> str:
@@ -10948,7 +10939,34 @@ async def detect_owner_type(bot, chat_id):
         return {'is_hidden': True, 'user_id': None}
     except:
         return {'is_hidden': True, 'user_id': None}
+
+# ============================================================
+# ===================== إضافة دالة delete_service_messages قبل main() =====================
+# ============================================================
+
+async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف رسائل الخدمة (دخول/مغادرة الأعضاء)"""
+    if not update.message or not update.effective_chat:
+        return
+    if not update.message.service_message:
+        return
+    chat_id = update.effective_chat.id
+    try:
+        settings = await db_get_security_settings(chat_id)
+        if not settings.get('delete_service', False):
+            return
+    except:
+        return
+    try:
+        await update.message.delete()
+        logger.info(f"🗑️ تم حذف رسالة خدمة في المجموعة {chat_id}")
+    except Exception as e:
+        logger.debug(f"فشل حذف رسالة خدمة: {e}")
+
+# ============================================================
 # ===================== معالج الرسائل الرئيسي =====================
+# ============================================================
+
 async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -12382,7 +12400,29 @@ async def self_ping_loop():
         except Exception as e:
             logger.warning(f"⚠️ فشل النبض الداخلي: {e}")
         await asyncio.sleep(600)
+
+# ============================================================
+# ===================== تضمين خادم الويب المنفصل =====================
+# ============================================================
+
+def import_web_server():
+    try:
+        import web_server
+        web_port = int(os.getenv('WEB_PORT', '8080'))
+        web_server.start_web_server_background(web_port)
+        logger.info("✅ تم تضمين وتشغيل خادم الويب المنفصل")
+        return True
+    except ImportError:
+        logger.warning("⚠️ لم يتم العثور على ملف web_server.py")
+        return False
+    except Exception as e:
+        logger.error(f"❌ فشل تشغيل خادم الويب المنفصل: {e}")
+        return False
+
+# ============================================================
 # ===================== تهيئة قاعدة البيانات المحسنة =====================
+# ============================================================
+
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -13331,6 +13371,9 @@ async def main():
     application.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, message_handler_main))
     application.add_handler(MessageHandler(filters.ANIMATION & filters.ChatType.PRIVATE, message_handler_main))
 
+    # ===== إضافة معالج حذف رسائل الخدمة المنفصل =====
+    application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
+
     commands = [
         BotCommand("start", "بدء البوت"),
         BotCommand("trial", "تجربة مجانية"),
@@ -13370,6 +13413,9 @@ async def main():
         BotCommand("rules", "عرض قوانين المجموعة"),
     ]
     await application.bot.set_my_commands(commands)
+
+    # ===== تضمين خادم الويب المنفصل =====
+    web_imported = import_web_server()
 
     task_manager.create_task(auto_publish_loop_improved(application.bot))
     task_manager.create_task(auto_backup())
@@ -13418,4 +13464,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
