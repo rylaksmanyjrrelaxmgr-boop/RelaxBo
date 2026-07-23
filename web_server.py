@@ -146,3 +146,4 @@ if __name__ == '__main__':
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n🛑 تم إيقاف الخادم")
+# تحديث نهائي للرفع Thu Jul 23 12:54:23 +03 2026
