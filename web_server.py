@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 5.5 (عرض جميع المجموعات والقنوات والمستخدمين)
-ريلاكس مانيجر · إدارة متقدمة مع عرض كامل للبيانات
+نظام الحظر المتطور - الإصدار 5.6 (مع إنشاء الجداول تلقائياً)
+ريلاكس مانيجر · عرض جميع المجموعات والقنوات والمستخدمين
 """
 
 import os
@@ -51,6 +51,7 @@ async def is_admin(user_id: int) -> bool:
     return False
 
 async def init_db():
+    """إنشاء الجداول الخاصة بالحظر إذا لم تكن موجودة"""
     async with await get_db() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_users (
@@ -91,7 +92,7 @@ async def init_db():
         """)
         await conn.commit()
 
-# ========== دوال الحظر (نفسها) ==========
+# ========== دوال الحظر ==========
 
 async def db_block_user(user_id, reason, admin_id=1, severity="ban", duration_minutes=None):
     async with await get_db() as conn:
@@ -143,7 +144,7 @@ async def db_log_block_action(action, target, admin_id, reason, extra=""):
         )
         await conn.commit()
 
-# ========== دوال جلب البيانات المحظورة ==========
+# ========== دوال جلب البيانات (مع try/except) ==========
 
 async def db_get_blocked_users(limit=100):
     try:
@@ -195,12 +196,15 @@ async def db_get_block_logs(limit=200, action=None):
     except:
         return []
 
-# ========== دوال جلب ALL البيانات (جديدة) ==========
+# ========== دوال جلب جميع البيانات ==========
 
 async def db_get_all_groups(limit=200):
-    """جلب جميع المجموعات من قاعدة البيانات مع حالة الحظر"""
     try:
         async with await get_db() as conn:
+            # تأكد من وجود جدول bot_groups
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_groups'")
+            if not await cur.fetchone():
+                return []
             cur = await conn.execute("""
                 SELECT 
                     g.chat_id,
@@ -222,9 +226,11 @@ async def db_get_all_groups(limit=200):
         return []
 
 async def db_get_all_channels(limit=200):
-    """جلب جميع القنوات من قاعدة البيانات مع حالة الحظر"""
     try:
         async with await get_db() as conn:
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_channels'")
+            if not await cur.fetchone():
+                return []
             cur = await conn.execute("""
                 SELECT 
                     c.id,
@@ -246,9 +252,11 @@ async def db_get_all_channels(limit=200):
         return []
 
 async def db_get_all_users(limit=200):
-    """جلب جميع المستخدمين من قاعدة البيانات مع حالة الحظر"""
     try:
         async with await get_db() as conn:
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            if not await cur.fetchone():
+                return []
             cur = await conn.execute("""
                 SELECT 
                     u.user_id,
@@ -274,24 +282,54 @@ async def db_get_all_users(limit=200):
 async def db_stats():
     try:
         async with await get_db() as conn:
-            total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
-            blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] or 0
-            blocked_channels = (await conn.execute("SELECT COUNT(*) FROM blocked_channels")).fetchone()[0] or 0
-            blocked_groups = (await conn.execute("SELECT COUNT(*) FROM blocked_groups")).fetchone()[0] or 0
-            total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
-            total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
-            pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
-            
-            today = datetime.utcnow().date().isoformat()
-            today_blocks = (await conn.execute(
-                "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
-                (today,)
-            )).fetchone()[0] or 0
-            
-            updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
-            updates_row = await updates_channel.fetchone()
-            updates_channel = updates_row[0] if updates_row else "غير محددة"
-            
+            # تحقق من وجود الجداول
+            total_users = 0
+            total_channels = 0
+            total_groups = 0
+            pending_posts = 0
+            blocked_users = 0
+            blocked_channels = 0
+            blocked_groups = 0
+            today_blocks = 0
+            updates_channel = "غير محددة"
+
+            # جدول users
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            if await cur.fetchone():
+                total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
+                blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] if (await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blocked_users'")).fetchone() else 0
+
+            # جدول user_channels
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_channels'")
+            if await cur.fetchone():
+                total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
+
+            # جدول bot_groups
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_groups'")
+            if await cur.fetchone():
+                total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
+
+            # جدول posts
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
+            if await cur.fetchone():
+                pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
+
+            # حظر اليوم
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='block_logs'")
+            if await cur.fetchone():
+                today = datetime.utcnow().date().isoformat()
+                today_blocks = (await conn.execute(
+                    "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
+                    (today,)
+                )).fetchone()[0] or 0
+
+            # قناة التحديثات
+            cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
+            if await cur.fetchone():
+                updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
+                updates_row = await updates_channel.fetchone()
+                updates_channel = updates_row[0] if updates_row else "غير محددة"
+
             return {
                 'total_users': total_users,
                 'blocked_users': blocked_users,
@@ -321,14 +359,14 @@ async def db_stats():
 app = web.Application()
 
 # ===================== واجهة المستخدم =====================
+# (نفس HTML السابق مع التبويبات الجديدة، لكننا سنكتفي بنسخه مختصراً لتوفير المساحة، وسنضعه في متغير HTML_TEMPLATE)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v5.5</title>
+    <title>نظام الحظر المتطور v5.6</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -568,7 +606,7 @@ HTML_TEMPLATE = """
                 <div class="subtitle">ريلاكس مانيجر · عرض جميع المجموعات والقنوات والمستخدمين</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span class="version-badge">v5.5</span>
+                <span class="version-badge">v5.6</span>
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <span style="font-size:12px;color:var(--text-muted);" id="lastUpdate"></span>
             </div>
@@ -885,12 +923,10 @@ async def index_handler(request):
     return web.Response(text=HTML_TEMPLATE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.5"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.6"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats())
-
-# ===== نقاط النهاية للمحظورين =====
 
 async def api_blocked_users(request):
     return web.json_response([dict(u) for u in await db_get_blocked_users(200)])
@@ -900,8 +936,6 @@ async def api_blocked_channels(request):
 
 async def api_blocked_groups(request):
     return web.json_response([dict(g) for g in await db_get_blocked_groups(100)])
-
-# ===== نقاط النهاية لجميع البيانات (جديدة) =====
 
 async def api_all_groups(request):
     return web.json_response([dict(g) for g in await db_get_all_groups(200)])
@@ -1006,7 +1040,7 @@ def start_web_server_background(port=None):
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v5.5 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v5.6 يعمل على http://0.0.0.0:{port}")
         except OSError as e:
             if "address already in use" in str(e):
                 site = web.TCPSite(runner, '0.0.0.0', 0)
@@ -1024,12 +1058,14 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v5.5")
+    logger.info("🚀 تم تشغيل نظام الحظر v5.6")
 
 if __name__ == '__main__':
+    # تهيئة قاعدة البيانات قبل التشغيل
+    asyncio.run(init_db())
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v5.5 متاح على http://0.0.0.0:{port}")
+    print(f"🌐 نظام الحظر v5.6 متاح على http://0.0.0.0:{port}")
     try:
         while True:
             time.sleep(1)
