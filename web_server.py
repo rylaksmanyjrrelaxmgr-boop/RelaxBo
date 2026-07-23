@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 5.1
+نظام الحظر المتطور - الإصدار 5.2 (متكامل مع قاعدة البيانات الفعلية)
 ريلاكس مانيجر · إدارة متقدمة للمستخدمين والقنوات والمجموعات
 """
 
@@ -18,15 +18,20 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
+# ===================== إعدادات قاعدة البيانات =====================
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot_data.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
+# ===================== دوال قاعدة البيانات =====================
+
 async def get_db():
+    """الحصول على اتصال بقاعدة البيانات"""
     conn = await aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
     return conn
 
 async def init_db():
+    """إنشاء الجداول إذا لم تكن موجودة"""
     async with await get_db() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_users (
@@ -156,33 +161,65 @@ async def db_get_block_logs(limit=200, action=None):
         return await cur.fetchall()
 
 async def db_stats():
+    """جلب الإحصائيات الحقيقية من قاعدة البيانات"""
     async with await get_db() as conn:
+        # إجمالي المستخدمين
         total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
+        
+        # المستخدمين المحظورين (من جدول الحظر)
         blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] or 0
+        
+        # القنوات المحظورة
         blocked_channels = (await conn.execute("SELECT COUNT(*) FROM blocked_channels")).fetchone()[0] or 0
+        
+        # المجموعات المحظورة
         blocked_groups = (await conn.execute("SELECT COUNT(*) FROM blocked_groups")).fetchone()[0] or 0
+        
+        # عدد القنوات المضافة (من جدول user_channels)
+        total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
+        
+        # عدد المجموعات المضافة (من جدول bot_groups)
+        total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
+        
+        # عدد المنشورات غير المنشورة
+        pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
+        
+        # حظر اليوم
         today = datetime.utcnow().date().isoformat()
         today_blocks = (await conn.execute(
             "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
             (today,)
         )).fetchone()[0] or 0
+        
+        # جلب قناة التحديثات من الإعدادات
+        updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
+        updates_row = await updates_channel.fetchone()
+        updates_channel = updates_row[0] if updates_row else "غير محددة"
+        
         return {
             'total_users': total_users,
             'blocked_users': blocked_users,
             'blocked_channels': blocked_channels,
             'blocked_groups': blocked_groups,
-            'today_blocks': today_blocks
+            'total_channels': total_channels,
+            'total_groups': total_groups,
+            'pending_posts': pending_posts,
+            'today_blocks': today_blocks,
+            'updates_channel': updates_channel
         }
 
+# ===================== تطبيق الويب =====================
 app = web.Application()
 
-HTML = """
+# ===================== واجهة المستخدم HTML =====================
+
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v5.1</title>
+    <title>نظام الحظر المتطور v5.2</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -193,6 +230,7 @@ HTML = """
             --success: #3fb950;
             --danger: #f85149;
             --warning: #d29922;
+            --info: #58a6ff;
             --text: #c9d1d9;
             --text-muted: #8b949e;
         }
@@ -246,6 +284,8 @@ HTML = """
         }
         .stat-card .num.danger { color: var(--danger); }
         .stat-card .num.success { color: var(--success); }
+        .stat-card .num.warning { color: var(--warning); }
+        .stat-card .num.info { color: var(--info); }
         .stat-card .label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
         .stat-card .icon { font-size: 20px; display: block; margin-bottom: 4px; }
         .tabs {
@@ -413,10 +453,10 @@ HTML = """
         <div class="header">
             <div>
                 <h1>🛡️ نظام الحظر المتطور</h1>
-                <div class="subtitle">ريلاكس مانيجر · الإدارة المتقدمة</div>
+                <div class="subtitle">ريلاكس مانيجر · إدارة متقدمة · الإحصائيات من قاعدة البيانات الفعلية</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span class="version-badge">v5.1</span>
+                <span class="version-badge">v5.2</span>
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <span style="font-size:12px;color:var(--text-muted);" id="lastUpdate"></span>
             </div>
@@ -425,9 +465,11 @@ HTML = """
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><span class="icon">👤</span><div class="num" id="totalUsers">-</div><div class="label">إجمالي المستخدمين</div></div>
             <div class="stat-card"><span class="icon">🚫</span><div class="num danger" id="blockedUsers">-</div><div class="label">مستخدمون محظورون</div></div>
-            <div class="stat-card"><span class="icon">📺</span><div class="num" id="blockedChannels">-</div><div class="label">قنوات محظورة</div></div>
-            <div class="stat-card"><span class="icon">👥</span><div class="num" id="blockedGroups">-</div><div class="label">مجموعات محظورة</div></div>
+            <div class="stat-card"><span class="icon">📺</span><div class="num" id="totalChannels">-</div><div class="label">القنوات المضافة</div></div>
+            <div class="stat-card"><span class="icon">👥</span><div class="num" id="totalGroups">-</div><div class="label">المجموعات المضافة</div></div>
+            <div class="stat-card"><span class="icon">📝</span><div class="num warning" id="pendingPosts">-</div><div class="label">منشورات غير منشورة</div></div>
             <div class="stat-card"><span class="icon">📊</span><div class="num success" id="todayBlocks">-</div><div class="label">حظر اليوم</div></div>
+            <div class="stat-card"><span class="icon">📢</span><div class="num info" id="updatesChannel" style="font-size:18px;">-</div><div class="label">قناة التحديثات</div></div>
         </div>
 
         <div class="tabs">
@@ -559,9 +601,11 @@ HTML = """
                 const stats = await fetchJSON('/api/stats');
                 document.getElementById('totalUsers').textContent = stats.total_users || 0;
                 document.getElementById('blockedUsers').textContent = stats.blocked_users || 0;
-                document.getElementById('blockedChannels').textContent = stats.blocked_channels || 0;
-                document.getElementById('blockedGroups').textContent = stats.blocked_groups || 0;
+                document.getElementById('totalChannels').textContent = stats.total_channels || 0;
+                document.getElementById('totalGroups').textContent = stats.total_groups || 0;
+                document.getElementById('pendingPosts').textContent = stats.pending_posts || 0;
                 document.getElementById('todayBlocks').textContent = stats.today_blocks || 0;
+                document.getElementById('updatesChannel').textContent = stats.updates_channel || 'غير محددة';
                 document.getElementById('lastUpdate').textContent = '🕐 ' + new Date().toLocaleTimeString('ar-EG');
 
                 const filter = document.getElementById('logFilter')?.value || 'all';
@@ -677,11 +721,13 @@ HTML = """
 </html>
 """
 
+# ===================== نقاط النهاية =====================
+
 async def index_handler(request):
-    return web.Response(text=HTML, content_type='text/html')
+    return web.Response(text=HTML_TEMPLATE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.1"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.2"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats())
@@ -752,6 +798,7 @@ async def api_unblock(request):
     except Exception as e:
         return web.json_response({'success': False, 'error': str(e)}, status=500)
 
+# ===================== تسجيل المسارات =====================
 app.router.add_get('/', index_handler)
 app.router.add_get('/panel', index_handler)
 app.router.add_get('/health', health_handler)
@@ -763,7 +810,10 @@ app.router.add_get('/api/block_logs', api_block_logs)
 app.router.add_post('/api/block', api_block)
 app.router.add_post('/api/unblock', api_unblock)
 
+# ===================== تشغيل الخادم =====================
+
 def start_web_server_background(port=None):
+    """تشغيل خادم الويب في خلفية منفصلة"""
     if port is None:
         port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
 
@@ -775,7 +825,7 @@ def start_web_server_background(port=None):
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v5.1 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v5.2 يعمل على http://0.0.0.0:{port}")
         except OSError as e:
             if "address already in use" in str(e):
                 site = web.TCPSite(runner, '0.0.0.0', 0)
@@ -793,12 +843,12 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v5.1")
+    logger.info("🚀 تم تشغيل نظام الحظر v5.2")
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v5.1 متاح على http://0.0.0.0:{port}")
+    print(f"🌐 نظام الحظر v5.2 متاح على http://0.0.0.0:{port}")
     try:
         while True:
             time.sleep(1)
