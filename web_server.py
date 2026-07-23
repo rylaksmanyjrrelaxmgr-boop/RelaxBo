@@ -43,7 +43,7 @@ if ENABLE_2FA and not ADMIN_2FA_SECRET:
 
 SESSION_SECRET = secrets.token_urlsafe(32)
 _sessions = {}
-_SESSION_TIMEOUT = 3600
+_SESSION_TIMEOUT = 3600  # ساعة
 _SERVER_STARTED = False
 _SERVER_LOCK = threading.Lock()
 
@@ -393,7 +393,9 @@ async def auth_middleware(request, handler):
 
 app.middlewares.append(auth_middleware)
 
-LOGIN_PAGE = '''
+# ===================== صفحات HTML =====================
+
+LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -420,9 +422,9 @@ LOGIN_PAGE = '''
     </div>
 </body>
 </html>
-'''
+"""
 
-MAIN_PAGE = '''
+MAIN_PAGE = """
 <!DOCTYPE html>
 <html dir="rtl">
 <head>
@@ -826,7 +828,7 @@ MAIN_PAGE = '''
     </script>
 </body>
 </html>
-'''
+"""
 
 # ===================== نقاط النهاية =====================
 
@@ -961,10 +963,10 @@ async def api_unblock(request):
         return web.json_response({'success': False, 'error': str(e)}, status=500)
 
 # ===================== تسجيل المسارات =====================
+app.router.add_get('/', index_handler)
 app.router.add_get('/login', login_handler)
 app.router.add_post('/login', login_handler)
 app.router.add_get('/logout', logout_handler)
-app.router.add_get('/', index_handler)
 app.router.add_get('/panel', index_handler)
 app.router.add_get('/web', index_handler)
 app.router.add_get('/health', health_handler)
