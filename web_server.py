@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-نظام الحظر المتطور - الإصدار 5.2 (متكامل مع قاعدة البيانات الفعلية)
+نظام الحظر المتطور - الإصدار 5.4 (مع إصلاح الجداول غير الموجودة)
 ريلاكس مانيجر · إدارة متقدمة للمستخدمين والقنوات والمجموعات
 """
 
@@ -18,21 +18,41 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-# ===================== إعدادات قاعدة البيانات =====================
+# ===================== إعدادات =====================
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot_data.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+# ===================== المطور الأساسي =====================
+PRIMARY_OWNER_ID = int(os.getenv('MAIN_ADMIN_ID', 0))
 
 # ===================== دوال قاعدة البيانات =====================
 
 async def get_db():
-    """الحصول على اتصال بقاعدة البيانات"""
     conn = await aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
     return conn
 
-async def init_db():
-    """إنشاء الجداول إذا لم تكن موجودة"""
+async def get_primary_owner():
+    global PRIMARY_OWNER_ID
+    if PRIMARY_OWNER_ID > 0:
+        return PRIMARY_OWNER_ID
     async with await get_db() as conn:
+        cur = await conn.execute("SELECT value FROM settings WHERE key='primary_owner_id'")
+        row = await cur.fetchone()
+        if row:
+            PRIMARY_OWNER_ID = int(row[0])
+            return PRIMARY_OWNER_ID
+    return 0
+
+async def is_admin(user_id: int) -> bool:
+    owner = await get_primary_owner()
+    if user_id == owner:
+        return True
+    return False
+
+async def init_db():
+    async with await get_db() as conn:
+        # جدول المستخدمين المحظورين
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_users (
                 user_id INTEGER PRIMARY KEY,
@@ -43,6 +63,7 @@ async def init_db():
                 severity TEXT DEFAULT 'ban'
             )
         """)
+        # جدول القنوات المحظورة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_channels (
                 channel_id INTEGER PRIMARY KEY,
@@ -51,6 +72,7 @@ async def init_db():
                 blocked_at TIMESTAMP
             )
         """)
+        # جدول المجموعات المحظورة
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_groups (
                 chat_id INTEGER PRIMARY KEY,
@@ -59,6 +81,7 @@ async def init_db():
                 blocked_at TIMESTAMP
             )
         """)
+        # جدول سجل الحظر
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS block_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,96 +145,111 @@ async def db_log_block_action(action, target, admin_id, reason, extra=""):
         )
         await conn.commit()
 
+# دوال لجلب البيانات مع معالجة الجداول غير الموجودة
 async def db_get_blocked_users(limit=100):
-    async with await get_db() as conn:
-        cur = await conn.execute(
-            "SELECT user_id, reason, blocked_by, blocked_at, expires_at, severity FROM blocked_users ORDER BY blocked_at DESC LIMIT ?",
-            (limit,)
-        )
-        return await cur.fetchall()
-
-async def db_get_blocked_channels(limit=100):
-    async with await get_db() as conn:
-        cur = await conn.execute(
-            "SELECT channel_id, reason, blocked_by, blocked_at FROM blocked_channels ORDER BY blocked_at DESC LIMIT ?",
-            (limit,)
-        )
-        return await cur.fetchall()
-
-async def db_get_blocked_groups(limit=100):
-    async with await get_db() as conn:
-        cur = await conn.execute(
-            "SELECT chat_id, reason, blocked_by, blocked_at FROM blocked_groups ORDER BY blocked_at DESC LIMIT ?",
-            (limit,)
-        )
-        return await cur.fetchall()
-
-async def db_get_block_logs(limit=200, action=None):
-    async with await get_db() as conn:
-        if action:
+    try:
+        async with await get_db() as conn:
             cur = await conn.execute(
-                "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs WHERE action=? ORDER BY created_at DESC LIMIT ?",
-                (action, limit)
-            )
-        else:
-            cur = await conn.execute(
-                "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs ORDER BY created_at DESC LIMIT ?",
+                "SELECT user_id, reason, blocked_by, blocked_at, expires_at, severity FROM blocked_users ORDER BY blocked_at DESC LIMIT ?",
                 (limit,)
             )
-        return await cur.fetchall()
+            return await cur.fetchall()
+    except Exception as e:
+        logger.warning(f"خطأ في جلب المستخدمين المحظورين: {e}")
+        return []
+
+async def db_get_blocked_channels(limit=100):
+    try:
+        async with await get_db() as conn:
+            cur = await conn.execute(
+                "SELECT channel_id, reason, blocked_by, blocked_at FROM blocked_channels ORDER BY blocked_at DESC LIMIT ?",
+                (limit,)
+            )
+            return await cur.fetchall()
+    except Exception as e:
+        logger.warning(f"خطأ في جلب القنوات المحظورة: {e}")
+        return []
+
+async def db_get_blocked_groups(limit=100):
+    try:
+        async with await get_db() as conn:
+            cur = await conn.execute(
+                "SELECT chat_id, reason, blocked_by, blocked_at FROM blocked_groups ORDER BY blocked_at DESC LIMIT ?",
+                (limit,)
+            )
+            return await cur.fetchall()
+    except Exception as e:
+        logger.warning(f"خطأ في جلب المجموعات المحظورة: {e}")
+        return []
+
+async def db_get_block_logs(limit=200, action=None):
+    try:
+        async with await get_db() as conn:
+            if action:
+                cur = await conn.execute(
+                    "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs WHERE action=? ORDER BY created_at DESC LIMIT ?",
+                    (action, limit)
+                )
+            else:
+                cur = await conn.execute(
+                    "SELECT id, action, target, admin_id, reason, extra, created_at FROM block_logs ORDER BY created_at DESC LIMIT ?",
+                    (limit,)
+                )
+            return await cur.fetchall()
+    except Exception as e:
+        logger.warning(f"خطأ في جلب سجل الحظر: {e}")
+        return []
 
 async def db_stats():
-    """جلب الإحصائيات الحقيقية من قاعدة البيانات"""
-    async with await get_db() as conn:
-        # إجمالي المستخدمين
-        total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
-        
-        # المستخدمين المحظورين (من جدول الحظر)
-        blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] or 0
-        
-        # القنوات المحظورة
-        blocked_channels = (await conn.execute("SELECT COUNT(*) FROM blocked_channels")).fetchone()[0] or 0
-        
-        # المجموعات المحظورة
-        blocked_groups = (await conn.execute("SELECT COUNT(*) FROM blocked_groups")).fetchone()[0] or 0
-        
-        # عدد القنوات المضافة (من جدول user_channels)
-        total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
-        
-        # عدد المجموعات المضافة (من جدول bot_groups)
-        total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
-        
-        # عدد المنشورات غير المنشورة
-        pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
-        
-        # حظر اليوم
-        today = datetime.utcnow().date().isoformat()
-        today_blocks = (await conn.execute(
-            "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
-            (today,)
-        )).fetchone()[0] or 0
-        
-        # جلب قناة التحديثات من الإعدادات
-        updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
-        updates_row = await updates_channel.fetchone()
-        updates_channel = updates_row[0] if updates_row else "غير محددة"
-        
+    try:
+        async with await get_db() as conn:
+            total_users = (await conn.execute("SELECT COUNT(*) FROM users")).fetchone()[0] or 0
+            blocked_users = (await conn.execute("SELECT COUNT(*) FROM blocked_users")).fetchone()[0] or 0
+            blocked_channels = (await conn.execute("SELECT COUNT(*) FROM blocked_channels")).fetchone()[0] or 0
+            blocked_groups = (await conn.execute("SELECT COUNT(*) FROM blocked_groups")).fetchone()[0] or 0
+            total_channels = (await conn.execute("SELECT COUNT(*) FROM user_channels")).fetchone()[0] or 0
+            total_groups = (await conn.execute("SELECT COUNT(*) FROM bot_groups")).fetchone()[0] or 0
+            pending_posts = (await conn.execute("SELECT COUNT(*) FROM posts WHERE published=0")).fetchone()[0] or 0
+            
+            today = datetime.utcnow().date().isoformat()
+            today_blocks = (await conn.execute(
+                "SELECT COUNT(*) FROM block_logs WHERE DATE(created_at)=?",
+                (today,)
+            )).fetchone()[0] or 0
+            
+            updates_channel = await conn.execute("SELECT value FROM settings WHERE key='updates_channel'")
+            updates_row = await updates_channel.fetchone()
+            updates_channel = updates_row[0] if updates_row else "غير محددة"
+            
+            return {
+                'total_users': total_users,
+                'blocked_users': blocked_users,
+                'blocked_channels': blocked_channels,
+                'blocked_groups': blocked_groups,
+                'total_channels': total_channels,
+                'total_groups': total_groups,
+                'pending_posts': pending_posts,
+                'today_blocks': today_blocks,
+                'updates_channel': updates_channel
+            }
+    except Exception as e:
+        logger.error(f"خطأ في جلب الإحصائيات: {e}")
         return {
-            'total_users': total_users,
-            'blocked_users': blocked_users,
-            'blocked_channels': blocked_channels,
-            'blocked_groups': blocked_groups,
-            'total_channels': total_channels,
-            'total_groups': total_groups,
-            'pending_posts': pending_posts,
-            'today_blocks': today_blocks,
-            'updates_channel': updates_channel
+            'total_users': 0,
+            'blocked_users': 0,
+            'blocked_channels': 0,
+            'blocked_groups': 0,
+            'total_channels': 0,
+            'total_groups': 0,
+            'pending_posts': 0,
+            'today_blocks': 0,
+            'updates_channel': 'غير محددة'
         }
 
 # ===================== تطبيق الويب =====================
 app = web.Application()
 
-# ===================== واجهة المستخدم HTML =====================
+# ===================== واجهة المستخدم =====================
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -219,7 +257,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام الحظر المتطور v5.2</title>
+    <title>نظام الحظر المتطور v5.4</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -453,10 +491,10 @@ HTML_TEMPLATE = """
         <div class="header">
             <div>
                 <h1>🛡️ نظام الحظر المتطور</h1>
-                <div class="subtitle">ريلاكس مانيجر · إدارة متقدمة · الإحصائيات من قاعدة البيانات الفعلية</div>
+                <div class="subtitle">ريلاكس مانيجر · المطور الأساسي فقط يمكنه الحظر</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span class="version-badge">v5.2</span>
+                <span class="version-badge">v5.4</span>
                 <button class="btn btn-primary" onclick="refreshData()">🔄 تحديث</button>
                 <span style="font-size:12px;color:var(--text-muted);" id="lastUpdate"></span>
             </div>
@@ -727,7 +765,7 @@ async def index_handler(request):
     return web.Response(text=HTML_TEMPLATE, content_type='text/html')
 
 async def health_handler(request):
-    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.2"})
+    return web.json_response({"status": "ok", "timestamp": time.time(), "version": "5.4"})
 
 async def stats_handler(request):
     return web.json_response(await db_stats())
@@ -747,6 +785,10 @@ async def api_block_logs(request):
 
 async def api_block(request):
     try:
+        user_id = int(request.headers.get('X-User-ID', 0))
+        if not await is_admin(user_id):
+            return web.json_response({'success': False, 'error': 'غير مصرح: المطور الأساسي فقط'}, status=403)
+        
         data = await request.json()
         t = data.get('type')
         target = data.get('id')
@@ -758,14 +800,14 @@ async def api_block(request):
             return web.json_response({'success': False, 'error': 'بيانات ناقصة'}, status=400)
 
         if t == 'user':
-            await db_block_user(target, reason, 1, severity, duration)
-            await db_log_block_action('BLOCK_USER', target, 1, reason, f"severity:{severity},duration:{duration}")
+            await db_block_user(target, reason, user_id, severity, duration)
+            await db_log_block_action('BLOCK_USER', target, user_id, reason, f"severity:{severity},duration:{duration}")
         elif t == 'channel':
-            await db_block_channel(target, reason, 1)
-            await db_log_block_action('BLOCK_CHANNEL', target, 1, reason, f"severity:{severity}")
+            await db_block_channel(target, reason, user_id)
+            await db_log_block_action('BLOCK_CHANNEL', target, user_id, reason, f"severity:{severity}")
         elif t == 'group':
-            await db_block_group(target, reason, 1)
-            await db_log_block_action('BLOCK_GROUP', target, 1, reason, f"severity:{severity}")
+            await db_block_group(target, reason, user_id)
+            await db_log_block_action('BLOCK_GROUP', target, user_id, reason, f"severity:{severity}")
         else:
             return web.json_response({'success': False, 'error': 'نوع غير صالح'}, status=400)
 
@@ -775,6 +817,10 @@ async def api_block(request):
 
 async def api_unblock(request):
     try:
+        user_id = int(request.headers.get('X-User-ID', 0))
+        if not await is_admin(user_id):
+            return web.json_response({'success': False, 'error': 'غير مصرح: المطور الأساسي فقط'}, status=403)
+        
         data = await request.json()
         t = data.get('type')
         target = data.get('id')
@@ -784,13 +830,13 @@ async def api_unblock(request):
 
         if t == 'user':
             await db_unblock_user(target)
-            await db_log_block_action('UNBLOCK_USER', target, 1, 'إلغاء حظر')
+            await db_log_block_action('UNBLOCK_USER', target, user_id, 'إلغاء حظر')
         elif t == 'channel':
             await db_unblock_channel(target)
-            await db_log_block_action('UNBLOCK_CHANNEL', target, 1, 'إلغاء حظر')
+            await db_log_block_action('UNBLOCK_CHANNEL', target, user_id, 'إلغاء حظر')
         elif t == 'group':
             await db_unblock_group(target)
-            await db_log_block_action('UNBLOCK_GROUP', target, 1, 'إلغاء حظر')
+            await db_log_block_action('UNBLOCK_GROUP', target, user_id, 'إلغاء حظر')
         else:
             return web.json_response({'success': False, 'error': 'نوع غير صالح'}, status=400)
 
@@ -813,7 +859,6 @@ app.router.add_post('/api/unblock', api_unblock)
 # ===================== تشغيل الخادم =====================
 
 def start_web_server_background(port=None):
-    """تشغيل خادم الويب في خلفية منفصلة"""
     if port is None:
         port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
 
@@ -825,7 +870,7 @@ def start_web_server_background(port=None):
         try:
             site = web.TCPSite(runner, '0.0.0.0', port)
             loop.run_until_complete(site.start())
-            logger.info(f"✅ نظام الحظر v5.2 يعمل على http://0.0.0.0:{port}")
+            logger.info(f"✅ نظام الحظر v5.4 يعمل على http://0.0.0.0:{port}")
         except OSError as e:
             if "address already in use" in str(e):
                 site = web.TCPSite(runner, '0.0.0.0', 0)
@@ -843,12 +888,12 @@ def start_web_server_background(port=None):
             loop.close()
 
     threading.Thread(target=run, daemon=True).start()
-    logger.info("🚀 تم تشغيل نظام الحظر v5.2")
+    logger.info("🚀 تم تشغيل نظام الحظر v5.4")
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', os.getenv('WEB_PORT', 10000)))
     start_web_server_background(port)
-    print(f"🌐 نظام الحظر v5.2 متاح على http://0.0.0.0:{port}")
+    print(f"🌐 نظام الحظر v5.4 متاح على http://0.0.0.0:{port}")
     try:
         while True:
             time.sleep(1)
