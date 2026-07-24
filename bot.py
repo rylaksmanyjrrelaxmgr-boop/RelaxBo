@@ -13476,7 +13476,9 @@ async def main():
     print("   • ✅ تعطيل start_web_server والاكتفاء بـ import_web_server")
     print("   • ✅ إضافة الجداول المفقودة: blocked_users, blocked_channels, blocked_groups, block_logs")
     print("   • ✅ إضافة دوال is_bot_admin, add_bot_admin, remove_bot_admin, get_all_bot_admins")
-
+    print(f"📁 مسار قاعدة البيانات: {DB_PATH}")
+    print(f"📁 هل المجلد موجود؟ {DB_PATH.parent.exists()}")
+    print(f"📁 هل يمكن الكتابة؟ {os.access(str(DB_PATH.parent), os.W_OK)}")
     try:
         await application.run_polling(
             drop_pending_updates=True,
