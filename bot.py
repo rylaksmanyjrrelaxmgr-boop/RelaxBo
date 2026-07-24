@@ -11979,7 +11979,65 @@ async def init_db_improved():
 # ============================================================
 # ===================== الوظيفة الرئيسية =====================
 # ============================================================
+# ===================== معالج الأخطاء العالمي =====================
+async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        error = context.error
+        error_id = advanced_logger.log_error("خطأ في تحديث", error, {
+            'user_id': update.effective_user.id if update and update.effective_user else None,
+            'chat_id': update.effective_chat.id if update and update.effective_chat else None,
+            'message': update.effective_message.text if update and update.effective_message else None
+        })
 
+        if isinstance(error, Conflict):
+            logger.warning(f"⚠️ تعارض في التحديثات (Conflict): {error}")
+            return
+
+        if isinstance(error, Forbidden):
+            logger.warning(f"⚠️ البوت محظور أو ليس لديه صلاحيات: {error}")
+            if update and update.effective_chat:
+                try:
+                    await context.bot.send_message(
+                        chat_id=PRIMARY_OWNER_ID,
+                        text=f"⚠️ **البوت محظور أو ليس لديه صلاحيات في:**\n{update.effective_chat.title}\nID: `{update.effective_chat.id}`"
+                    )
+                except:
+                    pass
+            return
+
+        if isinstance(error, TimedOut):
+            logger.warning(f"⏱️ انتهت المهلة: {error}")
+            return
+
+        if update and update.effective_user and context and context.bot:
+            try:
+                await safe_send_markdown(
+                    context.bot,
+                    update.effective_user.id,
+                    f"❌ حدث خطأ:\n`{str(error)[:300]}`\n(الرمز: `{error_id}`)"
+                )
+            except Exception as e:
+                logger.error(f"فشل إرسال رسالة الخطأ للمستخدم: {e}")
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_user.id,
+                        text=f"❌ خطأ: `{str(error)[:300]}` (كود: {error_id})"
+                    )
+                except:
+                    pass
+
+        if PRIMARY_OWNER_ID and context and context.bot:
+            try:
+                error_text = f"🚨 **خطأ في البوت** (الرمز: {error_id})\n\n"
+                error_text += f"📌 المستخدم: {update.effective_user.id if update and update.effective_user else 'غير معروف'}\n"
+                error_text += f"⚠️ الخطأ: `{str(error)[:300]}`\n"
+                if update and update.effective_message and update.effective_message.text:
+                    error_text += f"📝 الرسالة: `{update.effective_message.text[:100]}`\n"
+                await context.bot.send_message(PRIMARY_OWNER_ID, error_text, parse_mode="MarkdownV2")
+            except Exception as e:
+                logger.error(f"فشل إرسال إشعار الخطأ للمطور: {e}")
+    except Exception as e:
+        logger.error(f"فشل معالج الأخطاء نفسه: {e}")
 async def main():
     await init_db_improved()
 
