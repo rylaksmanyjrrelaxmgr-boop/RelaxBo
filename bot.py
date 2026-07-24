@@ -1,36 +1,9 @@
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-24 01:49:15
-# SIGNATURE: 605808449c18295e
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-23 17:38:13
-# SIGNATURE: d3fb90a7bdbd3786
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
-# ============================================================
-# ORIGINAL_OWNER: 8290212138
-# GENERATED_AT: 2026-07-23 14:38:57
-# SIGNATURE: c41959c0f42fc23f
-# ============================================================
-# ⚠️ تحذير: هذا الكود يحتوي على معلومات حساسة
-# لا تشاركه مع أي شخص غير موثوق
-# ============================================================
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 ريلاكس مانيجر - بوت متكامل لإدارة القنوات والمجموعات
-الإصدار: 19.3.3 - إضافة أزرار حذف الفيديوهات ورسائل الخدمة والملفات والملصقات
+الإصدار: 19.3.4 - تحسينات إضافية
 المطور: @RelaxMgr
 """
 
@@ -183,6 +156,7 @@ ensure_package("reportlab")
 ensure_package("jinja2")
 ensure_package("markdown")
 ensure_package("python-multipart", "multipart")
+ensure_package("aioredis")
 
 # محاولة تثبيت المكتبات الاختيارية
 PYOTP_AVAILABLE = ensure_package("pyotp")
@@ -2490,6 +2464,11 @@ class CallbackData:
     SECURITY_DELETE_SERVICE_PREFIX = "security:delete_service:"
     SECURITY_DELETE_DOCUMENTS_PREFIX = "security:delete_documents:"
     SECURITY_DELETE_STICKERS_PREFIX = "security:delete_stickers:"
+    SECURITY_DELETE_AUDIO_PREFIX = "security:delete_audio:"
+    SECURITY_DELETE_ANIMATION_PREFIX = "security:delete_animation:"
+    SECURITY_ENABLE_ALL_PREFIX = "security:enable_all:"
+    SECURITY_DISABLE_ALL_PREFIX = "security:disable_all:"
+    SECURITY_DELETE_PENALTY_PREFIX = "security:delete_penalty:"
 # ===================== نظام إدارة الحالات المتقدم =====================
 class UserState(Enum):
     NONE = auto()
@@ -3052,9 +3031,13 @@ async def db_get_security_settings(chat_id: int):
         'goodbye_enabled': False, 'goodbye_text': "وداعاً {user} 👋",
         'delete_banned_words': False, 'auto_penalty': 'none', 'auto_mute_duration': 60,
         'delete_videos': False,
+        'delete_audio': False,
+        'delete_animation': False,
         'delete_service': False,
         'delete_documents': False,
-        'delete_stickers': False
+        'delete_stickers': False,
+        'delete_penalty': 'none',
+        'delete_penalty_duration': 0
     }
 
     if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
@@ -3062,34 +3045,41 @@ async def db_get_security_settings(chat_id: int):
 
     try:
         async def _get(conn):
+            conn.row_factory = aiosqlite.Row
             cur = await conn.execute(
                 """SELECT delete_links, delete_mentions, warn_message, slow_mode,
                           slow_mode_seconds, welcome_enabled, welcome_text,
                           goodbye_enabled, goodbye_text, delete_banned_words,
                           auto_penalty, auto_mute_duration,
-                          delete_videos, delete_service, delete_documents, delete_stickers
+                          delete_videos, delete_audio, delete_animation,
+                          delete_service, delete_documents, delete_stickers,
+                          delete_penalty, delete_penalty_duration
                    FROM group_security WHERE chat_id=?""",
                 (chat_id,)
             )
             row = await cur.fetchone()
             if row:
                 settings = {
-                    'links': row[0] == 1,
-                    'mentions': row[1] == 1,
-                    'warn': row[2] == 1,
-                    'slow_mode': row[3] == 1,
-                    'slow_mode_seconds': row[4] if row[4] is not None else 5,
-                    'welcome_enabled': row[5] == 1,
-                    'welcome_text': row[6] if row[6] else default_settings['welcome_text'],
-                    'goodbye_enabled': row[7] == 1,
-                    'goodbye_text': row[8] if row[8] else default_settings['goodbye_text'],
-                    'delete_banned_words': row[9] == 1,
-                    'auto_penalty': row[10] if row[10] else 'none',
-                    'auto_mute_duration': row[11] if row[11] is not None else 60,
-                    'delete_videos': row[12] == 1 if len(row) > 12 else False,
-                    'delete_service': row[13] == 1 if len(row) > 13 else False,
-                    'delete_documents': row[14] == 1 if len(row) > 14 else False,
-                    'delete_stickers': row[15] == 1 if len(row) > 15 else False
+                    'links': row['delete_links'] == 1,
+                    'mentions': row['delete_mentions'] == 1,
+                    'warn': row['warn_message'] == 1,
+                    'slow_mode': row['slow_mode'] == 1,
+                    'slow_mode_seconds': row['slow_mode_seconds'] if row['slow_mode_seconds'] is not None else 5,
+                    'welcome_enabled': row['welcome_enabled'] == 1,
+                    'welcome_text': row['welcome_text'] if row['welcome_text'] else default_settings['welcome_text'],
+                    'goodbye_enabled': row['goodbye_enabled'] == 1,
+                    'goodbye_text': row['goodbye_text'] if row['goodbye_text'] else default_settings['goodbye_text'],
+                    'delete_banned_words': row['delete_banned_words'] == 1,
+                    'auto_penalty': row['auto_penalty'] if row['auto_penalty'] else 'none',
+                    'auto_mute_duration': row['auto_mute_duration'] if row['auto_mute_duration'] is not None else 60,
+                    'delete_videos': row['delete_videos'] == 1 if 'delete_videos' in row else False,
+                    'delete_audio': row['delete_audio'] == 1 if 'delete_audio' in row else False,
+                    'delete_animation': row['delete_animation'] == 1 if 'delete_animation' in row else False,
+                    'delete_service': row['delete_service'] == 1 if 'delete_service' in row else False,
+                    'delete_documents': row['delete_documents'] == 1 if 'delete_documents' in row else False,
+                    'delete_stickers': row['delete_stickers'] == 1 if 'delete_stickers' in row else False,
+                    'delete_penalty': row['delete_penalty'] if 'delete_penalty' in row else 'none',
+                    'delete_penalty_duration': row['delete_penalty_duration'] if 'delete_penalty_duration' in row else 0
                 }
                 if CACHETOOLS_AVAILABLE:
                     _security_cache[chat_id] = settings
@@ -3100,11 +3090,13 @@ async def db_get_security_settings(chat_id: int):
                    (chat_id, delete_links, delete_mentions, warn_message, slow_mode,
                     slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled,
                     goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration,
-                    delete_videos, delete_service, delete_documents, delete_stickers)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    delete_videos, delete_audio, delete_animation,
+                    delete_service, delete_documents, delete_stickers,
+                    delete_penalty, delete_penalty_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (chat_id, 0, 0, 1, 0, 5, 0, default_settings['welcome_text'],
                  0, default_settings['goodbye_text'], 0, 'none', 60,
-                 0, 0, 0, 0)
+                 0, 0, 0, 0, 0, 0, 'none', 0)
             )
             await conn.commit()
             if CACHETOOLS_AVAILABLE:
@@ -3162,6 +3154,12 @@ async def db_set_security_settings(chat_id: int, **kwargs):
                 elif key == 'delete_videos':
                     updates.append("delete_videos=?")
                     values.append(1 if value else 0)
+                elif key == 'delete_audio':
+                    updates.append("delete_audio=?")
+                    values.append(1 if value else 0)
+                elif key == 'delete_animation':
+                    updates.append("delete_animation=?")
+                    values.append(1 if value else 0)
                 elif key == 'delete_service':
                     updates.append("delete_service=?")
                     values.append(1 if value else 0)
@@ -3171,14 +3169,26 @@ async def db_set_security_settings(chat_id: int, **kwargs):
                 elif key == 'delete_stickers':
                     updates.append("delete_stickers=?")
                     values.append(1 if value else 0)
+                elif key == 'delete_penalty':
+                    updates.append("delete_penalty=?")
+                    values.append(value)
+                elif key == 'delete_penalty_duration':
+                    updates.append("delete_penalty_duration=?")
+                    values.append(value)
             if updates:
                 query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id=?"
                 values.append(chat_id)
                 await conn.execute(query, values)
         else:
             await conn.execute(
-                """INSERT INTO group_security (chat_id, delete_links, delete_mentions, warn_message, slow_mode, slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled, goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration, delete_videos, delete_service, delete_documents, delete_stickers)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO group_security
+                   (chat_id, delete_links, delete_mentions, warn_message, slow_mode,
+                    slow_mode_seconds, welcome_enabled, welcome_text, goodbye_enabled,
+                    goodbye_text, delete_banned_words, auto_penalty, auto_mute_duration,
+                    delete_videos, delete_audio, delete_animation,
+                    delete_service, delete_documents, delete_stickers,
+                    delete_penalty, delete_penalty_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (chat_id,
                   1 if kwargs.get('links', False) else 0,
                   1 if kwargs.get('mentions', False) else 0,
@@ -3193,14 +3203,23 @@ async def db_set_security_settings(chat_id: int, **kwargs):
                   kwargs.get('auto_penalty', 'none'),
                   kwargs.get('auto_mute_duration', 60),
                   1 if kwargs.get('delete_videos', False) else 0,
+                  1 if kwargs.get('delete_audio', False) else 0,
+                  1 if kwargs.get('delete_animation', False) else 0,
                   1 if kwargs.get('delete_service', False) else 0,
                   1 if kwargs.get('delete_documents', False) else 0,
-                  1 if kwargs.get('delete_stickers', False) else 0)
+                  1 if kwargs.get('delete_stickers', False) else 0,
+                  kwargs.get('delete_penalty', 'none'),
+                  kwargs.get('delete_penalty_duration', 0)
+                )
             )
         await conn.commit()
         if CACHETOOLS_AVAILABLE and chat_id in _security_cache:
             del _security_cache[chat_id]
     return await execute_db(_set)
+
+async def db_get_delete_settings(chat_id: int) -> dict:
+    settings = await db_get_security_settings(chat_id)
+    return {k: v for k, v in settings.items() if k.startswith('delete_')}
 
 async def db_check_slow_mode(chat_id: int, user_id: int) -> bool:
     settings = await db_get_security_settings(chat_id)
@@ -4971,6 +4990,33 @@ async def apply_penalty(bot, chat_id, user_id, settings):
         duration = settings.get('auto_mute_duration', 60)
         await execute_mute(bot, chat_id, user_id, duration, "مخالفة قواعد المجموعة")
 
+async def delete_and_penalize(update: Update, context: ContextTypes.DEFAULT_TYPE, warning_text: str):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    try:
+        await update.message.delete()
+        await safe_send_markdown(context.bot, chat_id, f"{warning_text}\n@{user.username or str(user.id)}")
+    except Exception as e:
+        logger.warning(f"فشل الحذف أو الإرسال: {e}")
+    settings = await db_get_security_settings(chat_id)
+    penalty = settings.get('delete_penalty', settings.get('auto_penalty', 'none'))
+    if penalty != 'none':
+        duration = settings.get('delete_penalty_duration', settings.get('auto_mute_duration', 60))
+        await apply_penalty_with_duration(context.bot, chat_id, user.id, penalty, duration)
+
+async def apply_penalty_with_duration(bot, chat_id, user_id, penalty, duration):
+    if penalty == 'kick':
+        await execute_kick(bot, chat_id, user_id)
+    elif penalty == 'ban':
+        await execute_ban(bot, chat_id, user_id)
+    elif penalty == 'mute':
+        await execute_mute(bot, chat_id, user_id, duration)
+
+def is_service_message(message) -> bool:
+    return (message.service_message or message.new_chat_members or message.left_chat_member or
+            message.new_chat_photo or message.delete_chat_photo or message.group_chat_created or
+            message.supergroup_chat_created or message.channel_chat_created or message.pinned_message)
+
 # ===================== دوال الإجراءات المتقدمة =====================
 async def execute_ban(bot, chat_id: int, user_id: int, until_date=None, reason: str = "", moderator_id: int = None):
     try:
@@ -5289,12 +5335,17 @@ def security_keyboard(chat_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("@ حذف المعرفات", callback_data=f"{CallbackData.SECURITY_MENTIONS_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🚫 كلمات محظورة", callback_data=f"{CallbackData.SECURITY_BANNED_WORDS_MENU_PREFIX}{chat_id}"),
          InlineKeyboardButton("⏱️ الوضع البطيء", callback_data=f"{CallbackData.SECURITY_SLOWMODE_PREFIX}{chat_id}")],
-        [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"),
-         InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("🎬 حذف الفيديوهات", callback_data=f"{CallbackData.SECURITY_DELETE_VIDEOS_PREFIX}{chat_id}"),
          InlineKeyboardButton("🛠️ حذف رسائل الخدمة", callback_data=f"{CallbackData.SECURITY_DELETE_SERVICE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("📄 حذف الملفات", callback_data=f"{CallbackData.SECURITY_DELETE_DOCUMENTS_PREFIX}{chat_id}"),
          InlineKeyboardButton("🖼️ حذف الملصقات", callback_data=f"{CallbackData.SECURITY_DELETE_STICKERS_PREFIX}{chat_id}")],
+        [InlineKeyboardButton("🎵 حذف الصوتيات", callback_data=f"{CallbackData.SECURITY_DELETE_AUDIO_PREFIX}{chat_id}"),
+         InlineKeyboardButton("🎞️ حذف المتحركات", callback_data=f"{CallbackData.SECURITY_DELETE_ANIMATION_PREFIX}{chat_id}")],
+        [InlineKeyboardButton("⚡ تفعيل الكل", callback_data=f"{CallbackData.SECURITY_ENABLE_ALL_PREFIX}{chat_id}"),
+         InlineKeyboardButton("⛔ تعطيل الكل", callback_data=f"{CallbackData.SECURITY_DISABLE_ALL_PREFIX}{chat_id}")],
+        [InlineKeyboardButton("⚖️ عقوبة الحذف", callback_data=f"{CallbackData.SECURITY_DELETE_PENALTY_PREFIX}{chat_id}")],
+        [InlineKeyboardButton("🎯 الترحيب", callback_data=f"{CallbackData.SECURITY_WELCOME_PREFIX}{chat_id}"),
+         InlineKeyboardButton("👋 الوداع", callback_data=f"{CallbackData.SECURITY_GOODBYE_PREFIX}{chat_id}")],
         [InlineKeyboardButton("⚖️ تحديد العقوبة", callback_data=f"{CallbackData.PENALTY_MENU}:{chat_id}"),
          InlineKeyboardButton("📝 إعدادات الردود", callback_data=CallbackData.ADMIN_AUTO_REPLY)],
         [InlineKeyboardButton("🛠️ إجراءات متقدمة", callback_data=f"{CallbackData.ADVANCED_ACTIONS}:{chat_id}")],
@@ -6100,6 +6151,8 @@ async def group_settings_callback(update: Update, context: ContextTypes.DEFAULT_
         text += f"👋 رسالة وداع: {'✅' if settings.get('goodbye_enabled', False) else '❌'}\n"
         text += f"🔊 رسالة تحذير: {'✅' if settings.get('warn', True) else '❌'}\n"
         text += f"🎬 حذف الفيديوهات: {'✅' if settings.get('delete_videos', False) else '❌'}\n"
+        text += f"🎵 حذف الصوتيات: {'✅' if settings.get('delete_audio', False) else '❌'}\n"
+        text += f"🎞️ حذف المتحركات: {'✅' if settings.get('delete_animation', False) else '❌'}\n"
         text += f"🛠️ حذف رسائل الخدمة: {'✅' if settings.get('delete_service', False) else '❌'}\n"
         text += f"📄 حذف الملفات: {'✅' if settings.get('delete_documents', False) else '❌'}\n"
         text += f"🖼️ حذف الملصقات: {'✅' if settings.get('delete_stickers', False) else '❌'}\n"
@@ -6521,75 +6574,24 @@ async def security_banned_words_menu_callback(update: Update, context: ContextTy
 # ===================== معالجات الكولباك الجديدة لحذف الفيديوهات ورسائل الخدمة والملفات والملصقات =====================
 
 async def security_delete_videos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    uid = update.effective_user.id
-    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
-    if not chat_id:
-        return
-    if not await is_authorized_in_group(context.bot, chat_id, uid):
-        if query:
-            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
-        else:
-            await update.message.reply_text(get_text(uid, 'admin_only'))
-        return
-    settings = await db_get_security_settings(chat_id)
-    settings['delete_videos'] = not settings.get('delete_videos', False)
-    await db_set_security_settings(chat_id, **settings)
-    if query:
-        await query.edit_message_text(get_text(uid, 'updated'))
-    else:
-        await update.message.reply_text(get_text(uid, 'updated'))
-    await group_settings_callback(update, context)
+    await security_toggle_helper(update, context, 'delete_videos')
 
 async def security_delete_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    uid = update.effective_user.id
-    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
-    if not chat_id:
-        return
-    if not await is_authorized_in_group(context.bot, chat_id, uid):
-        if query:
-            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
-        else:
-            await update.message.reply_text(get_text(uid, 'admin_only'))
-        return
-    settings = await db_get_security_settings(chat_id)
-    settings['delete_service'] = not settings.get('delete_service', False)
-    await db_set_security_settings(chat_id, **settings)
-    if query:
-        await query.edit_message_text(get_text(uid, 'updated'))
-    else:
-        await update.message.reply_text(get_text(uid, 'updated'))
-    await group_settings_callback(update, context)
+    await security_toggle_helper(update, context, 'delete_service')
 
 async def security_delete_documents_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-    uid = update.effective_user.id
-    chat_id = int(query.data.split(":")[-1]) if query else context.user_data.get('security_chat_id')
-    if not chat_id:
-        return
-    if not await is_authorized_in_group(context.bot, chat_id, uid):
-        if query:
-            await query.answer(get_text(uid, 'admin_only'), show_alert=True)
-        else:
-            await update.message.reply_text(get_text(uid, 'admin_only'))
-        return
-    settings = await db_get_security_settings(chat_id)
-    settings['delete_documents'] = not settings.get('delete_documents', False)
-    await db_set_security_settings(chat_id, **settings)
-    if query:
-        await query.edit_message_text(get_text(uid, 'updated'))
-    else:
-        await update.message.reply_text(get_text(uid, 'updated'))
-    await group_settings_callback(update, context)
+    await security_toggle_helper(update, context, 'delete_documents')
 
 async def security_delete_stickers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await security_toggle_helper(update, context, 'delete_stickers')
+
+async def security_delete_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await security_toggle_helper(update, context, 'delete_audio')
+
+async def security_delete_animation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await security_toggle_helper(update, context, 'delete_animation')
+
+async def security_toggle_helper(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     query = update.callback_query
     if query:
         await query.answer()
@@ -6604,7 +6606,7 @@ async def security_delete_stickers_callback(update: Update, context: ContextType
             await update.message.reply_text(get_text(uid, 'admin_only'))
         return
     settings = await db_get_security_settings(chat_id)
-    settings['delete_stickers'] = not settings.get('delete_stickers', False)
+    settings[key] = not settings.get(key, False)
     await db_set_security_settings(chat_id, **settings)
     if query:
         await query.edit_message_text(get_text(uid, 'updated'))
@@ -6612,6 +6614,62 @@ async def security_delete_stickers_callback(update: Update, context: ContextType
         await update.message.reply_text(get_text(uid, 'updated'))
     await group_settings_callback(update, context)
 
+async def security_enable_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await security_bulk_toggle(update, context, True)
+
+async def security_disable_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await security_bulk_toggle(update, context, False)
+
+async def security_bulk_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE, enabled: bool):
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user_id = update.effective_user.id
+    chat_id = int(query.data.split(":")[-1])
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+        return
+    keys = ['delete_videos', 'delete_audio', 'delete_animation', 'delete_service', 'delete_documents', 'delete_stickers']
+    settings = await db_get_security_settings(chat_id)
+    for key in keys:
+        settings[key] = enabled
+    await db_set_security_settings(chat_id, **settings)
+    await query.edit_message_text(get_text(user_id, 'updated'))
+    await group_settings_callback(update, context)
+
+async def security_delete_penalty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split(":")[-1])
+    user_id = update.effective_user.id
+    if not await is_authorized_in_group(context.bot, chat_id, user_id):
+        await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 لا شيء", callback_data=f"set_delete_penalty:none:{chat_id}"),
+         InlineKeyboardButton("👢 طرد", callback_data=f"set_delete_penalty:kick:{chat_id}")],
+        [InlineKeyboardButton("🛑 حظر", callback_data=f"set_delete_penalty:ban:{chat_id}"),
+         InlineKeyboardButton("🔇 كتم", callback_data=f"set_delete_penalty:mute:{chat_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CallbackData.GROUPS_SETTINGS_PREFIX}{chat_id}")]
+    ])
+    await query.edit_message_text("⚖️ **اختر عقوبة حذف المحتوى**", reply_markup=keyboard)
+
+async def set_delete_penalty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) == 3:
+        penalty = parts[1]
+        chat_id = int(parts[2])
+        user_id = update.effective_user.id
+        if not await is_authorized_in_group(context.bot, chat_id, user_id):
+            await query.answer(get_text(user_id, 'admin_only'), show_alert=True)
+            return
+        await db_set_security_settings(chat_id, delete_penalty=penalty, delete_penalty_duration=60)
+        await query.edit_message_text(f"✅ تم تعيين عقوبة الحذف إلى: {penalty}")
+        await group_settings_callback(update, context)
+
+# ===================== معالجات الكولباك للترحيب والوداع =====================
 async def security_welcome_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -6716,11 +6774,14 @@ async def security_select_group_callback(update: Update, context: ContextTypes.D
 👋 وداع: {'✅' if settings['goodbye_enabled'] else '❌'}
 🔊 تحذير: {'✅' if settings['warn'] else '❌'}
 🎬 حذف الفيديوهات: {'✅' if settings.get('delete_videos', False) else '❌'}
+🎵 حذف الصوتيات: {'✅' if settings.get('delete_audio', False) else '❌'}
+🎞️ حذف المتحركات: {'✅' if settings.get('delete_animation', False) else '❌'}
 🛠️ حذف رسائل الخدمة: {'✅' if settings.get('delete_service', False) else '❌'}
 📄 حذف الملفات: {'✅' if settings.get('delete_documents', False) else '❌'}
 🖼️ حذف الملصقات: {'✅' if settings.get('delete_stickers', False) else '❌'}
 ━━━━━━━━━━━━━━━━━━━━━━
 ⚖️ **العقوبة التلقائية:** {'طرد' if settings.get('auto_penalty') == 'kick' else 'حظر' if settings.get('auto_penalty') == 'ban' else 'كتم' if settings.get('auto_penalty') == 'mute' else 'لا شيء'}
+⚖️ **عقوبة الحذف:** {'طرد' if settings.get('delete_penalty') == 'kick' else 'حظر' if settings.get('delete_penalty') == 'ban' else 'كتم' if settings.get('delete_penalty') == 'mute' else 'لا شيء'}
 ━━━━━━━━━━━━━━━━━━━━━━
 💡 **اختر الإجراء المناسب:**"""
     if query:
@@ -7144,7 +7205,7 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""👑 **معلومات المطور**
 ━━━━━━━━━━━━━━━━━━━━━━
 🤖 **البوت:** {BOT_NAME}
-📦 **الإصدار:** 19.3.3
+📦 **الإصدار:** 19.3.4
 👨‍💻 **المطور:** @RelaxMgr
 
 🔐 **الميزات الأمنية المتقدمة:**
@@ -7186,9 +7247,13 @@ async def developer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 • ⏱️ جدولة CRON
 • 👑 دعم كامل للمشرفين المتعددين (جميع المشرفين الحقيقيين يظهرون في مجموعاتهم)
 • 🎬 حذف الفيديوهات التلقائي
+• 🎵 حذف الصوتيات التلقائي
+• 🎞️ حذف المتحركات التلقائي
 • 🛠️ حذف رسائل الخدمة التلقائي
 • 📄 حذف الملفات التلقائي
 • 🖼️ حذف الملصقات التلقائي
+• ⚡ تفعيل/تعطيل الكل
+• ⚖️ عقوبة خاصة للحذف
 
 ⚡ **وضع السرعة:** {'مفعل' if not BATTERY_SAVER_MODE else 'معطل'}
 
@@ -10967,7 +11032,7 @@ async def detect_owner_type(bot, chat_id):
         return {'is_hidden': True, 'user_id': None}
 
 # ============================================================
-# ===================== إضافة دالة delete_service_messages قبل main() =====================
+# ===================== إضافة دالة delete_service_messages =====================
 # ============================================================
 
 async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10976,18 +11041,12 @@ async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_
     الإصدار المطور: 2.0
     """
     
-    # ============================================================
-    # 1. التحقق من وجود البيانات الأساسية
-    # ============================================================
     if not update.message or not update.effective_chat:
         return
     
     chat_id = update.effective_chat.id
     message = update.message
     
-    # ============================================================
-    # 2. جلب إعدادات المجموعة من قاعدة البيانات (مع تخزين مؤقت)
-    # ============================================================
     try:
         settings = await db_get_security_settings(chat_id)
         if not settings.get('delete_service', False):
@@ -10996,84 +11055,44 @@ async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"[delete_service] خطأ في جلب الإعدادات للمجموعة {chat_id}: {e}")
         return
     
-    # ============================================================
-    # 3. التحقق من أن الرسالة هي رسالة خدمة (طريقة شاملة)
-    # ============================================================
-    
-    # 3.1 التحقق المباشر من خاصية service_message
     is_service = bool(message.service_message)
     
-    # 3.2 التحقق من أنواع رسائل الخدمة المختلفة
     service_flags = [
-        message.new_chat_members,           # أعضاء جدد انضموا
-        message.left_chat_member,           # عضو غادر
-        message.new_chat_photo,             # صورة جديدة للمجموعة
-        message.delete_chat_photo,          # حذف صورة المجموعة
-        message.group_chat_created,         # إنشاء المجموعة
-        message.supergroup_chat_created,    # إنشاء سوبر جروب
-        message.channel_chat_created,       # إنشاء قناة
-        message.migrate_to_chat_id,         # ترقية إلى سوبر جروب
-        message.migrate_from_chat_id,       # ترقية من جروب عادي
-        message.pinned_message,             # رسالة مثبتة (خدمة)
-        message.successful_payment,         # دفع ناجح
-        message.invoice,                    # فاتورة
-        message.connected_website,          # موقع متصل
-        message.boost_added,                # تعزيز المجموعة (جديد)
+        message.new_chat_members,
+        message.left_chat_member,
+        message.new_chat_photo,
+        message.delete_chat_photo,
+        message.group_chat_created,
+        message.supergroup_chat_created,
+        message.channel_chat_created,
+        message.migrate_to_chat_id,
+        message.migrate_from_chat_id,
+        message.pinned_message,
+        message.successful_payment,
+        message.invoice,
+        message.connected_website,
+        message.boost_added,
     ]
     
-    # إذا كان أي من هذه القيم موجودة (غير None/False)، فهي رسالة خدمة
     if any(service_flags):
         is_service = True
     
-    # 3.3 التحقق من وجود أزرار (بعض رسائل الخدمة تحتوي عليها)
-    if hasattr(message, 'reply_markup') and message.reply_markup:
-        # رسائل الخدمة غالباً ليس لها أزرار عادية
-        pass
-    
-    # ============================================================
-    # 4. إذا لم تكن رسالة خدمة، نخرج من الدالة
-    # ============================================================
     if not is_service:
         return
     
-    # ============================================================
-    # 5. محاولة حذف الرسالة مع إعادة المحاولة التلقائية
-    # ============================================================
     max_retries = 2
     for attempt in range(max_retries):
         try:
             await message.delete()
             logger.info(f"🗑️ [delete_service] تم حذف رسالة خدمة في المجموعة {chat_id} (المحاولة {attempt+1})")
-            
-            # ============================================================
-            # 6. تسجيل العملية في قاعدة البيانات (تحليلات)
-            # ============================================================
-            try:
-                async def _log_deletion(conn):
-                    await conn.execute(
-                        "INSERT INTO moderation_log (chat_id, user_id, action, duration_minutes, reason, created_at) VALUES (?, ?, 'delete_service', 0, 'رسالة خدمة محذوفة تلقائياً', ?)",
-                        (chat_id, 0, utc_now_iso())
-                    )
-                    await conn.commit()
-                asyncio.create_task(execute_db(_log_deletion))
-            except Exception as e:
-                logger.debug(f"فشل تسجيل الحذف في السجل: {e}")
-            
-            return True  # تم الحذف بنجاح
-            
+            return True
         except Exception as e:
             error_msg = str(e).lower()
-            
-            # ============================================================
-            # 7. معالجة الأخطاء المختلفة
-            # ============================================================
             if "message can't be deleted" in error_msg:
                 logger.debug(f"⚠️ [delete_service] لا يمكن حذف رسالة الخدمة: قديمة جداً (المجموعة {chat_id})")
-                return False  # الرسالة قديمة جداً، لا يمكن حذفها
-                
+                return False
             elif "not enough rights" in error_msg or "bot is not admin" in error_msg:
                 logger.warning(f"⚠️ [delete_service] البوت ليس لديه صلاحية الحذف في المجموعة {chat_id}")
-                # محاولة إرسال تنبيه للمشرفين
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -11083,20 +11102,13 @@ async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_
                 except:
                     pass
                 return False
-                
-            elif "message_id_invalid" in error_msg:
-                logger.debug(f"⚠️ [delete_service] معرف الرسالة غير صالح (المجموعة {chat_id})")
-                return False
-                
             elif "timeout" in error_msg or "timed out" in error_msg:
                 logger.warning(f"⏱️ [delete_service] انتهت المهلة في المحاولة {attempt+1} (المجموعة {chat_id})")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(0.5 * (attempt + 1))  # تأخير تصاعدي
+                    await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 return False
-                
             else:
-                # خطأ غير معروف
                 logger.error(f"❌ [delete_service] فشل حذف رسالة خدمة (المجموعة {chat_id}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(0.5 * (attempt + 1))
@@ -11106,701 +11118,9 @@ async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_
     return False
 
 # ============================================================
-# ===================== معالج الرسائل الرئيسي =====================
+# ===================== معالج الأخطاء العالمي =====================
 # ============================================================
 
-async def message_handler_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
-        return
-    chat = update.effective_chat
-    user = update.effective_user
-    uid = user.id if user else 0
-    text = update.message.text.strip() if update.message.text else ""
-    if user and user.is_bot:
-        return
-
-    # ===== التحقق من حجم الملفات =====
-    if update.message.photo:
-        file = await context.bot.get_file(update.message.photo[-1].file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الصورة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.video:
-        file = await context.bot.get_file(update.message.video.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الفيديو كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.document:
-        file = await context.bot.get_file(update.message.document.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الملف كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.audio:
-        file = await context.bot.get_file(update.message.audio.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الصوت كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.voice:
-        file = await context.bot.get_file(update.message.voice.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم الرسالة الصوتية كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-    if update.message.animation:
-        file = await context.bot.get_file(update.message.animation.file_id)
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ حجم المتحركة كبير جداً (الحد الأقصى {MAX_FILE_SIZE//(1024*1024)} ميجابايت)")
-            return
-
-    # ===== معالجة إلغاء العملية =====
-    if text == "/cancel":
-        context.user_data.pop('state', None)
-        context.user_data.pop('support_mode', None)
-        await update.message.reply_text(get_text(uid, 'cancelled'))
-        if chat.type == 'private':
-            await main_menu_callback(update, context)
-        return
-
-    # ===== معالجة المصادقة الثنائية =====
-    if context.user_data.get('waiting_2fa') and text:
-        if ENABLE_2FA and ADMIN_2FA_SECRET and PYOTP_AVAILABLE:
-            try:
-                totp = pyotp.TOTP(ADMIN_2FA_SECRET)
-                if totp.verify(text):
-                    context.user_data['2fa_verified'] = True
-                    context.user_data['2fa_time'] = time_module.time()
-                    context.user_data.pop('waiting_2fa', None)
-                    await update.message.reply_text("✅ تم التحقق من المصادقة الثنائية!")
-                    await sendcode_command_handler(update, context)
-                    return
-                else:
-                    await update.message.reply_text("❌ رمز غير صحيح!")
-                    context.user_data.pop('waiting_2fa', None)
-                    return
-            except:
-                await update.message.reply_text("❌ خطأ في التحقق")
-                context.user_data.pop('waiting_2fa', None)
-                return
-
-    # ===== معالجة الحالات =====
-    if await state_dispatcher.handle(update, context):
-        return
-
-    state = context.user_data.get('state')
-
-    if state == UserState.ADDING_POSTS:
-        session_key = f"session_{uid}"
-        if text == "/cancel":
-            context.user_data.pop(session_key, None)
-            context.user_data.pop(f"session_target_{uid}", None)
-            context.user_data.pop('state', None)
-            await update.message.reply_text(get_text(uid, 'cancelled'))
-            await main_menu_callback(update, context)
-            return
-        media_type = 'text'
-        media_file_id = None
-        text_content = text
-        if update.message.photo:
-            media_type = 'photo'
-            media_file_id = update.message.photo[-1].file_id
-            text_content = update.message.caption or ""
-        elif update.message.video:
-            media_type = 'video'
-            media_file_id = update.message.video.file_id
-            text_content = update.message.caption or ""
-        elif update.message.document:
-            media_type = 'document'
-            media_file_id = update.message.document.file_id
-            text_content = update.message.caption or ""
-        elif update.message.audio:
-            media_type = 'audio'
-            media_file_id = update.message.audio.file_id
-            text_content = update.message.caption or ""
-        elif update.message.voice:
-            media_type = 'voice'
-            media_file_id = update.message.voice.file_id
-            text_content = update.message.caption or ""
-        elif update.message.animation:
-            media_type = 'animation'
-            media_file_id = update.message.animation.file_id
-            text_content = update.message.caption or ""
-        context.user_data[session_key].append((text_content, media_type, media_file_id))
-        cur = len(context.user_data[session_key])
-        target = context.user_data.get(f"session_target_{uid}", 15)
-        if cur >= target or cur >= MAX_POSTS_PER_SESSION:
-            active = context.user_data.get('active_channel') or await db_get_active_channel(uid)
-            if not active:
-                await update.message.reply_text(get_text(uid, 'error'))
-                context.user_data.pop(session_key, None)
-                context.user_data.pop('state', None)
-                return
-            saved = await db_save_posts(active, context.user_data[session_key])
-            context.user_data.pop(session_key, None)
-            context.user_data.pop(f"session_target_{uid}", None)
-            context.user_data.pop('state', None)
-            has_sub = await db_has_active_subscription(uid) or await db_has_used_trial(uid)
-            auto_status = await db_auto_status(uid)
-            if not has_sub:
-                await update.message.reply_text(f"✅ تم حفظ {saved} منشور\n⚠️ النشر التلقائي غير مفعل بسبب عدم وجود اشتراك\nاستخدم /trial للحصول على 30 يوماً مجاناً")
-            elif not auto_status:
-                await update.message.reply_text(f"✅ تم حفظ {saved} منشور\n⚠️ النشر التلقائي معطل\nفعله من الإعدادات")
-            else:
-                await update.message.reply_text(f"✅ تم حفظ {saved} منشور\n🔄 سيتم نشرها تلقائياً")
-            await main_menu_callback(update, context)
-        else:
-            await update.message.reply_text(f"📥 {cur}/{target}")
-        return
-
-    if state in [UserState.WAITING_CONTEST_TITLE, UserState.WAITING_CONTEST_DESCRIPTION,
-                 UserState.WAITING_CONTEST_PRIZE, UserState.WAITING_CONTEST_END_DATE,
-                 UserState.WAITING_CONTEST_ANSWER]:
-        if await handle_contest_creation_states(update, context, state):
-            return
-
-    if state == UserState.WAITING_SENDCODE_PASSWORD:
-        await handle_sendcode_confirmation_handler(update, context)
-        return
-
-    # ===== WAITING_CHANNEL_ID =====
-    if state == UserState.WAITING_CHANNEL_ID:
-        context.user_data.pop('state', None)
-        channel_id = text.strip()
-        if not channel_id.startswith('@') and not channel_id.startswith('-100'):
-            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)\n\nتأكد من أن البوت مشرف في القناة.", parse_mode="MarkdownV2")
-            context.user_data['state'] = UserState.WAITING_CHANNEL_ID
-            return
-        new_id = await db_add_channel(uid, channel_id, channel_id)
-        if new_id:
-            context.user_data['active_channel'] = new_id
-            await db_set_active_channel(uid, new_id)
-            await update.message.reply_text(get_text(uid, 'channel_added').format(channel_id))
-        else:
-            await update.message.reply_text(get_text(uid, 'channel_exists'))
-        kb, title, active = await get_main_keyboard(uid)
-        context.user_data['active_channel'] = active
-        await safe_send_markdown(context.bot, uid, title, reply_markup=kb)
-        return
-
-    # ===== WAITING_INTERVAL_MINUTES =====
-    if state == UserState.WAITING_INTERVAL_MINUTES:
-        context.user_data.pop('state', None)
-        ch_db_id = context.user_data.pop('schedule_ch_id', None)
-        is_admin = context.user_data.pop('admin_interval', False)
-        is_cron = context.user_data.pop('schedule_cron', False)
-
-        if is_cron:
-            cron_expr = text.strip()
-            if len(cron_expr.split()) >= 5:
-                await schedule_cron(ch_db_id, cron_expr)
-                await db_set_next_publish_date(ch_db_id, None)
-                await update.message.reply_text(f"✅ **تم حفظ تعبير CRON:** `{cron_expr}`")
-                await schedule_menu_callback(update, context)
-                return
-            else:
-                await update.message.reply_text("❌ **تعبير CRON غير صحيح!**\nتأكد من الصيغة: `دقيقة ساعة يوم شهر يوم_أسبوع`")
-                return
-
-        try:
-            minutes = int(text)
-            if minutes < 1:
-                minutes = 1
-            if is_admin:
-                seconds = minutes * 60
-                if seconds > 86400:
-                    seconds = 86400
-                await db_set_publish_interval_seconds(seconds, uid, is_admin=True)
-                await update.message.reply_text(f"✅ **تم ضبط وقت النشر العام بنجاح!**\n\n🕐 الوقت الجديد: {minutes} دقيقة ({seconds} ثانية)")
-                await admin_panel_callback(update, context)
-            else:
-                await db_save_schedule(ch_db_id, 'interval_minutes', interval_minutes=minutes)
-                await db_set_next_publish_date(ch_db_id, None)
-                await update.message.reply_text(get_text(uid, 'interval_set'))
-                await schedule_menu_callback(update, context)
-        except ValueError:
-            await update.message.reply_text(get_text(uid, 'invalid_number'))
-        return
-
-    # ===== WAITING_INTERVAL_HOURS =====
-    if state == UserState.WAITING_INTERVAL_HOURS:
-        context.user_data.pop('state', None)
-        ch_db_id = context.user_data.pop('schedule_ch_id', None)
-        try:
-            hours = int(text)
-            if hours < 1:
-                hours = 1
-            await db_save_schedule(ch_db_id, 'interval_hours', interval_hours=hours)
-            await db_set_next_publish_date(ch_db_id, None)
-            await update.message.reply_text(get_text(uid, 'interval_set'))
-        except:
-            await update.message.reply_text(get_text(uid, 'invalid_number'))
-        await schedule_menu_callback(update, context)
-        return
-
-    # ===== WAITING_INTERVAL_DAYS =====
-    if state == UserState.WAITING_INTERVAL_DAYS:
-        context.user_data.pop('state', None)
-        ch_db_id = context.user_data.pop('schedule_ch_id', None)
-        try:
-            days = int(text)
-            if days < 1:
-                days = 1
-            await db_save_schedule(ch_db_id, 'interval_days', interval_days=days)
-            await db_set_next_publish_date(ch_db_id, None)
-            await update.message.reply_text(get_text(uid, 'interval_set'))
-        except:
-            await update.message.reply_text(get_text(uid, 'invalid_number'))
-        await schedule_menu_callback(update, context)
-        return
-
-    # ===== WAITING_DATES =====
-    if state == UserState.WAITING_DATES:
-        context.user_data.pop('state', None)
-        ch_db_id = context.user_data.pop('schedule_ch_id', None)
-        dates = text.split(',')
-        valid_dates = []
-        for d in dates:
-            d = d.strip()
-            try:
-                datetime.strptime(d, '%Y-%m-%d')
-                valid_dates.append(d)
-            except:
-                await update.message.reply_text(get_text(uid, 'invalid_date'))
-                return
-        await db_save_schedule(ch_db_id, 'dates', specific_dates=json.dumps(valid_dates))
-        await db_set_next_publish_date(ch_db_id, None)
-        await update.message.reply_text(get_text(uid, 'dates_saved'))
-        await schedule_menu_callback(update, context)
-        return
-
-    # ===== WAITING_PUBLISH_TIME =====
-    if state == UserState.WAITING_PUBLISH_TIME:
-        context.user_data.pop('state', None)
-        ch_db_id = context.user_data.pop('schedule_ch_id', None)
-        try:
-            time_str = text.strip()
-            hour, minute = map(int, time_str.split(':'))
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                await db_set_publish_time(ch_db_id, time_str)
-                await db_set_next_publish_date(ch_db_id, None)
-                await update.message.reply_text(get_text(uid, 'interval_set'))
-            else:
-                await update.message.reply_text(get_text(uid, 'invalid_time'))
-        except:
-            await update.message.reply_text(get_text(uid, 'invalid_time'))
-        await schedule_menu_callback(update, context)
-        return
-
-    # ===== WAITING_SCHEDULE_POST =====
-    if state == UserState.WAITING_SCHEDULE_POST:
-        context.user_data.pop('state', None)
-        args = text.split()
-        if len(args) < 3:
-            await update.message.reply_text("❌ **صيغة غير صحيحة!**\n\nالاستخدام الصحيح:\n`YYYY-MM-DD HH:MM نص المنشور`\n\nمثال: `2024-12-31 20:00 مرحباً بالجميع!`", parse_mode="MarkdownV2")
-            return
-        try:
-            date_str = args[0]
-            time_str = args[1]
-            post_text = " ".join(args[2:])
-            mecca_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            if mecca_dt <= mecca_now():
-                await update.message.reply_text("❌ **الوقت يجب أن يكون في المستقبل!**", parse_mode="MarkdownV2")
-                return
-            utc_dt = mecca_to_utc(mecca_dt)
-            await db_add_scheduled_post(chat.id, post_text, utc_dt)
-            await update.message.reply_text(f"✅ **تم جدولة المنشور بنجاح!**\n\n📅 التاريخ: {date_str}\n🕐 الوقت: {time_str} (بتوقيت مكة)\n📝 المنشور: {post_text[:100]}{'...' if len(post_text) > 100 else ''}", parse_mode="MarkdownV2")
-        except ValueError:
-            await update.message.reply_text("❌ **صيغة التاريخ أو الوقت غير صحيحة!**\n\nتأكد من الصيغة:\n• التاريخ: YYYY-MM-DD (مثال: 2024-12-31)\n• الوقت: HH:MM (مثال: 20:00)", parse_mode="MarkdownV2")
-        await main_menu_callback(update, context)
-        return
-
-    # ===== WAITING_REMINDER_DAYS =====
-    if state == UserState.WAITING_REMINDER_DAYS:
-        context.user_data.pop('state', None)
-        try:
-            days = int(text)
-            if 1 <= days <= 10:
-                await db_update_reminder_settings(uid, reminder_days_before=days)
-                await update.message.reply_text(f"✅ تم تعيين التذكير قبل {days} يوم من انتهاء الاشتراك")
-            else:
-                await update.message.reply_text("❌ الرجاء إدخال رقم بين 1 و 10")
-        except ValueError:
-            await update.message.reply_text("❌ الرجاء إدخال رقم صحيح")
-        await reminder_menu_callback(update, context)
-        return
-
-    # ===== WAITING_UPDATE_TEXT =====
-    if state == UserState.WAITING_UPDATE_TEXT:
-        context.user_data.pop('state', None)
-        channel = await db_get_updates_channel()
-        if channel:
-            try:
-                await context.bot.send_message(chat_id=f"@{channel}", text=text, parse_mode="HTML")
-                await update.message.reply_text("✅ تم نشر التحديث في قناة التحديثات")
-            except Exception as e:
-                await update.message.reply_text(f"❌ فشل النشر: {str(e)[:100]}\nتأكد من أن البوت مشرف في القناة @{channel}")
-        else:
-            await update.message.reply_text("❌ لم يتم تعيين قناة تحديثات بعد\nاستخدم زر '⚙️ قناة التحديثات' أولاً")
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_UPDATE_CHANNEL =====
-    if state == UserState.WAITING_UPDATE_CHANNEL:
-        context.user_data.pop('state', None)
-        channel = text.strip()
-        if channel.startswith('@'):
-            channel = channel[1:]
-        if not channel:
-            await update.message.reply_text("❌ **معرف قناة غير صالح!**\nالرجاء إدخال معرف صحيح.")
-            return
-        try:
-            if channel.startswith('-'):
-                chat_obj = await context.bot.get_chat(int(channel))
-            else:
-                chat_obj = await context.bot.get_chat(f"@{channel}")
-            if chat_obj.type != 'channel':
-                await update.message.reply_text("❌ **هذا ليس قناة!**\nتأكد من أن المعرف ينتمي لقناة.")
-                return
-            success = await db_set_updates_channel(channel)
-            if success:
-                saved_channel = await db_get_updates_channel()
-                if saved_channel == channel:
-                    await update.message.reply_text(f"✅ **تم تعيين قناة التحديثات بنجاح!**\n📢 القناة: @{channel}")
-                    try:
-                        await context.bot.send_message(
-                            chat_id=f"@{channel}",
-                            text="✅ **تم تفعيل قناة التحديثات!**\nسيتم نشر التحديثات هنا."
-                        )
-                        await update.message.reply_text("✅ تم إرسال رسالة اختبار للقناة.")
-                    except Exception as e:
-                        await update.message.reply_text(f"⚠️ **تنبيه:** لم أتمكن من إرسال رسالة اختبار للقناة.\nتأكد من أن البوت مشرف ولديه صلاحية الإرسال.\nالخطأ: {str(e)[:100]}")
-                else:
-                    await update.message.reply_text("❌ **فشل حفظ القناة!** حاول مرة أخرى.")
-            else:
-                await update.message.reply_text("❌ **فشل حفظ القناة!** المعرف غير صالح.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ **لا يمكن الوصول إلى القناة:**\n{str(e)[:200]}\n\n📌 تأكد من:\n• المعرف صحيح\n• البوت مشرف في القناة\n• القناة عامة (Public)")
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_FORCE_CHANNEL =====
-    if state == UserState.WAITING_FORCE_CHANNEL:
-        context.user_data.pop('state', None)
-        await db_set_force_subscribe_channel(text)
-        await update.message.reply_text(f"✅ تم تعيين قناة الاشتراك الإجباري: {text}")
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_BROADCAST =====
-    if state == UserState.WAITING_BROADCAST:
-        context.user_data.pop('state', None)
-        confirm_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ نعم، أرسل", callback_data=CallbackData.ADMIN_CONFIRM_BROADCAST),
-             InlineKeyboardButton("❌ إلغاء", callback_data=CallbackData.ADMIN_PANEL)]
-        ])
-        context.user_data['broadcast_text'] = text
-        await update.message.reply_text(f"📨 **تأكيد الإرسال الجماعي**\n\nالنص المرسل:\n━━━━━━━━━━━━━━\n{text[:500]}\n━━━━━━━━━━━━━━\n\n⚠️ سيتم إرسال هذه الرسالة إلى **جميع مستخدمي البوت**\nهل أنت متأكد؟", reply_markup=confirm_kb, parse_mode="MarkdownV2")
-        return
-
-    # ===== WAITING_SENDCODE_USER =====
-    if state == UserState.WAITING_SENDCODE_USER:
-        context.user_data.pop('state', None)
-        try:
-            target_user_id = int(text)
-        except ValueError:
-            await update.message.reply_text(get_text(uid, 'invalid_number'))
-            return
-        await db_set_allowed_sendcode_user(target_user_id)
-        await security_audit.log("SENDCODE_PERMISSION_GRANTED", uid, {"target": target_user_id}, "CRITICAL")
-        await update.message.reply_text(f"✅ تم منح صلاحية /sendcode للمستخدم `{target_user_id}`")
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_LOG_CHANNEL =====
-    if state == UserState.WAITING_LOG_CHANNEL:
-        context.user_data.pop('state', None)
-        identifier = text.strip()
-        if not identifier.startswith('@') and not identifier.startswith('-100'):
-            await update.message.reply_text("❌ **معرف قناة غير صالح!**\n\nالصيغ المدعومة:\n• `@username` (مثل: @my_channel)\n• `-1001234567890` (المعرف الرقمي)", parse_mode="MarkdownV2")
-            context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
-            return
-        try:
-            identifier_clean = identifier.lstrip('@')
-            if identifier_clean.startswith('-100') or identifier_clean.lstrip('-').isdigit():
-                chat_id = int(identifier_clean)
-            else:
-                chat_obj = await context.bot.get_chat(f"@{identifier_clean}")
-                chat_id = chat_obj.id
-            bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-            if bot_member.status not in ['administrator', 'creator']:
-                await update.message.reply_text("❌ **البوت ليس مشرفاً في هذه القناة.**", parse_mode="MarkdownV2")
-                context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
-                return
-            if not bot_member.can_post_messages:
-                await update.message.reply_text("❌ **البوت لا يملك صلاحية الإرسال في هذه القناة.**", parse_mode="MarkdownV2")
-                context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
-                return
-            await db_set_log_channel_id(str(chat_id))
-            await update.message.reply_text(f"✅ **تم تعيين قناة التقارير بنجاح!**\nمعرف القناة: `{chat_id}`", parse_mode="MarkdownV2")
-            try:
-                await context.bot.send_message(chat_id, "✅ **تم تفعيل نظام التقارير**")
-            except:
-                pass
-        except Exception as e:
-            await update.message.reply_text(f"❌ **لا يمكن الوصول إلى القناة:**\n{str(e)[:200]}", parse_mode="MarkdownV2")
-            context.user_data['state'] = UserState.WAITING_LOG_CHANNEL
-            return
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_KEYWORD =====
-    if state == UserState.WAITING_KEYWORD:
-        context.user_data.pop('state', None)
-        keyword = text.strip().lower()
-        if len(keyword) < 2:
-            await update.message.reply_text("❌ الكلمة المفتاحية قصيرة جداً (يجب أن تكون حرفين على الأقل)")
-            context.user_data['state'] = UserState.WAITING_KEYWORD
-            return
-        context.user_data['state'] = UserState.WAITING_REPLY
-        context.user_data['admin_keyword'] = keyword
-        await update.message.reply_text(f"📝 **إضافة رد للكلمة:** `{keyword}`\n\nأرسل الرد الذي تريده لهذه الكلمة:", parse_mode="MarkdownV2")
-        return
-
-    # ===== WAITING_REPLY =====
-    if state == UserState.WAITING_REPLY:
-        context.user_data.pop('state', None)
-        if context.user_data.get('admin_del_reply'):
-            kw = text.lower()
-            if await db_del_reply(kw):
-                await update.message.reply_text(f"✅ تم حذف رد {kw}")
-            else:
-                await update.message.reply_text(f"⚠️ الكلمة {kw} غير موجودة")
-            context.user_data.pop('admin_del_reply', None)
-            await admin_replies_callback(update, context)
-            return
-        kw = context.user_data.pop('admin_keyword', '')
-        reply = text.strip()
-        if kw and reply:
-            await db_add_reply(kw, reply)
-            await update.message.reply_text(f"✅ تم إضافة رد للكلمة {kw}")
-        else:
-            await update.message.reply_text("❌ حدث خطأ")
-        await admin_replies_callback(update, context)
-        return
-
-    # ===== WAITING_ADMIN_ID_ADD =====
-    if state == UserState.WAITING_ADMIN_ID_ADD:
-        try:
-            target_id = int(text)
-            if target_id == PRIMARY_OWNER_ID:
-                await update.message.reply_text(get_text(uid, 'cannot_remove_main_admin'))
-            else:
-                await add_bot_admin(target_id)
-                await security_audit.log("ADMIN_ADDED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(f"✅ تم إضافة المستخدم `{target_id}` كمشرف")
-        except ValueError:
-            await update.message.reply_text(get_text(uid, 'invalid_user_id'))
-        context.user_data.pop('state', None)
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_ADMIN_ID_REMOVE =====
-    if state == UserState.WAITING_ADMIN_ID_REMOVE:
-        try:
-            target_id = int(text)
-            if target_id == PRIMARY_OWNER_ID:
-                await update.message.reply_text(get_text(uid, 'cannot_remove_main_admin'))
-            else:
-                await remove_bot_admin(target_id)
-                await security_audit.log("ADMIN_REMOVED", uid, {"target": target_id}, "CRITICAL")
-                await update.message.reply_text(f"✅ تم إزالة المستخدم `{target_id}` من المشرفين")
-        except ValueError:
-            await update.message.reply_text(get_text(uid, 'invalid_user_id'))
-        context.user_data.pop('state', None)
-        await admin_panel_callback(update, context)
-        return
-
-    # ===== WAITING_GROUP_BANNED_WORD =====
-    if state == UserState.WAITING_GROUP_BANNED_WORD:
-        chat_id = context.user_data.get('banned_words_chat_id')
-        if chat_id:
-            word = text.split()[0].lower() if text else ""
-            if len(word) < 2:
-                await update.message.reply_text("❌ الكلمة قصيرة جداً")
-                return
-            if await db_add_banned_word(word, chat_id, uid):
-                await update.message.reply_text(f"✅ تم إضافة {word}")
-            else:
-                await update.message.reply_text(f"⚠️ {word} موجودة مسبقاً")
-            context.user_data.pop('state', None)
-            await banned_words_list_callback(update, context)
-        return
-
-    # ===== WAITING_REMOVE_GROUP_BANNED_WORD =====
-    if state == UserState.WAITING_REMOVE_GROUP_BANNED_WORD:
-        chat_id = context.user_data.get('banned_words_chat_id')
-        if chat_id:
-            word = text.lower()
-            if await db_remove_banned_word(word, chat_id):
-                await update.message.reply_text(f"✅ تم حذف {word}")
-            else:
-                await update.message.reply_text(f"⚠️ الكلمة {word} غير موجودة")
-            context.user_data.pop('state', None)
-            await banned_words_list_callback(update, context)
-        return
-
-    # ===== WAITING_GLOBAL_BANNED_WORD =====
-    if state == UserState.WAITING_GLOBAL_BANNED_WORD:
-        word = text.split()[0].lower() if text else ""
-        if len(word) < 2:
-            await update.message.reply_text("❌ الكلمة قصيرة جداً")
-            return
-        if await db_add_banned_word(word, -1, uid):
-            await update.message.reply_text(f"✅ تم إضافة {word} ككلمة محظورة عامة")
-        else:
-            await update.message.reply_text(f"⚠️ {word} موجودة مسبقاً")
-        context.user_data.pop('state', None)
-        await admin_banned_words_callback(update, context)
-        return
-
-    # ===== WAITING_REMOVE_GLOBAL_BANNED_WORD =====
-    if state == UserState.WAITING_REMOVE_GLOBAL_BANNED_WORD:
-        word = text.lower()
-        async def _remove(conn):
-            await conn.execute("DELETE FROM banned_words WHERE word=? AND chat_id=?", (word, -1))
-            await conn.commit()
-        await execute_db(_remove)
-        await update.message.reply_text(f"✅ تم حذف {word} من الكلمات المحظورة العامة")
-        context.user_data.pop('state', None)
-        await admin_banned_words_callback(update, context)
-        return
-
-    # ===== WAITING_NSFW_THRESHOLD =====
-    if state == UserState.WAITING_NSFW_THRESHOLD:
-        try:
-            threshold = float(text)
-            if 0 < threshold <= 100:
-                global NSFW_THRESHOLD
-                NSFW_THRESHOLD = threshold / 100
-                os.environ["NSFW_THRESHOLD"] = str(NSFW_THRESHOLD)
-                await update.message.reply_text(f"✅ تم تغيير نسبة الحساسية إلى: {threshold}%")
-            else:
-                await update.message.reply_text("❌ الرجاء إدخال رقم بين 1 و 100")
-        except ValueError:
-            await update.message.reply_text("❌ الرجاء إدخال رقم صحيح (مثال: 75)")
-        context.user_data.pop('state', None)
-        await nsfw_settings_callback(update, context)
-        return
-
-    # ===== معالجة الأوامر المتقدمة =====
-    if state and isinstance(state, UserState) and state.name.startswith('WAITING_'):
-        chat_id = context.user_data.get('advanced_chat_id')
-        if not chat_id:
-            return
-
-        if state == UserState.WAITING_BAN_USER:
-            parts = text.split(maxsplit=1)
-            reason = parts[1] if len(parts) > 1 else ""
-            try:
-                target_id = int(parts[0])
-                success, msg = await execute_ban(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_MUTE_USER:
-            parts = text.split(maxsplit=1)
-            reason = parts[1] if len(parts) > 1 else ""
-            try:
-                target_id = int(parts[0])
-                minutes = context.user_data.get('mute_minutes', 60)
-                success, msg = await execute_mute(context.bot, chat_id, target_id, minutes, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_WARN_USER:
-            parts = text.split(maxsplit=1)
-            reason = parts[1] if len(parts) > 1 else ""
-            try:
-                target_id = int(parts[0])
-                success, msg = await execute_warn(context.bot, chat_id, target_id, uid, reason=reason)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_KICK_USER:
-            parts = text.split(maxsplit=1)
-            reason = parts[1] if len(parts) > 1 else ""
-            try:
-                target_id = int(parts[0])
-                success, msg = await execute_kick(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_RESTRICT_USER:
-            parts = text.split(maxsplit=1)
-            reason = parts[1] if len(parts) > 1 else ""
-            try:
-                target_id = int(parts[0])
-                success, msg = await execute_restrict(context.bot, chat_id, target_id, reason=reason, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_UNBAN_USER:
-            try:
-                target_id = int(text)
-                success, msg = await execute_unban(context.bot, chat_id, target_id, moderator_id=uid)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            except ValueError:
-                await update.message.reply_text("❌ معرف مستخدم غير صالح")
-            context.user_data.pop('state', None)
-            return
-
-        if state == UserState.WAITING_PIN_MESSAGE:
-            if update.message.reply_to_message:
-                success, msg = await execute_pin(context.bot, chat_id, update.message.reply_to_message.message_id)
-                await safe_send_markdown(context.bot, chat_id, msg)
-            else:
-                await update.message.reply_text("❌ يرجى الرد على الرسالة التي تريد تثبيتها")
-            context.user_data.pop('state', None)
-            return
-
-    # ===== وضع الدعم =====
-    if context.user_data.get('support_mode') and chat.type == 'private' and text and not text.startswith('/'):
-        ticket_num = await db_get_next_ticket_number()
-        username = user.full_name or user.first_name or str(uid)
-        clean_text = sanitize_text(text, max_length=2000)
-        await db_save_ticket(uid, username, clean_text, ticket_num)
-        now_mecca = mecca_now()
-        now_str = now_mecca.strftime("%Y-%m-%d %H:%M:%S")
-        reply_text = f"✅ **تم استلام رسالتك!**\n📋 رقم التذكرة: #{ticket_num}\n🕐 {now_str}\n\nسيتم الرد عليك في أقرب وقت ممكن."
-        await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
-        notification_text = f"📬 **تذكرة دعم جديدة**\n━━━━━━━━━━━━━━━━━━━━━━\n👤 المستخدم: {username}\n🆔 المعرف: `{uid}`\n📋 رقم التذكرة: #{ticket_num}\n🕐 الوقت: {now_str}\n━━━━━━━━━━━━━━━━━━━━━━\n📝 **الرسالة:**\n{clean_text[:500]}\n━━━━━━━━━━━━━━━━━━━━━━\nللرد استخدم:\n`/support_reply {uid} نص الرد`"
-        await context.bot.send_message(chat_id=PRIMARY_OWNER_ID, text=notification_text, parse_mode="MarkdownV2")
-        context.user_data['support_mode'] = False
-        return
-
-    # ===== أوامر الخاصة =====
-    if chat.type == 'private':
-        if text == "/start":
-            await start_command_handler(update, context)
-        elif text == "/cancel":
-            context.user_data.pop('state', None)
-            await update.message.reply_text(get_text(uid, 'cancelled'))
-            await main_menu_callback(update, context)
-
-# ===================== معالج الأخطاء العالمي =====================
 async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         error = context.error
@@ -11860,225 +11180,10 @@ async def global_error_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"فشل معالج الأخطاء نفسه: {e}")
 
-# ===================== فلتر الرسائل مع كشف NSFW =====================
-async def filter_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_chat or not update.effective_user:
-        return
-    chat = update.effective_chat
-    user = update.effective_user
-    chat_id = chat.id
-    user_id = user.id
-    if chat.type not in ['group', 'supergroup']:
-        return
-    if user.is_bot:
-        return
+# ============================================================
+# ===================== خادم الويب المبسط =====================
+# ============================================================
 
-    # ===== التحقق من قفل المجموعة =====
-    if await is_chat_locked(chat_id):
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🔒 المجموعة مقفلة من قبل المشرف", 5)
-        except:
-            pass
-        return
-
-    bot_perms = await check_bot_admin_permissions(context.bot, chat_id)
-    if not bot_perms['can_act']:
-        return
-
-    # ===== التحقق من الوضع البطيء =====
-    if not await db_check_slow_mode(chat_id, user_id):
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"⏱️ **وضع بطيء مفعل**\n@{user.username or str(user_id)} يرجى الانتظار قبل إرسال رسالة جديدة", 3)
-        except:
-            pass
-        return
-
-    # ===================== كشف NSFW =====================
-    if NSFW_ENABLED:
-        # كشف الصور
-        if update.message.photo:
-            file = await context.bot.get_file(update.message.photo[-1].file_id)
-            if file.file_size > NSFW_MAX_FILE_SIZE:
-                await update.message.reply_text(f"⚠️ حجم الصورة كبير جداً للتحليل (الحد الأقصى {NSFW_MAX_FILE_SIZE // (1024*1024)} ميجابايت)")
-                return
-
-            try:
-                file_bytes = await file.download_as_bytearray()
-                cache_key = hashlib.md5(file_bytes).hexdigest()
-                result = await check_nsfw_cached(file_bytes, cache_key)
-
-                if result.get("error"):
-                    logger.warning(f"خطأ في كشف NSFW: {result.get('error')}")
-                elif result.get("nsfw", False):
-                    await update.message.delete()
-                    warning = f"🚫 **تم حذف الصورة**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
-                    await safe_send_markdown(context.bot, chat_id, warning)
-                    security_settings = await db_get_security_settings(chat_id)
-                    await apply_penalty(context.bot, chat_id, user_id, security_settings)
-                    return
-            except Exception as e:
-                logger.error(f"خطأ في تحليل الصورة NSFW: {e}")
-
-        # كشف الفيديوهات
-        elif update.message.video:
-            if not CV2_AVAILABLE:
-                logger.warning("cv2 غير مثبت، تخطي كشف NSFW للفيديو")
-                return
-
-            file = await context.bot.get_file(update.message.video.file_id)
-            if file.file_size > NSFW_MAX_VIDEO_SIZE:
-                await update.message.reply_text(f"⚠️ حجم الفيديو كبير جداً للتحليل (الحد الأقصى {NSFW_MAX_VIDEO_SIZE // (1024*1024)} ميجابايت)")
-                return
-
-            try:
-                file_bytes = await file.download_as_bytearray()
-                result = await check_nsfw_video(file_bytes, frames=NSFW_FRAMES)
-
-                if result.get("error"):
-                    logger.warning(f"خطأ في كشف NSFW للفيديو: {result.get('error')}")
-                elif result.get("nsfw", False):
-                    await update.message.delete()
-                    warning = f"🚫 **تم حذف الفيديو**\n\nنسبة المحتوى غير اللائق: {result['nsfw_score'] * 100:.0f}%\nتم تحليل {result.get('frames_analyzed', 0)} إطار.\n@{user.username or str(user_id)} يرجى احترام قوانين المجموعة."
-                    await safe_send_markdown(context.bot, chat_id, warning)
-                    security_settings = await db_get_security_settings(chat_id)
-                    await apply_penalty(context.bot, chat_id, user_id, security_settings)
-                    return
-            except Exception as e:
-                logger.error(f"خطأ في تحليل الفيديو NSFW: {e}")
-
-    # ===================== الردود التلقائية =====================
-
-    # 1. التحقق من إعدادات المستخدم
-    user_reply_enabled = await db_get_user_auto_reply_status(user_id)
-    if not user_reply_enabled:
-        return
-
-    # 2. التحقق من إعدادات المجموعة
-    settings = await db_get_auto_reply_settings(chat_id)
-    if not settings['enabled']:
-        return
-
-    # 3. التحقق من صلاحيات المستخدم (إذا كان المشرفين فقط)
-    if settings['only_admins']:
-        if not await is_authorized_in_group(context.bot, chat_id, user_id):
-            return
-
-    # 4. تجاهل البوتات
-    if settings['ignore_bots'] and update.effective_user.is_bot:
-        return
-
-    # 5. التحقق من إعدادات الأمان
-    security_settings = await db_get_security_settings(chat_id)
-
-    text = update.message.text or update.message.caption or ""
-
-    # ===== حذف الفيديوهات =====
-    if security_settings.get('delete_videos') and update.message.video:
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🎬 **الفيديوهات غير مسموح بها**\n@{user.username or str(user_id)}")
-        except:
-            pass
-        await apply_penalty(context.bot, chat_id, user_id, security_settings)
-        return
-
-    # ===== حذف رسائل الخدمة =====
-    if security_settings.get('delete_service') and update.message.service_message:
-        try:
-            await update.message.delete()
-        except:
-            pass
-        return
-
-    # ===== حذف الملفات =====
-    if security_settings.get('delete_documents') and update.message.document:
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"📄 **الملفات غير مسموح بها**\n@{user.username or str(user_id)}")
-        except:
-            pass
-        await apply_penalty(context.bot, chat_id, user_id, security_settings)
-        return
-
-    # ===== حذف الملصقات =====
-    if security_settings.get('delete_stickers') and update.message.sticker:
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🖼️ **الملصقات غير مسموح بها**\n@{user.username or str(user_id)}")
-        except:
-            pass
-        await apply_penalty(context.bot, chat_id, user_id, security_settings)
-        return
-
-    # ===== حذف الكلمات المحظورة =====
-    if security_settings.get('delete_banned_words'):
-        banned_word = await db_contains_banned_word(text, chat_id)
-        if banned_word:
-            try:
-                await update.message.delete()
-                await safe_send_markdown(context.bot, chat_id, f"🚫 **كلمة محظورة**\n@{user.username or str(user_id)} الكلمة `{banned_word}` غير مسموح بها")
-            except:
-                pass
-            await apply_penalty(context.bot, chat_id, user_id, security_settings)
-            return
-
-    # ===== حذف الروابط =====
-    if security_settings.get('links') and contains_link(text):
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"🔗 **الروابط غير مسموح بها**\n@{user.username or str(user_id)}")
-        except:
-            pass
-        await apply_penalty(context.bot, chat_id, user_id, security_settings)
-        return
-
-    # ===== حذف المعرفات =====
-    if security_settings.get('mentions') and contains_mention(text):
-        try:
-            await update.message.delete()
-            await safe_send_markdown(context.bot, chat_id, f"@ **المعرفات غير مسموح بها**\n@{user.username or str(user_id)}")
-        except:
-            pass
-        await apply_penalty(context.bot, chat_id, user_id, security_settings)
-        return
-
-    # ===== البحث عن الرد مع المطابقة الجزئية =====
-    reply = None
-    text_lower = text.lower()
-
-    # المستوى 1: ردود مخصصة (قاعدة البيانات) - بحث مباشر
-    if text_lower:
-        reply = await db_get_reply(text_lower)
-
-    # المستوى 2: ردود مضمنة (مطابقة تامة)
-    if not reply and text_lower in ALL_REPLIES:
-        reply = ALL_REPLIES[text_lower]
-
-    # المستوى 3: ردود مضمنة (مطابقة جزئية)
-    if not reply:
-        for keyword, response in ALL_REPLIES.items():
-            if keyword in text_lower:
-                reply = response
-                break
-
-    # إرسال الرد
-    if reply:
-        try:
-            await update.message.reply_text(reply)
-        except Exception as e:
-            logger.error(f"فشل إرسال الرد: {e}")
-
-    # ===================== رسالة ترويجية للعضو العادي =====================
-    if text.startswith('/') and not await is_authorized_in_group(context.bot, chat_id, user_id):
-        promo_msg = get_text(user_id, 'promo_message').format(BOT_USERNAME)
-        try:
-            await update.message.reply_text(promo_msg, parse_mode="MarkdownV2")
-        except Exception as e:
-            logger.error(f"فشل إرسال رسالة ترويجية: {e}")
-
-# ===================== خادم الويب =====================
 web_app = web.Application()
 
 async def health_check_handler(request):
@@ -12105,7 +11210,51 @@ async def health_check_handler(request):
 
 web_app.router.add_get('/health', health_check_handler)
 
+async def start_web_server():
+    try:
+        render_port = int(os.getenv("PORT", "0"))
+        ports_to_try = []
+        if render_port > 0:
+            ports_to_try.append(render_port)
+        ports_to_try.extend([WEB_PORT, 8080, 10000, 8081, 8082, 8083])
+
+        for port in ports_to_try:
+            try:
+                runner = web.AppRunner(web_app)
+                await runner.setup()
+                site = web.TCPSite(runner, WEB_HOST, port)
+                await site.start()
+                logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
+                global WEB_PORT_USED
+                WEB_PORT_USED = port
+                return
+            except OSError as e:
+                if "address already in use" in str(e):
+                    logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
+                    continue
+                raise
+        logger.error("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
+    except Exception as e:
+        logger.error(f"❌ فشل تشغيل خادم الويب: {e}")
+
+def import_web_server():
+    try:
+        import web_server
+        web_port = int(os.getenv('WEB_PORT', '8080'))
+        web_server.start_web_server_background(web_port)
+        logger.info("✅ تم تضمين وتشغيل خادم الويب المنفصل")
+        return True
+    except ImportError:
+        logger.warning("⚠️ لم يتم العثور على ملف web_server.py")
+        return False
+    except Exception as e:
+        logger.error(f"❌ فشل تشغيل خادم الويب المنفصل: {e}")
+        return False
+
+# ============================================================
 # ===================== نظام إدارة المهام =====================
+# ============================================================
+
 class TaskManager:
     def __init__(self, max_tasks=50, max_concurrent=10):
         self.tasks = set()
@@ -12139,7 +11288,10 @@ class TaskManager:
 
 task_manager = TaskManager(max_concurrent=10)
 
+# ============================================================
 # ===================== أنظمة التشغيل الخلفي =====================
+# ============================================================
+
 async def auto_publish_loop_improved(bot):
     await asyncio.sleep(5)
     consecutive_errors = 0
@@ -12490,35 +11642,6 @@ async def memory_monitor():
             logger.error(f"خطأ في مراقبة الذاكرة: {e}")
             await asyncio.sleep(60)
 
-async def start_web_server():
-    try:
-        render_port = int(os.getenv("PORT", "0"))
-        ports_to_try = []
-        if render_port > 0:
-            ports_to_try.append(render_port)
-        ports_to_try.extend([WEB_PORT, 8080, 10000, 8081, 8082, 8083])
-
-        for port in ports_to_try:
-            try:
-                runner = web.AppRunner(web_app)
-                await runner.setup()
-                site = web.TCPSite(runner, WEB_HOST, port)
-                await site.start()
-                logger.info(f"✅ خادم الويب يعمل على http://{WEB_HOST}:{port}")
-                global WEB_PORT_USED
-                WEB_PORT_USED = port
-                return
-            except OSError as e:
-                if "address already in use" in str(e):
-                    logger.warning(f"⚠️ المنفذ {port} مشغول، جرب المنفذ التالي...")
-                    continue
-                raise
-        logger.error("❌ لا يمكن العثور على منفذ متاح لخادم الويب")
-    except Exception as e:
-        logger.error(f"❌ فشل تشغيل خادم الويب: {e}")
-
-WEB_PORT_USED = WEB_PORT
-
 async def self_ping_loop():
     await asyncio.sleep(10)
     external_url = os.getenv("RENDER_EXTERNAL_URL", "")
@@ -12537,26 +11660,9 @@ async def self_ping_loop():
         await asyncio.sleep(600)
 
 # ============================================================
-# ===================== تضمين خادم الويب المنفصل =====================
+# ===================== تهيئة قاعدة البيانات =====================
 # ============================================================
 
-def import_web_server():
-    try:
-        import web_server
-        web_port = int(os.getenv('WEB_PORT', '8080'))
-        web_server.start_web_server_background(web_port)
-        logger.info("✅ تم تضمين وتشغيل خادم الويب المنفصل")
-        return True
-    except ImportError:
-        logger.warning("⚠️ لم يتم العثور على ملف web_server.py")
-        return False
-    except Exception as e:
-        logger.error(f"❌ فشل تشغيل خادم الويب المنفصل: {e}")
-        return False
-
-# ============================================================
-# ===================== تهيئة قاعدة البيانات المحسنة =====================
-# ============================================================
 async def init_db_improved():
     async with aiosqlite.connect(str(DB_PATH), timeout=DB_TIMEOUT) as conn:
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -12569,8 +11675,7 @@ async def init_db_improved():
         await conn.execute("PRAGMA max_page_count=1000000")
         await conn.execute("PRAGMA secure_delete=ON")
 
-        # ========== إنشاء جميع الجداول ==========
-
+        # ========== إنشاء الجداول الأساسية ==========
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -12579,7 +11684,6 @@ async def init_db_improved():
                 trial_used INTEGER DEFAULT 0,
                 subscription_end TEXT DEFAULT NULL,
                 referral_code TEXT DEFAULT NULL,
-                referred_by INTEGER DEFAULT NULL,
                 active_channel INTEGER DEFAULT NULL,
                 auto_reply_enabled INTEGER DEFAULT 1,
                 auto_recycle INTEGER DEFAULT 1,
@@ -12588,7 +11692,6 @@ async def init_db_improved():
                 achievements TEXT DEFAULT '[]'
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12600,7 +11703,6 @@ async def init_db_improved():
                 FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12616,21 +11718,12 @@ async def init_db_improved():
                 FOREIGN KEY(channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS group_replies (
-                keyword TEXT PRIMARY KEY,
-                reply TEXT
-            )
-        """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id INTEGER PRIMARY KEY,
@@ -12647,28 +11740,15 @@ async def init_db_improved():
                 auto_penalty TEXT DEFAULT 'none',
                 auto_mute_duration INTEGER DEFAULT 60,
                 delete_videos INTEGER DEFAULT 0,
+                delete_audio INTEGER DEFAULT 0,
+                delete_animation INTEGER DEFAULT 0,
                 delete_service INTEGER DEFAULT 0,
                 delete_documents INTEGER DEFAULT 0,
-                delete_stickers INTEGER DEFAULT 0
+                delete_stickers INTEGER DEFAULT 0,
+                delete_penalty TEXT DEFAULT 'none',
+                delete_penalty_duration INTEGER DEFAULT 0
             )
         """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS group_settings (
-                chat_id INTEGER PRIMARY KEY,
-                anti_links INTEGER DEFAULT 0,
-                anti_badwords INTEGER DEFAULT 0,
-                welcome_msg INTEGER DEFAULT 1,
-                mute_all INTEGER DEFAULT 0
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_admins (
-                user_id INTEGER PRIMARY KEY
-            )
-        """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_groups (
                 chat_id INTEGER PRIMARY KEY,
@@ -12679,44 +11759,11 @@ async def init_db_improved():
                 banned INTEGER DEFAULT 0
             )
         """)
-
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_channels (
-                channel_id INTEGER PRIMARY KEY,
-                channel_name TEXT,
-                added_by INTEGER,
-                added_at TIMESTAMP,
-                banned INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER PRIMARY KEY
             )
         """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_messages (
-                user_id INTEGER,
-                chat_id INTEGER,
-                message_time TIMESTAMP,
-                PRIMARY KEY (user_id, chat_id)
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users_cache (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_updated TEXT
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_warnings (
-                user_id INTEGER,
-                chat_id INTEGER,
-                warnings INTEGER DEFAULT 0,
-                PRIMARY KEY(user_id, chat_id)
-            )
-        """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS banned_words (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12727,7 +11774,20 @@ async def init_db_improved():
                 UNIQUE(word, chat_id)
             )
         """)
-
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id INTEGER,
+                chat_id INTEGER,
+                PRIMARY KEY(user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_owner_groups (
                 chat_id INTEGER PRIMARY KEY,
@@ -12735,7 +11795,6 @@ async def init_db_improved():
                 is_hidden INTEGER DEFAULT 1
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_admins (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12746,53 +11805,6 @@ async def init_db_improved():
                 UNIQUE(chat_id, admin_id)
             )
         """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_groups_link (
-                user_id INTEGER,
-                chat_id INTEGER,
-                PRIMARY KEY(user_id, chat_id)
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS group_admins (
-                chat_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                PRIMARY KEY(chat_id, user_id)
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_levels (
-                user_id INTEGER PRIMARY KEY,
-                points INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS support_tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                username TEXT,
-                message TEXT,
-                ticket_number INTEGER,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP,
-                replied INTEGER DEFAULT 0
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_locks (
-                chat_id INTEGER PRIMARY KEY,
-                locked INTEGER DEFAULT 0,
-                locked_at TIMESTAMP,
-                locked_by INTEGER
-            )
-        """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS schedule (
                 channel_db_id INTEGER PRIMARY KEY,
@@ -12808,7 +11820,6 @@ async def init_db_improved():
                 FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS last_publish (
                 channel_db_id INTEGER PRIMARY KEY,
@@ -12816,7 +11827,6 @@ async def init_db_improved():
                 FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12827,15 +11837,25 @@ async def init_db_improved():
                 fail_count INTEGER DEFAULT 0
             )
         """)
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_posts(publish_time)")
-
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS allowed_sendcode_user (
-                id INTEGER PRIMARY KEY CHECK (id=1),
-                user_id INTEGER
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                message TEXT,
+                ticket_number INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP,
+                replied INTEGER DEFAULT 0
             )
         """)
-
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_levels (
+                user_id INTEGER PRIMARY KEY,
+                points INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12846,7 +11866,6 @@ async def init_db_improved():
                 UNIQUE(referred_id)
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referral_rewards (
                 user_id INTEGER PRIMARY KEY,
@@ -12855,14 +11874,12 @@ async def init_db_improved():
                 claimed_reward_days INTEGER DEFAULT 0
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referral_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_reminder_settings (
                 user_id INTEGER PRIMARY KEY,
@@ -12874,7 +11891,6 @@ async def init_db_improved():
                 notification_lang TEXT DEFAULT 'ar'
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS moderation_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12887,14 +11903,131 @@ async def init_db_improved():
                 created_at TIMESTAMP
             )
         """)
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_translation (
                 user_id INTEGER PRIMARY KEY,
                 lang TEXT DEFAULT 'off'
             )
         """)
-
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id INTEGER PRIMARY KEY,
+                locked INTEGER DEFAULT 0,
+                locked_at TIMESTAMP,
+                locked_by INTEGER
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id INTEGER PRIMARY KEY,
+                rules_text TEXT,
+                set_by INTEGER,
+                set_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER,
+                title TEXT,
+                description TEXT,
+                prize TEXT,
+                end_date TEXT,
+                status TEXT DEFAULT 'active',
+                winner_id INTEGER,
+                created_at TIMESTAMP,
+                contest_type TEXT DEFAULT 'raffle'
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                contest_id INTEGER,
+                answer TEXT,
+                joined_at TIMESTAMP,
+                UNIQUE(user_id, contest_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contest_id INTEGER,
+                winner_id INTEGER,
+                announced_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                only_admins INTEGER DEFAULT 0,
+                ignore_bots INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_replies (
+                keyword TEXT PRIMARY KEY,
+                reply TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                user_id INTEGER PRIMARY KEY,
+                reason TEXT,
+                blocked_by INTEGER,
+                blocked_at TIMESTAMP,
+                expires_at TIMESTAMP,
+                severity TEXT DEFAULT 'ban'
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_sendcode_user (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                user_id INTEGER
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_data TEXT,
+                expires INTEGER
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users_cache (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_updated TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_channels (
+                channel_id INTEGER PRIMARY KEY,
+                channel_name TEXT,
+                added_by INTEGER,
+                added_at TIMESTAMP,
+                banned INTEGER DEFAULT 0
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id INTEGER,
+                chat_id INTEGER,
+                message_time TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id INTEGER,
+                chat_id INTEGER,
+                warnings INTEGER DEFAULT 0,
+                PRIMARY KEY(user_id, chat_id)
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS channel_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12914,223 +12047,45 @@ async def init_db_improved():
             )
         """)
 
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS web_sessions (
-                session_id TEXT PRIMARY KEY,
-                user_data TEXT,
-                expires INTEGER
-            )
-        """)
-
-        # ========== جداول المسابقات ==========
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS contests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                creator_id INTEGER,
-                title TEXT,
-                description TEXT,
-                prize TEXT,
-                end_date TEXT,
-                status TEXT DEFAULT 'active',
-                winner_id INTEGER,
-                created_at TIMESTAMP,
-                contest_type TEXT DEFAULT 'raffle'
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS contest_participants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                contest_id INTEGER,
-                answer TEXT,
-                joined_at TIMESTAMP,
-                UNIQUE(user_id, contest_id)
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS contest_winners (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contest_id INTEGER,
-                winner_id INTEGER,
-                announced_at TIMESTAMP
-            )
-        """)
-
-        # ========== جدول إعدادات الردود التلقائية ==========
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS auto_reply_settings (
-                chat_id INTEGER PRIMARY KEY,
-                enabled INTEGER DEFAULT 1,
-                only_admins INTEGER DEFAULT 0,
-                ignore_bots INTEGER DEFAULT 1,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # ========== جدول قوانين المجموعة ==========
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS group_rules (
-                chat_id INTEGER PRIMARY KEY,
-                rules_text TEXT,
-                set_by INTEGER,
-                set_at TIMESTAMP
-            )
-        """)
-
-        # ========== جداول الحظر المتقدم ==========
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_users (
-                user_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP,
-                expires_at TIMESTAMP,
-                severity TEXT DEFAULT 'ban'
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_channels (
-                channel_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blocked_groups (
-                chat_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                blocked_by INTEGER,
-                blocked_at TIMESTAMP
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS block_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT,
-                target INTEGER,
-                admin_id INTEGER,
-                reason TEXT,
-                extra TEXT,
-                created_at TIMESTAMP
-            )
-        """)
-
-        # ========== الفهارس (Indexes) للتحسين ==========
-
+        # ========== الفهارس ==========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule(next_publish_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id, word)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_messages_time ON user_messages(message_time)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, published, fail_count)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_points ON user_levels(points DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_chat ON moderation_log(chat_id, created_at)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats ON channel_stats(channel_db_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_views ON posts(views_count)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_published_views ON posts(published, views_count)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_contests_active ON contests(status, end_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_admins_chat ON hidden_admins(chat_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_cron ON schedule(cron_expression)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_daily ON users(last_daily_reward)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_rules_chat ON group_rules(chat_id)")
 
         # ========== تحديث الجداول القديمة ==========
-
         try:
             cursor = await conn.execute("PRAGMA table_info(group_security)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if 'auto_penalty' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_penalty TEXT DEFAULT 'none'")
-            if 'auto_mute_duration' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN auto_mute_duration INTEGER DEFAULT 60")
-            if 'delete_videos' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_videos INTEGER DEFAULT 0")
-            if 'delete_service' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_service INTEGER DEFAULT 0")
-            if 'delete_documents' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_documents INTEGER DEFAULT 0")
-            if 'delete_stickers' not in column_names:
-                await conn.execute("ALTER TABLE group_security ADD COLUMN delete_stickers INTEGER DEFAULT 0")
-        except Exception as e:
-            logger.warning(f"⚠️ فشل تحديث جدول group_security: {e}")
+            columns = [col[1] for col in await cursor.fetchall()]
+            for col in ['delete_videos', 'delete_audio', 'delete_animation', 'delete_service', 'delete_documents', 'delete_stickers', 'delete_penalty', 'delete_penalty_duration']:
+                if col not in columns:
+                    await conn.execute(f"ALTER TABLE group_security ADD COLUMN {col} DEFAULT 0")
+        except:
+            pass
 
         try:
             cursor = await conn.execute("PRAGMA table_info(users)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if 'active_channel' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN active_channel INTEGER DEFAULT NULL")
-            if 'referral_code' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT NULL")
-            if 'auto_reply_enabled' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN auto_reply_enabled INTEGER DEFAULT 1")
-            if 'auto_recycle' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN auto_recycle INTEGER DEFAULT 1")
-            if 'last_daily_reward' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN last_daily_reward TEXT DEFAULT NULL")
-            if 'last_weekly_reward' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN last_weekly_reward TEXT DEFAULT NULL")
-            if 'achievements' not in column_names:
-                await conn.execute("ALTER TABLE users ADD COLUMN achievements TEXT DEFAULT '[]'")
+            columns = [col[1] for col in await cursor.fetchall()]
+            for col in ['auto_recycle', 'last_daily_reward', 'last_weekly_reward', 'achievements']:
+                if col not in columns:
+                    await conn.execute(f"ALTER TABLE users ADD COLUMN {col} DEFAULT '[]'")
         except:
             pass
 
-        try:
-            cursor = await conn.execute("PRAGMA table_info(posts)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if 'views_count' not in column_names:
-                await conn.execute("ALTER TABLE posts ADD COLUMN views_count INTEGER DEFAULT 0")
-            if 'last_view_time' not in column_names:
-                await conn.execute("ALTER TABLE posts ADD COLUMN last_view_time TIMESTAMP")
-        except:
-            pass
-
-        try:
-            cursor = await conn.execute("PRAGMA table_info(contests)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if 'contest_type' not in column_names:
-                await conn.execute("ALTER TABLE contests ADD COLUMN contest_type TEXT DEFAULT 'raffle'")
-        except:
-            pass
-
-        try:
-            cursor = await conn.execute("PRAGMA table_info(schedule)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if 'cron_expression' not in column_names:
-                await conn.execute("ALTER TABLE schedule ADD COLUMN cron_expression TEXT DEFAULT NULL")
-        except:
-            pass
-
-        # ========== إدراج البيانات الافتراضية ==========
-
+        # ========== البيانات الافتراضية ==========
         await conn.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (PRIMARY_OWNER_ID,))
-
-        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', ?)", (str(DEFAULT_PUBLISH_INTERVAL_SECONDS),))
+        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('publish_interval', '720')")
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('updates_channel', '')")
-        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_enabled', '0')")
-        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_subscribe_channel', '')")
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_backup', '1')")
-        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_backup', '')")
         await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('last_ticket_number', '0')")
-        await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('log_channel_id', '')")
-
         await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('reward_days_per_referral', '3')")
-        await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('referral_bonus_points', '50')")
         await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('max_referrals_per_day', '5')")
         await conn.execute("INSERT OR IGNORE INTO referral_settings (key, value) VALUES ('welcome_bonus_points', '10')")
 
@@ -13140,12 +12095,17 @@ async def init_db_improved():
     await cache_manager.init()
 
     logger.info("✅ قاعدة البيانات جاهزة مع جميع الجداول والتحسينات")
-    logger.info("✅ تم إنشاء 40+ جدول و 20+ فهرس")
 
-# ===== استيراد الكلمات المحظورة من ملف عند التشغيل =====
-async def import_banned_words_on_startup():
-    """استيراد الكلمات المحظورة من ملف عند بدء التشغيل"""
+# ============================================================
+# ===================== الوظيفة الرئيسية =====================
+# ============================================================
+
+async def main():
+    await init_db_improved()
+
+    # استيراد الكلمات المحظورة من ملف
     try:
+        from banned_words import load_banned_words_from_file
         words = load_banned_words_from_file(BANNED_WORDS_FILE)
         if words:
             async def _import(conn):
@@ -13163,116 +12123,10 @@ async def import_banned_words_on_startup():
                 return imported
             imported_count = await execute_db(_import)
             logger.info(f"✅ تم استيراد {imported_count} كلمة محظورة من {BANNED_WORDS_FILE}")
-        else:
-            logger.info(f"📭 لا توجد كلمات محظورة في {BANNED_WORDS_FILE} للاستيراد")
     except Exception as e:
         logger.error(f"❌ فشل استيراد الكلمات المحظورة: {e}")
 
-# ===================================================================
-# ===================== إضافة أوامر /set_rules و /rules =====================
-# ===================================================================
-
-async def set_rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تعيين قوانين المجموعة"""
-    if update.message is None:
-        return
-    chat = update.effective_chat
-    user = update.effective_user
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = chat.id
-    user_id = user.id
-
-    if not await is_authorized_in_group(context.bot, chat_id, user_id):
-        await update.message.reply_text(get_text(user_id, 'admin_only'))
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "📝 **تعيين قوانين المجموعة**\n\n"
-            "استخدم الأمر مع النص المراد تعيينه كقوانين:\n"
-            "`/set_rules نص القوانين`\n\n"
-            "📌 مثال:\n"
-            "`/set_rules 1- احترام الأعضاء\n2- عدم إرسال روابط\n3- الالتزام بالآداب العامة`"
-        )
-        return
-
-    rules_text = " ".join(args)
-    rules_text = sanitize_text(rules_text, max_length=4000)
-
-    async def _set_rules(conn):
-        await conn.execute(
-            "INSERT OR REPLACE INTO group_rules (chat_id, rules_text, set_by, set_at) VALUES (?, ?, ?, ?)",
-            (chat_id, rules_text, user_id, utc_now_iso())
-        )
-        await conn.commit()
-
-    await execute_db(_set_rules)
-
-    await update.message.reply_text(
-        f"✅ **تم تعيين قوانين المجموعة بنجاح!**\n\n"
-        f"📌 لعرض القوانين استخدم الأمر `/rules`",
-        parse_mode="MarkdownV2"
-    )
-
-async def rules_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قوانين المجموعة"""
-    if update.message is None:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في المجموعات!")
-        return
-
-    chat_id = chat.id
-
-    async def _get_rules(conn):
-        cur = await conn.execute(
-            "SELECT rules_text, set_by, set_at FROM group_rules WHERE chat_id=?",
-            (chat_id,)
-        )
-        return await cur.fetchone()
-
-    rules_data = await execute_db(_get_rules)
-
-    if not rules_data or not rules_data[0]:
-        await update.message.reply_text(
-            "📜 **لا توجد قوانين مسجلة لهذه المجموعة.**\n\n"
-            "يمكن للمشرفين تعيين القوانين باستخدام:\n"
-            "`/set_rules نص القوانين`"
-        )
-        return
-
-    rules_text = rules_data[0]
-    set_by = rules_data[1]
-    set_at = rules_data[2]
-
-    try:
-        set_at_dt = datetime.fromisoformat(set_at)
-        set_at_mecca = utc_to_mecca(set_at_dt)
-        set_at_str = set_at_mecca.strftime("%Y-%m-%d %H:%M")
-    except:
-        set_at_str = set_at[:16] if set_at else "تاريخ غير معروف"
-
-    message = f"📜 **قوانين المجموعة**\n━━━━━━━━━━━━━━━━━━━━━━\n\n{rules_text}\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"📌 تم التعيين بواسطة: `{set_by}`\n"
-    message += f"🕐 التاريخ: {set_at_str}"
-
-    await safe_send_markdown(context.bot, chat_id, message)
-
-# ===================================================================
-
-# ===== الوظيفة الرئيسية =====
-async def main():
-    await init_db_improved()
-
-    # استيراد الكلمات المحظورة من ملف
-    await import_banned_words_on_startup()
-
-    # تحميل اللغات من الملفات
+    # تحميل اللغات
     load_all_languages()
 
     # تحسينات الذاكرة
@@ -13528,6 +12382,12 @@ async def main():
     application.add_handler(CallbackQueryHandler(security_delete_service_callback, pattern=f"^{CallbackData.SECURITY_DELETE_SERVICE_PREFIX}"))
     application.add_handler(CallbackQueryHandler(security_delete_documents_callback, pattern=f"^{CallbackData.SECURITY_DELETE_DOCUMENTS_PREFIX}"))
     application.add_handler(CallbackQueryHandler(security_delete_stickers_callback, pattern=f"^{CallbackData.SECURITY_DELETE_STICKERS_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_delete_audio_callback, pattern=f"^{CallbackData.SECURITY_DELETE_AUDIO_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_delete_animation_callback, pattern=f"^{CallbackData.SECURITY_DELETE_ANIMATION_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_enable_all_callback, pattern=f"^{CallbackData.SECURITY_ENABLE_ALL_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_disable_all_callback, pattern=f"^{CallbackData.SECURITY_DISABLE_ALL_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(security_delete_penalty_callback, pattern=f"^{CallbackData.SECURITY_DELETE_PENALTY_PREFIX}"))
+    application.add_handler(CallbackQueryHandler(set_delete_penalty_callback, pattern="^set_delete_penalty:"))
 
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback_handler))
@@ -13546,9 +12406,9 @@ async def main():
 
     # ===== إضافة معالج حذف رسائل الخدمة المنفصل =====
     application.add_handler(MessageHandler(
-    filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
-    delete_service_messages
-))
+        filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+        delete_service_messages
+    ))
 
     commands = [
         BotCommand("start", "بدء البوت"),
@@ -13590,29 +12450,31 @@ async def main():
     ]
     await application.bot.set_my_commands(commands)
 
-    # ===== تضمين خادم الويب المنفصل =====
-    web_imported = import_web_server()
+    # ===== تضمين خادم الويب المنفصل (معطل حالياً) =====
+    # web_imported = import_web_server()
 
+    # ===== مهام الخلفية =====
     task_manager.create_task(auto_publish_loop_improved(application.bot))
     task_manager.create_task(auto_backup())
     task_manager.create_task(run_scheduled_posts_loop_improved(application.bot))
     task_manager.create_task(send_reminders_loop_improved(application.bot))
     task_manager.create_task(cleanup_expired_sessions_improved())
-    #task_manager.create_task(start_web_server())
+    # task_manager.create_task(start_web_server())
     task_manager.create_task(self_ping_loop())
     task_manager.create_task(broadcast_stats_periodically())
     task_manager.create_task(cleanup_points_cache())
     task_manager.create_task(memory_monitor())
     task_manager.create_task(auto_close_contests_loop(application.bot))
 
-    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.3)")
+    print(f"🚀 تم تشغيل {BOT_NAME} (الإصدار 19.3.4)")
     print("✅ جميع التحسينات المطلوبة تم تطبيقها:")
-    print("   • ✅ أزرار جديدة: حذف الفيديوهات، رسائل الخدمة، الملفات، الملصقات")
-    print("   • ✅ تحديث قاعدة البيانات (group_security)")
-    print("   • ✅ تحسين filter_messages_handler")
-    print("   • ✅ إضافة معالجات الكولباك الجديدة")
-    print("   • ✅ تحديث لوحة الأمان security_keyboard")
-    print("   • ✅ إصلاح شاملة للكود")
+    print("   • ✅ أزرار جديدة: حذف الفيديوهات، رسائل الخدمة، الملفات، الملصقات، الصوتيات، المتحركات")
+    print("   • ✅ أزرار تفعيل/تعطيل الكل")
+    print("   • ✅ إمكانية تعيين عقوبة خاصة للحذف")
+    print("   • ✅ تحسين معالج رسائل الخدمة ليشمل جميع الأنواع")
+    print("   • ✅ إعادة هيكلة الكود لتقليل التكرار (دوال مساعدة)")
+    print("   • ✅ فهارس محسنة لقاعدة البيانات")
+    print("   • ✅ تحسين الأمان والصلاحيات")
 
     try:
         await application.run_polling(
@@ -13640,4 +12502,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
