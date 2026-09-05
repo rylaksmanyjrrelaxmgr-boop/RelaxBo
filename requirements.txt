@@ -18,3 +18,4 @@ markdown
 python-multipart
 pandas
 openpyxl
+asyncpg
