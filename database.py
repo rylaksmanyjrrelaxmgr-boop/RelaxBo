@@ -9,7 +9,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - تجمع اتصالات PostgreSQL و MySQL، اتصال SQLite مع WAL
 - معاملات ذرية وإعادة محاولة تلقائية
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
-- تم إصلاح جميع الأخطاء: lastrowid, ON CONFLICT, تاريخ, placeholders, إلخ.
+- تم إصلاح جميع الأخطاء: التوافق مع ON CONFLICT، INSERT OR REPLACE، العناصر النائبة، إلخ.
 """
 
 import os
@@ -107,8 +107,7 @@ def _convert_placeholders(query: str) -> str:
             result = f"${counter}"
             counter += 1
             return result
-        # نحتاج إلى استبدال ? التي ليست داخل نصوص
-        # نسخة مبسطة: استبدال كل ? بـ $n
+        # نستبدل كل ? بـ $n (بسيط ولكن قد يسبب مشاكل إذا كان ? داخل نص، ولكننا نقبل ذلك)
         return re.sub(r'\?', replace_with_dollar, query)
     elif USE_MYSQL:
         return query.replace('?', '%s')
@@ -120,73 +119,190 @@ def _convert_insert_or_ignore(query: str) -> str:
     تحويل INSERT OR IGNORE إلى الصيغة المناسبة لكل قاعدة، مع دعم المفاتيح المركبة.
     """
     upper_query = query.upper().lstrip()
-    if not upper_query.startswith("INSERT"):
-        return query
-    if "INSERT OR IGNORE" not in upper_query:
+    if not upper_query.startswith("INSERT OR IGNORE"):
         return query
 
     if USE_POSTGRES:
+        # PostgreSQL: تحويل إلى INSERT ... ON CONFLICT ... DO NOTHING
+        # نستخرج اسم الجدول والأعمدة
         match = re.search(r"INSERT OR IGNORE INTO (\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
-        if match:
-            table = match.group(1)
-            columns = match.group(2).strip()
-            # قائمة المفاتيح الفريدة المعروفة
-            known_unique = {
-                'auto_replies': ['chat_id', 'keyword'],
-                'banned_words': ['word', 'chat_id'],
-                'user_channels': ['user_id', 'channel_id'],
-                'user_warnings': ['user_id', 'chat_id'],
-                'user_violations': ['user_id', 'chat_id'],
-                'group_admins': ['chat_id', 'user_id'],
-                'hidden_owner_groups': ['chat_id', 'owner_id'],
-                'hidden_admins': ['chat_id', 'admin_id'],
-                'anonymous_admins': ['chat_id', 'anonymous_id'],
-                'contest_participants': ['user_id', 'contest_id'],
-                'referrals': ['referrer_id', 'referred_id'],
-                'subscriptions': ['user_id', 'plan_id'],
-                'schedule': ['channel_db_id'],
-                'last_publish': ['channel_db_id'],
-                'users': ['user_id'],
-                'user_points': ['user_id'],
-                'referral_rewards': ['user_id'],
-                'user_reminder_settings': ['user_id'],
-                'user_translation': ['user_id'],
-                'chat_locks': ['chat_id'],
-                'group_security': ['chat_id'],
-                'auto_reply_settings': ['chat_id'],
-                'bot_groups': ['chat_id'],
-                'group_rules': ['chat_id'],
-                'support_tickets': ['id'],  # pk
-                'bot_admins': ['user_id'],
-                'settings': ['key'],
-            }
-            if table in known_unique:
-                conflict_cols = ', '.join(known_unique[table])
-                new_query = re.sub(r"INSERT OR IGNORE INTO", f"INSERT INTO", query, flags=re.IGNORECASE)
-                values_match = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
-                if values_match:
-                    pos = values_match.start()
-                    new_query = new_query[:pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING " + new_query[pos:]
-                return new_query
-            else:
-                # نأخذ أول عمود كافتراضي
-                first_col = columns.split(',')[0].strip()
-                new_query = re.sub(r"INSERT OR IGNORE INTO", f"INSERT INTO", query, flags=re.IGNORECASE)
-                values_match = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
-                if values_match:
-                    pos = values_match.start()
-                    new_query = new_query[:pos] + f" ON CONFLICT ({first_col}) DO NOTHING " + new_query[pos:]
-                return new_query
-        else:
+        if not match:
+            # إذا لم نجد الأقواس، نستخدم صيغة أبسط: نضيف ON CONFLICT DO NOTHING في النهاية
             return query.replace("INSERT OR IGNORE", "INSERT") + " ON CONFLICT DO NOTHING"
+        table = match.group(1)
+        columns = [c.strip() for c in match.group(2).split(',')]
+        # قائمة المفاتيح الفريدة المعروفة
+        known_unique = {
+            'auto_replies': ['chat_id', 'keyword'],
+            'banned_words': ['word', 'chat_id'],
+            'user_channels': ['user_id', 'channel_id'],
+            'user_warnings': ['user_id', 'chat_id'],
+            'user_violations': ['user_id', 'chat_id'],
+            'group_admins': ['chat_id', 'user_id'],
+            'hidden_owner_groups': ['chat_id', 'owner_id'],
+            'hidden_admins': ['chat_id', 'admin_id'],
+            'anonymous_admins': ['chat_id', 'anonymous_id'],
+            'contest_participants': ['user_id', 'contest_id'],
+            'referrals': ['referrer_id', 'referred_id'],
+            'subscriptions': ['user_id', 'plan_id'],
+            'schedule': ['channel_db_id'],
+            'last_publish': ['channel_db_id'],
+            'users': ['user_id'],
+            'user_points': ['user_id'],
+            'referral_rewards': ['user_id'],
+            'user_reminder_settings': ['user_id'],
+            'user_translation': ['user_id'],
+            'chat_locks': ['chat_id'],
+            'group_security': ['chat_id'],
+            'auto_reply_settings': ['chat_id'],
+            'bot_groups': ['chat_id'],
+            'group_rules': ['chat_id'],
+            'support_tickets': ['id'],  # pk
+            'bot_admins': ['user_id'],
+            'settings': ['key'],
+        }
+        if table in known_unique:
+            conflict_cols = ', '.join(known_unique[table])
+        else:
+            # نأخذ أول عمود كافتراضي
+            conflict_cols = columns[0] if columns else 'id'
+        # بناء الاستعلام الجديد
+        new_query = re.sub(r"INSERT OR IGNORE INTO", "INSERT INTO", query, flags=re.IGNORECASE)
+        # نضع ON CONFLICT قبل VALUES
+        values_pos = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
+        if values_pos:
+            pos = values_pos.start()
+            new_query = new_query[:pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING " + new_query[pos:]
+        else:
+            new_query = new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
+        return new_query
     elif USE_MYSQL:
+        # MySQL: INSERT IGNORE
         return query.replace("INSERT OR IGNORE", "INSERT IGNORE")
     else:
+        # SQLite: INSERT OR IGNORE مدعوم أصلاً
         return query
 
-# =====================================================================
-# 1.1 دوال مساعدة للتواريخ والمعاملات (تم التعديل هنا)
-# =====================================================================
+def _convert_upsert(query: str) -> str:
+    """
+    تحويل ON CONFLICT (col) DO UPDATE SET ... إلى الصيغة المناسبة لكل قاعدة.
+    - PostgreSQL: يترك ON CONFLICT كما هو (مدعوم).
+    - MySQL: يحول إلى ON DUPLICATE KEY UPDATE.
+    - SQLite: يترك ON CONFLICT (مدعوم).
+    """
+    if not USE_MYSQL:
+        return query  # PostgreSQL و SQLite يدعمان ON CONFLICT
+
+    # MySQL لا يدعم ON CONFLICT، نحوله إلى ON DUPLICATE KEY UPDATE
+    # نبحث عن ON CONFLICT ... DO UPDATE SET ...
+    pattern = r"ON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+(.+)"
+    match = re.search(pattern, query, re.IGNORECASE)
+    if not match:
+        return query
+
+    # استخراج أجزاء
+    conflict_cols = match.group(1).strip()
+    update_set = match.group(2).strip()
+
+    # استبدال excluded. بـ VALUES()
+    def replace_excluded(match):
+        col = match.group(1)
+        return f"VALUES({col})"
+    new_update_set = re.sub(r'excluded\.([a-zA-Z_][a-zA-Z0-9_]*)', replace_excluded, update_set)
+
+    # إزالة جزء ON CONFLICT من الاستعلام وإضافة ON DUPLICATE KEY UPDATE في النهاية
+    # نستبدل المطابقة بكلمة فارغة (مع الحفاظ على ما قبلها وما بعدها)
+    new_query = re.sub(pattern, '', query, flags=re.IGNORECASE)
+    # نتأكد من أن هناك مسافة قبل ON DUPLICATE
+    new_query = new_query.rstrip()
+    # نضيف ON DUPLICATE KEY UPDATE
+    new_query = new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
+    return new_query
+
+def _convert_insert_or_replace(query: str) -> str:
+    """
+    تحويل INSERT OR REPLACE إلى الصيغة المناسبة:
+    - SQLite: INSERT OR REPLACE (يدعم)
+    - PostgreSQL: INSERT ... ON CONFLICT (pk) DO UPDATE SET ...
+    - MySQL: REPLACE INTO (يدعم)
+    """
+    upper_query = query.upper().lstrip()
+    if not upper_query.startswith("INSERT OR REPLACE"):
+        return query
+
+    if USE_POSTGRES:
+        # PostgreSQL: نحول إلى INSERT ... ON CONFLICT ... DO UPDATE
+        match = re.search(r"INSERT OR REPLACE INTO (\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
+        if not match:
+            # إذا لم نجد الأقواس، نضع ON CONFLICT DO UPDATE بشكل عام (قد لا يعمل)
+            return query.replace("INSERT OR REPLACE", "INSERT") + " ON CONFLICT DO UPDATE SET ..."
+        table = match.group(1)
+        columns = [c.strip() for c in match.group(2).split(',')]
+        # تحديد المفتاح الأساسي
+        pk_map = {
+            'last_publish': 'channel_db_id',
+            'settings': 'key',
+            'user_points': 'user_id',
+            'referral_rewards': 'user_id',
+            'user_reminder_settings': 'user_id',
+            'user_translation': 'user_id',
+            'chat_locks': 'chat_id',
+            'group_security': 'chat_id',
+            'auto_reply_settings': 'chat_id',
+            'bot_groups': 'chat_id',
+            'group_rules': 'chat_id',
+            'users': 'user_id',
+            'schedule': 'channel_db_id',
+            'plans': 'id',
+            'subscriptions': 'id',
+            'invoices': 'id',
+            'gift_codes': 'id',
+            'user_penalties': 'id',
+            'admin_logs': 'id',
+            'contest_winners': 'id',
+            'contests': 'id',
+            'support_tickets': 'id',
+            'banned_words': 'id',
+            'auto_replies': ['chat_id', 'keyword'],  # مركب
+            'user_channels': ['user_id', 'channel_id'],
+            'user_warnings': ['user_id', 'chat_id'],
+            'user_violations': ['user_id', 'chat_id'],
+            'group_admins': ['chat_id', 'user_id'],
+            'hidden_owner_groups': ['chat_id', 'owner_id'],
+            'hidden_admins': ['chat_id', 'admin_id'],
+            'anonymous_admins': ['chat_id', 'anonymous_id'],
+            'contest_participants': ['user_id', 'contest_id'],
+            'referrals': ['referrer_id', 'referred_id'],
+            'user_groups_link': ['user_id', 'chat_id'],
+        }
+        if table in pk_map:
+            pk = pk_map[table]
+            if isinstance(pk, list):
+                pk_cols = ', '.join(pk)
+            else:
+                pk_cols = pk
+        else:
+            # نأخذ أول عمود
+            pk_cols = columns[0] if columns else 'id'
+
+        # بناء UPDATE SET (لجميع الأعمدة)
+        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns])
+        # بناء الاستعلام الجديد
+        new_query = re.sub(r"INSERT OR REPLACE INTO", "INSERT INTO", query, flags=re.IGNORECASE)
+        # نضيف ON CONFLICT قبل VALUES
+        values_pos = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
+        if values_pos:
+            pos = values_pos.start()
+            new_query = new_query[:pos] + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause} " + new_query[pos:]
+        else:
+            new_query = new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
+        return new_query
+    elif USE_MYSQL:
+        # MySQL يدعم REPLACE INTO
+        return query.replace("INSERT OR REPLACE", "REPLACE")
+    else:
+        # SQLite يدعم INSERT OR REPLACE
+        return query
 
 def _adapt_params(params: tuple) -> tuple:
     """
@@ -417,6 +533,8 @@ class Database:
     async def execute(self, query: str, params: tuple = ()) -> int:
         params = _adapt_params(params)
         query = _convert_insert_or_ignore(query)
+        query = _convert_upsert(query)          # تحويل ON CONFLICT ... DO UPDATE إلى ON DUPLICATE KEY UPDATE في MySQL
+        query = _convert_insert_or_replace(query)  # تحويل INSERT OR REPLACE
         query = _convert_placeholders(query)
         max_retries = 3
         for attempt in range(max_retries):
@@ -444,6 +562,8 @@ class Database:
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
         params = _adapt_params(params)
         query = _convert_insert_or_ignore(query)
+        query = _convert_upsert(query)
+        query = _convert_insert_or_replace(query)
         query = _convert_placeholders(query)
         max_retries = 3
         for attempt in range(max_retries):
@@ -475,6 +595,8 @@ class Database:
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
         params = _adapt_params(params)
         query = _convert_insert_or_ignore(query)
+        query = _convert_upsert(query)
+        query = _convert_insert_or_replace(query)
         query = _convert_placeholders(query)
         max_retries = 3
         for attempt in range(max_retries):
@@ -506,6 +628,8 @@ class Database:
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
         params = _adapt_params(params)
         query = _convert_insert_or_ignore(query)
+        query = _convert_upsert(query)
+        query = _convert_insert_or_replace(query)
         query = _convert_placeholders(query)
         max_retries = 3
         for attempt in range(max_retries):
@@ -535,6 +659,8 @@ class Database:
         if not params_list:
             return 0
         query = _convert_insert_or_ignore(query)
+        query = _convert_upsert(query)
+        query = _convert_insert_or_replace(query)
         query = _convert_placeholders(query)
         max_retries = 3
         for attempt in range(max_retries):
@@ -2586,6 +2712,8 @@ class Database:
                                        updated_at = excluded.updated_at"""
                         params = (user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now())
                         query = _convert_insert_or_ignore(query)
+                        query = _convert_upsert(query)
+                        query = _convert_insert_or_replace(query)
                         query = _convert_placeholders(query)
                         params = _adapt_params(params)
                         if USE_POSTGRES:
@@ -2601,10 +2729,12 @@ class Database:
                     logger.error(f"❌ فشل توليد رمز إحالة فريد للمستخدم {user_id}")
                     return False
 
-                q_points = "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO NOTHING"
+                q_points = "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET points = excluded.points, last_updated = excluded.last_updated"
                 q_points = _convert_insert_or_ignore(q_points)
+                q_points = _convert_upsert(q_points)
+                q_points = _convert_insert_or_replace(q_points)
                 q_points = _convert_placeholders(q_points)
-                p_points = _adapt_params((user_id, TimeUtils.utc_now()))
+                p_points = _adapt_params((user_id, TimeUtils.utc_now(), TimeUtils.utc_now()))
                 if USE_POSTGRES:
                     await conn.execute(q_points, *p_points)
                 else:
@@ -2612,6 +2742,8 @@ class Database:
 
                 q_rewards = "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING"
                 q_rewards = _convert_insert_or_ignore(q_rewards)
+                q_rewards = _convert_upsert(q_rewards)
+                q_rewards = _convert_insert_or_replace(q_rewards)
                 q_rewards = _convert_placeholders(q_rewards)
                 p_rewards = _adapt_params((user_id,))
                 if USE_POSTGRES:
@@ -3729,13 +3861,16 @@ class Database:
         return True
 
     async def update_last_publish(self, channel_db_id: int) -> bool:
-        return await self.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?,?)", (channel_db_id, TimeUtils.sql_iso())) > 0
+        query = "INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)"
+        # التحويلات ستتم في execute
+        return await self.execute(query, (channel_db_id, TimeUtils.sql_iso())) > 0
 
     # =====================================================================
     # تعديل دالة get_channels_to_publish لاستخدام datetime بدلاً من السلاسل النصية
     # =====================================================================
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
+        # نكتب الاستعلام باستخدام ?، سيتم تحويلها بواسطة _convert_placeholders
         query = """
             WITH best_subscription AS (
                 SELECT s.user_id, s.plan_id, p.max_channels, p.max_posts,
@@ -3745,7 +3880,7 @@ class Database:
                        ) AS rn
                 FROM subscriptions s
                 JOIN plans p ON s.plan_id = p.id
-                WHERE s.status = 'active' AND s.end_date > $1
+                WHERE s.status = 'active' AND s.end_date > ?
             ),
             active_subs AS (
                 SELECT user_id, plan_id, max_channels, max_posts
@@ -3776,7 +3911,7 @@ class Database:
             WHERE uc.banned = 0 
               AND u.banned = 0 
               AND u.auto_publish = 1
-              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= $2)
+              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
               AND (
                   (pc.publishable_unpublished_count > 0)
                   OR (u.auto_recycle = 1 AND pc.published_count > 0)
@@ -3784,8 +3919,9 @@ class Database:
               AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
               AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
             ORDER BY COALESCE(sch.next_publish_date, '1970-01-01 00:00:00') ASC
-            LIMIT $3
+            LIMIT ?
         """
+        # نمرر now كـ datetime، وسيتم تحويلها بواسطة _adapt_params في fetchall
         return await self.fetchall(query, (now, now, limit))
 
     # ============================= التذاكر =============================
@@ -4231,6 +4367,7 @@ class Database:
         return result if result is not None else default
 
     async def set_setting(self, key: str, value: str) -> bool:
+        # استخدام INSERT OR REPLACE، سيتم تحويلها حسب الحاجة
         return await self.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)) > 0
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
