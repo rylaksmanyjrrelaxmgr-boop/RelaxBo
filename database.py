@@ -20,6 +20,7 @@ import time
 import shutil
 import sqlite3
 import secrets
+import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any, Union
@@ -31,8 +32,6 @@ from collections import defaultdict
 # =====================================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-
-# تحديد نوع قاعدة البيانات بناءً على الرابط
 DB_TYPE = "sqlite"  # افتراضي
 
 if DATABASE_URL:
@@ -53,17 +52,14 @@ if DATABASE_URL:
             logging.error("❌ asyncmy غير مثبت. قم بتثبيته: pip install asyncmy")
             raise
     else:
-        # افتراضي SQLite
         DB_TYPE = "sqlite"
         import aiosqlite
 
 if DB_TYPE == "sqlite":
     import aiosqlite
 elif DB_TYPE == "postgres":
-    # تم الاستيراد أعلاه
     pass
 elif DB_TYPE == "mysql":
-    # تم الاستيراد أعلاه
     pass
 
 # للحفاظ على التوافق مع الكود القديم
@@ -98,10 +94,35 @@ def _pg_type_to_sqlite(pg_type: str) -> str:
 
 def _get_placeholder() -> str:
     """إرجاع رمز المعامل المناسب لنوع قاعدة البيانات."""
-    if USE_POSTGRES or USE_MYSQL:
+    if USE_POSTGRES:
+        return '$1'  # سيتم استبداله ديناميكياً
+    elif USE_MYSQL:
         return '%s'
     else:
         return '?'
+
+# دالة جديدة لتحويل علامات الاستفهام إلى العلامة المناسبة لكل قاعدة بيانات
+def _convert_placeholders(query: str) -> str:
+    """
+    تحويل علامات ? في الاستعلام إلى العلامة المناسبة حسب نوع قاعدة البيانات.
+    - PostgreSQL: $1, $2, ...
+    - MySQL: %s
+    - SQLite: ? (تبقى كما هي)
+    """
+    if USE_POSTGRES:
+        # استبدال كل ? بعلامة $n (n يبدأ من 1)
+        # نستخدم re.sub مع دالة lambda لحساب الترتيب
+        counter = 1
+        def replace_with_dollar(match):
+            nonlocal counter
+            result = f"${counter}"
+            counter += 1
+            return result
+        return re.sub(r'\?', replace_with_dollar, query)
+    elif USE_MYSQL:
+        return query.replace('?', '%s')
+    else:
+        return query  # SQLite يحتفظ بـ ?
 
 def _adapt_params(params: tuple) -> tuple:
     """تكييف المعاملات (تحويل None إلى NULL إذا لزم الأمر)."""
@@ -186,7 +207,6 @@ class Database:
     def __init__(self):
         self._pool = None
         self._sqlite_conn = None
-        self._mysql_conn = None
         self._initialized = False
         self._db_type = DB_TYPE
         self._max_connections = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -215,7 +235,6 @@ class Database:
             )
             logger.info(f"✅ Pool PostgreSQL جاهز (max={self._max_connections})")
         elif USE_MYSQL:
-            # استخراج المعلمات من DATABASE_URL (mysql://user:pass@host:port/db)
             import re
             pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
             match = re.match(pattern, DATABASE_URL)
@@ -333,12 +352,13 @@ class Database:
             await self._return_connection(conn)
 
     # =====================================================================
-    # 5. دوال الاستعلام المتوافقة والمحسّنة
+    # 5. دوال الاستعلام المتوافقة والمحسّنة (مع تحويل العلامات)
     # =====================================================================
 
     async def execute(self, query: str, params: tuple = ()) -> int:
         """تنفيذ استعلام (INSERT/UPDATE/DELETE) مع إرجاع عدد الصفوف المتأثرة."""
         params = _adapt_params(params)
+        query = _convert_placeholders(query)  # تحويل ? إلى $1 أو %s حسب الحاجة
         async with self.connection() as conn:
             if USE_POSTGRES:
                 result = await conn.execute(query, *params)
@@ -355,6 +375,7 @@ class Database:
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
         """جلب صف واحد."""
         params = _adapt_params(params)
+        query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
                 row = await conn.fetchrow(query, *params)
@@ -375,6 +396,7 @@ class Database:
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
         """جلب جميع الصفوف."""
         params = _adapt_params(params)
+        query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
                 rows = await conn.fetch(query, *params)
@@ -395,6 +417,7 @@ class Database:
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
         """جلب قيمة واحدة (الصف الأول، العمود الأول)."""
         params = _adapt_params(params)
+        query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
                 row = await conn.fetchrow(query, *params)
@@ -413,6 +436,7 @@ class Database:
         """تنفيذ استعلام متعدد الصفوف (INSERT/UPDATE)."""
         if not params_list:
             return 0
+        query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
                 return await conn.executemany(query, params_list)
@@ -2203,12 +2227,10 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_created ON referrals(referrer_id, created_at)",
         ]
         if USE_MYSQL:
-            # MySQL لا يدعم CREATE INDEX IF NOT EXISTS، لذا نتحقق وننشئ
             for query in indexes:
                 try:
                     await conn.execute(query)
                 except Exception as e:
-                    # قد يكون الخطأ بسبب تكرار الفهرس، نتجاهله
                     if "Duplicate key name" not in str(e):
                         logger.warning(f"⚠️ فشل إنشاء فهرس: {e}")
         else:
@@ -2265,7 +2287,7 @@ class Database:
                         "UPDATE plans SET max_channels = %s, max_posts = %s WHERE name = %s",
                         (plan["max_channels"], plan["max_posts"], plan["name"])
                     )
-            else:  # sqlite
+            else:
                 cursor = await conn.execute("SELECT id FROM plans WHERE name = ?", (plan["name"],))
                 existing = await cursor.fetchone()
                 if not existing:
@@ -2457,7 +2479,6 @@ class Database:
             elif USE_MYSQL:
                 import subprocess
                 import re
-                # استخراج المعلمات من DATABASE_URL
                 pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
                 match = re.match(pattern, DATABASE_URL)
                 if not match:
@@ -3035,7 +3056,7 @@ class Database:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
             return 0
 
-    # ✅ الدالة المفقودة التي تطلبها (مضافة هنا)
+    # ✅ الدالة المفقودة (مضافة)
     async def get_user_posts(self, user_id: int, channel_db_id: int, limit: int = 10) -> List[Dict]:
         """جلب منشورات المستخدم لقناة محددة."""
         exists = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
@@ -3729,11 +3750,8 @@ class Database:
             query = query.replace('%s', '$1').replace('%s', '$2').replace('%s', '$3')
             return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
         elif USE_MYSQL:
-            # MySQL لا يدعم WITH RECURSIVE بالضبط، لكنه يدعم CTE منذ 8.0
-            # نستخدم نفس الاستعلام مع علامات %s
             return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
         else:
-            # sqlite
             query = query.replace('%s', '?')
             return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
 
@@ -4003,7 +4021,6 @@ class Database:
         return await self.execute(query, tuple(values)) > 0
 
     async def get_users_for_reminder(self) -> List[Dict]:
-        # ملاحظة: julianday خاص بـ SQLite، نستخدم حساب التواريخ بشكل عام
         if USE_POSTGRES:
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
@@ -4034,7 +4051,7 @@ class Database:
                       AND (r.last_reminder_sent IS NULL OR DATEDIFF(?, r.last_reminder_sent) >= 1)""",
                 (TimeUtils.sql_iso(), TimeUtils.sql_iso(), TimeUtils.sql_iso())
             )
-        else:  # sqlite
+        else:
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
                           CAST(julianday(MAX(s.end_date)) - julianday(?) AS INTEGER) as days_left,
