@@ -16,6 +16,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - تم تحسين _convert_insert_or_replace لتحديث الأعمدة بدقة
 - تم إصلاح استعلام add_posts لاستخدام executemany مع التحويلات
 - تم إصلاح أخطاء تمرير المعاملات في PostgreSQL (استخدام *args مع conn.execute)
+- تم إصلاح خطأ _fetchval_in_conn بحيث لا يخفي الاستثناءات مما يسبب aborted transactions
+- تم إصلاح expire_penalties لاستخراج rowcount بشكل صحيح من conn.execute في asyncpg
 """
 
 import os
@@ -4909,17 +4911,20 @@ class Database:
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
-                    cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()")
-                elif USE_MYSQL:
-                    cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()")
-                else:
-                    cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')")
-                expired_count = cursor.rowcount
-                if USE_POSTGRES:
+                    # في asyncpg، conn.execute ترجع سلسلة مثل "UPDATE 5"
+                    result = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()")
+                    # استخراج العدد من النص
+                    parts = result.split()
+                    expired_count = int(parts[-1]) if parts and parts[-1].isdigit() else 0
                     await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < NOW() - INTERVAL '30 days'")
                 elif USE_MYSQL:
+                    cursor = await conn.cursor()
+                    await cursor.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()")
+                    expired_count = cursor.rowcount
                     await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < NOW() - INTERVAL 30 DAY")
                 else:
+                    cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')")
+                    expired_count = cursor.rowcount
                     await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND julianday('now') - julianday(created_at) > 30")
                 return expired_count
         except Exception as e:
@@ -5210,8 +5215,9 @@ class Database:
                 row = await cursor.fetchone()
                 return row[0] if row else default
         except Exception as e:
+            # سجل الخطأ وأعد رفعه حتى لا يتم إخفاء الاستثناءات
             logger.error(f"❌ _fetchval_in_conn error: {e}")
-            return default
+            raise
 
     async def _fetchone_in_conn(self, conn, query: str, params: tuple = ()) -> Optional[Dict]:
         try:
@@ -5232,7 +5238,7 @@ class Database:
                 return dict(row) if row else None
         except Exception as e:
             logger.error(f"❌ _fetchone_in_conn error: {e}")
-            return None
+            raise
 
 # =====================================================================
 # 11. إنشاء كائن قاعدة البيانات
