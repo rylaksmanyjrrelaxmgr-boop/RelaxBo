@@ -15,6 +15,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - تم توسيع قاموس known_unique ليشمل جميع الجداول
 - تم تحسين _convert_insert_or_replace لتحديث الأعمدة بدقة
 - تم إصلاح استعلام add_posts لاستخدام executemany مع التحويلات
+- تم إصلاح أخطاء تمرير المعاملات في PostgreSQL (استخدام *args مع conn.execute)
 """
 
 import os
@@ -2361,18 +2362,19 @@ class Database:
             if USE_POSTGRES:
                 existing = await conn.fetchval("SELECT id FROM plans WHERE name = $1", plan["name"])
                 if not existing:
+                    # تمرير المعاملات مباشرة كوسائط منفصلة (لا تستخدم tuple)
                     await conn.execute(
                         """INSERT INTO plans 
                            (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
-                        (plan["name"], plan["description"], plan["price"], "XTR",
-                         plan["duration_days"], plan["max_channels"], plan["max_posts"],
-                         plan["features"], 1, plan["is_gift"], TimeUtils.utc_now())
+                        plan["name"], plan["description"], plan["price"], "XTR",
+                        plan["duration_days"], plan["max_channels"], plan["max_posts"],
+                        plan["features"], 1, plan["is_gift"], TimeUtils.utc_now()
                     )
                 else:
                     await conn.execute(
                         "UPDATE plans SET max_channels = $1, max_posts = $2 WHERE name = $3",
-                        (plan["max_channels"], plan["max_posts"], plan["name"])
+                        plan["max_channels"], plan["max_posts"], plan["name"]
                     )
             elif USE_MYSQL:
                 cursor = await conn.cursor()
