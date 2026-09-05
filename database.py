@@ -124,6 +124,36 @@ def _convert_placeholders(query: str) -> str:
     else:
         return query  # SQLite يحتفظ بـ ?
 
+def _convert_insert_or_ignore(query: str) -> str:
+    """
+    تحويل INSERT OR IGNORE إلى الصيغة المناسبة لكل قاعدة بيانات.
+    - PostgreSQL: INSERT INTO ... ON CONFLICT (column) DO NOTHING
+    - MySQL: INSERT IGNORE ...
+    - SQLite: INSERT OR IGNORE ... (يبقى كما هو)
+    """
+    if USE_POSTGRES:
+        # البحث عن INSERT OR IGNORE INTO table (columns) VALUES (...)
+        match = re.search(r"INSERT OR IGNORE INTO (\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
+        if match:
+            table = match.group(1)
+            columns = match.group(2).strip()
+            first_col = columns.split(',')[0].strip()
+            # استبدال OR IGNORE بـ ON CONFLICT (first_col) DO NOTHING
+            new_query = re.sub(r"INSERT OR IGNORE INTO", f"INSERT INTO", query, flags=re.IGNORECASE)
+            # نضيف ON CONFLICT قبل VALUES
+            values_match = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
+            if values_match:
+                pos = values_match.start()
+                new_query = new_query[:pos] + f" ON CONFLICT ({first_col}) DO NOTHING " + new_query[pos:]
+            return new_query
+        else:
+            # إذا لم نجد الأعمدة، نستخدم صيغة عامة أقل دقة (قد تسبب أخطاء)
+            return query.replace("INSERT OR IGNORE", "INSERT") + " ON CONFLICT DO NOTHING"
+    elif USE_MYSQL:
+        return query.replace("INSERT OR IGNORE", "INSERT IGNORE")
+    else:
+        return query  # SQLite
+
 def _adapt_params(params: tuple) -> tuple:
     """تكييف المعاملات (تحويل None إلى NULL إذا لزم الأمر)."""
     if params is None:
@@ -358,7 +388,8 @@ class Database:
     async def execute(self, query: str, params: tuple = ()) -> int:
         """تنفيذ استعلام (INSERT/UPDATE/DELETE) مع إرجاع عدد الصفوف المتأثرة."""
         params = _adapt_params(params)
-        query = _convert_placeholders(query)  # تحويل ? إلى $1 أو %s حسب الحاجة
+        query = _convert_insert_or_ignore(query)  # تحويل INSERT OR IGNORE أولاً
+        query = _convert_placeholders(query)      # ثم تحويل العلامات
         async with self.connection() as conn:
             if USE_POSTGRES:
                 result = await conn.execute(query, *params)
@@ -375,6 +406,7 @@ class Database:
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
         """جلب صف واحد."""
         params = _adapt_params(params)
+        query = _convert_insert_or_ignore(query)
         query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
@@ -396,6 +428,7 @@ class Database:
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
         """جلب جميع الصفوف."""
         params = _adapt_params(params)
+        query = _convert_insert_or_ignore(query)
         query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
@@ -417,6 +450,7 @@ class Database:
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
         """جلب قيمة واحدة (الصف الأول، العمود الأول)."""
         params = _adapt_params(params)
+        query = _convert_insert_or_ignore(query)
         query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
@@ -436,6 +470,7 @@ class Database:
         """تنفيذ استعلام متعدد الصفوف (INSERT/UPDATE)."""
         if not params_list:
             return 0
+        query = _convert_insert_or_ignore(query)
         query = _convert_placeholders(query)
         async with self.connection() as conn:
             if USE_POSTGRES:
@@ -3694,7 +3729,7 @@ class Database:
         return await self.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?,?)", (channel_db_id, TimeUtils.sql_iso())) > 0
 
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
-        # نستخدم نفس الاستعلام مع تعديل بسيط للتوافق (ONLY_FULL_GROUP_BY قد يسبب مشاكل في MySQL)
+        # استخدام علامات ? للتوافق مع جميع القواعد (سيتم تحويلها بواسطة _convert_placeholders)
         query = """
             WITH best_subscription AS (
                 SELECT s.user_id, s.plan_id, p.max_channels, p.max_posts,
@@ -3704,7 +3739,7 @@ class Database:
                        ) AS rn
                 FROM subscriptions s
                 JOIN plans p ON s.plan_id = p.id
-                WHERE s.status = 'active' AND s.end_date > %s
+                WHERE s.status = 'active' AND s.end_date > ?
             ),
             active_subs AS (
                 SELECT user_id, plan_id, max_channels, max_posts
@@ -3735,7 +3770,7 @@ class Database:
             WHERE uc.banned = 0 
               AND u.banned = 0 
               AND u.auto_publish = 1
-              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= %s)
+              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
               AND (
                   (pc.publishable_unpublished_count > 0)
                   OR (u.auto_recycle = 1 AND pc.published_count > 0)
@@ -3743,17 +3778,9 @@ class Database:
               AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
               AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
             ORDER BY COALESCE(sch.next_publish_date, '1970-01-01 00:00:00') ASC
-            LIMIT %s
+            LIMIT ?
         """
-        # استبدال علامات المعامل حسب نوع القاعدة
-        if USE_POSTGRES:
-            query = query.replace('%s', '$1').replace('%s', '$2').replace('%s', '$3')
-            return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
-        elif USE_MYSQL:
-            return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
-        else:
-            query = query.replace('%s', '?')
-            return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
+        return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
 
     # ============================= التذاكر =============================
     async def create_ticket(self, user_id: int, username: str, content: str, media_type: str = None, media_file_id: str = None) -> int:
