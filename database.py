@@ -107,6 +107,8 @@ def _convert_placeholders(query: str) -> str:
             result = f"${counter}"
             counter += 1
             return result
+        # نحتاج إلى استبدال ? التي ليست داخل نصوص
+        # نسخة مبسطة: استبدال كل ? بـ $n
         return re.sub(r'\?', replace_with_dollar, query)
     elif USE_MYSQL:
         return query.replace('?', '%s')
@@ -182,10 +184,30 @@ def _convert_insert_or_ignore(query: str) -> str:
     else:
         return query
 
+# =====================================================================
+# 1.1 دوال مساعدة للتواريخ والمعاملات (تم التعديل هنا)
+# =====================================================================
+
 def _adapt_params(params: tuple) -> tuple:
+    """
+    تحويل المعاملات لتتناسب مع نوع قاعدة البيانات.
+    - PostgreSQL: يمرر التواريخ كـ datetime objects.
+    - SQLite و MySQL: يحول التواريخ إلى نص 'YYYY-MM-DD HH:MM:SS'.
+    """
     if params is None:
         return ()
-    return params
+    if USE_POSTGRES:
+        # PostgreSQL يتوقع datetime مباشرة، ولا يغير شيئًا
+        return params
+    else:
+        # SQLite و MySQL يتوقعان سلسلة نصية
+        new_params = []
+        for p in params:
+            if isinstance(p, datetime):
+                new_params.append(p.strftime('%Y-%m-%d %H:%M:%S'))
+            else:
+                new_params.append(p)
+        return tuple(new_params)
 
 # =====================================================================
 # 2. فئة TimeUtils
@@ -519,7 +541,9 @@ class Database:
             async with self.connection() as conn:
                 try:
                     if USE_POSTGRES:
-                        return await conn.executemany(query, params_list)
+                        # asyncpg.executemany لا تعيد عدد الصفوف، نعيد عدد المعاملات كتقدير
+                        await conn.executemany(query, params_list)
+                        return len(params_list)
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
                         await cursor.executemany(query, params_list)
@@ -2553,40 +2577,21 @@ class Database:
                 for _ in range(5):
                     code = secrets.token_urlsafe(8)
                     try:
-                        if USE_POSTGRES:
-                            await conn.execute(
-                                """INSERT INTO users 
+                        query = """INSERT INTO users 
                                    (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES ($1, $2, $3, $4, 0, $5, $6)
-                                   ON CONFLICT (user_id) DO UPDATE SET
-                                       username = EXCLUDED.username,
-                                       first_name = EXCLUDED.first_name,
-                                       updated_at = EXCLUDED.updated_at""",
-                                user_id, username, first_name, code,
-                                TimeUtils.utc_now(), TimeUtils.utc_now()
-                            )
-                        elif USE_MYSQL:
-                            await conn.execute(
-                                """INSERT INTO users 
-                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES (%s, %s, %s, %s, 0, %s, %s)
-                                   ON DUPLICATE KEY UPDATE
-                                       username = VALUES(username),
-                                       first_name = VALUES(first_name),
-                                       updated_at = VALUES(updated_at)""",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
-                            )
-                        else:
-                            await conn.execute(
-                                """INSERT INTO users 
-                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES (?,?,?,?,0,?,?)
+                                   VALUES (?, ?, ?, ?, 0, ?, ?)
                                    ON CONFLICT(user_id) DO UPDATE SET
                                        username = CASE WHEN excluded.username != '' THEN excluded.username ELSE users.username END,
                                        first_name = CASE WHEN excluded.first_name != '' THEN excluded.first_name ELSE users.first_name END,
-                                       updated_at = excluded.updated_at""",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
-                            )
+                                       updated_at = excluded.updated_at"""
+                        params = (user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        query = _convert_insert_or_ignore(query)
+                        query = _convert_placeholders(query)
+                        params = _adapt_params(params)
+                        if USE_POSTGRES:
+                            await conn.execute(query, *params)
+                        else:
+                            await conn.execute(query, params)
                         break
                     except Exception as e:
                         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -2595,33 +2600,25 @@ class Database:
                 else:
                     logger.error(f"❌ فشل توليد رمز إحالة فريد للمستخدم {user_id}")
                     return False
+
+                q_points = "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO NOTHING"
+                q_points = _convert_insert_or_ignore(q_points)
+                q_points = _convert_placeholders(q_points)
+                p_points = _adapt_params((user_id, TimeUtils.utc_now()))
                 if USE_POSTGRES:
-                    await conn.execute(
-                        "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT DO NOTHING",
-                        (user_id, TimeUtils.utc_now())
-                    )
-                    await conn.execute(
-                        "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING",
-                        (user_id,)
-                    )
-                elif USE_MYSQL:
-                    await conn.execute(
-                        "INSERT IGNORE INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s)",
-                        (user_id, TimeUtils.sql_iso())
-                    )
-                    await conn.execute(
-                        "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
-                        (user_id,)
-                    )
+                    await conn.execute(q_points, *p_points)
                 else:
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO user_points (user_id, points, last_updated) VALUES (?,0,?)",
-                        (user_id, TimeUtils.sql_iso())
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
-                        (user_id,)
-                    )
+                    await conn.execute(q_points, p_points)
+
+                q_rewards = "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING"
+                q_rewards = _convert_insert_or_ignore(q_rewards)
+                q_rewards = _convert_placeholders(q_rewards)
+                p_rewards = _adapt_params((user_id,))
+                if USE_POSTGRES:
+                    await conn.execute(q_rewards, *p_rewards)
+                else:
+                    await conn.execute(q_rewards, p_rewards)
+
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
@@ -2672,7 +2669,7 @@ class Database:
     async def has_active_subscription(self, user_id: int) -> bool:
         result = await self.fetchval(
             "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ? LIMIT 1",
-            (user_id, TimeUtils.sql_iso())
+            (user_id, TimeUtils.utc_now())
         )
         return result is not None
 
@@ -2703,7 +2700,7 @@ class Database:
                     current_end = await self._fetchval_in_conn(
                         conn,
                         "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        (user_id, TimeUtils.sql_iso())
+                        (user_id, TimeUtils.utc_now())
                     )
                     current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
 
@@ -2770,7 +2767,7 @@ class Database:
                WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                LIMIT 1""",
-            (user_id, TimeUtils.sql_iso())
+            (user_id, TimeUtils.utc_now())
         )
 
     async def get_active_plan(self, user_id: int) -> Optional[Dict]:
@@ -2798,7 +2795,7 @@ class Database:
                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     else:
                         cursor = await conn.execute(
@@ -2808,7 +2805,7 @@ class Database:
                                WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                         plan_row = await cursor.fetchone()
                     if not plan_row:
@@ -2967,7 +2964,7 @@ class Database:
                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     else:
                         cursor = await conn.execute(
@@ -2977,7 +2974,7 @@ class Database:
                                WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                         plan_row = await cursor.fetchone()
                     if not plan_row:
@@ -3734,7 +3731,11 @@ class Database:
     async def update_last_publish(self, channel_db_id: int) -> bool:
         return await self.execute("INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?,?)", (channel_db_id, TimeUtils.sql_iso())) > 0
 
+    # =====================================================================
+    # تعديل دالة get_channels_to_publish لاستخدام datetime بدلاً من السلاسل النصية
+    # =====================================================================
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
+        now = TimeUtils.utc_now()
         query = """
             WITH best_subscription AS (
                 SELECT s.user_id, s.plan_id, p.max_channels, p.max_posts,
@@ -3744,7 +3745,7 @@ class Database:
                        ) AS rn
                 FROM subscriptions s
                 JOIN plans p ON s.plan_id = p.id
-                WHERE s.status = 'active' AND s.end_date > ?
+                WHERE s.status = 'active' AND s.end_date > $1
             ),
             active_subs AS (
                 SELECT user_id, plan_id, max_channels, max_posts
@@ -3775,7 +3776,7 @@ class Database:
             WHERE uc.banned = 0 
               AND u.banned = 0 
               AND u.auto_publish = 1
-              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
+              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= $2)
               AND (
                   (pc.publishable_unpublished_count > 0)
                   OR (u.auto_recycle = 1 AND pc.published_count > 0)
@@ -3783,9 +3784,9 @@ class Database:
               AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
               AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
             ORDER BY COALESCE(sch.next_publish_date, '1970-01-01 00:00:00') ASC
-            LIMIT ?
+            LIMIT $3
         """
-        return await self.fetchall(query, (TimeUtils.sql_iso(), TimeUtils.sql_iso(), limit))
+        return await self.fetchall(query, (now, now, limit))
 
     # ============================= التذاكر =============================
     async def create_ticket(self, user_id: int, username: str, content: str, media_type: str = None, media_file_id: str = None) -> int:
@@ -3931,7 +3932,7 @@ class Database:
                             ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                             LIMIT 1
                             """,
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -3997,7 +3998,7 @@ class Database:
                     if USE_POSTGRES:
                         current_end = await conn.fetchval(
                             "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4043,57 +4044,41 @@ class Database:
         return [ref['referred_id'] for ref in referrals]
 
     # ============================= التذكيرات =============================
-    async def get_reminder_settings(self, user_id: int) -> Dict:
-        settings = await self.fetchone("SELECT * FROM user_reminder_settings WHERE user_id = ?", (user_id,))
-        if settings:
-            return settings
-        await self.execute("INSERT OR IGNORE INTO user_reminder_settings (user_id) VALUES (?)", (user_id,))
-        settings = await self.fetchone("SELECT * FROM user_reminder_settings WHERE user_id = ?", (user_id,))
-        return settings if settings else {}
-
-    async def update_reminder_settings(self, user_id: int, **kwargs) -> bool:
-        if not kwargs:
-            return False
-        allowed_columns = {'subscription_reminder', 'daily_stats_reminder', 'weekly_report', 'reminder_days_before', 'last_reminder_sent', 'notification_lang'}
-        for key in kwargs:
-            if key not in allowed_columns:
-                logger.error(f"❌ Invalid column: {key}")
-                return False
-        updates = [f"{key} = ?" for key in kwargs]
-        values = list(kwargs.values()) + [user_id]
-        query = f"UPDATE user_reminder_settings SET {', '.join(updates)} WHERE user_id = ?"
-        return await self.execute(query, tuple(values)) > 0
-
+    # =====================================================================
+    # تعديل get_users_for_reminder لاستخدام datetime بدلاً من السلاسل النصية
+    # =====================================================================
     async def get_users_for_reminder(self) -> List[Dict]:
+        now = TimeUtils.utc_now()
         if USE_POSTGRES:
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          EXTRACT(DAY FROM (MAX(s.end_date) - ?)) as days_left,
+                          EXTRACT(DAY FROM (MAX(s.end_date) - $1)) as days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
-                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > ?
+                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > $2
                    WHERE r.subscription_reminder = 1
                    GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
                    HAVING days_left <= r.reminder_days_before
                       AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL OR EXTRACT(DAY FROM (? - r.last_reminder_sent)) >= 1)""",
-                (TimeUtils.sql_iso(), TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                      AND (r.last_reminder_sent IS NULL OR EXTRACT(DAY FROM ($3 - r.last_reminder_sent)) >= 1)""",
+                (now, now, now)
             )
         elif USE_MYSQL:
+            # MySQL يستخدم DATEDIFF ويحتاج إلى تواريخ نصية أو datetime
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          DATEDIFF(MAX(s.end_date), ?) as days_left,
+                          DATEDIFF(MAX(s.end_date), %s) as days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
-                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > ?
+                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > %s
                    WHERE r.subscription_reminder = 1
                    GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
                    HAVING days_left <= r.reminder_days_before
                       AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL OR DATEDIFF(?, r.last_reminder_sent) >= 1)""",
-                (TimeUtils.sql_iso(), TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                      AND (r.last_reminder_sent IS NULL OR DATEDIFF(%s, r.last_reminder_sent) >= 1)""",
+                (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'))
             )
         else:
             return await self.fetchall(
@@ -4108,7 +4093,7 @@ class Database:
                    HAVING days_left <= r.reminder_days_before
                       AND days_left > 0
                       AND (r.last_reminder_sent IS NULL OR julianday(?) - julianday(r.last_reminder_sent) >= 1)""",
-                (TimeUtils.sql_iso(), TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'))
             )
 
     # ============================= المسابقات =============================
@@ -4330,7 +4315,7 @@ class Database:
                     if USE_POSTGRES:
                         current_end = await conn.fetchval(
                             "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4417,7 +4402,7 @@ class Database:
                     if USE_POSTGRES:
                         current_end = await conn.fetchval(
                             "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4468,7 +4453,7 @@ class Database:
                     if USE_POSTGRES:
                         current_end = await conn.fetchval(
                             "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4540,7 +4525,7 @@ class Database:
 
     async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
         if USE_POSTGRES:
-            end = await conn.fetchval("SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", (user_id, TimeUtils.sql_iso()))
+            end = await conn.fetchval("SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", (user_id, TimeUtils.utc_now()))
         elif USE_MYSQL:
             cursor = await conn.cursor()
             await cursor.execute("SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", (user_id, TimeUtils.sql_iso()))
@@ -4620,7 +4605,7 @@ class Database:
                     if USE_POSTGRES:
                         current_end = await conn.fetchval(
                             "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, TimeUtils.utc_now())
                         )
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4785,7 +4770,6 @@ class Database:
     async def expire_penalties(self) -> int:
         try:
             async with self.transaction() as conn:
-                # استخدام دوال تاريخ متوافقة
                 if USE_POSTGRES:
                     cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()")
                 elif USE_MYSQL:
@@ -4793,7 +4777,6 @@ class Database:
                 else:
                     cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')")
                 expired_count = cursor.rowcount
-                # حذف العقوبات المنتهية منذ أكثر من 30 يومًا
                 if USE_POSTGRES:
                     await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < NOW() - INTERVAL '30 days'")
                 elif USE_MYSQL:
@@ -4945,7 +4928,7 @@ class Database:
             groups = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
             posts = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
             published = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.sql_iso(),), default=0)
+            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.utc_now(),), default=0)
             tickets = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
         return {
             'users': users,
@@ -4964,7 +4947,7 @@ class Database:
             groups = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
             posts = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
             published = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.sql_iso(),), default=0)
+            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.utc_now(),), default=0)
             tickets = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
             invoices = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM invoices", default=0)
             active_penalties = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM user_penalties WHERE status='active'", default=0)
