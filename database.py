@@ -72,7 +72,7 @@ logger.info(f"📌 سيتم استخدام قاعدة البيانات: {DB_TYPE
 from config import PATHS, CONFIG
 
 # =====================================================================
-# 1. دوال مساعدة للتوافق (معدلة بالكامل)
+# 1. دوال مساعدة للتوافق (الإصدار النهائي - كامل ومصحح)
 # =====================================================================
 
 def _pg_type_to_sqlite(pg_type: str) -> str:
@@ -91,19 +91,8 @@ def _pg_type_to_sqlite(pg_type: str) -> str:
     }
     return mapping.get(pg_type.upper(), 'TEXT')
 
-def _get_placeholder() -> str:
-    if USE_POSTGRES:
-        return '$1'
-    elif USE_MYSQL:
-        return '%s'
-    else:
-        return '?'
 
 def _convert_placeholders(query: str) -> str:
-    """
-    تحويل العناصر النائبة '?' إلى الصيغة المناسبة لكل قاعدة،
-    مع تجاهل علامات الاستفهام داخل النصوص (محاطة بعلامات اقتباس).
-    """
     if USE_POSTGRES:
         result = []
         in_single = False
@@ -135,13 +124,8 @@ def _convert_placeholders(query: str) -> str:
     else:
         return query
 
+
 def _convert_insert_or_ignore(query: str) -> str:
-    """
-    تحويل INSERT OR IGNORE إلى الصيغة المناسبة:
-    - PostgreSQL: INSERT INTO ... ON CONFLICT (col1, col2, ...) DO NOTHING
-    - MySQL: INSERT IGNORE INTO ...
-    - SQLite: INSERT OR IGNORE (مدعوم أصلاً)
-    """
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR IGNORE"):
         return query
@@ -153,6 +137,7 @@ def _convert_insert_or_ignore(query: str) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
+
         known_unique = {
             'auto_replies': ['chat_id', 'keyword'],
             'banned_words': ['word', 'chat_id'],
@@ -186,10 +171,11 @@ def _convert_insert_or_ignore(query: str) -> str:
             conflict_cols = ', '.join(known_unique[table])
         else:
             conflict_cols = columns[0] if columns else 'id'
-        values_pos = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
-        if values_pos:
-            pos = values_pos.start()
-            new_query = new_query[:pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING " + new_query[pos:]
+
+        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+        if values_match:
+            end_pos = values_match.end()
+            new_query = new_query[:end_pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING" + new_query[end_pos:]
         else:
             new_query = new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
         return new_query
@@ -199,13 +185,8 @@ def _convert_insert_or_ignore(query: str) -> str:
     else:
         return query
 
+
 def _convert_insert_or_replace(query: str) -> str:
-    """
-    تحويل INSERT OR REPLACE إلى:
-    - PostgreSQL: INSERT INTO ... ON CONFLICT (pk) DO UPDATE SET ...
-    - MySQL: REPLACE INTO ...
-    - SQLite: INSERT OR REPLACE (مدعوم)
-    """
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR REPLACE"):
         return query
@@ -217,6 +198,7 @@ def _convert_insert_or_replace(query: str) -> str:
             return new_query + " ON CONFLICT DO UPDATE SET ..."
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
+
         pk_map = {
             'last_publish': 'channel_db_id',
             'settings': 'key',
@@ -255,19 +237,18 @@ def _convert_insert_or_replace(query: str) -> str:
         }
         if table in pk_map:
             pk = pk_map[table]
-            if isinstance(pk, list):
-                pk_cols = ', '.join(pk)
-            else:
-                pk_cols = pk
+            pk_cols = ', '.join(pk) if isinstance(pk, list) else pk
         else:
             pk_cols = columns[0] if columns else 'id'
+
         set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col != pk_cols])
         if not set_clause:
             set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns])
-        values_pos = re.search(r"VALUES\s*\(", new_query, re.IGNORECASE)
-        if values_pos:
-            pos = values_pos.start()
-            new_query = new_query[:pos] + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause} " + new_query[pos:]
+
+        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+        if values_match:
+            end_pos = values_match.end()
+            new_query = new_query[:end_pos] + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}" + new_query[end_pos:]
         else:
             new_query = new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
         return new_query
@@ -277,13 +258,8 @@ def _convert_insert_or_replace(query: str) -> str:
     else:
         return query
 
+
 def _convert_upsert(query: str) -> str:
-    """
-    تحويل ON CONFLICT (col) DO UPDATE SET ... إلى الصيغة المناسبة لكل قاعدة.
-    - PostgreSQL: يترك ON CONFLICT كما هو (مدعوم).
-    - MySQL: يحول إلى ON DUPLICATE KEY UPDATE.
-    - SQLite: يترك ON CONFLICT (مدعوم).
-    """
     if not USE_MYSQL:
         return query
 
@@ -299,12 +275,8 @@ def _convert_upsert(query: str) -> str:
     new_query = re.sub(pattern, '', query, flags=re.IGNORECASE).rstrip()
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
 
+
 def _adapt_params(params: tuple) -> tuple:
-    """
-    تحويل المعاملات لتتناسب مع نوع قاعدة البيانات.
-    - PostgreSQL: يمرر التواريخ كـ datetime objects.
-    - SQLite و MySQL: يحول التواريخ إلى نص 'YYYY-MM-DD HH:MM:SS'.
-    """
     if params is None:
         return ()
     if USE_POSTGRES:
@@ -317,6 +289,7 @@ def _adapt_params(params: tuple) -> tuple:
             else:
                 new_params.append(p)
         return tuple(new_params)
+
 
 # =====================================================================
 # 2. فئة TimeUtils
