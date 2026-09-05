@@ -11,9 +11,10 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
 - تم إصلاح جميع الأخطاء: التوافق مع ON CONFLICT، INSERT OR REPLACE، العناصر النائبة، إلخ.
 - تم إصلاح دالة executemany لتطبيق جميع التحويلات
-- تم إصلاح عدد المعاملات في register_user
+- تم إصلاح عدد المعاملات في register_user (معلمتان فقط لـ user_points)
 - تم توسيع قاموس known_unique ليشمل جميع الجداول
 - تم تحسين _convert_insert_or_replace لتحديث الأعمدة بدقة
+- تم إصلاح استعلام add_posts لاستخدام executemany مع التحويلات
 """
 
 import os
@@ -142,11 +143,10 @@ def _convert_insert_or_ignore(query: str) -> str:
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
 
-        # قاموس كامل بجميع الجداول المستخدمة ومفاتيحها الفريدة
         known_unique = {
             'users': ['user_id'],
             'user_channels': ['user_id', 'channel_id'],
-            'posts': ['id'],           # لكن عادةً لا نستخدم INSERT OR IGNORE مع posts
+            'posts': ['id'],
             'schedule': ['channel_db_id'],
             'last_publish': ['channel_db_id'],
             'bot_groups': ['chat_id'],
@@ -218,7 +218,6 @@ def _convert_insert_or_replace(query: str) -> str:
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
 
-        # نفس القاموس ولكن مع تحديد المفتاح لكل جدول
         pk_map = {
             'users': 'user_id',
             'user_channels': ['user_id', 'channel_id'],
@@ -267,24 +266,18 @@ def _convert_insert_or_replace(query: str) -> str:
         else:
             pk_cols = columns[0] if columns else 'id'
 
-        # تحديد الأعمدة التي سيتم تحديثها (جميع الأعمدة ما عدا المفتاح)
-        # استبعاد الأعمدة التي هي جزء من المفتاح
         pk_set = set(pk) if isinstance(pk, list) else {pk}
         set_columns = [col for col in columns if col not in pk_set]
-        # إذا لم يتبقى أعمدة، نستخدم كل الأعمدة باستثناء المفتاح (لكن هذا نادر)
         if not set_columns:
-            set_columns = columns[:]  # نسخة
-            # إزالة الأعمدة التي هي مفتاح
+            set_columns = columns[:]
             for col in pk_set:
                 if col in set_columns:
                     set_columns.remove(col)
-        # إنشاء جملة SET
         set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in set_columns])
         if not set_clause:
-            # إذا لم يكن هناك أعمدة غير المفتاح، استخدم تحديث فارغ (لكن هذا نادر)
             set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col not in pk_set])
             if not set_clause:
-                set_clause = '1 = 1'  # تحديث وهمي
+                set_clause = '1 = 1'
 
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
@@ -2746,7 +2739,7 @@ class Database:
                 q_points = _convert_upsert(q_points)
                 q_points = _convert_insert_or_replace(q_points)
                 q_points = _convert_placeholders(q_points)
-                p_points = _adapt_params((user_id, TimeUtils.utc_now()))  # معلمتان فقط
+                p_points = _adapt_params((user_id, TimeUtils.utc_now()))  # ✅ معلمتان فقط
                 if USE_POSTGRES:
                     await conn.execute(q_points, *p_points)
                 else:
@@ -3163,6 +3156,7 @@ class Database:
                     for i in range(0, len(final_posts), 100):
                         batch = final_posts[i:i+100]
                         vals = [(channel_db_id, (t or "")[:4096], m, f, TimeUtils.sql_iso()) for t, m, f in batch]
+                        # استخدام executemany مع تحويل تلقائي
                         if USE_POSTGRES:
                             await conn.executemany(
                                 "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES ($1, $2, $3, $4, $5)",
