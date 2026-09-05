@@ -10,6 +10,10 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - معاملات ذرية وإعادة محاولة تلقائية
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
 - تم إصلاح جميع الأخطاء: التوافق مع ON CONFLICT، INSERT OR REPLACE، العناصر النائبة، إلخ.
+- تم إصلاح دالة executemany لتطبيق جميع التحويلات
+- تم إصلاح عدد المعاملات في register_user
+- تم توسيع قاموس known_unique ليشمل جميع الجداول
+- تم تحسين _convert_insert_or_replace لتحديث الأعمدة بدقة
 """
 
 import os
@@ -138,34 +142,49 @@ def _convert_insert_or_ignore(query: str) -> str:
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
 
+        # قاموس كامل بجميع الجداول المستخدمة ومفاتيحها الفريدة
         known_unique = {
-            'auto_replies': ['chat_id', 'keyword'],
-            'banned_words': ['word', 'chat_id'],
+            'users': ['user_id'],
             'user_channels': ['user_id', 'channel_id'],
-            'user_warnings': ['user_id', 'chat_id'],
-            'user_violations': ['user_id', 'chat_id'],
+            'posts': ['id'],           # لكن عادةً لا نستخدم INSERT OR IGNORE مع posts
+            'schedule': ['channel_db_id'],
+            'last_publish': ['channel_db_id'],
+            'bot_groups': ['chat_id'],
+            'user_groups_link': ['user_id', 'chat_id'],
             'group_admins': ['chat_id', 'user_id'],
             'hidden_owner_groups': ['chat_id', 'owner_id'],
             'hidden_admins': ['chat_id', 'admin_id'],
             'anonymous_admins': ['chat_id', 'anonymous_id'],
-            'contest_participants': ['user_id', 'contest_id'],
-            'referrals': ['referrer_id', 'referred_id'],
-            'subscriptions': ['user_id', 'plan_id'],
-            'schedule': ['channel_db_id'],
-            'last_publish': ['channel_db_id'],
-            'users': ['user_id'],
-            'user_points': ['user_id'],
-            'referral_rewards': ['user_id'],
-            'user_reminder_settings': ['user_id'],
-            'user_translation': ['user_id'],
-            'chat_locks': ['chat_id'],
             'group_security': ['chat_id'],
+            'chat_locks': ['chat_id'],
+            'banned_words': ['word', 'chat_id'],
+            'auto_replies': ['chat_id', 'keyword'],
             'auto_reply_settings': ['chat_id'],
-            'bot_groups': ['chat_id'],
-            'group_rules': ['chat_id'],
             'support_tickets': ['id'],
             'bot_admins': ['user_id'],
             'settings': ['key'],
+            'referrals': ['referrer_id', 'referred_id'],
+            'referral_rewards': ['user_id'],
+            'user_reminder_settings': ['user_id'],
+            'user_translation': ['user_id'],
+            'contests': ['id'],
+            'contest_participants': ['user_id', 'contest_id'],
+            'contest_winners': ['id'],
+            'admin_logs': ['id'],
+            'user_warnings': ['user_id', 'chat_id'],
+            'user_violations': ['user_id', 'chat_id'],
+            'group_rules': ['chat_id'],
+            'user_messages': ['user_id', 'chat_id'],
+            'scheduled_posts': ['id'],
+            'sentiment_history': ['id'],
+            'plans': ['id'],
+            'subscriptions': ['id'],
+            'invoices': ['id'],
+            'payment_logs': ['id'],
+            'user_penalties': ['id'],
+            'violation_penalties': ['chat_id', 'violation_type'],
+            'gift_codes': ['id'],
+            'user_points': ['user_id'],
         }
         if table in known_unique:
             conflict_cols = ', '.join(known_unique[table])
@@ -199,41 +218,48 @@ def _convert_insert_or_replace(query: str) -> str:
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
 
+        # نفس القاموس ولكن مع تحديد المفتاح لكل جدول
         pk_map = {
-            'last_publish': 'channel_db_id',
-            'settings': 'key',
-            'user_points': 'user_id',
-            'referral_rewards': 'user_id',
-            'user_reminder_settings': 'user_id',
-            'user_translation': 'user_id',
-            'chat_locks': 'chat_id',
-            'group_security': 'chat_id',
-            'auto_reply_settings': 'chat_id',
-            'bot_groups': 'chat_id',
-            'group_rules': 'chat_id',
             'users': 'user_id',
-            'schedule': 'channel_db_id',
-            'plans': 'id',
-            'subscriptions': 'id',
-            'invoices': 'id',
-            'gift_codes': 'id',
-            'user_penalties': 'id',
-            'admin_logs': 'id',
-            'contest_winners': 'id',
-            'contests': 'id',
-            'support_tickets': 'id',
-            'banned_words': 'id',
-            'auto_replies': ['chat_id', 'keyword'],
             'user_channels': ['user_id', 'channel_id'],
-            'user_warnings': ['user_id', 'chat_id'],
-            'user_violations': ['user_id', 'chat_id'],
+            'schedule': 'channel_db_id',
+            'last_publish': 'channel_db_id',
+            'bot_groups': 'chat_id',
+            'user_groups_link': ['user_id', 'chat_id'],
             'group_admins': ['chat_id', 'user_id'],
             'hidden_owner_groups': ['chat_id', 'owner_id'],
             'hidden_admins': ['chat_id', 'admin_id'],
             'anonymous_admins': ['chat_id', 'anonymous_id'],
-            'contest_participants': ['user_id', 'contest_id'],
+            'group_security': 'chat_id',
+            'chat_locks': 'chat_id',
+            'banned_words': ['word', 'chat_id'],
+            'auto_replies': ['chat_id', 'keyword'],
+            'auto_reply_settings': 'chat_id',
+            'support_tickets': 'id',
+            'bot_admins': 'user_id',
+            'settings': 'key',
             'referrals': ['referrer_id', 'referred_id'],
-            'user_groups_link': ['user_id', 'chat_id'],
+            'referral_rewards': 'user_id',
+            'user_reminder_settings': 'user_id',
+            'user_translation': 'user_id',
+            'contests': 'id',
+            'contest_participants': ['user_id', 'contest_id'],
+            'contest_winners': 'id',
+            'admin_logs': 'id',
+            'user_warnings': ['user_id', 'chat_id'],
+            'user_violations': ['user_id', 'chat_id'],
+            'group_rules': 'chat_id',
+            'user_messages': ['user_id', 'chat_id'],
+            'scheduled_posts': 'id',
+            'sentiment_history': 'id',
+            'plans': 'id',
+            'subscriptions': 'id',
+            'invoices': 'id',
+            'payment_logs': 'id',
+            'user_penalties': 'id',
+            'violation_penalties': ['chat_id', 'violation_type'],
+            'gift_codes': 'id',
+            'user_points': 'user_id',
         }
         if table in pk_map:
             pk = pk_map[table]
@@ -241,9 +267,24 @@ def _convert_insert_or_replace(query: str) -> str:
         else:
             pk_cols = columns[0] if columns else 'id'
 
-        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col != pk_cols])
+        # تحديد الأعمدة التي سيتم تحديثها (جميع الأعمدة ما عدا المفتاح)
+        # استبعاد الأعمدة التي هي جزء من المفتاح
+        pk_set = set(pk) if isinstance(pk, list) else {pk}
+        set_columns = [col for col in columns if col not in pk_set]
+        # إذا لم يتبقى أعمدة، نستخدم كل الأعمدة باستثناء المفتاح (لكن هذا نادر)
+        if not set_columns:
+            set_columns = columns[:]  # نسخة
+            # إزالة الأعمدة التي هي مفتاح
+            for col in pk_set:
+                if col in set_columns:
+                    set_columns.remove(col)
+        # إنشاء جملة SET
+        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in set_columns])
         if not set_clause:
-            set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns])
+            # إذا لم يكن هناك أعمدة غير المفتاح، استخدم تحديث فارغ (لكن هذا نادر)
+            set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col not in pk_set])
+            if not set_clause:
+                set_clause = '1 = 1'  # تحديث وهمي
 
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
@@ -620,13 +661,19 @@ class Database:
                     raise
         return default
 
+    # =====================================================================
+    # 5.1 دوال التنفيذ المتعدد (مصححة لتطبيق التحويلات)
+    # =====================================================================
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
         if not params_list:
             return 0
+        # تطبيق جميع التحويلات على الاستعلام
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
         query = _convert_upsert(query)
         query = _convert_placeholders(query)
+        # تحويل المعاملات (إذا كانت تحتوي على datetime)
+        params_list = [_adapt_params(p) for p in params_list]
         max_retries = 3
         for attempt in range(max_retries):
             async with self.connection() as conn:
@@ -2693,12 +2740,13 @@ class Database:
                     logger.error(f"❌ فشل توليد رمز إحالة فريد للمستخدم {user_id}")
                     return False
 
+                # إدراج أو تحديث user_points مع معلمتين فقط (user_id, last_updated)
                 q_points = "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET points = excluded.points, last_updated = excluded.last_updated"
                 q_points = _convert_insert_or_ignore(q_points)
                 q_points = _convert_upsert(q_points)
                 q_points = _convert_insert_or_replace(q_points)
                 q_points = _convert_placeholders(q_points)
-                p_points = _adapt_params((user_id, TimeUtils.utc_now(), TimeUtils.utc_now()))
+                p_points = _adapt_params((user_id, TimeUtils.utc_now()))  # معلمتان فقط
                 if USE_POSTGRES:
                     await conn.execute(q_points, *p_points)
                 else:
