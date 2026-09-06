@@ -17,6 +17,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
 - جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
 - نسخ احتياطي واستعادة وتحسين قاعدة البيانات
+- تحسين أداء register_user باستخدام معاملة واحدة (Transaction)
 """
 
 import os
@@ -2737,85 +2738,111 @@ class Database:
             return False
 
     # =====================================================================
-    # دوال المستخدمين
+    # دوال المستخدمين (تم تحسين register_user)
     # =====================================================================
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
+        """
+        تسجيل مستخدم جديد باستخدام معاملة واحدة لتحسين الأداء.
+        """
         try:
-            async with self.connection() as conn:
-                for _ in range(5):
-                    code = secrets.token_urlsafe(12)
-                    try:
+            async with await self._get_user_lock(user_id):
+                async with self.transaction() as conn:
+                    # توليد referral_code فريد (محاولة 5 مرات)
+                    referral_code = None
+                    for _ in range(5):
+                        code = secrets.token_urlsafe(12)
+                        try:
+                            if USE_POSTGRES:
+                                await conn.execute(
+                                    """INSERT INTO users 
+                                       (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
+                                       VALUES ($1, $2, $3, $4, 0, $5, $6)
+                                       ON CONFLICT(user_id) DO UPDATE SET
+                                           username = CASE WHEN $2 != '' THEN $2 ELSE users.username END,
+                                           first_name = CASE WHEN $3 != '' THEN $3 ELSE users.first_name END,
+                                           updated_at = $6""",
+                                    user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
+                                )
+                            elif USE_MYSQL:
+                                await conn.execute(
+                                    """INSERT INTO users 
+                                       (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
+                                       VALUES (%s, %s, %s, %s, 0, %s, %s)
+                                       ON DUPLICATE KEY UPDATE
+                                           username = CASE WHEN %s != '' THEN %s ELSE users.username END,
+                                           first_name = CASE WHEN %s != '' THEN %s ELSE users.first_name END,
+                                           updated_at = %s""",
+                                    (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                     username, username, first_name, first_name, TimeUtils.sql_iso())
+                                )
+                            else:
+                                await conn.execute(
+                                    """INSERT INTO users 
+                                       (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
+                                       VALUES (?, ?, ?, ?, 0, ?, ?)
+                                       ON CONFLICT(user_id) DO UPDATE SET
+                                           username = CASE WHEN ? != '' THEN ? ELSE users.username END,
+                                           first_name = CASE WHEN ? != '' THEN ? ELSE users.first_name END,
+                                           updated_at = ?""",
+                                    (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                     username, username, first_name, first_name, TimeUtils.sql_iso())
+                                )
+                            referral_code = code
+                            break
+                        except Exception as e:
+                            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                                continue
+                            raise
+                    else:
+                        # إذا فشلت المحاولات، استخدم UUID
+                        import uuid
+                        code = str(uuid.uuid4()).replace('-', '')[:12]
                         if USE_POSTGRES:
                             await conn.execute(
-                                """INSERT INTO users 
-                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES ($1, $2, $3, $4, 0, $5, $6)
-                                   ON CONFLICT(user_id) DO UPDATE SET
-                                       username = CASE WHEN $2 != '' THEN $2 ELSE users.username END,
-                                       first_name = CASE WHEN $3 != '' THEN $3 ELSE users.first_name END,
-                                       updated_at = $6""",
+                                "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES ($1, $2, $3, $4, 0, $5, $6) ON CONFLICT(user_id) DO UPDATE SET username = $2, first_name = $3, updated_at = $6",
                                 user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
                             )
                         elif USE_MYSQL:
                             await conn.execute(
-                                """INSERT INTO users 
-                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES (%s, %s, %s, %s, 0, %s, %s)
-                                   ON DUPLICATE KEY UPDATE
-                                       username = CASE WHEN %s != '' THEN %s ELSE users.username END,
-                                       first_name = CASE WHEN %s != '' THEN %s ELSE users.first_name END,
-                                       updated_at = %s""",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                 username, username, first_name, first_name, TimeUtils.sql_iso())
+                                "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (%s, %s, %s, %s, 0, %s, %s) ON DUPLICATE KEY UPDATE username = VALUES(username), first_name = VALUES(first_name), updated_at = VALUES(updated_at)",
+                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                             )
                         else:
                             await conn.execute(
-                                """INSERT INTO users 
-                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
-                                   VALUES (?, ?, ?, ?, 0, ?, ?)
-                                   ON CONFLICT(user_id) DO UPDATE SET
-                                       username = CASE WHEN ? != '' THEN ? ELSE users.username END,
-                                       first_name = CASE WHEN ? != '' THEN ? ELSE users.first_name END,
-                                       updated_at = ?""",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                 username, username, first_name, first_name, TimeUtils.sql_iso())
+                                "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, updated_at = excluded.updated_at",
+                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                             )
-                        break
-                    except Exception as e:
-                        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                            continue
-                        raise
-                else:
-                    import uuid
-                    code = str(uuid.uuid4()).replace('-', '')[:12]
+                        referral_code = code
+
+                    # إدراج user_points و referral_rewards داخل نفس المعاملة
                     if USE_POSTGRES:
                         await conn.execute(
-                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES ($1, $2, $3, $4, 0, $5, $6) ON CONFLICT(user_id) DO UPDATE SET username = $2, first_name = $3, updated_at = $6",
-                            user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
+                            "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2",
+                            user_id, TimeUtils.utc_now()
+                        )
+                        await conn.execute(
+                            "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING",
+                            user_id
                         )
                     elif USE_MYSQL:
                         await conn.execute(
-                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (%s, %s, %s, %s, 0, %s, %s) ON DUPLICATE KEY UPDATE username = VALUES(username), first_name = VALUES(first_name), updated_at = VALUES(updated_at)",
-                            (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                            "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)",
+                            (user_id, TimeUtils.sql_iso())
+                        )
+                        await conn.execute(
+                            "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
+                            (user_id,)
                         )
                     else:
                         await conn.execute(
-                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, updated_at = excluded.updated_at",
-                            (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                            "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated",
+                            (user_id, TimeUtils.sql_iso())
                         )
-                if USE_POSTGRES:
-                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2", user_id, TimeUtils.utc_now())
-                elif USE_MYSQL:
-                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)", (user_id, TimeUtils.sql_iso()))
-                else:
-                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated", (user_id, TimeUtils.sql_iso()))
-                if USE_POSTGRES:
-                    await conn.execute("INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING", user_id)
-                elif USE_MYSQL:
-                    await conn.execute("INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", (user_id,))
-                else:
-                    await conn.execute("INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", (user_id,))
+                        await conn.execute(
+                            "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
+                            (user_id,)
+                        )
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
