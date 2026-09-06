@@ -12,6 +12,7 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + إصلاح متغيرات القائمة الرئيسية main_menu
 + إصلاح متغيرات معلومات المطور developer_info
 + تحسين أداء /start باستخدام اتصال واحد لجلب بيانات المستخدم دفعة واحدة
++ إصلاح مشكلة توافق PostgreSQL في استعلام الاشتراك
 """
 
 import asyncio
@@ -24,9 +25,9 @@ from telegram.ext import ContextTypes
 from telegram.error import BadRequest, TimedOut
 
 from config import CONFIG, PATHS
-from database import DB
+from database import DB, TimeUtils
 from utils import (
-    TimeUtils, TextUtils, safe_send, is_authorized_in_group,
+    TextUtils, safe_send, is_authorized_in_group,
     check_bot_permissions, invalidate_auth_cache, apply_penalty,
     RATE_LIMITER, METRICS, get_text, StateManager, UserState,
     KeyboardFactory, TranslationManager, CB,
@@ -163,12 +164,13 @@ class CommandHandlers:
                    OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)
             """, (user_id, user_id, user_id, user_id, user_id, user_id), default=0)
 
-            # 4. حالة الاشتراك
+            # 4. حالة الاشتراك (باستخدام وقت محسوب في Python بدلاً من datetime('now'))
+            now = TimeUtils.sql_iso()
             has_sub = await DB._fetchval_in_conn(conn, """
                 SELECT 1 FROM subscriptions
-                WHERE user_id=? AND status='active' AND end_date > datetime('now')
+                WHERE user_id=? AND status='active' AND end_date > ?
                 LIMIT 1
-            """, (user_id,), default=None) is not None
+            """, (user_id, now), default=None) is not None
 
             # 5. النشر التلقائي
             auto = await DB._fetchval_in_conn(conn, "SELECT auto_publish FROM users WHERE user_id=?", (user_id,), default=1) == 1
