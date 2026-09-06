@@ -34,6 +34,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إضافة فهارس (channel_db_id, published) و (channel_db_id, fail_count)
 - إصلاح خطأ asyncpg: إزالة المنطقة الزمنية من datetime في _adapt_params
 - إضافة دوال _fetchone_in_conn، _fetchall_in_conn، _fetchval_in_conn للتوافق
+- إصلاح خطأ tuple في _adapt_params (فك tuple المتداخل)
+- إصلاح خطأ مقارنة التواريخ في increment_violation_count (تحويل naive إلى aware)
 """
 
 import os
@@ -458,9 +460,13 @@ def _adapt_params(params: tuple) -> tuple:
     - لـ PostgreSQL: تحويل أي كائن datetime إلى naive (بدون منطقة زمنية)
       لأن جميع أعمدة TIMESTAMP في الجداول معرفة بدون time zone.
     - لـ SQLite و MySQL: تحويل datetime إلى نص بالصيغة المطلوبة.
+    - أيضاً: تفكيك tuple المتداخل (إذا كان params يحتوي على tuple واحد فقط).
     """
     if params is None:
         return ()
+    # إذا كان params يحتوي على tuple واحد فقط، فكها (لتجنب تمرير tuple داخل tuple)
+    if len(params) == 1 and isinstance(params[0], tuple):
+        params = params[0]
     new_params = []
     for p in params:
         if isinstance(p, datetime):
@@ -5054,8 +5060,12 @@ class Database:
                 last_time = await self._fetchval_with_conn(conn, "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 if last_time:
                     dt = TimeUtils.safe_parse_iso(last_time) if isinstance(last_time, str) else last_time
-                    if dt and TimeUtils.utc_now() - dt > timedelta(hours=24):
-                        await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
+                    if dt:
+                        # تحويل dt إلى aware إذا كان naive (لأن PostgreSQL يعيد naive)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if TimeUtils.utc_now() - dt > timedelta(hours=24):
+                            await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 current = await self._fetchval_with_conn(conn, "SELECT violation_count FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id, default=0)
                 new_count = current + 1
                 now = TimeUtils.utc_now()
