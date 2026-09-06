@@ -13,6 +13,7 @@
 - تحسين تسجيل الأخطاء والمرونة
 - تنظيف دوري لأقفال المستخدمين
 - دمج نظام الكاش الموحد cache.py (مع fallback)
+- إزالة filters.PAYMENT (غير موجود في الإصدار 22.8)
 """
 
 import asyncio
@@ -122,7 +123,6 @@ async def pre_checkout(update, context):
 
     # التحقق من المبلغ (مع السماح بالدفع المجاني إذا السعر 0)
     expected_amount = plan.get('price', 0)
-    # بعض أنواع الدفع قد لا تحتوي على total_amount، لذا نتحقق
     total_amount = getattr(query, 'total_amount', None)
     if total_amount is not None:
         if expected_amount > 0 and total_amount != expected_amount:
@@ -133,7 +133,6 @@ async def pre_checkout(update, context):
                 logger.error(f"❌ Failed to answer amount mismatch: {e}")
             return
     else:
-        # إذا لم يكن هناك total_amount (قد يكون الدفع مجانياً)، نسمح بذلك
         if expected_amount > 0:
             logger.warning(f"❌ Missing total_amount for non-free plan {plan['id']}")
             try:
@@ -158,7 +157,6 @@ async def successful_payment(update, context):
     telegram_payment_charge_id = getattr(payment, 'telegram_payment_charge_id', None)
     provider_payment_charge_id = getattr(payment, 'provider_payment_charge_id', None)
 
-    # ضمان وجود payment_id
     payment_id = telegram_payment_charge_id or provider_payment_charge_id
     if not payment_id:
         logger.error(f"❌ No payment ID for user {user_id}")
@@ -172,7 +170,6 @@ async def successful_payment(update, context):
         await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
         return
 
-    # التحقق من المبلغ
     expected_amount = plan.get('price', 0)
     if expected_amount > 0 and total_amount != expected_amount:
         logger.error(f"❌ Amount mismatch in successful payment for user {user_id}: invoice {invoice['number']}")
@@ -217,7 +214,7 @@ async def successful_payment(update, context):
 
 
 async def payment_error(update, context):
-    """معالج الأخطاء المتعلقة بالدفع"""
+    """معالج الأخطاء المتعلقة بالدفع (احتياطي)"""
     logger.error(f"❌ Payment error: {update}")
     try:
         await safe_send(context.bot, update.effective_user.id, "❌ حدث خطأ أثناء معالجة الدفع. يرجى المحاولة مرة أخرى.")
@@ -391,7 +388,7 @@ async def main():
     # معالجات الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
-    app.add_handler(MessageHandler(filters.PAYMENT, payment_error))
+    # تم حذف السطر: app.add_handler(MessageHandler(filters.PAYMENT, payment_error))
 
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
@@ -473,13 +470,11 @@ async def main():
             logger.info("✅ Webhook تم التعيين")
             runner = await setup_webhook(app, port)
             try:
-                # الانتظار إلى الأبد (أو حتى يتم إيقاف التشغيل)
                 await asyncio.Event().wait()
             finally:
                 await runner.cleanup()
         else:
             logger.info("⚠️ Polling")
-            # فتح المنفذ حتى لو كنا في وضع Polling لتفعيل الخدمة على Render
             runner = await setup_webhook(app, port)
             try:
                 await app.run_polling(
