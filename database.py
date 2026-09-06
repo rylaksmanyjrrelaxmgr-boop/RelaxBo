@@ -14,7 +14,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
 - تم تحسين الأداء للدوال الأكثر استهلاكاً: register_user, activate_trial, add_channel, add_posts
 - تم إضافة فهارس إضافية لتحسين سرعة الاستعلامات الأكثر استخداماً
-- تم إصلاح جميع الأخطاء المعروفة سابقاً
+- تم إصلاح جميع الأخطاء المعروفة سابقاً (بما فيها خطأ asyncpg max_lifetime)
 """
 
 import os
@@ -430,15 +430,14 @@ class Database:
         url = DATABASE_URL_READ if (read_only and DATABASE_URL_READ) else DATABASE_URL
 
         if USE_POSTGRES:
-            pool = await asyncpg.create_pool(
-                dsn=url,
-                min_size=self._min_connections,
-                max_size=self._max_connections,
-                max_lifetime=self._max_lifetime,
-                max_idle=self._max_idle,
-                timeout=self._connection_timeout,
-                command_timeout=self._query_timeout,
-                server_settings={
+            # بناء معاملات متوافقة مع جميع إصدارات asyncpg
+            pool_kwargs = {
+                'dsn': url,
+                'min_size': self._min_connections,
+                'max_size': self._max_connections,
+                'timeout': self._connection_timeout,
+                'command_timeout': self._query_timeout,
+                'server_settings': {
                     'application_name': 'RelaxManager',
                     'statement_timeout': f'{self._query_timeout}s',
                     'timezone': 'UTC',
@@ -446,13 +445,24 @@ class Database:
                     'tcp_keepalives_interval': '10',
                     'tcp_keepalives_count': '5',
                 }
-            )
+            }
+            # محاولة إضافة max_lifetime أو max_inactive_connection_lifetime بأمان
+            try:
+                pool = await asyncpg.create_pool(**pool_kwargs, max_lifetime=self._max_lifetime)
+            except TypeError:
+                try:
+                    pool = await asyncpg.create_pool(**pool_kwargs, max_inactive_connection_lifetime=self._max_lifetime)
+                except TypeError:
+                    pool = await asyncpg.create_pool(**pool_kwargs)
+                    logger.warning("⚠️ max_lifetime و max_inactive_connection_lifetime غير مدعومين، تم تجاهلهما")
+
             if read_only:
                 self._pool_read = pool
                 logger.info(f"✅ Pool PostgreSQL للقراءة جاهز (max={self._max_connections})")
             else:
                 self._pool = pool
                 logger.info(f"✅ Pool PostgreSQL للكتابة جاهز (max={self._max_connections})")
+
         elif USE_MYSQL:
             pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
             match = re.match(pattern, url)
@@ -478,10 +488,10 @@ class Database:
             else:
                 self._pool = pool
                 logger.info(f"✅ Pool MySQL للكتابة جاهز (max={self._max_connections})")
+
         else:
             # SQLite - اتصال واحد فقط (لا حاجة للقراءة/الكتابة منفصلين)
             if read_only:
-                # إذا طلب قراءة فقط ونحن في SQLite، نستخدم نفس الاتصال العادي
                 self._sqlite_conn = await aiosqlite.connect(
                     str(PATHS.DB),
                     timeout=self._connection_timeout,
@@ -553,7 +563,6 @@ class Database:
 
     async def _return_connection(self, conn):
         if USE_POSTGRES or USE_MYSQL:
-            # لا نعرف أي تجمع ينتمي إليه الاتصال، ولكن يمكننا محاولة إطلاقه في كليهما (سيتم تجاهل الخطأ)
             try:
                 if self._pool:
                     await self._pool.release(conn)
@@ -566,7 +575,6 @@ class Database:
                     return
             except Exception:
                 pass
-            # إذا وصلنا هنا، الاتصال ليس في أي تجمع، نتجاهل
         # SQLite لا يحتاج إرجاع
 
     @asynccontextmanager
@@ -575,7 +583,6 @@ class Database:
         conn = await self._get_connection(read_only=read_only)
         try:
             yield conn
-            # في SQLite، نلتزم تلقائياً إذا لم تكن هناك معاملة نشطة
             if DB_TYPE == 'sqlite' and self._transaction_depth == 0:
                 await conn.commit()
         except Exception:
@@ -624,20 +631,18 @@ class Database:
     async def _log_query_time(self, query: str, start: float, params: tuple = ()):
         if self._log_query_time:
             elapsed = time.perf_counter() - start
-            if elapsed > 0.5:  # سجل فقط الاستعلامات البطيئة (> 500 مللي)
+            if elapsed > 0.5:
                 logger.warning(f"🐌 استعلام بطيء ({elapsed:.3f}s): {query[:100]}... params={params[:10]}")
 
     async def execute(self, query: str, params: tuple = ()) -> int:
         start = time.perf_counter()
         params = _adapt_params(params)
-        # مسار سريع لـ SQLite (مثل النسخة الأولى تماماً)
         if DB_TYPE == 'sqlite':
             async with self.connection() as conn:
                 cursor = await conn.execute(query, params)
                 await self._log_query_time(query, start, params)
                 return cursor.rowcount
 
-        # المسار العام لـ PostgreSQL / MySQL
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
         query = _convert_upsert(query)
@@ -675,7 +680,6 @@ class Database:
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
         start = time.perf_counter()
         params = _adapt_params(params)
-        # مسار سريع لـ SQLite
         if DB_TYPE == 'sqlite':
             async with self.connection(read_only=True) as conn:
                 cursor = await conn.execute(query, params)
@@ -683,7 +687,6 @@ class Database:
                 await self._log_query_time(query, start, params)
                 return dict(row) if row else None
 
-        # المسار العام
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
             query = _convert_insert_or_replace(query)
@@ -723,7 +726,6 @@ class Database:
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
         start = time.perf_counter()
         params = _adapt_params(params)
-        # مسار سريع لـ SQLite
         if DB_TYPE == 'sqlite':
             async with self.connection(read_only=True) as conn:
                 cursor = await conn.execute(query, params)
@@ -731,7 +733,6 @@ class Database:
                 await self._log_query_time(query, start, params)
                 return [dict(row) for row in rows]
 
-        # المسار العام
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
             query = _convert_insert_or_replace(query)
@@ -771,7 +772,6 @@ class Database:
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
         start = time.perf_counter()
         params = _adapt_params(params)
-        # مسار سريع لـ SQLite
         if DB_TYPE == 'sqlite':
             async with self.connection(read_only=True) as conn:
                 cursor = await conn.execute(query, params)
@@ -779,7 +779,6 @@ class Database:
                 await self._log_query_time(query, start, params)
                 return row[0] if row else default
 
-        # المسار العام
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
             query = _convert_insert_or_replace(query)
@@ -816,7 +815,6 @@ class Database:
         start = time.perf_counter()
         if not params_list:
             return 0
-        # مسار سريع لـ SQLite
         if DB_TYPE == 'sqlite':
             params_list = [_adapt_params(p) for p in params_list]
             async with self.connection() as conn:
@@ -824,7 +822,6 @@ class Database:
                 await self._log_query_time(query, start, params_list[:1] if params_list else ())
                 return cursor.rowcount
 
-        # المسار العام
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
         query = _convert_upsert(query)
@@ -5638,15 +5635,15 @@ class Database:
         if USE_POSTGRES or USE_MYSQL:
             if self._pool:
                 stats['pool'] = {
-                    'size': self._pool.get_size() if self._pool else 0,
-                    'available': self._pool.get_available() if self._pool else 0,
-                    'used': self._pool.get_used() if self._pool else 0,
+                    'size': self._pool.get_size() if hasattr(self._pool, 'get_size') else 0,
+                    'available': self._pool.get_available() if hasattr(self._pool, 'get_available') else 0,
+                    'used': self._pool.get_used() if hasattr(self._pool, 'get_used') else 0,
                 }
             if self._pool_read:
                 stats['pool_read'] = {
-                    'size': self._pool_read.get_size() if self._pool_read else 0,
-                    'available': self._pool_read.get_available() if self._pool_read else 0,
-                    'used': self._pool_read.get_used() if self._pool_read else 0,
+                    'size': self._pool_read.get_size() if hasattr(self._pool_read, 'get_size') else 0,
+                    'available': self._pool_read.get_available() if hasattr(self._pool_read, 'get_available') else 0,
+                    'used': self._pool_read.get_used() if hasattr(self._pool_read, 'get_used') else 0,
                 }
         return stats
 
