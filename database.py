@@ -12,6 +12,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (نسخ�
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
 - تحسينات الأداء: تخطي تحويل العناصر النائبة في SQLite، تبسيط الاستعلامات الحرجة
 - الحفاظ على جميع الميزات الأصلية
+- إصلاح: استخدام datetime بدلاً من str في executemany لـ PostgreSQL
 """
 
 import os
@@ -2426,7 +2427,8 @@ class Database:
             for word in BANNED_WORDS:
                 word = str(word).strip().lower()
                 if len(word) >= 2:
-                    words_to_insert.append((word, -1, CONFIG.PRIMARY_OWNER_ID, TimeUtils.sql_iso()))
+                    # ✅ استخدام datetime بدلاً من str لضمان التوافق مع PostgreSQL
+                    words_to_insert.append((word, -1, CONFIG.PRIMARY_OWNER_ID, TimeUtils.utc_now()))
             if words_to_insert:
                 if USE_POSTGRES:
                     await conn.executemany(
@@ -2499,9 +2501,10 @@ class Database:
                         continue
                     if not keyword or reply_type not in self.VALID_REPLY_TYPES:
                         continue
+                    # ✅ استخدام datetime بدلاً من str
                     replies_to_insert.append((
                         chat_id, keyword, reply, reply_type, media_id, buttons,
-                        TimeUtils.sql_iso(), 1, 0
+                        TimeUtils.utc_now(), 1, 0
                     ))
                 except Exception as e:
                     logger.warning(f"⚠️ تجاهل رد تلقائي غير صالح: {e}")
@@ -2615,7 +2618,6 @@ class Database:
             else:
                 backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
                 backup_file.parent.mkdir(parents=True, exist_ok=True)
-                # استخدام اتصال من التجمع للنسخ الاحتياطي
                 async with self.connection() as conn:
                     await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 def _backup():
@@ -2870,7 +2872,6 @@ class Database:
         result = await self.fetchval("SELECT trial_used FROM users WHERE user_id = ?", (user_id,), default=0)
         return result == 1
 
-    # activate_trial (محسّن) موجود سابقاً، سنضعه هنا للاستمرارية
     async def activate_trial(self, user_id: int) -> int:
         try:
             async with await self._get_user_lock(user_id):
