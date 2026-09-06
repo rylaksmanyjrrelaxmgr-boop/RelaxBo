@@ -13,6 +13,10 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + إصلاح متغيرات معلومات المطور developer_info
 + تحسين أداء /start باستخدام اتصال واحد لجلب بيانات المستخدم دفعة واحدة
 + إصلاح مشكلة توافق PostgreSQL في استعلام الاشتراك
++ إصلاح أسماء دوال قاعدة البيانات: _fetchone_in_conn → _fetchone_with_conn
+  _fetchval_in_conn → _fetchval_with_conn
+  _fetchall_in_conn → _fetchall_with_conn
+  _execute_in_conn → _execute_with_conn
 """
 
 import asyncio
@@ -136,24 +140,22 @@ class CommandHandlers:
         # ===== جلب جميع بيانات المستخدم في اتصال واحد =====
         async with DB.connection() as conn:
             # 1. اللغة
-            lang_row = await DB._fetchone_in_conn(conn, "SELECT language FROM users WHERE user_id=?", (user_id,))
+            lang_row = await DB._fetchone_with_conn(conn, "SELECT language FROM users WHERE user_id=?", (user_id,))
             lang = lang_row['language'] if lang_row else 'ar'
 
             # 2. القناة النشطة
-            active = await DB._fetchval_in_conn(conn, "SELECT active_channel FROM users WHERE user_id=?", (user_id,), default=None)
+            active = await DB._fetchval_with_conn(conn, "SELECT active_channel FROM users WHERE user_id=?", (user_id,), default=None)
 
             ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
             cnt = 0
             if active:
-                # اسم القناة
-                ch_info = await DB._fetchone_in_conn(conn, "SELECT channel_name FROM user_channels WHERE id=? AND user_id=?", (active, user_id))
+                ch_info = await DB._fetchone_with_conn(conn, "SELECT channel_name FROM user_channels WHERE id=? AND user_id=?", (active, user_id))
                 if ch_info:
                     ch_display = ch_info['channel_name']
-                # عدد المنشورات غير المنشورة
-                cnt = await DB._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (active,), default=0)
+                cnt = await DB._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (active,), default=0)
 
             # 3. عدد المجموعات
-            groups_count = await DB._fetchval_in_conn(conn, """
+            groups_count = await DB._fetchval_with_conn(conn, """
                 SELECT COUNT(DISTINCT bg.chat_id)
                 FROM bot_groups bg
                 WHERE bg.added_by = ?
@@ -166,17 +168,17 @@ class CommandHandlers:
 
             # 4. حالة الاشتراك (باستخدام وقت محسوب في Python بدلاً من datetime('now'))
             now = TimeUtils.sql_iso()
-            has_sub = await DB._fetchval_in_conn(conn, """
+            has_sub = await DB._fetchval_with_conn(conn, """
                 SELECT 1 FROM subscriptions
                 WHERE user_id=? AND status='active' AND end_date > ?
                 LIMIT 1
             """, (user_id, now), default=None) is not None
 
             # 5. النشر التلقائي
-            auto = await DB._fetchval_in_conn(conn, "SELECT auto_publish FROM users WHERE user_id=?", (user_id,), default=1) == 1
+            auto = await DB._fetchval_with_conn(conn, "SELECT auto_publish FROM users WHERE user_id=?", (user_id,), default=1) == 1
 
             # 6. التدوير التلقائي
-            recycle = await DB._fetchval_in_conn(conn, "SELECT auto_recycle FROM users WHERE user_id=?", (user_id,), default=1) == 1
+            recycle = await DB._fetchval_with_conn(conn, "SELECT auto_recycle FROM users WHERE user_id=?", (user_id,), default=1) == 1
 
         # ===== انتهى جلب البيانات =====
 
