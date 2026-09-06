@@ -12,6 +12,8 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - تطبيق إصلاحات إضافية بعد الفحص الثاني (النقاط 1،2،5،6،8،9،11،13،14)
 - إضافة تحسينات اختيارية: timeout للطلبات، تحسين أسماء المتغيرات، فحص Content-Type
 - إضافة عرض حالة الوسائط في _format_security_text
+- إصلاح _send_media لتمرير **kwargs و reply_markup و parse_mode
+- إصلاح safe_send لتمرير جميع المعاملات بشكل صحيح
 """
 
 import asyncio
@@ -1035,40 +1037,86 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
-    """إرسال الوسائط حسب النوع."""
+    """إرسال الوسائط حسب النوع مع تمرير جميع المعاملات الإضافية."""
+    # استخراج parse_mode و disable_web_page_preview ونحوها من kwargs
+    parse_mode = kwargs.pop('parse_mode', None)
+    # يجب إزالة parse_mode من kwargs إذا كانت غير مدعومة، ولكننا نمررها حيث تدعمها الدوال
+    # في Telegram، معظم دوال الوسائط لا تدعم parse_mode في caption، لذا نمررها فقط إذا كانت مدعومة.
+    # لكننا سنمررها لضمان التوافق.
+
     # الأنواع التي لا تدعم caption
     no_caption_types = {'voice', 'sticker', 'video_note'}
 
+    # بناء معاملات الإرسال الأساسية مع استثناء parse_mode من caption
+    send_kwargs = {}
+    if reply_markup is not None:
+        send_kwargs['reply_markup'] = reply_markup
+    if kwargs:
+        send_kwargs.update(kwargs)  # تمرير أي معاملات إضافية (مثل disable_notification)
+    
     if media_type == 'photo':
-        return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        if caption and parse_mode:
+            return await bot.send_photo(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
+        return await bot.send_photo(chat_id, media_file_id, caption=caption, **send_kwargs)
     elif media_type == 'video':
-        return await bot.send_video(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        if caption and parse_mode:
+            return await bot.send_video(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
+        return await bot.send_video(chat_id, media_file_id, caption=caption, **send_kwargs)
     elif media_type == 'document':
-        return await bot.send_document(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        if caption and parse_mode:
+            return await bot.send_document(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
+        return await bot.send_document(chat_id, media_file_id, caption=caption, **send_kwargs)
     elif media_type == 'audio':
-        return await bot.send_audio(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        if caption and parse_mode:
+            return await bot.send_audio(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
+        return await bot.send_audio(chat_id, media_file_id, caption=caption, **send_kwargs)
     elif media_type == 'voice':
-        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
-        sent = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
+        # لا يدعم caption، أرسل الصوت أولاً
+        voice_kwargs = {**send_kwargs}
+        if 'parse_mode' in voice_kwargs:
+            del voice_kwargs['parse_mode']  # ليس مدعومًا
+        sent = await bot.send_voice(chat_id, media_file_id, **voice_kwargs)
         if caption:
-            await bot.send_message(chat_id, caption)
+            # إرسال النص كرسالة منفصلة مع parse_mode إذا كان موجوداً
+            text_kwargs = {**send_kwargs}
+            if parse_mode:
+                text_kwargs['parse_mode'] = parse_mode
+            await bot.send_message(chat_id, caption, **text_kwargs)
         return sent
     elif media_type == 'animation':
-        return await bot.send_animation(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        if caption and parse_mode:
+            return await bot.send_animation(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
+        return await bot.send_animation(chat_id, media_file_id, caption=caption, **send_kwargs)
     elif media_type == 'sticker':
-        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
-        sent = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
+        # لا يدعم caption
+        sticker_kwargs = {**send_kwargs}
+        if 'parse_mode' in sticker_kwargs:
+            del sticker_kwargs['parse_mode']
+        sent = await bot.send_sticker(chat_id, media_file_id, **sticker_kwargs)
         if caption:
-            await bot.send_message(chat_id, caption)
+            text_kwargs = {**send_kwargs}
+            if parse_mode:
+                text_kwargs['parse_mode'] = parse_mode
+            await bot.send_message(chat_id, caption, **text_kwargs)
         return sent
     elif media_type == 'video_note':
-        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
-        sent = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
+        # لا يدعم caption
+        video_note_kwargs = {**send_kwargs}
+        if 'parse_mode' in video_note_kwargs:
+            del video_note_kwargs['parse_mode']
+        sent = await bot.send_video_note(chat_id, media_file_id, **video_note_kwargs)
         if caption:
-            await bot.send_message(chat_id, caption)
+            text_kwargs = {**send_kwargs}
+            if parse_mode:
+                text_kwargs['parse_mode'] = parse_mode
+            await bot.send_message(chat_id, caption, **text_kwargs)
         return sent
     else:
-        return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
+        # نص عادي
+        msg_kwargs = {**send_kwargs}
+        if parse_mode:
+            msg_kwargs['parse_mode'] = parse_mode
+        return await bot.send_message(chat_id, caption or ".", **msg_kwargs)
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
@@ -1091,30 +1139,43 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
     # قص النص إلى 1024 حرف إذا كان سيستخدم كـ caption
     caption_text = text[:1024] if media_type else text
 
+    # إعداد kwargs للإرسال مع تمرير parse_mode إذا كان موجوداً
+    send_kwargs = kwargs.copy()
+    if parse_mode:
+        send_kwargs['parse_mode'] = parse_mode
+
     try:
         if media_type:
-            return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+            return await _send_media(
+                bot, chat_id, media_type, media_file_id,
+                caption=caption_text or None,
+                reply_markup=reply_markup,
+                **send_kwargs
+            )
         else:
             return await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                **kwargs
+                **send_kwargs
             )
     except TimedOut:
         logger.warning("⚠️ Timed out، محاولة إعادة الإرسال...")
         try:
             await asyncio.sleep(1)
             if media_type:
-                return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+                return await _send_media(
+                    bot, chat_id, media_type, media_file_id,
+                    caption=caption_text or None,
+                    reply_markup=reply_markup,
+                    **send_kwargs
+                )
             else:
                 return await bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     reply_markup=reply_markup,
-                    parse_mode=parse_mode,
-                    **kwargs
+                    **send_kwargs
                 )
         except Exception as e2:
             logger.error(f"❌ فشل الإرسال بعد المحاولة الثانية: {e2}")
@@ -1125,14 +1186,23 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
             # محاولة الإرسال بدون parse_mode مع الحفاظ على النص
             try:
                 if media_type:
-                    return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+                    # إزالة parse_mode من send_kwargs
+                    safe_kwargs = send_kwargs.copy()
+                    safe_kwargs.pop('parse_mode', None)
+                    return await _send_media(
+                        bot, chat_id, media_type, media_file_id,
+                        caption=caption_text or None,
+                        reply_markup=reply_markup,
+                        **safe_kwargs
+                    )
                 else:
+                    safe_kwargs = send_kwargs.copy()
+                    safe_kwargs.pop('parse_mode', None)
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=text[:4096],
                         reply_markup=reply_markup,
-                        parse_mode=None,
-                        **kwargs
+                        **safe_kwargs
                     )
             except Exception as e2:
                 logger.error(f"❌ فشل الإرسال النهائي: {e2}")
@@ -1351,7 +1421,7 @@ async def _flush_usage_updates():
 
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
-        "SELECT keyword, reply FROM auto_replies WHERE chat_id=? AND is_active=1",
+        "SELECT keyword, reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id=? AND is_active=1",
         (chat_id,)
     )
     if not rows:
@@ -1390,13 +1460,15 @@ async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[D
             if overwrite:
                 await DB.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?", (chat_id, keyword))
             reply_type = item.get('reply_type', 'text')
-            media_id = item.get('media_file_id')
-            buttons = item.get('buttons')
+            media_id = item.get('reply_media_id')
+            buttons = item.get('reply_buttons')
+            if isinstance(buttons, (dict, list)):
+                buttons = json.dumps(buttons)
             await DB.add_auto_reply(
                 chat_id, keyword, reply,
                 reply_type=reply_type,
                 media_id=media_id,
-                buttons=json.dumps(buttons) if buttons else None
+                buttons=buttons
             )
             count += 1
         _auto_reply_cache.invalidate()
