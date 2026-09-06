@@ -2,19 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - النسخة النهائية الكاملة
-===================================================================================
-جميع الأوامر النصية للبوت مع دعم المشرفين المخفيين وإصلاح جميع المشاكل.
-+ الأوامر الإضافية: /admin /broadcast /set_force /set_update_ch /set_log_ch
-+ /add_admin /remove_admin /export_replies /import_replies /backup /restore
-+ /auto_publish /auto_recycle /channels /posts /mood
-+ ربط جميع النصوص الثابتة بنظام الترجمة _trans
-+ إصلاح متغيرات القائمة الرئيسية main_menu
-+ إصلاح متغيرات معلومات المطور developer_info
-+ تحسين أداء /start باستخدام asyncio.gather
-+ إصلاح استدعاء _fetchone_in_conn -> _fetchone_with_conn
-+ إضافة تخزين مؤقت (Cache) للبيانات المتكررة مع مهلة زمنية 5 دقائق
-+ إضافة فهارس محسّنة لقاعدة البيانات (تمت إضافتها في database.py)
+handlers_command.py - معالجات الأوامر (CommandHandlers) - نسخة محسّنة وموثوقة
+=============================================================================
+- استخدام asyncio.gather مع return_exceptions=True لتفادي توقف العملية
+- معالجة فردية لكل نتيجة، مع قيم افتراضية عند الفشل
+- تحسين التحقق من الاشتراك الإجباري: السماح بالدخول عند حدوث خطأ
+- الحفاظ على جميع الأوامر والإصلاحات السابقة
 """
 
 import asyncio
@@ -40,11 +33,10 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 # =====================================================================
-# طبقة تخزين مؤقت بسيطة (In-Memory Cache)
+# طبقة تخزين مؤقت بسيطة (In-Memory Cache) مع TTL = 10 دقائق
 # =====================================================================
 class SimpleCache:
-    """تخزين مؤقت للبيانات مع مهلة زمنية"""
-    def __init__(self, ttl_seconds: int = 300):
+    def __init__(self, ttl_seconds: int = 600):
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._ttl = ttl_seconds
 
@@ -69,12 +61,88 @@ class SimpleCache:
     def clear(self) -> None:
         self._cache.clear()
 
-# كائن cache عام
-CACHE = SimpleCache(ttl_seconds=300)  # 5 دقائق
+CACHE = SimpleCache(ttl_seconds=600)
+
+
+# =====================================================================
+# دوال مساعدة
+# =====================================================================
+async def _get_cached_or_fetch(cache_key: str, user_id: int, fetch_func, default=None):
+    """جلب قيمة من الكاش أو تنفيذ دالة الجلب ثم تخزينها. إذا فشلت، نعيد القيمة الافتراضية."""
+    val = CACHE.get(cache_key, user_id)
+    if val is not None:
+        return val
+    try:
+        val = await fetch_func(user_id)
+        if val is None:
+            val = default
+        CACHE.set(val, cache_key, user_id)
+        return val
+    except Exception as e:
+        logger.error(f"❌ فشل جلب {cache_key} للمستخدم {user_id}: {e}", exc_info=True)
+        return default
+
+
+async def _check_force_subscription(bot, user_id: int) -> Dict[str, Any]:
+    """
+    التحقق من الاشتراك الإجباري مع تخزين مؤقت.
+    تُرجع قاموسًا يحتوي على:
+        - passed: bool (هل يمكنه الدخول)
+        - invite_link: str أو None (إذا لزم)
+        - error: bool (هل حدث خطأ أثناء التحقق)
+    """
+    cache_key = "force_sub"
+    cached = CACHE.get(cache_key, user_id)
+    if cached is not None:
+        return cached
+
+    result = {
+        "passed": True,
+        "invite_link": None,
+        "error": False,
+    }
+
+    force_ch = None
+    try:
+        force_ch = await DB.get_force_subscribe_channel()
+    except Exception as e:
+        logger.error(f"❌ فشل جلب قناة الاشتراك الإجباري: {e}")
+        result["error"] = True
+        CACHE.set(result, cache_key, user_id)
+        return result  # في حالة الخطأ نسمح بالدخول
+
+    if not force_ch or user_id == CONFIG.PRIMARY_OWNER_ID:
+        CACHE.set(result, cache_key, user_id)
+        return result
+
+    try:
+        # جلب كائن الدردشة
+        if force_ch.lstrip('-').isdigit():
+            chat = await bot.get_chat(int(force_ch))
+        else:
+            chat = await bot.get_chat(f"@{force_ch}")
+
+        # التحقق من عضوية المستخدم
+        member = await bot.get_chat_member(chat.id, user_id)
+        if member.status not in ['member', 'administrator', 'creator']:
+            result["passed"] = False
+            try:
+                invite_link = await bot.export_chat_invite_link(chat.id)
+                result["invite_link"] = invite_link
+            except Exception as e:
+                logger.warning(f"⚠️ فشل جلب رابط الدعوة: {e}")
+                # في حالة فشل جلب الرابط، نترك invite_link = None
+    except Exception as e:
+        # إذا حدث خطأ في API، نسجل الخطأ ونعتبر أن المستخدم يمكنه الدخول لتجنب الحبس
+        logger.error(f"❌ خطأ أثناء التحقق من الاشتراك للمستخدم {user_id}: {e}", exc_info=True)
+        result["error"] = True
+        result["passed"] = True  # السماح بالدخول عند الخطأ
+
+    CACHE.set(result, cache_key, user_id)
+    return result
 
 
 async def _safe_answer(query, text=None, show_alert=False):
-    """دالة مساعدة للإجابة على الاستعلامات بأمان"""
     try:
         if text:
             await query.answer(text, show_alert=show_alert)
@@ -90,7 +158,6 @@ async def _safe_answer(query, text=None, show_alert=False):
 
 
 def _mask_id(id_value, prefix=3, suffix=2):
-    """إخفاء جزء من المعرفات الحساسة"""
     if id_value is None:
         return "***"
     s = str(id_value)
@@ -100,7 +167,6 @@ def _mask_id(id_value, prefix=3, suffix=2):
 
 
 async def _trans(key, lang, default_ar):
-    """جلب النص المترجم مع fallback للعربية"""
     try:
         text = await get_text(lang, key)
         if not text or text == key:
@@ -110,104 +176,92 @@ async def _trans(key, lang, default_ar):
         return default_ar
 
 
+# =====================================================================
+# معالجات الأوامر
+# =====================================================================
 class CommandHandlers:
-    """جميع معالجات الأوامر"""
-
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """الأمر /start - القائمة الرئيسية"""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
-        await DB.register_user(user_id, username, first_name)
 
-        # معالجة الإحالات
+        # تسجيل المستخدم (سريع)
+        try:
+            await DB.register_user(user_id, username, first_name)
+        except Exception as e:
+            logger.error(f"❌ فشل تسجيل المستخدم {user_id}: {e}")
+
+        # معالجة الإحالات (اختياري، في الخلفية)
         args = context.args or []
         if args and args[0].startswith('ref_'):
-            ref_code = args[0][4:]
-            referrer = await DB.get_user_by_referral_code(ref_code)
-            if referrer and referrer != user_id and not await DB.is_user_banned(referrer):
-                existing = await DB.fetchone("SELECT 1 FROM referrals WHERE referred_id=?", (user_id,))
-                if not existing:
-                    if await DB.add_referral(referrer, user_id):
-                        reward = await DB.get_referral_stats(referrer)
-                        try:
-                            await context.bot.send_message(
-                                referrer,
-                                f"🎁 تمت إحالة `{_mask_id(user_id)}`. لديك {reward['available']} يوم متاح للصرف."
-                            )
-                        except Exception as e:
-                            logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
-
-        # التحقق من الاشتراك الإجباري (قد يكون بطيئاً بسبب API)
-        force_ch = await DB.get_force_subscribe_channel()
-        if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
             try:
-                if force_ch.lstrip('-').isdigit():
-                    chat = await context.bot.get_chat(int(force_ch))
-                else:
-                    chat = await context.bot.get_chat(f"@{force_ch}")
-                member = await context.bot.get_chat_member(chat.id, user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    invite_link = None
-                    try:
-                        invite_link = await context.bot.export_chat_invite_link(chat.id)
-                    except Exception:
-                        pass
-
-                    if invite_link:
-                        kb = InlineKeyboardMarkup([[
-                            InlineKeyboardButton("📢 اشترك", url=invite_link),
-                            InlineKeyboardButton("✅ تحقق", callback_data=CB.CHECK_SUB)
-                        ]])
-                    else:
-                        kb = InlineKeyboardMarkup([[
-                            InlineKeyboardButton("✅ تحقق", callback_data=CB.CHECK_SUB)
-                        ]])
-                    await safe_send(context.bot, user_id, "⚠️ اشترك في القناة أولاً", reply_markup=kb)
-                    return
+                ref_code = args[0][4:]
+                referrer = await DB.get_user_by_referral_code(ref_code)
+                if referrer and referrer != user_id and not await DB.is_user_banned(referrer):
+                    existing = await DB.fetchone("SELECT 1 FROM referrals WHERE referred_id=?", (user_id,))
+                    if not existing:
+                        if await DB.add_referral(referrer, user_id):
+                            reward = await DB.get_referral_stats(referrer)
+                            try:
+                                await context.bot.send_message(
+                                    referrer,
+                                    f"🎁 تمت إحالة `{_mask_id(user_id)}`. لديك {reward['available']} يوم متاح للصرف."
+                                )
+                            except Exception as e:
+                                logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
             except Exception as e:
-                logger.error(f"❌ خطأ في التحقق من الاشتراك الإجباري: {e}")
+                logger.error(f"❌ خطأ في معالجة الإحالة: {e}")
 
-        # ===== استخدام التخزين المؤقت للبيانات المتكررة =====
-        # محاولة جلب اللغة من الكاش
-        lang = CACHE.get("lang", user_id)
-        if lang is None:
-            lang = await DB.get_user_language(user_id) or 'ar'
-            CACHE.set(lang, "lang", user_id)
+        # ===== جلب جميع البيانات المطلوبة بالتوازي مع معالجة الأخطاء =====
+        # نستخدم asyncio.gather مع return_exceptions=True للحصول على كل نتيجة بشكل منفصل
+        # حتى لو فشل بعضها، لا يفشل البقية.
+        results = await asyncio.gather(
+            _get_cached_or_fetch("lang", user_id, DB.get_user_language, 'ar'),
+            _get_cached_or_fetch("active_channel", user_id, DB.get_active_channel, None),
+            _get_cached_or_fetch("auto_publish", user_id, DB.get_auto_publish_status, False),
+            _get_cached_or_fetch("auto_recycle", user_id, DB.get_auto_recycle_status, False),
+            _get_cached_or_fetch("has_sub", user_id, DB.has_active_subscription, False),
+            DB.get_user_groups(user_id),
+            _check_force_subscription(context.bot, user_id),
+            return_exceptions=True
+        )
 
-        # جلب البيانات الأخرى (مع استخدام الكاش إن أمكن)
-        active = CACHE.get("active_channel", user_id)
-        if active is None:
-            active = await DB.get_active_channel(user_id)
-            CACHE.set(active, "active_channel", user_id)
+        # تفكيك النتائج مع تعويض أي فشل بالقيم الافتراضية
+        lang = results[0] if not isinstance(results[0], Exception) else 'ar'
+        active = results[1] if not isinstance(results[1], Exception) else None
+        auto = results[2] if not isinstance(results[2], Exception) else False
+        recycle = results[3] if not isinstance(results[3], Exception) else False
+        has_sub = results[4] if not isinstance(results[4], Exception) else False
+        groups = results[5] if not isinstance(results[5], Exception) else []
+        force_sub_info = results[6] if not isinstance(results[6], Exception) else {"passed": True, "invite_link": None, "error": True}
 
-        auto = CACHE.get("auto_publish", user_id)
-        if auto is None:
-            auto = await DB.get_auto_publish_status(user_id)
-            CACHE.set(auto, "auto_publish", user_id)
+        # التحقق من الاشتراك الإجباري
+        if not force_sub_info.get("passed", True):
+            invite_link = force_sub_info.get("invite_link")
+            if invite_link:
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📢 اشترك", url=invite_link),
+                    InlineKeyboardButton("✅ تحقق", callback_data=CB.CHECK_SUB)
+                ]])
+            else:
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ تحقق", callback_data=CB.CHECK_SUB)
+                ]])
+            await safe_send(context.bot, user_id, "⚠️ اشترك في القناة أولاً", reply_markup=kb)
+            return
 
-        recycle = CACHE.get("auto_recycle", user_id)
-        if recycle is None:
-            recycle = await DB.get_auto_recycle_status(user_id)
-            CACHE.set(recycle, "auto_recycle", user_id)
-
-        has_sub = CACHE.get("has_sub", user_id)
-        if has_sub is None:
-            has_sub = await DB.has_active_subscription(user_id)
-            CACHE.set(has_sub, "has_sub", user_id)
-
-        # استعلام get_user_groups ثقيل ولا يمكن تخزينه مؤقتاً بسهولة (لأنه يتغير)
-        groups = await DB.get_user_groups(user_id)
-        # ===================================================
-
+        # تجهيز بيانات العرض
         cnt = 0
         ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
         if active:
-            cnt = await DB.get_unpublished_posts_count(user_id, active)
-            ch_info = await DB.get_channel_info(user_id, active)
-            if ch_info:
-                ch_display = ch_info['channel_name']
+            try:
+                cnt = await DB.get_unpublished_posts_count(user_id, active)
+                ch_info = await DB.get_channel_info(user_id, active)
+                if ch_info:
+                    ch_display = ch_info['channel_name']
+            except Exception as e:
+                logger.error(f"❌ خطأ في جلب بيانات القناة النشطة: {e}")
 
         sub_active_text = await _trans('subscription_active', lang, "✅ مفعل")
         sub_inactive_text = await _trans('subscription_inactive', lang, "❌ غير مفعل")
@@ -246,17 +300,21 @@ class CommandHandlers:
 
         kb = InlineKeyboardMarkup(keyboard)
 
-        title = await get_text(
-            lang,
-            'main_menu',
-            user_name=f"<code>{user_id}</code>",
-            groups_count=len(groups),
-            active_channel=ch_display,
-            unpublished_posts=cnt,
-            auto_publish=auto_text,
-            auto_recycle=recycle_text,
-            subscription_status=sub_text
-        )
+        try:
+            title = await get_text(
+                lang,
+                'main_menu',
+                user_name=f"<code>{user_id}</code>",
+                groups_count=len(groups),
+                active_channel=ch_display,
+                unpublished_posts=cnt,
+                auto_publish=auto_text,
+                auto_recycle=recycle_text,
+                subscription_status=sub_text
+            )
+        except Exception as e:
+            logger.error(f"❌ خطأ في توليد نص القائمة: {e}")
+            title = "مرحبًا! استخدم الأزرار أدناه."
 
         await safe_send(context.bot, user_id, title, reply_markup=kb)
 
@@ -280,7 +338,6 @@ class CommandHandlers:
         else:
             msg = await _trans('trial_failed', lang, "❌ تعذر تفعيل التجربة")
         await safe_send(context.bot, user_id, msg)
-        # إبطال الكاش بعد تغيير الاشتراك
         CACHE.invalidate("has_sub", user_id)
 
     @staticmethod
@@ -397,11 +454,15 @@ class CommandHandlers:
             return
 
         text = " ".join(args)
-        from handlers_message import analyze_sentiment
-        if analyze_sentiment is None:
+        try:
+            from handlers_message import analyze_sentiment
+            if analyze_sentiment is None:
+                raise ImportError
+            result = analyze_sentiment(text)
+        except Exception as e:
+            logger.error(f"❌ فشل تحليل المشاعر: {e}")
             await safe_send(context.bot, user_id, await _trans('mood_unavailable', lang, "❌ خدمة تحليل المشاعر غير متاحة حالياً"))
             return
-        result = analyze_sentiment(text)
 
         response = (
             f"{result['emoji']} <b>{await _trans('mood_analysis', lang, 'تحليل المشاعر')}</b>\n\n"
@@ -533,7 +594,6 @@ class CommandHandlers:
         await DB.set_auto_publish(user_id, not cur)
         status = await _trans('enabled', lang, "مفعل") if not cur else await _trans('disabled', lang, "معطل")
         await safe_send(context.bot, user_id, f"✅ {await _trans('auto_publish_status', lang, 'النشر التلقائي')}: {status}")
-        # إبطال الكاش
         CACHE.invalidate("auto_publish", user_id)
 
     @staticmethod
@@ -1026,7 +1086,6 @@ class CommandHandlers:
         success = await DB.grant_subscription_days(target_id, days, plan_id=plan_id, provider='manual')
         if success:
             await safe_send(context.bot, user_id, f"✅ تم منح {days} يوم للمستخدم <code>{_mask_id(target_id)}</code>", parse_mode='HTML')
-            # إبطال الكاش للمستخدم المستهدف
             CACHE.invalidate("has_sub", target_id)
         else:
             await safe_send(context.bot, user_id, "❌ فشل المنح")
