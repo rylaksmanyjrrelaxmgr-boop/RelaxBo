@@ -32,6 +32,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - جعل دوال التحويل غير متزامنة واستخدام _get_unique_columns عند توفر conn
 - تحسين منطق تحديد النص في add_posts
 - إضافة فهارس (channel_db_id, published) و (channel_db_id, fail_count)
+- إصلاح خطأ asyncpg: إزالة المنطقة الزمنية من datetime في _adapt_params
+- إضافة دوال _fetchone_in_conn، _fetchall_in_conn، _fetchval_in_conn للتوافق
 """
 
 import os
@@ -450,21 +452,27 @@ def _convert_upsert(query: str) -> str:
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
 
 def _adapt_params(params: tuple) -> tuple:
-    """تكييف المعامل حسب نوع قاعدة البيانات."""
+    """
+    تكييف المعامل حسب نوع قاعدة البيانات.
+    
+    - لـ PostgreSQL: تحويل أي كائن datetime إلى naive (بدون منطقة زمنية)
+      لأن جميع أعمدة TIMESTAMP في الجداول معرفة بدون time zone.
+    - لـ SQLite و MySQL: تحويل datetime إلى نص بالصيغة المطلوبة.
+    """
     if params is None:
         return ()
-    if USE_POSTGRES:
-        # في PostgreSQL، نمرر datetime كما هو (كائن مع tzinfo)
-        return params
-    else:
-        # في SQLite و MySQL، نحول datetime إلى نص
-        new_params = []
-        for p in params:
-            if isinstance(p, datetime):
-                new_params.append(p.strftime('%Y-%m-%d %H:%M:%S'))
+    new_params = []
+    for p in params:
+        if isinstance(p, datetime):
+            if USE_POSTGRES:
+                # إزالة المنطقة الزمنية (tzinfo) لأن العمود من نوع TIMESTAMP (بدون منطقة)
+                # هذا يتجنب خطأ asyncpg: can't subtract offset-naive and offset-aware
+                p = p.replace(tzinfo=None)
             else:
-                new_params.append(p)
-        return tuple(new_params)
+                # SQLite و MySQL تخزنان التواريخ كنص
+                p = p.strftime('%Y-%m-%d %H:%M:%S')
+        new_params.append(p)
+    return tuple(new_params)
 
 # =====================================================================
 # 2. فئة TimeUtils (محسّنة)
@@ -877,6 +885,19 @@ class Database:
             async with self.connection() as conn:
                 return await self._fetchval_with_conn(conn, q, *p, default=default)
         return await self._execute_with_retry(query, params, _exec)
+
+    # دوال مساعدة للتوافق مع الكود القديم (مرادفات)
+    async def _fetchone_in_conn(self, conn, query: str, *params) -> Optional[Dict]:
+        """مرادف لـ _fetchone_with_conn للتوافق مع الكود القديم."""
+        return await self._fetchone_with_conn(conn, query, *params)
+
+    async def _fetchall_in_conn(self, conn, query: str, *params) -> List[Dict]:
+        """مرادف لـ _fetchall_with_conn للتوافق مع الكود القديم."""
+        return await self._fetchall_with_conn(conn, query, *params)
+
+    async def _fetchval_in_conn(self, conn, query: str, *params, default=None) -> Any:
+        """مرادف لـ _fetchval_with_conn للتوافق مع الكود القديم."""
+        return await self._fetchval_with_conn(conn, query, *params, default=default)
 
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
         if not params_list:
@@ -2512,8 +2533,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
             "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
             "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",          # إضافة جديدة
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, fail_count)",               # إضافة جديدة
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
             "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
@@ -4449,7 +4470,6 @@ class Database:
                 (now, now, now)
             )
         elif USE_MYSQL:
-            # استخدام TIMESTAMPDIFF بدلاً من DATEDIFF للحصول على دقة أفضل
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
                           TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) as days_left,
@@ -4723,14 +4743,12 @@ class Database:
                     if USE_POSTGRES:
                         row = await self._fetchone_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now())
                         sub_id = row['id'] if row else 0
-                        # تحديث subscription_end بعد إدراج الاشتراك
                         await self._refresh_user_subscription_end(conn, user_id)
                         return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
                         await cursor.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (%s, %s, 'active', %s, %s, 0, %s, %s, %s, %s)", (user_id, plan_id, TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
                         sub_id = cursor.lastrowid
-                        # تحديث subscription_end بعد إدراج الاشتراك
                         await self._refresh_user_subscription_end(conn, user_id)
                         return sub_id
                     else:
