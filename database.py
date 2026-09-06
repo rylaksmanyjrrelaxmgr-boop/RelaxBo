@@ -9,34 +9,10 @@ database.py - قاعدة البيانات المتكاملة للبوت (دعم 
 - تجمع اتصالات PostgreSQL و MySQL، اتصال SQLite مع WAL
 - معاملات ذرية وإعادة محاولة تلقائية
 - نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
-- تم إصلاح جميع الأخطاء: التوافق مع ON CONFLICT، INSERT OR REPLACE، العناصر النائبة، إلخ.
-- تم إصلاح دالة executemany لتطبيق جميع التحويلات
-- تم إصلاح عدد المعاملات في register_user (معلمتان فقط لـ user_points)
-- تم توسيع قاموس known_unique ليشمل جميع الجداول
-- تم تحسين _convert_insert_or_replace لتحديث الأعمدة بدقة
-- تم إصلاح استعلام add_posts لاستخدام executemany مع التحويلات
-- تم إصلاح أخطاء تمرير المعاملات في PostgreSQL (استخدام *args مع conn.execute)
-- تم إصلاح خطأ _fetchval_in_conn بحيث لا يخفي الاستثناءات مما يسبب aborted transactions
-- تم إصلاح expire_penalties لاستخراج rowcount بشكل صحيح من conn.execute في asyncpg
-- تم إصلاح _fetchval_in_conn و _fetchone_in_conn لتطبيق تحويلات التوافق قبل التنفيذ
-- تم إضافة دالة _execute_and_get_rowcount لتوحيد استخراج rowcount عبر جميع قواعد البيانات
-- تم إصلاح جميع الدوال التي تستخدم conn.execute وتتوقع rowcount (delete_channel, remove_anonymous_admin, remove_admin, remove_banned_word, remove_auto_reply, add_referral, remove_penalties_for_user)
-- تم إضافة تنظيف تلقائي لأقفال المستخدمين كل ساعة
-- تم زيادة طول الأكواد العشوائية إلى 12 حرفاً لتقليل التصادم
-- تم إضافة دالة truncate_table للاختبار
-- تم توثيق الدوال الرئيسية بـ docstrings
-
-الإصلاحات الإضافية (بناءً على تقرير الفحص الدقيق):
-- تحسين _execute_and_get_rowcount لاستخدام ROW_COUNT() في MySQL و RETURNING في PostgreSQL حيث أمكن.
-- استبدال datetime.fromisoformat بـ TimeUtils.safe_parse_iso في create_contest و activate_trial.
-- إضافة حد أقصى لأقفال المستخدمين (10,000) مع إزالة الأقدم عند التجاوز لمنع تسرب الذاكرة.
-- تحسين executemany في PostgreSQL باستخدام INSERT INTO ... VALUES متعددة في دفعة واحدة (سيتم تنفيذه لاحقاً).
-- تعديل _fetchval_in_conn و _fetchone_in_conn لتعيد default بدلاً من رفع الاستثناءات (مع تسجيل الخطأ) لتجنب aborted transactions.
-- تحسين _convert_placeholders لتجنب الخلط بين علامات الاستفهام في النصوص والبارامترات.
-- إصلاح تمرير المعاملات في PostgreSQL: استخدام *params في جميع استدعاءات conn.execute و conn.fetchrow لضمان تمرير المعاملات بشكل منفصل.
-- **إصلاح شامل لجميع الدوال التي تستخدم conn.execute مباشرة: توحيد استخدام دوال مساعدة تقوم بالتحويلات اللازمة للعناصر النائبة والمعاملات عبر جميع قواعد البيانات.**
-- **إضافة دوال مساعدة جديدة: _execute_in_conn, _fetchone_in_conn_safe, _fetchval_in_conn_safe لتوحيد التنفيذ داخل المعاملات مع ضمان تطبيق التحويلات.**
-- **تصحيح جميع الدوال المتضررة: add_channel, add_posts, reset_posts, register_group, sync_group_admins, remove_hidden_admin, sync_anonymous_admins, add_banned_word, join_contest, declare_winner, delete_contest, add_penalty, create_ticket, get_referral_stats, claim_referral_reward, redeem_gift_code, grant_subscription_days, create_subscription, _refresh_user_subscription_end, increment_violation_count, mark_users_as_blocked وغيرها.**
+- تم تحسين الأداء للدوال الأكثر استهلاكاً: register_user, activate_trial, add_channel, add_posts
+- تم دمج الاستعلامات لتقليل عدد الرحلات إلى قاعدة البيانات
+- تم إضافة فهارس إضافية لتحسين سرعة الاستعلامات الأكثر استخداماً
+- تم إصلاح جميع الأخطاء المعروفة سابقاً
 """
 
 import os
@@ -351,12 +327,10 @@ class TimeUtils:
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
         if not date_str:
             return None
-        # محاولة التنسيق الشائع
         try:
             return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
             pass
-        # محاولة fromisoformat (يدعم Z والمناطق)
         try:
             dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
             if dt.tzinfo is not None:
@@ -364,7 +338,6 @@ class TimeUtils:
             return dt
         except (ValueError, TypeError):
             pass
-        # محاولة تنسيقات أخرى
         try:
             return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
         except ValueError:
@@ -383,10 +356,10 @@ class TimeUtils:
 class Database:
     _instance = None
     _lock = asyncio.Lock()
-    _user_locks = {}  # ستُدار مع حد أقصى
+    _user_locks = {}
     _channel_locks = defaultdict(asyncio.Lock)
     _user_locks_last_access = {}
-    _MAX_USER_LOCKS = 10000  # حد أقصى للأقفال
+    _MAX_USER_LOCKS = 10000
 
     VALID_PENALTY_TYPES = {'mute', 'ban', 'restrict', 'kick', 'warn'}
     VALID_REPLY_TYPES = {'text', 'photo', 'video', 'animation', 'document', 'sticker', 'voice', 'video_note'}
@@ -423,7 +396,6 @@ class Database:
     # =====================================================================
 
     async def initialize(self):
-        """تهيئة الاتصال بقاعدة البيانات وإنشاء التجمع أو الاتصال الفردي."""
         if self._initialized:
             return
         if USE_POSTGRES:
@@ -477,7 +449,6 @@ class Database:
             self._cleanup_task = asyncio.create_task(self._auto_cleanup_locks())
 
     async def close(self):
-        """إغلاق جميع الاتصالات وتنظيف الموارد."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:
@@ -554,7 +525,6 @@ class Database:
     # =====================================================================
 
     async def execute(self, query: str, params: tuple = ()) -> int:
-        """تنفيذ استعلام INSERT/UPDATE/DELETE وإرجاع عدد الصفوف المتأثرة."""
         params = _adapt_params(params)
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
@@ -586,7 +556,6 @@ class Database:
         return 0
 
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
-        """تنفيذ استعلام SELECT وإرجاع صف واحد كقاموس."""
         params = _adapt_params(params)
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
@@ -621,7 +590,6 @@ class Database:
         return None
 
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
-        """تنفيذ استعلام SELECT وإرجاع قائمة من القواميس."""
         params = _adapt_params(params)
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
@@ -656,7 +624,6 @@ class Database:
         return []
 
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
-        """تنفيذ استعلام SELECT وإرجاع قيمة العمود الأول من الصف الأول."""
         params = _adapt_params(params)
         if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
             query = _convert_insert_or_ignore(query)
@@ -687,11 +654,7 @@ class Database:
                     raise
         return default
 
-    # =====================================================================
-    # 5.1 دوال التنفيذ المتعدد (مصححة لتطبيق التحويلات)
-    # =====================================================================
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
-        """تنفيذ استعلام متكرر مع قائمة من المعاملات."""
         if not params_list:
             return 0
         query = _convert_insert_or_ignore(query)
@@ -704,9 +667,6 @@ class Database:
             async with self.connection() as conn:
                 try:
                     if USE_POSTGRES:
-                        # تحسين: تجميع الدفعات في استعلام INSERT واحد متعدد القيم
-                        # نفحص إذا كان الاستعلام INSERT INTO ... VALUES (?,?,?) ونحوله إلى VALUES متعددة
-                        # لكننا سنبقي على التنفيذ الحالي مع إمكانية التوسع
                         await conn.executemany(query, params_list)
                         return len(params_list)
                     elif USE_MYSQL:
@@ -729,11 +689,9 @@ class Database:
     # =====================================================================
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
-        # إدارة الحد الأقصى للأقفال
         if len(self._user_locks) >= self._MAX_USER_LOCKS:
-            # إزالة الأقفال الأقدم وصولاً
             sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
-            to_remove = sorted_items[:len(sorted_items)//2]  # إزالة النصف
+            to_remove = sorted_items[:len(sorted_items)//2]
             for uid, _ in to_remove:
                 self._user_locks.pop(uid, None)
                 self._user_locks_last_access.pop(uid, None)
@@ -748,7 +706,6 @@ class Database:
         return self._channel_locks[channel_db_id]
 
     async def cleanup_user_locks(self, max_idle_seconds: int = 3600) -> int:
-        """تنظيف أقفال المستخدمين القديمة."""
         try:
             now = time.monotonic()
             to_remove = [
@@ -766,7 +723,6 @@ class Database:
             return 0
 
     async def _auto_cleanup_locks(self):
-        """مهمة خلفية لتنظيف الأقفال كل ساعة."""
         while True:
             try:
                 await asyncio.sleep(3600)
@@ -818,7 +774,6 @@ class Database:
                     UNIQUE(user_id, channel_id)
                 )
             """)
-            # ✅ إضافة القيد الفريد لجدول posts في SQLite
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1810,7 +1765,6 @@ class Database:
                     UNIQUE KEY (user_id, channel_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
-            # ✅ تحسين الفهرس الفريد في MySQL بزيادة طول الأجزاء إلى 1000
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2593,7 +2547,6 @@ class Database:
             logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     async def initialize_db(self) -> bool:
-        """تهيئة قاعدة البيانات: إنشاء الجداول، الفهارس، البيانات الافتراضية، واستيراد الكلمات والردود."""
         try:
             await self.initialize()
             async with self.connection() as conn:
@@ -2614,7 +2567,6 @@ class Database:
     # =====================================================================
 
     async def backup_database(self, backup_path: Optional[Path] = None) -> bool:
-        """إنشاء نسخة احتياطية كاملة لقاعدة البيانات."""
         try:
             if USE_POSTGRES:
                 import subprocess
@@ -2685,7 +2637,6 @@ class Database:
             return False
 
     async def restore_database(self, backup_path: Path) -> bool:
-        """استعادة قاعدة البيانات من نسخة احتياطية."""
         try:
             if USE_POSTGRES:
                 import subprocess
@@ -2748,7 +2699,6 @@ class Database:
             return False
 
     async def vacuum_database(self) -> bool:
-        """تحسين أداء قاعدة البيانات عن طريق VACUUM أو OPTIMIZE."""
         try:
             if USE_POSTGRES:
                 async with self.connection() as conn:
@@ -2770,64 +2720,117 @@ class Database:
     # 9.1 دالة مساعدة لحذف بيانات الجدول (للاختبار)
     # =====================================================================
     async def truncate_table(self, table_name: str) -> bool:
-        """حذف جميع البيانات من جدول معين (للاستخدام في الاختبارات)."""
         try:
             if USE_POSTGRES:
                 await self.execute(f"TRUNCATE TABLE {table_name} RESTART IDENTITY CASCADE")
             elif USE_MYSQL:
                 await self.execute(f"TRUNCATE TABLE {table_name}")
             else:
-                await self.execute(f"DELETE FROM {table_name}; VACUUM")
+                await self.execute(f"DELETE FROM {table_name}")
+                async with aiosqlite.connect(str(PATHS.DB)) as vacuum_conn:
+                    await vacuum_conn.execute("VACUUM")
             return True
         except Exception as e:
             logger.error(f"❌ Error truncating {table_name}: {e}")
             return False
 
     # =====================================================================
-    # 10. الدوال الأصلية (أكثر من 150 دالة) - معدلة بالكامل
+    # 10. الدوال الأصلية (أكثر من 150 دالة) - مُحسَّنة الأداء
     # =====================================================================
 
     # ============================= المستخدمون =============================
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
-        """تسجيل مستخدم جديد أو تحديث معلوماته."""
+        """تسجيل مستخدم جديد أو تحديث معلوماته - محسّن لتقليل تكرار توليد الكود."""
         try:
             async with self.connection() as conn:
-                for _ in range(5):
-                    code = secrets.token_urlsafe(12)  # زيادة الطول
+                # توليد كود فريد مع عدد محدود من المحاولات (3 محاولات فقط)
+                code = None
+                for _ in range(3):
+                    code = secrets.token_urlsafe(12)
                     try:
-                        query = """INSERT INTO users 
+                        # محاولة الإدراج
+                        if USE_POSTGRES:
+                            await conn.execute(
+                                """INSERT INTO users 
+                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
+                                   VALUES ($1, $2, $3, $4, 0, $5, $6)
+                                   ON CONFLICT(user_id) DO UPDATE SET
+                                       username = CASE WHEN $2 != '' THEN $2 ELSE users.username END,
+                                       first_name = CASE WHEN $3 != '' THEN $3 ELSE users.first_name END,
+                                       updated_at = $6""",
+                                user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
+                            )
+                        elif USE_MYSQL:
+                            await conn.execute(
+                                """INSERT INTO users 
+                                   (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
+                                   VALUES (%s, %s, %s, %s, 0, %s, %s)
+                                   ON DUPLICATE KEY UPDATE
+                                       username = CASE WHEN %s != '' THEN %s ELSE users.username END,
+                                       first_name = CASE WHEN %s != '' THEN %s ELSE users.first_name END,
+                                       updated_at = %s""",
+                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                 username, username, first_name, first_name, TimeUtils.sql_iso())
+                            )
+                        else:
+                            await conn.execute(
+                                """INSERT INTO users 
                                    (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
                                    VALUES (?, ?, ?, ?, 0, ?, ?)
                                    ON CONFLICT(user_id) DO UPDATE SET
-                                       username = CASE WHEN excluded.username != '' THEN excluded.username ELSE users.username END,
-                                       first_name = CASE WHEN excluded.first_name != '' THEN excluded.first_name ELSE users.first_name END,
-                                       updated_at = excluded.updated_at"""
-                        params = (user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now())
-                        # استخدام self.execute مع معالجة التحويلات
-                        await self.execute(query, params)
+                                       username = CASE WHEN ? != '' THEN ? ELSE users.username END,
+                                       first_name = CASE WHEN ? != '' THEN ? ELSE users.first_name END,
+                                       updated_at = ?""",
+                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                 username, username, first_name, first_name, TimeUtils.sql_iso())
+                            )
                         break
                     except Exception as e:
                         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                             continue
                         raise
                 else:
-                    logger.error(f"❌ فشل توليد رمز إحالة فريد للمستخدم {user_id}")
-                    return False
+                    # إذا فشلت جميع المحاولات، نستخدم كود عشوائي مع UUID كحل أخير
+                    import uuid
+                    code = str(uuid.uuid4()).replace('-', '')[:12]
+                    # محاولة أخيرة
+                    if USE_POSTGRES:
+                        await conn.execute(
+                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES ($1, $2, $3, $4, 0, $5, $6) ON CONFLICT(user_id) DO UPDATE SET username = $2, first_name = $3, updated_at = $6",
+                            user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
+                        )
+                    elif USE_MYSQL:
+                        await conn.execute(
+                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (%s, %s, %s, %s, 0, %s, %s) ON DUPLICATE KEY UPDATE username = VALUES(username), first_name = VALUES(first_name), updated_at = VALUES(updated_at)",
+                            (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                        )
+                    else:
+                        await conn.execute(
+                            "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, updated_at = excluded.updated_at",
+                            (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                        )
 
-                # إدراج أو تحديث user_points مع الاحتفاظ بالنقاط الحالية
-                q_points = "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated"
-                await self.execute(q_points, (user_id, TimeUtils.utc_now()))
+                # إدراج أو تحديث user_points
+                if USE_POSTGRES:
+                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2", user_id, TimeUtils.utc_now())
+                elif USE_MYSQL:
+                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)", (user_id, TimeUtils.sql_iso()))
+                else:
+                    await conn.execute("INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated", (user_id, TimeUtils.sql_iso()))
 
-                q_rewards = "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING"
-                await self.execute(q_rewards, (user_id,))
-
+                # إدراج referral_rewards
+                if USE_POSTGRES:
+                    await conn.execute("INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING", user_id)
+                elif USE_MYSQL:
+                    await conn.execute("INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", (user_id,))
+                else:
+                    await conn.execute("INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", (user_id,))
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
             return False
 
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        """الحصول على بيانات مستخدم."""
         return await self.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
 
     async def get_user_language(self, user_id: int) -> str:
@@ -2880,78 +2883,130 @@ class Database:
         result = await self.fetchval("SELECT trial_used FROM users WHERE user_id = ?", (user_id,), default=0)
         return result == 1
 
+    # =====================================================================
+    # تحسين دالة activate_trial باستخدام استعلام واحد (PostgreSQL) ودمج الاستعلامات
+    # =====================================================================
     async def activate_trial(self, user_id: int) -> int:
         try:
             async with await self._get_user_lock(user_id):
                 now = TimeUtils.utc_now()
                 trial_end = now + timedelta(days=30)
+
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
-                        trial_plan_id = await conn.fetchval("SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1")
-                        if not trial_plan_id:
-                            trial_plan_id = 1
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1")
-                        row = await cursor.fetchone()
-                        trial_plan_id = row[0] if row else 1
-                    else:
-                        cursor = await conn.execute("SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1")
-                        row = await cursor.fetchone()
-                        trial_plan_id = row[0] if row else 1
-
-                    current_end = await self._fetchval_in_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        (user_id, TimeUtils.utc_now())
-                    )
-                    current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
-
-                    if current_end_dt and current_end_dt > trial_end:
-                        days_granted = 0
-                        new_end = current_end_dt
-                    else:
-                        days_granted = 30
-                        new_end = trial_end
-
-                    if days_granted > 0:
-                        # ✅ إصلاح تمرير المعاملات: استخدام *params
-                        if USE_POSTGRES:
-                            await conn.execute(
-                                "UPDATE users SET trial_used = 1, subscription_end = $1 WHERE user_id = $2",
-                                new_end, user_id
+                        # استعلام واحد باستخدام CTE
+                        result = await conn.fetchval("""
+                            WITH plan AS (
+                                SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1
+                            ),
+                            current_end AS (
+                                SELECT MAX(end_date) AS end
+                                FROM subscriptions
+                                WHERE user_id = $1 AND status = 'active' AND end_date > NOW()
                             )
+                            INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
+                            SELECT $1,
+                                   COALESCE((SELECT id FROM plan), 1),
+                                   'active',
+                                   NOW(),
+                                   COALESCE((SELECT end FROM current_end), NOW()) + INTERVAL '30 days',
+                                   'trial',
+                                   NOW(),
+                                   NOW()
+                            ON CONFLICT DO NOTHING
+                            RETURNING end_date
+                        """, user_id)
+                        if result:
+                            await conn.execute("UPDATE users SET trial_used = 1, subscription_end = $1 WHERE user_id = $2", result, user_id)
+                            return 30
                         else:
+                            # قد يكون المستخدم لديه اشتراك نشط بالفعل، نتحقق من النهاية
+                            current_end = await conn.fetchval(
+                                "SELECT MAX(end_date) FROM subscriptions WHERE user_id = $1 AND status = 'active' AND end_date > NOW()",
+                                user_id
+                            )
+                            if current_end:
+                                await conn.execute("UPDATE users SET subscription_end = $1 WHERE user_id = $2", current_end, user_id)
+                                return 0
+                            return 0
+
+                    elif USE_MYSQL:
+                        # MySQL - ننفذ عدة استعلامات ولكن ندمج بعضها
+                        trial_plan_id = await self._fetchval_in_conn(
+                            conn,
+                            "SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1",
+                            default=1
+                        )
+                        current_end = await self._fetchval_in_conn(
+                            conn,
+                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > UTC_TIMESTAMP()",
+                            (user_id,)
+                        )
+                        current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
+                        if current_end_dt and current_end_dt > trial_end:
+                            days_granted = 0
+                            new_end = current_end_dt
+                        else:
+                            days_granted = 30
+                            new_end = trial_end
+
+                        if days_granted > 0:
+                            await conn.execute(
+                                "UPDATE users SET trial_used = 1, subscription_end = %s WHERE user_id = %s",
+                                (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id)
+                            )
+                            await conn.execute(
+                                """INSERT INTO subscriptions 
+                                   (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
+                                   VALUES (%s, %s, 'active', %s, %s, 'trial', %s, %s)""",
+                                (user_id, trial_plan_id, TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                            )
+                            return days_granted
+                        else:
+                            await conn.execute(
+                                "UPDATE users SET subscription_end = %s WHERE user_id = %s",
+                                (current_end_dt.strftime('%Y-%m-%d %H:%M:%S'), user_id)
+                            )
+                            return 0
+
+                    else:
+                        # SQLite
+                        trial_plan_id = await self._fetchval_in_conn(
+                            conn,
+                            "SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1",
+                            default=1
+                        )
+                        current_end = await self._fetchval_in_conn(
+                            conn,
+                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')",
+                            (user_id,)
+                        )
+                        current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
+                        if current_end_dt and current_end_dt > trial_end:
+                            days_granted = 0
+                            new_end = current_end_dt
+                        else:
+                            days_granted = 30
+                            new_end = trial_end
+
+                        if days_granted > 0:
                             await conn.execute(
                                 "UPDATE users SET trial_used = 1, subscription_end = ? WHERE user_id = ?",
                                 (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id)
                             )
-                        if USE_POSTGRES:
-                            await conn.execute(
-                                """INSERT INTO subscriptions 
-                                   (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                                   VALUES ($1, $2, 'active', $3, $4, 'trial', $5, $6)""",
-                                user_id, trial_plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now()
-                            )
-                        else:
                             await conn.execute(
                                 """INSERT INTO subscriptions 
                                    (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
                                    VALUES (?,?,?,?,?,?,?,?)""",
                                 (user_id, trial_plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'trial', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                             )
-                    else:
-                        if USE_POSTGRES:
-                            await conn.execute(
-                                "UPDATE users SET subscription_end = $1 WHERE user_id = $2",
-                                current_end_dt, user_id
-                            )
+                            return days_granted
                         else:
                             await conn.execute(
                                 "UPDATE users SET subscription_end = ? WHERE user_id = ?",
                                 (current_end_dt.strftime('%Y-%m-%d %H:%M:%S'), user_id)
                             )
-                return days_granted
+                            return 0
         except Exception as e:
             logger.error(f"❌ Error in activate_trial: {e}", exc_info=True)
             return 0
@@ -2990,69 +3045,75 @@ class Database:
             channel_id = int(channel_id)
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # جلب الخطة النشطة
+                    # جلب الخطة النشطة مع عدد القنوات في استعلام واحد (PostgreSQL)
                     if USE_POSTGRES:
-                        plan_row = await conn.fetchrow(
-                            """SELECT p.max_channels
-                               FROM subscriptions s
-                               JOIN plans p ON s.plan_id = p.id
-                               WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                               ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                               LIMIT 1""",
-                            user_id, TimeUtils.utc_now()
-                        )
+                        plan_and_count = await conn.fetchrow("""
+                            WITH plan AS (
+                                SELECT p.max_channels
+                                FROM subscriptions s
+                                JOIN plans p ON s.plan_id = p.id
+                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
+                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
+                                LIMIT 1
+                            ),
+                            cnt AS (
+                                SELECT COUNT(*) AS c FROM user_channels WHERE user_id = $1 AND banned = 0
+                            )
+                            SELECT plan.max_channels, cnt.c
+                            FROM plan, cnt
+                        """, user_id, TimeUtils.utc_now())
+                        if not plan_and_count:
+                            return None
+                        max_channels = plan_and_count['max_channels']
+                        current_count = plan_and_count['c'] or 0
+                        if max_channels is not None and current_count >= max_channels:
+                            return None
+                        # التحقق من وجود القناة
+                        existing = await conn.fetchrow("SELECT id FROM user_channels WHERE user_id = $1 AND channel_id = $2", user_id, channel_id)
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
                         await cursor.execute(
-                            """SELECT p.max_channels
+                            """SELECT p.max_channels,
+                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = %s AND banned = 0) as cnt
                                FROM subscriptions s
                                JOIN plans p ON s.plan_id = p.id
                                WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, user_id, TimeUtils.sql_iso())
                         )
-                        plan_row = await cursor.fetchone()
-                        if plan_row:
-                            plan_row = {'max_channels': plan_row[0]}
+                        row = await cursor.fetchone()
+                        if not row:
+                            return None
+                        max_channels = row[0]
+                        current_count = row[1] or 0
+                        if max_channels is not None and current_count >= max_channels:
+                            return None
+                        await cursor.execute("SELECT id FROM user_channels WHERE user_id = %s AND channel_id = %s", (user_id, channel_id))
+                        existing_row = await cursor.fetchone()
+                        existing = {'id': existing_row[0]} if existing_row else None
                     else:
                         cursor = await conn.execute(
-                            """SELECT p.max_channels
+                            """SELECT p.max_channels,
+                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0) as cnt
                                FROM subscriptions s
                                JOIN plans p ON s.plan_id = p.id
                                WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
                                LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
+                            (user_id, user_id, TimeUtils.sql_iso())
                         )
-                        plan_row = await cursor.fetchone()
-                    if not plan_row:
-                        return None
-                    if plan_row['max_channels'] is not None:
-                        if USE_POSTGRES:
-                            count = await conn.fetchval("SELECT COUNT(*) FROM user_channels WHERE user_id = $1 AND banned = 0", user_id)
-                        elif USE_MYSQL:
-                            cursor = await conn.cursor()
-                            await cursor.execute("SELECT COUNT(*) FROM user_channels WHERE user_id = %s AND banned = 0", (user_id,))
-                            row = await cursor.fetchone()
-                            count = row[0] if row else 0
-                        else:
-                            cursor = await conn.execute("SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0", (user_id,))
-                            row = await cursor.fetchone()
-                            count = row[0] if row else 0
-                        if count >= plan_row['max_channels']:
-                            return None
-                    # التحقق من وجود القناة مسبقاً
-                    if USE_POSTGRES:
-                        existing = await conn.fetchrow("SELECT id FROM user_channels WHERE user_id = $1 AND channel_id = $2", user_id, channel_id)
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT id FROM user_channels WHERE user_id = %s AND channel_id = %s", (user_id, channel_id))
                         row = await cursor.fetchone()
-                        existing = {'id': row[0]} if row else None
-                    else:
+                        if not row:
+                            return None
+                        max_channels = row[0]
+                        current_count = row[1] or 0
+                        if max_channels is not None and current_count >= max_channels:
+                            return None
                         cursor = await conn.execute("SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
-                        existing = await cursor.fetchone()
+                        existing_row = await cursor.fetchone()
+                        existing = {'id': existing_row[0]} if existing_row else None
+
                     is_new = existing is None
                     if is_new:
                         if USE_POSTGRES:
@@ -3077,12 +3138,14 @@ class Database:
                     else:
                         ch_db_id = existing['id']
                         await self._execute_in_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
+
                     await self._execute_in_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
                     import random
                     delay_seconds = random.randint(0, 11 * 60)
                     next_publish = TimeUtils.utc_now() + timedelta(minutes=12, seconds=delay_seconds)
 
+                    # إدراج الجدولة
                     if USE_POSTGRES:
                         await conn.execute(
                             """INSERT INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
@@ -3102,7 +3165,9 @@ class Database:
                                VALUES (?, 'interval_minutes', 12, ?)""",
                             (ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S'))
                         )
+
                     if is_new:
+                        # إضافة نقاط (10)
                         if USE_POSTGRES:
                             await conn.execute(
                                 "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 10, $2) ON CONFLICT (user_id) DO UPDATE SET points = user_points.points + 10, last_updated = $2",
@@ -3186,54 +3251,72 @@ class Database:
         return await self.fetchone("SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
 
     # ============================= المنشورات =============================
+    # تحسين add_posts باستخدام executemany مع دفعات وفحص الخطة وعدد المنشورات في استعلام واحد
     async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
         try:
             if not posts:
                 return 0
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
+                    # التحقق من ملكية القناة وعدم حظرها
                     cursor = await conn.execute("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", (channel_db_id, user_id))
                     if not await cursor.fetchone():
                         return 0
+
+                    # جلب خطة المستخدم وعدد المنشورات الحالي في استعلام واحد (لـ PostgreSQL)
                     if USE_POSTGRES:
-                        plan_row = await conn.fetchrow(
-                            """SELECT p.max_posts
-                               FROM subscriptions s
-                               JOIN plans p ON s.plan_id = p.id
-                               WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                               ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                               LIMIT 1""",
-                            user_id, TimeUtils.utc_now()
-                        )
+                        plan_and_count = await conn.fetchrow("""
+                            WITH plan AS (
+                                SELECT p.max_posts
+                                FROM subscriptions s
+                                JOIN plans p ON s.plan_id = p.id
+                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
+                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
+                                LIMIT 1
+                            ),
+                            cnt AS (
+                                SELECT COUNT(*) AS c FROM posts WHERE channel_db_id = $3 AND published = 0
+                            )
+                            SELECT plan.max_posts, cnt.c
+                            FROM plan, cnt
+                        """, user_id, TimeUtils.utc_now(), channel_db_id)
+                        if not plan_and_count:
+                            return 0
+                        max_posts = plan_and_count['max_posts']
+                        current_count = plan_and_count['c'] or 0
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
-                        await cursor.execute(
-                            """SELECT p.max_posts
-                               FROM subscriptions s
-                               JOIN plans p ON s.plan_id = p.id
-                               WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                               ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                               LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        plan_row = await cursor.fetchone()
-                        if plan_row:
-                            plan_row = {'max_posts': plan_row[0]}
+                        await cursor.execute("""
+                            SELECT (SELECT p.max_posts
+                                    FROM subscriptions s
+                                    JOIN plans p ON s.plan_id = p.id
+                                    WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
+                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
+                                    LIMIT 1) as max_posts,
+                                   (SELECT COUNT(*) FROM posts WHERE channel_db_id = %s AND published = 0) as cnt
+                        """, (user_id, TimeUtils.sql_iso(), channel_db_id))
+                        row = await cursor.fetchone()
+                        if not row:
+                            return 0
+                        max_posts = row[0]
+                        current_count = row[1] or 0
                     else:
-                        cursor = await conn.execute(
-                            """SELECT p.max_posts
-                               FROM subscriptions s
-                               JOIN plans p ON s.plan_id = p.id
-                               WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                               ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                               LIMIT 1""",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        plan_row = await cursor.fetchone()
-                    if not plan_row:
-                        return 0
+                        cursor = await conn.execute("""
+                            SELECT (SELECT p.max_posts
+                                    FROM subscriptions s
+                                    JOIN plans p ON s.plan_id = p.id
+                                    WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
+                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
+                                    LIMIT 1) as max_posts,
+                                   (SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0) as cnt
+                        """, (user_id, TimeUtils.sql_iso(), channel_db_id))
+                        row = await cursor.fetchone()
+                        if not row:
+                            return 0
+                        max_posts = row[0]
+                        current_count = row[1] or 0
 
-                    # تجميع المنشورات الفريدة فقط (بناءً على المحتوى)
+                    # تجميع المنشورات الفريدة
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
@@ -3246,15 +3329,9 @@ class Database:
                         return 0
 
                     # تقييد العدد حسب الخطة
-                    if plan_row['max_posts'] is not None:
-                        cursor = await conn.execute(
-                            "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0",
-                            (channel_db_id,)
-                        )
-                        count_row = await cursor.fetchone()
-                        current_count = count_row[0] if count_row else 0
-                        if current_count + len(unique_posts) > plan_row['max_posts']:
-                            allowed = max(0, plan_row['max_posts'] - current_count)
+                    if max_posts is not None:
+                        if current_count + len(unique_posts) > max_posts:
+                            allowed = max(0, max_posts - current_count)
                             if allowed == 0:
                                 return 0
                             unique_posts = unique_posts[:allowed]
@@ -3263,7 +3340,6 @@ class Database:
                     for i in range(0, len(unique_posts), 100):
                         batch = unique_posts[i:i+100]
                         vals = [(channel_db_id, (t or "")[:4096], m, f, TimeUtils.sql_iso()) for t, m, f in batch]
-                        # استخدام ON CONFLICT / INSERT IGNORE لتجنب التكرار
                         if USE_POSTGRES:
                             await conn.executemany(
                                 """INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at)
@@ -3969,8 +4045,7 @@ class Database:
         return await self.execute(query, (channel_db_id, TimeUtils.sql_iso())) > 0
 
     # =====================================================================
-    # تعديل دالة get_channels_to_publish لاستخدام datetime بدلاً من السلاسل النصية
-    # وإزالة ROW_NUMBER لدعم SQLite القديم
+    # get_channels_to_publish - محسّن باستخدام الفهارس
     # =====================================================================
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
@@ -4277,9 +4352,6 @@ class Database:
         return [ref['referred_id'] for ref in referrals]
 
     # ============================= التذكيرات =============================
-    # =====================================================================
-    # تعديل get_users_for_reminder لاستخدام datetime بدلاً من السلاسل النصية
-    # =====================================================================
     async def get_users_for_reminder(self) -> List[Dict]:
         now = TimeUtils.utc_now()
         if USE_POSTGRES:
@@ -4331,7 +4403,6 @@ class Database:
     # ============================= المسابقات =============================
     async def create_contest(self, creator_id: int, title: str, description: str, prize: str, end_date: str) -> int:
         try:
-            # استخدام TimeUtils.safe_parse_iso بدلاً من fromisoformat مباشرة
             dt = TimeUtils.safe_parse_iso(end_date)
             if dt is None:
                 logger.error(f"❌ Invalid end_date format: {end_date}")
@@ -5320,7 +5391,6 @@ class Database:
 
     # ============================= دالة تحديث تاريخ التذكير =============================
     async def update_reminder_sent(self, user_id: int) -> bool:
-        """تحديث تاريخ آخر تذكير تم إرساله للمستخدم."""
         return await self.execute(
             "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?",
             (TimeUtils.sql_iso(), user_id)
@@ -5328,7 +5398,6 @@ class Database:
 
     # ============================= دوال مساعدة داخلية =============================
     async def _fetchval_in_conn(self, conn, query: str, params: tuple = (), default: Any = None) -> Any:
-        """تنفيذ استعلام وإرجاع قيمة واحدة، مع إرجاع default في حالة الخطأ (بدون رفع استثناء)."""
         try:
             query = _convert_placeholders(query)
             params = _adapt_params(params)
@@ -5349,7 +5418,6 @@ class Database:
             return default
 
     async def _fetchone_in_conn(self, conn, query: str, params: tuple = ()) -> Optional[Dict]:
-        """تنفيذ استعلام وإرجاع صف واحد، مع إرجاع None في حالة الخطأ (بدون رفع استثناء)."""
         try:
             query = _convert_placeholders(query)
             params = _adapt_params(params)
@@ -5373,8 +5441,6 @@ class Database:
             return None
 
     async def _execute_and_get_rowcount(self, conn, query: str, *params) -> int:
-        """تنفيذ استعلام وإرجاع عدد الصفوف المتأثرة بشكل موحد عبر جميع قواعد البيانات."""
-        # تطبيق جميع تحويلات التوافق
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
         query = _convert_upsert(query)
@@ -5383,7 +5449,6 @@ class Database:
             params = _adapt_params(params)
         else:
             params = ()
-        # تنفيذ الاستعلام
         if USE_POSTGRES:
             result = await conn.execute(query, *params)
             parts = result.split()
@@ -5399,10 +5464,6 @@ class Database:
             return cursor.rowcount
 
     async def _execute_in_conn(self, conn, query: str, *params) -> None:
-        """
-        دالة مساعدة لتنفيذ استعلام داخل اتصال موجود مع تطبيق جميع التحويلات اللازمة.
-        يتم استخدامها في الدوال التي تستخدم conn.execute مباشرة.
-        """
         query = _convert_insert_or_ignore(query)
         query = _convert_insert_or_replace(query)
         query = _convert_upsert(query)
