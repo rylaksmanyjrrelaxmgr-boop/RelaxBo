@@ -11,6 +11,7 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + ربط جميع النصوص الثابتة بنظام الترجمة _trans
 + إصلاح متغيرات القائمة الرئيسية main_menu
 + إصلاح متغيرات معلومات المطور developer_info
++ تحسين أداء /start باستخدام اتصال واحد لجلب بيانات المستخدم دفعة واحدة
 """
 
 import asyncio
@@ -77,7 +78,7 @@ class CommandHandlers:
 
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """الأمر /start - القائمة الرئيسية"""
+        """الأمر /start - القائمة الرئيسية (محسّن الأداء)"""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
@@ -131,29 +132,60 @@ class CommandHandlers:
             except Exception as e:
                 logger.error(f"❌ خطأ في التحقق من الاشتراك الإجباري: {e}")
 
-        # جمع بيانات المستخدم
-        lang = await DB.get_user_language(user_id) or 'ar'
-        active = await DB.get_active_channel(user_id)
-        cnt = 0
-        ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
-        if active:
-            cnt = await DB.get_unpublished_posts_count(user_id, active)
-            ch_info = await DB.get_channel_info(user_id, active)
-            if ch_info:
-                ch_display = ch_info['channel_name']
+        # ===== جلب جميع بيانات المستخدم في اتصال واحد =====
+        async with DB.connection() as conn:
+            # 1. اللغة
+            lang_row = await DB._fetchone_in_conn(conn, "SELECT language FROM users WHERE user_id=?", (user_id,))
+            lang = lang_row['language'] if lang_row else 'ar'
 
-        groups = len(await DB.get_user_groups(user_id))
-        has_sub = await DB.has_active_subscription(user_id)
+            # 2. القناة النشطة
+            active = await DB._fetchval_in_conn(conn, "SELECT active_channel FROM users WHERE user_id=?", (user_id,), default=None)
+
+            ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
+            cnt = 0
+            if active:
+                # اسم القناة
+                ch_info = await DB._fetchone_in_conn(conn, "SELECT channel_name FROM user_channels WHERE id=? AND user_id=?", (active, user_id))
+                if ch_info:
+                    ch_display = ch_info['channel_name']
+                # عدد المنشورات غير المنشورة
+                cnt = await DB._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (active,), default=0)
+
+            # 3. عدد المجموعات
+            groups_count = await DB._fetchval_in_conn(conn, """
+                SELECT COUNT(DISTINCT bg.chat_id)
+                FROM bot_groups bg
+                WHERE bg.added_by = ?
+                   OR EXISTS (SELECT 1 FROM user_groups_link l WHERE l.chat_id = bg.chat_id AND l.user_id = ?)
+                   OR EXISTS (SELECT 1 FROM hidden_owner_groups ho WHERE ho.chat_id = bg.chat_id AND ho.owner_id = ?)
+                   OR EXISTS (SELECT 1 FROM hidden_admins ha WHERE ha.chat_id = bg.chat_id AND ha.admin_id = ?)
+                   OR EXISTS (SELECT 1 FROM group_admins ga WHERE ga.chat_id = bg.chat_id AND ga.user_id = ?)
+                   OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)
+            """, (user_id, user_id, user_id, user_id, user_id, user_id), default=0)
+
+            # 4. حالة الاشتراك
+            has_sub = await DB._fetchval_in_conn(conn, """
+                SELECT 1 FROM subscriptions
+                WHERE user_id=? AND status='active' AND end_date > datetime('now')
+                LIMIT 1
+            """, (user_id,), default=None) is not None
+
+            # 5. النشر التلقائي
+            auto = await DB._fetchval_in_conn(conn, "SELECT auto_publish FROM users WHERE user_id=?", (user_id,), default=1) == 1
+
+            # 6. التدوير التلقائي
+            recycle = await DB._fetchval_in_conn(conn, "SELECT auto_recycle FROM users WHERE user_id=?", (user_id,), default=1) == 1
+
+        # ===== انتهى جلب البيانات =====
+
+        # ترجمة النصوص الثابتة
         sub_active_text = await _trans('subscription_active', lang, "✅ مفعل")
         sub_inactive_text = await _trans('subscription_inactive', lang, "❌ غير مفعل")
         sub_text = sub_active_text if has_sub else sub_inactive_text
 
-        auto = await DB.get_auto_publish_status(user_id)
         enabled_text = await _trans('enabled', lang, "مفعل")
         disabled_text = await _trans('disabled', lang, "معطل")
         auto_text = enabled_text if auto else disabled_text
-
-        recycle = await DB.get_auto_recycle_status(user_id)
         recycle_text = enabled_text if recycle else disabled_text
 
         # بناء لوحة المفاتيح
@@ -184,11 +216,12 @@ class CommandHandlers:
 
         kb = InlineKeyboardMarkup(keyboard)
 
+        # النص الرئيسي
         title = await get_text(
             lang,
             'main_menu',
             user_name=f"<code>{user_id}</code>",
-            groups_count=groups,
+            groups_count=groups_count,
             active_channel=ch_display,
             unpublished_posts=cnt,
             auto_publish=auto_text,
