@@ -33,6 +33,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - جعل دوال تحويل INSERT OR IGNORE/REPLACE غير متزامنة لاستخدام المفاتيح الديناميكية
 - تعديل _adapt_params لإزالة المنطقة الزمنية من التواريخ المرسلة إلى PostgreSQL
 - إصلاح مشكلة طرح التواريخ (naive/aware) في increment_violation_count ودوال أخرى
+- إصلاح دالة safe_parse_iso لقبول datetime أيضاً (لتلافي TypeError)
 """
 
 import os
@@ -546,15 +547,33 @@ class TimeUtils:
         return dt + timedelta(hours=3)
     
     @staticmethod
-    def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
-        if not date_str:
+    def safe_parse_iso(date_str: Optional[Union[str, datetime]]) -> Optional[datetime]:
+        """
+        تحويل نص أو datetime إلى datetime naive (بدون منطقة زمنية).
+        - إذا كان المدخل None → يعيد None
+        - إذا كان datetime → يزيل المنطقة الزمنية إن وجدت
+        - إذا كان نصاً → يحاول تحويله من عدة صيغ
+        """
+        if date_str is None:
             return None
+
+        # إذا كان بالفعل datetime
+        if isinstance(date_str, datetime):
+            if date_str.tzinfo is not None:
+                return date_str.replace(tzinfo=None)
+            return date_str
+
+        # إذا لم يكن نصاً (مثلاً رقم) → None
+        if not isinstance(date_str, str):
+            return None
+
+        # محاولة تحويل النص بصيغ مختلفة
         try:
             # صيغة SQLite/MySQL (بدون منطقة)
-            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-            return dt  # naive
+            return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
             pass
+
         try:
             # صيغة ISO مع Z أو +00:00
             dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
@@ -563,17 +582,18 @@ class TimeUtils:
             return dt
         except (ValueError, TypeError):
             pass
+
         try:
-            # صيغة أخرى
-            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
-            return dt
+            # صيغة أخرى (بدون وقت)
+            return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
         except ValueError:
             pass
+
         try:
-            dt = datetime.strptime(date_str, '%Y-%m-%d')
-            return dt
+            return datetime.strptime(date_str, '%Y-%m-%d')
         except ValueError:
             pass
+
         return None
 
 # =====================================================================
