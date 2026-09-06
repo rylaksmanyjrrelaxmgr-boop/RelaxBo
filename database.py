@@ -31,6 +31,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح تحديث subscription_end في جميع دوال الاشتراكات
 - تصحيح تطبيق حد النص في add_posts
 - جعل دوال تحويل INSERT OR IGNORE/REPLACE غير متزامنة لاستخدام المفاتيح الديناميكية
+- تعديل _adapt_params لإزالة المنطقة الزمنية من التواريخ المرسلة إلى PostgreSQL لتجنب خطأ asyncpg
 """
 
 import os
@@ -471,14 +472,26 @@ def _convert_upsert(query: str) -> str:
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
 
 def _adapt_params(params: tuple) -> tuple:
-    """تكييف المعامل حسب نوع قاعدة البيانات."""
+    """
+    تكييف المعامل حسب نوع قاعدة البيانات.
+    بالنسبة لـ PostgreSQL: تحويل التواريخ إلى naive (بدون منطقة زمنية) لتجنب خطأ asyncpg.
+    بالنسبة لـ SQLite و MySQL: تحويل التواريخ إلى نص.
+    """
     if params is None:
         return ()
     if USE_POSTGRES:
-        # في PostgreSQL، نمرر datetime كما هو (كائن مع tzinfo)
-        return params
+        new_params = []
+        for p in params:
+            if isinstance(p, datetime):
+                # إزالة المنطقة الزمنية لجعلها naive
+                if p.tzinfo is not None:
+                    p = p.replace(tzinfo=None)
+                new_params.append(p)
+            else:
+                new_params.append(p)
+        return tuple(new_params)
     else:
-        # في SQLite و MySQL، نحول datetime إلى نص
+        # SQLite و MySQL: تحويل datetime إلى نص
         new_params = []
         for p in params:
             if isinstance(p, datetime):
