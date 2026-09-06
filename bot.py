@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (نسخة نهائية محسّنة)
+🌿 Relax Manager – البوت الرئيسي (نسخة نهائية محسّنة ومصححة)
 - إصلاحات أمنية في معالجة الدفع
 - تسجيل جميع الأوامر
 - دعم video_note
@@ -12,7 +12,7 @@
 - قوائم أوامر منفصلة للخاص والمجموعة
 - تحسين تسجيل الأخطاء والمرونة
 - تنظيف دوري لأقفال المستخدمين
-- دمج نظام الكاش الموحد cache.py
+- دمج نظام الكاش الموحد cache.py (مع fallback)
 """
 
 import asyncio
@@ -21,6 +21,7 @@ import logging
 import traceback
 import json
 import time
+from typing import Optional
 
 from telegram import (
     BotCommandScopeAllPrivateChats,
@@ -39,7 +40,15 @@ from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send
 )
-from cache import cache_cleanup_task
+
+# استيراد cache_cleanup_task مع fallback إذا لم يوجد الملف
+try:
+    from cache import cache_cleanup_task
+except ImportError:
+    async def cache_cleanup_task():
+        """دالة فارغة إذا لم يوجد cache.py"""
+        await asyncio.sleep(3600)
+    logging.warning("⚠️ cache.py غير موجود، تم استخدام دالة فارغة لـ cache_cleanup_task")
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -56,15 +65,16 @@ ALLOWED_UPDATES = [
 
 
 async def _validate_invoice_for_payment(user_id: int, payload: str):
-    """التحقق من صحة الفاتورة للدفع"""
+    """التحقق من صحة الفاتورة للدفع (مقاوم للأخطاء)"""
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
-        logger.error(f"❌ Invalid JSON payload: {payload}")
+        logger.error(f"❌ Invalid JSON payload: {payload[:100]}")
         return None, None, None
 
     invoice_number = data.get('invoice')
     if not invoice_number:
+        logger.error(f"❌ Invoice number missing in payload: {payload[:100]}")
         return None, None, None
 
     invoice = await DB.get_invoice(invoice_number)
@@ -78,7 +88,15 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
         return None, None, None
 
     plan_id = data.get('plan_id') or data.get('gift_plan_id')
-    plan = await DB.get_plan(plan_id) if payment_type == 'subscription' else await DB.get_gift_plan(plan_id)
+    if not plan_id:
+        logger.warning(f"❌ Plan ID missing in payload: {payload[:100]}")
+        return None, None, None
+
+    if payment_type == 'subscription':
+        plan = await DB.get_plan(plan_id)
+    else:
+        plan = await DB.get_gift_plan(plan_id)
+
     if not plan:
         logger.warning(f"❌ Plan not found: {plan_id}")
         return None, None, None
@@ -87,7 +105,7 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
 
 
 async def pre_checkout(update, context):
-    """معالجة ما قبل الدفع"""
+    """معالجة ما قبل الدفع (محسنة)"""
     query = update.pre_checkout_query
     user_id = query.from_user.id
     payload = query.invoice_payload
@@ -102,16 +120,26 @@ async def pre_checkout(update, context):
             logger.error(f"❌ Failed to answer pre-checkout rejection: {e}")
         return
 
-    # التحقق من المبلغ
-    if hasattr(query, 'total_amount'):
-        expected_amount = plan.get('price')
-        # السماح بالدفع إذا كان السعر 0 (تجربة مجانية) أو مطابق
-        if expected_amount is not None and expected_amount > 0 and query.total_amount != expected_amount:
-            logger.warning(f"❌ Amount mismatch for user {user_id}: expected {expected_amount}, got {query.total_amount}")
+    # التحقق من المبلغ (مع السماح بالدفع المجاني إذا السعر 0)
+    expected_amount = plan.get('price', 0)
+    # بعض أنواع الدفع قد لا تحتوي على total_amount، لذا نتحقق
+    total_amount = getattr(query, 'total_amount', None)
+    if total_amount is not None:
+        if expected_amount > 0 and total_amount != expected_amount:
+            logger.warning(f"❌ Amount mismatch for user {user_id}: expected {expected_amount}, got {total_amount}")
             try:
                 await query.answer(ok=False, error_message="المبلغ غير مطابق لسعر الخطة.")
             except Exception as e:
                 logger.error(f"❌ Failed to answer amount mismatch: {e}")
+            return
+    else:
+        # إذا لم يكن هناك total_amount (قد يكون الدفع مجانياً)، نسمح بذلك
+        if expected_amount > 0:
+            logger.warning(f"❌ Missing total_amount for non-free plan {plan['id']}")
+            try:
+                await query.answer(ok=False, error_message="خطأ في معالجة الدفع.")
+            except Exception as e:
+                logger.error(f"❌ Failed to answer missing amount: {e}")
             return
 
     try:
@@ -122,13 +150,20 @@ async def pre_checkout(update, context):
 
 
 async def successful_payment(update, context):
-    """معالجة الدفع الناجح"""
+    """معالجة الدفع الناجح (محسنة)"""
     user_id = update.effective_user.id
     payment = update.message.successful_payment
     payload = payment.invoice_payload
     total_amount = payment.total_amount
-    telegram_payment_charge_id = payment.telegram_payment_charge_id
-    provider_payment_charge_id = payment.provider_payment_charge_id
+    telegram_payment_charge_id = getattr(payment, 'telegram_payment_charge_id', None)
+    provider_payment_charge_id = getattr(payment, 'provider_payment_charge_id', None)
+
+    # ضمان وجود payment_id
+    payment_id = telegram_payment_charge_id or provider_payment_charge_id
+    if not payment_id:
+        logger.error(f"❌ No payment ID for user {user_id}")
+        await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع (لا يوجد معرف للدفع).")
+        return
 
     invoice, plan, data = await _validate_invoice_for_payment(user_id, payload)
 
@@ -137,17 +172,17 @@ async def successful_payment(update, context):
         await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
         return
 
-    # التحقق من المبلغ (مع السماح بالتجربة المجانية)
-    if plan.get('price', 0) > 0 and plan.get('price') != total_amount:
+    # التحقق من المبلغ
+    expected_amount = plan.get('price', 0)
+    if expected_amount > 0 and total_amount != expected_amount:
         logger.error(f"❌ Amount mismatch in successful payment for user {user_id}: invoice {invoice['number']}")
         await safe_send(context.bot, user_id, "❌ المبلغ المدفوع غير مطابق.")
         return
 
     payment_type = data.get('type')
-    payment_id = telegram_payment_charge_id or provider_payment_charge_id
 
-    if payment_type == 'subscription':
-        try:
+    try:
+        if payment_type == 'subscription':
             success = await DB.activate_subscription_with_payment(
                 user_id=user_id,
                 invoice_number=invoice['number'],
@@ -161,12 +196,8 @@ async def successful_payment(update, context):
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
                 logger.error(f"❌ Failed to activate subscription for user {user_id}, invoice {invoice['number']}")
-        except Exception as e:
-            logger.exception(f"❌ Exception in subscription payment: {e}")
-            await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
 
-    elif payment_type == 'gift':
-        try:
+        elif payment_type == 'gift':
             code = await DB.create_gift_code(plan_id=plan['id'], creator_id=user_id)
             if code:
                 await DB.mark_invoice_paid(invoice['number'], payment_id)
@@ -175,9 +206,23 @@ async def successful_payment(update, context):
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في توليد كود الهدية.")
                 logger.error(f"❌ Failed to create gift code for user {user_id}, invoice {invoice['number']}")
-        except Exception as e:
-            logger.exception(f"❌ Exception in gift payment: {e}")
-            await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
+
+        else:
+            logger.error(f"❌ Unknown payment type: {payment_type}")
+            await safe_send(context.bot, user_id, "❌ نوع دفع غير معروف.")
+
+    except Exception as e:
+        logger.exception(f"❌ Exception in payment processing: {e}")
+        await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع أثناء معالجة الدفع.")
+
+
+async def payment_error(update, context):
+    """معالج الأخطاء المتعلقة بالدفع"""
+    logger.error(f"❌ Payment error: {update}")
+    try:
+        await safe_send(context.bot, update.effective_user.id, "❌ حدث خطأ أثناء معالجة الدفع. يرجى المحاولة مرة أخرى.")
+    except Exception as e:
+        logger.error(f"❌ Failed to send payment error message: {e}")
 
 
 async def main():
@@ -225,9 +270,13 @@ async def main():
     )
 
     app = Application.builder().token(CONFIG.TOKEN).build()
-    # إضافة وقت بدء التشغيل
     app.bot_data['start_time'] = time.monotonic()
-    await app.initialize()
+
+    try:
+        await app.initialize()
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize app: {e}")
+        raise
 
     # ========== قائمة الأوامر الخاصة ==========
     private_commands = [
@@ -342,6 +391,7 @@ async def main():
     # معالجات الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    app.add_handler(MessageHandler(filters.PAYMENT, payment_error))
 
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
@@ -423,6 +473,7 @@ async def main():
             logger.info("✅ Webhook تم التعيين")
             runner = await setup_webhook(app, port)
             try:
+                # الانتظار إلى الأبد (أو حتى يتم إيقاف التشغيل)
                 await asyncio.Event().wait()
             finally:
                 await runner.cleanup()
