@@ -2,23 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية الشاملة)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية المُحسَّنة)
 ================================================================================
 - دعم SQLite (افتراضي) و PostgreSQL و MySQL عبر DATABASE_URL
 - جميع الدوال (أكثر من 150) تعمل بكلا النظامين
-- تجمع اتصالات لتحسين التزامن (يدوي لـ SQLite، asyncpg/asyncmy لـ PostgreSQL/MySQL)
-- أقفال أدق لكل مستخدم وقناة
-- معاملات ذرية وإعادة محاولة تلقائية
-- نسخ احتياطي متوافق (pg_dump / mysqldump / sqlite3)
-- تحسينات الأداء: تخطي تحويل العناصر النائبة في SQLite، تبسيط الاستعلامات الحرجة، فهارس محسّنة
-- الحفاظ على جميع الميزات الأصلية دون حذف أي دالة
-- إصلاح شامل للعناصر النائبة لـ PostgreSQL و MySQL
-- استيراد تلقائي للكلمات المحظورة والردود التلقائية مع دعم datetime
+- تجمع اتصالات متقدم (asyncio.Queue لـ SQLite، asyncpg/asyncmy للأنظمة الأخرى)
+- أقفال دقيقة مع LRU لإدارة الذاكرة ومنع التعارض (قابل للتكوين)
+- معاملات ذرية وإعادة محاولة ذكية مع backoff
+- نسخ احتياطي واستعادة متكامل مع دعم الضغط
+- تحسين الأداء: فهارس محسّنة، استعلامات مجمّعة، تتبع الاستعلامات البطيئة
+- إصلاح شامل للتواريخ والمناطق الزمنية
 - إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
 - جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
 - نسخ احتياطي واستعادة وتحسين قاعدة البيانات
-- تحسين أداء register_user باستخدام معاملة واحدة (Transaction)
-- إصلاح توافق PostgreSQL: تمرير datetime بدلاً من str في جميع استعلامات التواريخ
+- إصلاح توافق PostgreSQL: تمرير datetime بدلاً من str
+- دوال مساعدة لتوحيد التفاعل مع قواعد البيانات المختلفة وتقليل التكرار
+- تحسين إدارة الاتصالات في SQLite مع إعادة محاولة ذكية
+- إصلاح مشكلة cursor.description في MySQL
+- تحسين _convert_upsert لـ MySQL
+- آلية إعادة محاولة مع backoff تصاعدي
+- دعم ضغط النسخ الاحتياطي (gzip)
+- جعل MAX_USER_LOCKS قابل للتكوين عبر البيئة
+- إضافة MAX_POST_TEXT_LENGTH قابل للتكوين
+- تحسين _convert_placeholders للتعامل مع علامات الاقتباس المضمنة
+- جلب المفاتيح الفريدة ديناميكيًا لتجنب الاعتماد على KNOWN_UNIQUE الثابت
+- تحسين استعلام get_channels_to_publish باستخدام COALESCE
+- إضافة فهارس مركبة إضافية على posts
+- إصلاح تحديث subscription_end في جميع دوال الاشتراكات
+- جعل دوال التحويل غير متزامنة واستخدام _get_unique_columns عند توفر conn
+- تحسين منطق تحديد النص في add_posts
+- إضافة فهارس (channel_db_id, published) و (channel_db_id, fail_count)
 """
 
 import os
@@ -31,11 +44,14 @@ import shutil
 import sqlite3
 import secrets
 import re
+import subprocess
+import gzip
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any, Union
 from contextlib import asynccontextmanager
 from collections import defaultdict
+import asyncio
 
 # =====================================================================
 # 0. كشف نوع قاعدة البيانات
@@ -78,13 +94,32 @@ USE_MYSQL = (DB_TYPE == "mysql")
 logger = logging.getLogger(__name__)
 logger.info(f"📌 سيتم استخدام قاعدة البيانات: {DB_TYPE.upper()}")
 
-from config import PATHS, CONFIG
+# استيراد التكوينات
+try:
+    from config import PATHS, CONFIG
+except ImportError:
+    # تعريف افتراضي في حالة عدم وجود config
+    class PATHS:
+        DB = Path("data/relax.db")
+        BACKUPS = Path("data/backups")
+    PATHS.DB.parent.mkdir(parents=True, exist_ok=True)
+    PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
+    class CONFIG:
+        PRIMARY_OWNER_ID = 0
+        MAX_DAILY_REFERRALS = 10
+        MAX_GLOBAL_BANNED_WORDS = 500
+        pass
+
+# إعدادات قابلة للتكوين
+MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))  # 0 يعني غير محدود
+MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
 
 # =====================================================================
 # 1. دوال مساعدة للتوافق (محسّنة)
 # =====================================================================
 
-KNOWN_UNIQUE = {
+# قائمة المفاتيح الفريدة المعروفة (تستخدم كاحتياطي، ولكن يتم جلبها ديناميكيًا عند الحاجة)
+KNOWN_UNIQUE_FALLBACK = {
     'users': ['user_id'],
     'user_channels': ['user_id', 'channel_id'],
     'posts': ['id'],
@@ -128,6 +163,89 @@ KNOWN_UNIQUE = {
     'user_points': ['user_id'],
 }
 
+# ذاكرة مؤقتة للمفاتيح الفريدة التي تم جلبها ديناميكيًا
+_UNIQUE_CACHE = {}
+
+async def _get_unique_columns(table: str, conn) -> List[str]:
+    """
+    جلب أعمدة المفتاح الفريد لجدول معين من قاعدة البيانات.
+    إذا لم يتم العثور على معلومات، يتم استخدام القائمة الاحتياطية.
+    """
+    if table in _UNIQUE_CACHE:
+        return _UNIQUE_CACHE[table]
+    
+    columns = []
+    try:
+        if USE_POSTGRES:
+            # PostgreSQL: استخدام information_schema
+            rows = await conn.fetch(
+                """
+                SELECT a.attname
+                FROM pg_index i
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                WHERE i.indrelid = $1::regclass
+                  AND i.indisunique
+                  AND NOT i.indisprimary
+                """,
+                table
+            )
+            columns = [row['attname'] for row in rows]
+        elif USE_MYSQL:
+            # MySQL: استخدام SHOW INDEX
+            cursor = await conn.cursor()
+            await cursor.execute(f"SHOW INDEX FROM {table} WHERE Non_unique = 0")
+            rows = await cursor.fetchall()
+            # تجميع الأعمدة حسب اسم المفتاح
+            key_columns = defaultdict(list)
+            for row in rows:
+                # row: Table, Non_unique, Key_name, Seq_in_index, Column_name, ...
+                key_name = row[2]
+                col_name = row[4]
+                key_columns[key_name].append(col_name)
+            # أخذ أول مفتاح فريد (عادةً PRIMARY KEY أو أول UNIQUE)
+            if key_columns:
+                first_key = list(key_columns.keys())[0]
+                columns = key_columns[first_key]
+        else:
+            # SQLite: استخدام PRAGMA table_info و pragma index_list
+            cursor = await conn.execute(f"PRAGMA table_info({table})")
+            rows = await cursor.fetchall()
+            # في SQLite، نبحث عن UNIQUE في تعريف الجدول
+            # الأسهل: استخدام KNOWN_UNIQUE_FALLBACK
+            columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
+            # إذا لم نجد، نحاول استخدام أول عمود
+            if not columns and rows:
+                columns = [rows[0]['name']]
+    except Exception as e:
+        logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لجدول {table}: {e}")
+        # استخدام الاحتياطي
+        columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
+        if not columns:
+            # محاولة الحصول على أول عمود
+            try:
+                if USE_POSTGRES:
+                    row = await conn.fetchrow(f"SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position LIMIT 1", table)
+                    if row:
+                        columns = [row['column_name']]
+                elif USE_MYSQL:
+                    cursor = await conn.cursor()
+                    await cursor.execute(f"SHOW COLUMNS FROM {table} LIMIT 1")
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [row[0]]
+                else:
+                    cursor = await conn.execute(f"PRAGMA table_info({table})")
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [row['name']]
+            except Exception:
+                columns = ['id']  # افتراضي
+            if not columns:
+                columns = ['id']
+    
+    _UNIQUE_CACHE[table] = columns
+    return columns
+
 def _pg_type_to_sqlite(pg_type: str) -> str:
     mapping = {
         'BIGINT': 'INTEGER',
@@ -145,17 +263,86 @@ def _pg_type_to_sqlite(pg_type: str) -> str:
     return mapping.get(pg_type.upper(), 'TEXT')
 
 def _convert_placeholders(query: str) -> str:
-    """تحويل العناصر النائبة مع تحسين الأداء: في SQLite نمرر الاستعلام دون معالجة."""
+    """
+    تحويل العناصر النائبة مع تحسين الأداء ومعالجة النصوص والتعليقات.
+    تم تحسين هذه الدالة للتعامل مع علامات الاقتباس المضمنة وحالات الهروب.
+    """
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
         result = []
         in_single = False
         in_double = False
+        in_comment = False
+        escape_next = False
         param_count = 0
         i = 0
         while i < len(query):
             ch = query[i]
+            
+            # التعامل مع الهروب (\) في النصوص
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+                i += 1
+                continue
+            
+            if ch == '\\' and (in_single or in_double):
+                escape_next = True
+                result.append(ch)
+                i += 1
+                continue
+            
+            if not in_single and not in_double and ch == '-' and i+1 < len(query) and query[i+1] == '-':
+                in_comment = True
+            if in_comment:
+                if ch == '\n':
+                    in_comment = False
+                result.append(ch)
+                i += 1
+                continue
+            
+            if ch == "'" and not in_double and not in_comment:
+                in_single = not in_single
+                result.append(ch)
+                i += 1
+                continue
+            
+            if ch == '"' and not in_single and not in_comment:
+                in_double = not in_double
+                result.append(ch)
+                i += 1
+                continue
+            
+            if ch == '?' and not in_single and not in_double and not in_comment:
+                param_count += 1
+                result.append(f'${param_count}')
+                i += 1
+                continue
+            
+            result.append(ch)
+            i += 1
+        return ''.join(result)
+    elif USE_MYSQL:
+        # MySQL: تحويل ? إلى %s مع مراعاة النصوص
+        # استخدام نهج أبسط وأكثر أمانًا: استبدال ? خارج النصوص
+        result = []
+        in_single = False
+        in_double = False
+        escape_next = False
+        i = 0
+        while i < len(query):
+            ch = query[i]
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+                i += 1
+                continue
+            if ch == '\\' and (in_single or in_double):
+                escape_next = True
+                result.append(ch)
+                i += 1
+                continue
             if ch == "'" and not in_double:
                 in_single = not in_single
                 result.append(ch)
@@ -167,110 +354,107 @@ def _convert_placeholders(query: str) -> str:
                 i += 1
                 continue
             if ch == '?' and not in_single and not in_double:
-                param_count += 1
-                result.append(f'${param_count}')
+                result.append('%s')
                 i += 1
                 continue
             result.append(ch)
             i += 1
         return ''.join(result)
-    elif USE_MYSQL:
-        return query.replace('?', '%s')
     else:
         return query
 
-def _convert_insert_or_ignore(query: str) -> str:
+async def _convert_insert_or_ignore(query: str, conn=None) -> str:
+    """تحويل INSERT OR IGNORE مع دعم المفاتيح الفريدة الديناميكية."""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR IGNORE"):
         return query
     if USE_POSTGRES:
-        new_query = query.replace("INSERT OR IGNORE", "INSERT", 1)
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
+        # استخراج اسم الجدول والأعمدة
+        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
         if not match:
-            return new_query + " ON CONFLICT DO NOTHING"
+            return query.replace("INSERT OR IGNORE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
-        if table in KNOWN_UNIQUE:
-            conflict_cols = ', '.join(KNOWN_UNIQUE[table])
+        # استخدام المفاتيح الفريدة الديناميكية إذا كان conn متاحًا
+        conflict_cols = 'id'  # افتراضي
+        if conn:
+            unique_cols = await _get_unique_columns(table, conn)
+            if unique_cols:
+                conflict_cols = ', '.join(unique_cols)
+            else:
+                conflict_cols = columns[0] if columns else 'id'
         else:
             conflict_cols = columns[0] if columns else 'id'
-        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
-        if values_match:
-            end_pos = values_match.end()
-            new_query = new_query[:end_pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING" + new_query[end_pos:]
-        else:
-            new_query = new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
-        return new_query
+        new_query = query.replace("INSERT OR IGNORE", "INSERT", 1)
+        return new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
     elif USE_MYSQL:
         return query.replace("INSERT OR IGNORE", "INSERT IGNORE", 1)
     else:
         return query
 
-def _convert_insert_or_replace(query: str) -> str:
+async def _convert_insert_or_replace(query: str, conn=None) -> str:
+    """تحويل INSERT OR REPLACE مع دعم المفاتيح الفريدة الديناميكية."""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR REPLACE"):
         return query
     if USE_POSTGRES:
-        new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
+        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
         if not match:
-            return new_query + " ON CONFLICT DO NOTHING"
+            return query.replace("INSERT OR REPLACE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
-        pk_map = KNOWN_UNIQUE
-        if table in pk_map:
-            pk = pk_map[table]
-            pk_cols = ', '.join(pk) if isinstance(pk, list) else pk
-        else:
-            pk_cols = columns[0] if columns else 'id'
-        pk_set = set(pk) if isinstance(pk, list) else {pk}
-        set_columns = [col for col in columns if col not in pk_set]
-        if not set_columns:
-            values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
-            if values_match:
-                end_pos = values_match.end()
-                new_query = new_query[:end_pos] + f" ON CONFLICT ({pk_cols}) DO NOTHING" + new_query[end_pos:]
+        pk = ['id']  # افتراضي
+        if conn:
+            unique_cols = await _get_unique_columns(table, conn)
+            if unique_cols:
+                pk = unique_cols
             else:
-                new_query = new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
-            return new_query
-        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in set_columns])
-        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
-        if values_match:
-            end_pos = values_match.end()
-            new_query = new_query[:end_pos] + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}" + new_query[end_pos:]
+                pk = columns[:1] if columns else ['id']
         else:
-            new_query = new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
-        return new_query
+            pk = columns[:1] if columns else ['id']
+        pk_cols = ', '.join(pk)
+        pk_set = set(pk)
+        set_columns = [col for col in columns if col not in pk_set]
+        new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
+        if not set_columns:
+            return new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
+        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in set_columns])
+        return new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
     elif USE_MYSQL:
         return query.replace("INSERT OR REPLACE", "REPLACE", 1)
     else:
         return query
 
 def _convert_upsert(query: str) -> str:
+    """تحويل ON CONFLICT ... DO UPDATE إلى ON DUPLICATE KEY UPDATE لـ MySQL مع تحسينات."""
     if DB_TYPE == "sqlite":
         return query
     if not USE_MYSQL:
         return query
+    # التأكد من وجود ON CONFLICT مع UPDATE
     pattern = r"ON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+(.+)"
     match = re.search(pattern, query, re.IGNORECASE)
     if not match:
         return query
     update_set = match.group(2).strip()
+    # استبدال excluded.column بـ VALUES(column)
     def replace_excluded(m):
         return f"VALUES({m.group(1)})"
     new_update_set = re.sub(r'excluded\.([a-zA-Z_][a-zA-Z0-9_]*)', replace_excluded, update_set)
+    # إزالة ON CONFLICT من الاستعلام
     new_query = re.sub(pattern, '', query, flags=re.IGNORECASE).rstrip()
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
 
 def _adapt_params(params: tuple) -> tuple:
+    """تكييف المعامل حسب نوع قاعدة البيانات."""
     if params is None:
         return ()
     if USE_POSTGRES:
-        # في PostgreSQL، نمرر datetime كما هو (كائن)
+        # في PostgreSQL، نمرر datetime كما هو (كائن مع tzinfo)
         return params
     else:
         # في SQLite و MySQL، نحول datetime إلى نص
@@ -283,52 +467,63 @@ def _adapt_params(params: tuple) -> tuple:
         return tuple(new_params)
 
 # =====================================================================
-# 2. فئة TimeUtils
+# 2. فئة TimeUtils (محسّنة)
 # =====================================================================
 
 class TimeUtils:
     @staticmethod
     def utc_now() -> datetime:
-        return datetime.now(timezone.utc).replace(tzinfo=None)
+        """تعيد الوقت الحالي بتوقيت UTC مع المنطقة الزمنية."""
+        return datetime.now(timezone.utc)
+    
     @staticmethod
     def mecca_now() -> datetime:
         return TimeUtils.utc_now() + timedelta(hours=3)
+    
     @staticmethod
     def utc_iso() -> str:
         return TimeUtils.utc_now().isoformat()
+    
     @staticmethod
     def mecca_iso() -> str:
         return TimeUtils.mecca_now().isoformat()
+    
     @staticmethod
     def sql_iso() -> str:
+        """تعيد الوقت كـ string بصيغة YYYY-MM-DD HH:MM:SS (بدون منطقة)"""
         return TimeUtils.utc_now().strftime('%Y-%m-%d %H:%M:%S')
+    
     @staticmethod
     def mecca_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
         return dt - timedelta(hours=3) if dt else None
+    
     @staticmethod
     def utc_to_mecca(dt: Optional[datetime]) -> Optional[datetime]:
         return dt + timedelta(hours=3) if dt else None
+    
     @staticmethod
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
         if not date_str:
             return None
         try:
-            return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+            return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
         except ValueError:
             pass
         try:
             dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
             return dt
         except (ValueError, TypeError):
             pass
         try:
-            return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+            return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
         except ValueError:
             pass
         try:
-            return datetime.strptime(date_str, '%Y-%m-%d')
+            return datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
         except ValueError:
             pass
         return None
@@ -340,10 +535,11 @@ class TimeUtils:
 class Database:
     _instance = None
     _lock = asyncio.Lock()
+    # استخدام LRU للأقفال مع آلية تنظيف محسنة
     _user_locks = {}
     _channel_locks = defaultdict(asyncio.Lock)
     _user_locks_last_access = {}
-    _MAX_USER_LOCKS = 10000
+    _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
     VALID_PENALTY_TYPES = {'mute', 'ban', 'restrict', 'kick', 'warn'}
     VALID_REPLY_TYPES = {'text', 'photo', 'video', 'animation', 'document', 'sticker', 'voice', 'video_note'}
@@ -366,9 +562,8 @@ class Database:
 
     def __init__(self):
         self._pool = None
-        self._sqlite_pool = []
-        self._sqlite_pool_lock = asyncio.Lock()
-        self._sqlite_pool_size = 5
+        self._sqlite_queue = None  # asyncio.Queue للاتصالات
+        self._sqlite_pool_size = int(os.getenv("SQLITE_POOL_SIZE", "5"))
         self._initialized = False
         self._db_type = DB_TYPE
         self._max_connections = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -376,6 +571,8 @@ class Database:
         self._cleanup_task = None
         if not hasattr(self, '_lock'):
             self._lock = asyncio.Lock()
+        self._slow_query_log_threshold = float(os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0"))
+        self._max_post_text_length = MAX_POST_TEXT_LENGTH
 
     async def initialize(self):
         if self._initialized:
@@ -415,22 +612,28 @@ class Database:
             )
             logger.info(f"✅ Pool MySQL جاهز (max={self._max_connections})")
         else:
+            # SQLite باستخدام asyncio.Queue مع إعادة محاولة ذكية
+            self._sqlite_queue = asyncio.Queue(maxsize=self._sqlite_pool_size)
             for _ in range(self._sqlite_pool_size):
-                conn = await aiosqlite.connect(
-                    str(PATHS.DB),
-                    timeout=self._connection_timeout,
-                    check_same_thread=False
-                )
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA journal_mode=WAL")
-                await conn.execute("PRAGMA synchronous=NORMAL")
-                await conn.execute("PRAGMA foreign_keys=ON")
-                await conn.execute("PRAGMA busy_timeout=10000")
-                self._sqlite_pool.append(conn)
+                conn = await self._create_sqlite_connection()
+                await self._sqlite_queue.put(conn)
             logger.info(f"✅ Pool SQLite جاهز (size={self._sqlite_pool_size})")
         self._initialized = True
         if self._cleanup_task is None:
             self._cleanup_task = asyncio.create_task(self._auto_cleanup_locks())
+
+    async def _create_sqlite_connection(self):
+        conn = await aiosqlite.connect(
+            str(PATHS.DB),
+            timeout=self._connection_timeout,
+            check_same_thread=False
+        )
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA busy_timeout=10000")
+        return conn
 
     async def close(self):
         if self._cleanup_task:
@@ -448,10 +651,11 @@ class Database:
             await self._pool.wait_closed()
             self._pool = None
         else:
-            async with self._sqlite_pool_lock:
-                for conn in self._sqlite_pool:
+            if self._sqlite_queue:
+                while not self._sqlite_queue.empty():
+                    conn = await self._sqlite_queue.get()
                     await conn.close()
-                self._sqlite_pool.clear()
+                self._sqlite_queue = None
         self._initialized = False
 
     async def _get_connection(self):
@@ -463,30 +667,39 @@ class Database:
                 timeout=self._connection_timeout
             )
         else:
-            async with self._sqlite_pool_lock:
-                if self._sqlite_pool:
-                    return self._sqlite_pool.pop()
-                conn = await aiosqlite.connect(
-                    str(PATHS.DB),
-                    timeout=self._connection_timeout,
-                    check_same_thread=False
-                )
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA journal_mode=WAL")
-                await conn.execute("PRAGMA synchronous=NORMAL")
-                await conn.execute("PRAGMA foreign_keys=ON")
-                await conn.execute("PRAGMA busy_timeout=10000")
-                return conn
+            # SQLite: حاول الحصول على اتصال من قائمة الانتظار، مع إعادة محاولة محدودة
+            for attempt in range(3):
+                try:
+                    return await asyncio.wait_for(
+                        self._sqlite_queue.get(),
+                        timeout=self._connection_timeout
+                    )
+                except asyncio.TimeoutError:
+                    if attempt < 2:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                    # بعد فشل المحاولات، أنشئ اتصالاً مؤقتاً، لكن سيتم إعادة وضعه في القائمة عند الإرجاع
+                    conn = await self._create_sqlite_connection()
+                    return conn
+            # fallback
+            return await self._create_sqlite_connection()
 
     async def _return_connection(self, conn):
         if USE_POSTGRES or USE_MYSQL:
             await self._pool.release(conn)
         else:
-            async with self._sqlite_pool_lock:
-                if len(self._sqlite_pool) < self._sqlite_pool_size:
-                    self._sqlite_pool.append(conn)
+            try:
+                # محاولة إعادة الاتصال إلى قائمة الانتظار، إذا كانت ممتلئة يتم إغلاقه
+                if self._sqlite_queue is not None:
+                    if self._sqlite_queue.full():
+                        await conn.close()
+                    else:
+                        await self._sqlite_queue.put(conn)
                 else:
                     await conn.close()
+            except Exception as e:
+                logger.warning(f"⚠️ فشل إرجاع اتصال SQLite: {e}")
+                await conn.close()
 
     @asynccontextmanager
     async def connection(self):
@@ -526,179 +739,174 @@ class Database:
             await self._return_connection(conn)
 
     # =====================================================================
-    # 4. دوال الاستعلام (محسّنة)
+    # 4. دوال الاستعلام (محسّنة مع تتبع وقت التنفيذ وإعادة محاولة متقدمة)
     # =====================================================================
 
-    async def execute(self, query: str, params: tuple = ()) -> int:
-        params = _adapt_params(params)
-        if USE_POSTGRES or USE_MYSQL:
-            query = _convert_insert_or_ignore(query)
-            query = _convert_insert_or_replace(query)
-            query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        max_retries = 3
+    async def _execute_with_logging(self, query: str, params: tuple, conn, executor):
+        start = time.monotonic()
+        try:
+            result = await executor(query, params)
+            elapsed = time.monotonic() - start
+            if elapsed > self._slow_query_log_threshold:
+                logger.warning(f"🐌 استعلام بطيء ({elapsed:.2f}s): {query[:200]}...")
+            return result
+        except Exception as e:
+            elapsed = time.monotonic() - start
+            logger.error(f"❌ فشل الاستعلام ({elapsed:.2f}s): {query[:200]}... | خطأ: {e}")
+            raise
+
+    async def _execute_with_retry(self, query: str, params: tuple, executor, max_retries=3):
+        last_exception = None
         for attempt in range(max_retries):
+            try:
+                return await executor(query, params)
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # backoff تصاعدي مع randomness
+                    delay = (0.5 * (attempt + 1)) + (0.1 * attempt)
+                    logger.warning(f"⚠️ إعادة محاولة {attempt+1}/{max_retries} بعد {delay:.2f}s: {e}")
+                    await asyncio.sleep(delay)
+                    continue
+                raise last_exception
+        raise last_exception
+
+    # دوال مساعدة لتنفيذ الاستعلامات مع اتصال معين (لتقليل التكرار)
+
+    async def _execute_with_conn(self, conn, query: str, *params) -> int:
+        """تنفيذ استعلام INSERT/UPDATE/DELETE وإرجاع عدد الصفوف المتأثرة."""
+        # تحويل الاستعلام مع تمرير conn لجلب المفاتيح الفريدة إذا لزم الأمر
+        q = _convert_placeholders(query)
+        q = await _convert_insert_or_ignore(q, conn)
+        q = await _convert_insert_or_replace(q, conn)
+        q = _convert_upsert(q)
+        params = _adapt_params(params) if params else ()
+        if USE_POSTGRES:
+            result = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, *p2))
+            parts = result.split()
+            return int(parts[-1]) if parts and parts[-1].isdigit() else 0
+        elif USE_MYSQL:
+            cursor = await conn.cursor()
+            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            await cursor.execute("SELECT ROW_COUNT()")
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+        else:
+            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            return cursor.rowcount
+
+    async def _fetchone_with_conn(self, conn, query: str, *params) -> Optional[Dict]:
+        """تنفيذ استعلام SELECT وإرجاع صف واحد كقاموس."""
+        q = _convert_placeholders(query)
+        params = _adapt_params(params) if params else ()
+        if USE_POSTGRES:
+            row = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2))
+            return dict(row) if row else None
+        elif USE_MYSQL:
+            cursor = await conn.cursor()
+            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            row = await cursor.fetchone()
+            if row and cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        else:
+            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def _fetchall_with_conn(self, conn, query: str, *params) -> List[Dict]:
+        """تنفيذ استعلام SELECT وإرجاع جميع الصفوف كقائمة من القواميس."""
+        q = _convert_placeholders(query)
+        params = _adapt_params(params) if params else ()
+        if USE_POSTGRES:
+            rows = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetch(q2, *p2))
+            return [dict(row) for row in rows]
+        elif USE_MYSQL:
+            cursor = await conn.cursor()
+            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            rows = await cursor.fetchall()
+            if rows and cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+            return []
+        else:
+            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def _fetchval_with_conn(self, conn, query: str, *params, default=None) -> Any:
+        """تنفيذ استعلام SELECT وإرجاع العمود الأول من الصف الأول."""
+        q = _convert_placeholders(query)
+        params = _adapt_params(params) if params else ()
+        if USE_POSTGRES:
+            row = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2))
+            return row[0] if row else default
+        elif USE_MYSQL:
+            cursor = await conn.cursor()
+            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            row = await cursor.fetchone()
+            return row[0] if row else default
+        else:
+            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            row = await cursor.fetchone()
+            return row[0] if row else default
+
+    # واجهات الاستعلام العامة (التي تستخدم الاتصالات المؤقتة)
+
+    async def execute(self, query: str, params: tuple = ()) -> int:
+        async def _exec(q, p):
             async with self.connection() as conn:
-                try:
-                    if USE_POSTGRES:
-                        result = await conn.execute(query, *params)
-                        parts = result.split()
-                        return int(parts[-1]) if parts and parts[-1].isdigit() else 0
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(query, params)
-                        await cursor.execute("SELECT ROW_COUNT()")
-                        row = await cursor.fetchone()
-                        return row[0] if row else 0
-                    else:
-                        cursor = await conn.execute(query, params)
-                        return cursor.rowcount
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ إعادة محاولة التنفيذ ({attempt+1}/{max_retries}): {e}")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    raise
-        return 0
+                return await self._execute_with_conn(conn, q, *p)
+        return await self._execute_with_retry(query, params, _exec)
 
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
-        params = _adapt_params(params)
-        if USE_POSTGRES or USE_MYSQL:
-            if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
-                query = _convert_insert_or_ignore(query)
-                query = _convert_insert_or_replace(query)
-                query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        max_retries = 3
-        for attempt in range(max_retries):
+        async def _exec(q, p):
             async with self.connection() as conn:
-                try:
-                    if USE_POSTGRES:
-                        row = await conn.fetchrow(query, *params)
-                        return dict(row) if row else None
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(query, params)
-                        row = await cursor.fetchone()
-                        if row:
-                            columns = [desc[0] for desc in cursor.description]
-                            return dict(zip(columns, row))
-                        return None
-                    else:
-                        cursor = await conn.execute(query, params)
-                        row = await cursor.fetchone()
-                        return dict(row) if row else None
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ إعادة محاولة الجلب ({attempt+1}/{max_retries}): {e}")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    raise
-        return None
+                return await self._fetchone_with_conn(conn, q, *p)
+        return await self._execute_with_retry(query, params, _exec)
 
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
-        params = _adapt_params(params)
-        if USE_POSTGRES or USE_MYSQL:
-            if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
-                query = _convert_insert_or_ignore(query)
-                query = _convert_insert_or_replace(query)
-                query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        max_retries = 3
-        for attempt in range(max_retries):
+        async def _exec(q, p):
             async with self.connection() as conn:
-                try:
-                    if USE_POSTGRES:
-                        rows = await conn.fetch(query, *params)
-                        return [dict(row) for row in rows]
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(query, params)
-                        rows = await cursor.fetchall()
-                        if rows:
-                            columns = [desc[0] for desc in cursor.description]
-                            return [dict(zip(columns, row)) for row in rows]
-                        return []
-                    else:
-                        cursor = await conn.execute(query, params)
-                        rows = await cursor.fetchall()
-                        return [dict(row) for row in rows]
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ إعادة محاولة الجلب الكلي ({attempt+1}/{max_retries}): {e}")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    raise
-        return []
+                return await self._fetchall_with_conn(conn, q, *p)
+        return await self._execute_with_retry(query, params, _exec)
 
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
-        params = _adapt_params(params)
-        if USE_POSTGRES or USE_MYSQL:
-            if query.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
-                query = _convert_insert_or_ignore(query)
-                query = _convert_insert_or_replace(query)
-                query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        max_retries = 3
-        for attempt in range(max_retries):
+        async def _exec(q, p):
             async with self.connection() as conn:
-                try:
-                    if USE_POSTGRES:
-                        row = await conn.fetchrow(query, *params)
-                        return row[0] if row else default
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(query, params)
-                        row = await cursor.fetchone()
-                        return row[0] if row else default
-                    else:
-                        cursor = await conn.execute(query, params)
-                        row = await cursor.fetchone()
-                        return row[0] if row else default
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ إعادة محاولة جلب القيمة ({attempt+1}/{max_retries}): {e}")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    raise
-        return default
+                return await self._fetchval_with_conn(conn, q, *p, default=default)
+        return await self._execute_with_retry(query, params, _exec)
 
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
         if not params_list:
             return 0
-        if USE_POSTGRES or USE_MYSQL:
-            query = _convert_insert_or_ignore(query)
-            query = _convert_insert_or_replace(query)
-            query = _convert_upsert(query)
-        query = _convert_placeholders(query)
+        # نقوم بتحويل الاستعلام مرة واحدة (بدون conn لأننا لا نستطيع تمريره للـ executemany)
+        q = _convert_placeholders(query)
+        q = await _convert_insert_or_ignore(q)   # بدون conn، يستخدم الاحتياطي
+        q = await _convert_insert_or_replace(q)  # بدون conn
+        q = _convert_upsert(q)
         params_list = [_adapt_params(p) for p in params_list]
-        max_retries = 3
-        for attempt in range(max_retries):
+        async def _exec(q2, p_list):
             async with self.connection() as conn:
-                try:
-                    if USE_POSTGRES:
-                        await conn.executemany(query, params_list)
-                        return len(params_list)
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.executemany(query, params_list)
-                        return cursor.rowcount
-                    else:
-                        cursor = await conn.executemany(query, params_list)
-                        return cursor.rowcount
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ إعادة محاولة التنفيذ المتعدد ({attempt+1}/{max_retries}): {e}")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    raise
-        return 0
+                if USE_POSTGRES:
+                    await self._execute_with_logging(q2, p_list, conn, lambda q3, p3: conn.executemany(q3, p3))
+                    return len(p_list)
+                elif USE_MYSQL:
+                    cursor = await conn.cursor()
+                    await self._execute_with_logging(q2, p_list, conn, lambda q3, p3: cursor.executemany(q3, p3))
+                    return cursor.rowcount
+                else:
+                    cursor = await self._execute_with_logging(q2, p_list, conn, lambda q3, p3: conn.executemany(q3, p3))
+                    return cursor.rowcount
+        return await self._execute_with_retry(q, params_list, _exec)
 
     # =====================================================================
-    # 5. دوال الأقفال
+    # 5. دوال الأقفال (محسّنة مع LRU)
     # =====================================================================
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
+        # تنظيف الأقفال القديمة إذا تجاوزت الحد
         if len(self._user_locks) >= self._MAX_USER_LOCKS:
             sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
             to_remove = sorted_items[:len(sorted_items)//2]
@@ -742,8 +950,7 @@ class Database:
                 logger.error(f"❌ Error in _auto_cleanup_locks: {e}")
 
     # =====================================================================
-    # 6. إنشاء الجداول (كاملة) - حُذف بعض الأجزاء للاختصار لكنها موجودة في الكود الأصلي
-    # سنعيد كتابة دوال إنشاء الجداول بالكامل مع الحفاظ على المحتوى نفسه
+    # 6. إنشاء الجداول (كاملة) - مع تحسينات
     # =====================================================================
 
     async def _create_tables_sqlite(self, conn):
@@ -923,7 +1130,6 @@ class Database:
                 violation_duration INTEGER DEFAULT 60
             )
         """)
-        # باقي الجداول بنفس الشكل، نستمر...
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_locks (
                 chat_id INTEGER PRIMARY KEY,
@@ -992,7 +1198,6 @@ class Database:
                 value TEXT
             )
         """)
-        # إعدادات افتراضية
         default_settings = [
             ('publish_interval', '12'),
             ('auto_backup', '1'),
@@ -1001,7 +1206,6 @@ class Database:
         ]
         for key, value in default_settings:
             await conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        # باقي الجداول...
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1240,7 +1444,6 @@ class Database:
         logger.info("✅ تم إنشاء جميع جداول SQLite")
 
     async def _create_tables_postgres(self, conn):
-        # نفس المحتوى مع تعديل الأنواع إلى PostgreSQL (BIGINT, SERIAL, TIMESTAMP, TEXT)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -1258,14 +1461,969 @@ class Database:
                 active_channel INTEGER
             )
         """)
-        # ... باقي الجداول بنفس النمط مع تعديل الأنواع
-        # (تم حذف التكرار للاختصار، لكن الكود الأصلي موجود)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                channel_id BIGINT,
+                channel_name TEXT,
+                banned INTEGER DEFAULT 0,
+                created_at TIMESTAMP,
+                UNIQUE(user_id, channel_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                channel_db_id INTEGER,
+                text TEXT,
+                media_type TEXT,
+                media_file_id TEXT,
+                published INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP,
+                published_at TIMESTAMP,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique ON posts(channel_db_id, text, media_type, media_file_id)
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                channel_db_id INTEGER PRIMARY KEY,
+                schedule_type TEXT DEFAULT 'interval_minutes',
+                interval_minutes INTEGER DEFAULT 12,
+                interval_hours INTEGER DEFAULT 0,
+                interval_days INTEGER DEFAULT 0,
+                days_of_week TEXT DEFAULT '[]',
+                specific_dates TEXT DEFAULT '[]',
+                publish_time TEXT DEFAULT '00:00',
+                cron_expression TEXT,
+                next_publish_date TIMESTAMP,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS last_publish (
+                channel_db_id INTEGER PRIMARY KEY,
+                last_publish_time TIMESTAMP,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id BIGINT PRIMARY KEY,
+                chat_name TEXT,
+                username TEXT,
+                added_by BIGINT,
+                added_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                banned INTEGER DEFAULT 0
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id BIGINT,
+                chat_id BIGINT,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id BIGINT,
+                user_id BIGINT,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+                chat_id BIGINT,
+                owner_id BIGINT,
+                is_hidden INTEGER DEFAULT 1,
+                PRIMARY KEY (chat_id, owner_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                chat_id BIGINT,
+                admin_id BIGINT,
+                added_by BIGINT,
+                added_at TIMESTAMP,
+                PRIMARY KEY (chat_id, admin_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS anonymous_admins (
+                chat_id BIGINT NOT NULL,
+                anonymous_id BIGINT NOT NULL,
+                added_by BIGINT,
+                user_id BIGINT,
+                added_at TIMESTAMP,
+                PRIMARY KEY (chat_id, anonymous_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_security (
+                chat_id BIGINT PRIMARY KEY,
+                delete_links INTEGER DEFAULT 0,
+                mentions INTEGER DEFAULT 0,
+                slow_mode INTEGER DEFAULT 0,
+                slow_mode_seconds INTEGER DEFAULT 5,
+                welcome_enabled INTEGER DEFAULT 0,
+                welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+                goodbye_enabled INTEGER DEFAULT 0,
+                goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+                delete_banned_words INTEGER DEFAULT 0,
+                auto_penalty TEXT DEFAULT 'none',
+                auto_mute_duration INTEGER DEFAULT 3600,
+                delete_videos INTEGER DEFAULT 0,
+                delete_audio INTEGER DEFAULT 0,
+                delete_animation INTEGER DEFAULT 0,
+                delete_service INTEGER DEFAULT 0,
+                delete_documents INTEGER DEFAULT 0,
+                delete_stickers INTEGER DEFAULT 0,
+                delete_forwarded INTEGER DEFAULT 0,
+                delete_polls INTEGER DEFAULT 0,
+                delete_games INTEGER DEFAULT 0,
+                delete_voice INTEGER DEFAULT 0,
+                delete_video_note INTEGER DEFAULT 0,
+                delete_photos INTEGER DEFAULT 0,
+                delete_penalty TEXT DEFAULT 'none',
+                delete_penalty_duration INTEGER DEFAULT 0,
+                delete_penalty_messages INTEGER DEFAULT 0,
+                antiflood_enabled INTEGER DEFAULT 0,
+                antiflood_messages INTEGER DEFAULT 5,
+                antiflood_seconds INTEGER DEFAULT 10,
+                antiflood_penalty TEXT DEFAULT 'mute',
+                antiflood_penalty_duration INTEGER DEFAULT 3600,
+                max_warnings INTEGER DEFAULT 3,
+                warn_penalty TEXT DEFAULT 'ban',
+                warn_penalty_duration INTEGER DEFAULT 3600,
+                warn_enabled INTEGER DEFAULT 0,
+                max_message_length INTEGER DEFAULT 0,
+                night_mode_enabled INTEGER DEFAULT 0,
+                night_mode_start TEXT DEFAULT '23:00',
+                night_mode_end TEXT DEFAULT '06:00',
+                night_mode_action TEXT DEFAULT 'mute',
+                night_mode_action_duration INTEGER DEFAULT 3600,
+                nsfw_enabled INTEGER DEFAULT 0,
+                nsfw_threshold REAL DEFAULT 0.7,
+                nsfw_filter INTEGER DEFAULT 0,
+                auto_approve_join INTEGER DEFAULT 0,
+                auto_reject_join INTEGER DEFAULT 0,
+                mute_default_duration INTEGER DEFAULT 3600,
+                ban_default_duration INTEGER DEFAULT 0,
+                warn_default_duration INTEGER DEFAULT 0,
+                restrict_default_duration INTEGER DEFAULT 1800,
+                enable_timed_penalties INTEGER DEFAULT 1,
+                auto_remove_penalties INTEGER DEFAULT 1,
+                violation_strikes INTEGER DEFAULT 3,
+                violation_duration INTEGER DEFAULT 60
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id BIGINT PRIMARY KEY,
+                locked INTEGER DEFAULT 0,
+                locked_at TIMESTAMP,
+                locked_by BIGINT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id SERIAL PRIMARY KEY,
+                word TEXT,
+                chat_id BIGINT,
+                added_by BIGINT,
+                added_at TIMESTAMP,
+                UNIQUE(word, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                chat_id BIGINT,
+                keyword TEXT,
+                reply TEXT,
+                reply_type TEXT DEFAULT 'text',
+                reply_media_id TEXT,
+                reply_buttons TEXT,
+                created_at TIMESTAMP,
+                is_active INTEGER DEFAULT 1,
+                usage_count INTEGER DEFAULT 0,
+                PRIMARY KEY (chat_id, keyword)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id BIGINT PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                only_admins INTEGER DEFAULT 0,
+                ignore_bots INTEGER DEFAULT 1,
+                updated_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                message TEXT,
+                media_type TEXT,
+                media_file_id TEXT,
+                ticket_number INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP,
+                replied INTEGER DEFAULT 0
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                added_by BIGINT,
+                added_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        default_settings = [
+            ('publish_interval', '12'),
+            ('auto_backup', '1'),
+            ('last_ticket_number', '0'),
+            ('last_backup', ''),
+        ]
+        for key, value in default_settings:
+            await conn.execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", key, value)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT,
+                referred_id BIGINT,
+                created_at TIMESTAMP,
+                UNIQUE(referrer_id, referred_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                user_id BIGINT PRIMARY KEY,
+                referral_count INTEGER DEFAULT 0,
+                total_reward_days INTEGER DEFAULT 0,
+                claimed_reward_days INTEGER DEFAULT 0,
+                last_referral_date TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reminder_settings (
+                user_id BIGINT PRIMARY KEY,
+                subscription_reminder INTEGER DEFAULT 1,
+                daily_stats_reminder INTEGER DEFAULT 0,
+                weekly_report INTEGER DEFAULT 1,
+                reminder_days_before INTEGER DEFAULT 3,
+                last_reminder_sent TIMESTAMP,
+                notification_lang TEXT DEFAULT 'ar'
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_translation (
+                user_id BIGINT PRIMARY KEY,
+                lang TEXT DEFAULT 'off'
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id SERIAL PRIMARY KEY,
+                creator_id BIGINT,
+                title TEXT,
+                description TEXT,
+                prize TEXT,
+                end_date TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                winner_id BIGINT,
+                created_at TIMESTAMP,
+                contest_type TEXT DEFAULT 'raffle'
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                contest_id INTEGER,
+                answer TEXT,
+                joined_at TIMESTAMP,
+                UNIQUE(user_id, contest_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id SERIAL PRIMARY KEY,
+                contest_id INTEGER,
+                winner_id BIGINT,
+                announced_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                admin_id BIGINT,
+                action TEXT,
+                target_id BIGINT,
+                reason TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id BIGINT,
+                chat_id BIGINT,
+                warnings INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_violations (
+                user_id BIGINT,
+                chat_id BIGINT,
+                violation_count INTEGER DEFAULT 0,
+                last_violation_time TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id BIGINT PRIMARY KEY,
+                rules_text TEXT,
+                updated_by BIGINT,
+                updated_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id BIGINT,
+                chat_id BIGINT,
+                message_time TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                text TEXT,
+                publish_time TIMESTAMP,
+                fail_count INTEGER DEFAULT 0
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentiment_history (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                chat_id BIGINT,
+                text_encrypted BYTEA,
+                sentiment TEXT,
+                score REAL,
+                created_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE,
+                description TEXT,
+                price INTEGER,
+                currency TEXT DEFAULT 'XTR',
+                duration_days INTEGER,
+                max_channels INTEGER,
+                max_posts INTEGER,
+                features TEXT,
+                is_active INTEGER DEFAULT 1,
+                is_gift INTEGER DEFAULT 0,
+                created_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                plan_id INTEGER,
+                status TEXT DEFAULT 'active',
+                start_date TIMESTAMP,
+                end_date TIMESTAMP,
+                auto_renew INTEGER DEFAULT 0,
+                provider TEXT DEFAULT 'xtr',
+                provider_subscription_id TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id SERIAL PRIMARY KEY,
+                number TEXT UNIQUE,
+                user_id BIGINT,
+                plan_id INTEGER,
+                amount INTEGER,
+                currency TEXT DEFAULT 'XTR',
+                status TEXT DEFAULT 'pending',
+                provider TEXT DEFAULT 'xtr',
+                provider_payment_id TEXT,
+                paid_at TIMESTAMP,
+                created_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                provider TEXT DEFAULT 'xtr',
+                event_type TEXT,
+                data TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_penalties (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type TEXT,
+                duration INTEGER,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                reason TEXT,
+                issued_by BIGINT,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS violation_penalties (
+                chat_id BIGINT NOT NULL,
+                violation_type TEXT NOT NULL,
+                penalty_type TEXT NOT NULL DEFAULT 'mute',
+                duration_seconds INTEGER DEFAULT 3600,
+                PRIMARY KEY (chat_id, violation_type)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE,
+                plan_id INTEGER,
+                creator_id BIGINT,
+                used_by BIGINT,
+                used_at TIMESTAMP,
+                created_at TIMESTAMP,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_points (
+                user_id BIGINT PRIMARY KEY,
+                points INTEGER DEFAULT 0,
+                last_updated TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+        """)
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL")
 
     async def _create_tables_mysql(self, conn):
-        # نفس المحتوى مع تعديل الأنواع إلى MySQL (BIGINT, INT, VARCHAR, DATETIME, JSON)
         await conn.execute("SET FOREIGN_KEY_CHECKS=0")
-        # ... الجداول
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                language VARCHAR(10) DEFAULT 'ar',
+                auto_publish TINYINT(1) DEFAULT 1,
+                auto_recycle TINYINT(1) DEFAULT 1,
+                banned TINYINT(1) DEFAULT 0,
+                trial_used TINYINT(1) DEFAULT 0,
+                subscription_end DATETIME,
+                referral_code VARCHAR(255) UNIQUE,
+                created_at DATETIME,
+                updated_at DATETIME,
+                active_channel INT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                channel_id BIGINT,
+                channel_name VARCHAR(255),
+                banned TINYINT(1) DEFAULT 0,
+                created_at DATETIME,
+                UNIQUE KEY (user_id, channel_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                channel_db_id INT,
+                text TEXT,
+                media_type VARCHAR(50),
+                media_file_id TEXT,
+                published TINYINT(1) DEFAULT 0,
+                fail_count INT DEFAULT 0,
+                created_at DATETIME,
+                published_at DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
+                UNIQUE KEY idx_posts_unique (channel_db_id, text(1000), media_type, media_file_id(1000))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                channel_db_id INT PRIMARY KEY,
+                schedule_type VARCHAR(50) DEFAULT 'interval_minutes',
+                interval_minutes INT DEFAULT 12,
+                interval_hours INT DEFAULT 0,
+                interval_days INT DEFAULT 0,
+                days_of_week JSON DEFAULT '[]',
+                specific_dates JSON DEFAULT '[]',
+                publish_time VARCHAR(10) DEFAULT '00:00',
+                cron_expression TEXT,
+                next_publish_date DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS last_publish (
+                channel_db_id INT PRIMARY KEY,
+                last_publish_time DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id BIGINT PRIMARY KEY,
+                chat_name VARCHAR(255),
+                username VARCHAR(255),
+                added_by BIGINT,
+                added_at DATETIME,
+                updated_at DATETIME,
+                banned TINYINT(1) DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id BIGINT,
+                chat_id BIGINT,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id BIGINT,
+                user_id BIGINT,
+                PRIMARY KEY (chat_id, user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+                chat_id BIGINT,
+                owner_id BIGINT,
+                is_hidden TINYINT(1) DEFAULT 1,
+                PRIMARY KEY (chat_id, owner_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                chat_id BIGINT,
+                admin_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, admin_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS anonymous_admins (
+                chat_id BIGINT NOT NULL,
+                anonymous_id BIGINT NOT NULL,
+                added_by BIGINT,
+                user_id BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, anonymous_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_security (
+                chat_id BIGINT PRIMARY KEY,
+                delete_links TINYINT(1) DEFAULT 0,
+                mentions TINYINT(1) DEFAULT 0,
+                slow_mode TINYINT(1) DEFAULT 0,
+                slow_mode_seconds INT DEFAULT 5,
+                welcome_enabled TINYINT(1) DEFAULT 0,
+                welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+                goodbye_enabled TINYINT(1) DEFAULT 0,
+                goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+                delete_banned_words TINYINT(1) DEFAULT 0,
+                auto_penalty VARCHAR(50) DEFAULT 'none',
+                auto_mute_duration INT DEFAULT 3600,
+                delete_videos TINYINT(1) DEFAULT 0,
+                delete_audio TINYINT(1) DEFAULT 0,
+                delete_animation TINYINT(1) DEFAULT 0,
+                delete_service TINYINT(1) DEFAULT 0,
+                delete_documents TINYINT(1) DEFAULT 0,
+                delete_stickers TINYINT(1) DEFAULT 0,
+                delete_forwarded TINYINT(1) DEFAULT 0,
+                delete_polls TINYINT(1) DEFAULT 0,
+                delete_games TINYINT(1) DEFAULT 0,
+                delete_voice TINYINT(1) DEFAULT 0,
+                delete_video_note TINYINT(1) DEFAULT 0,
+                delete_photos TINYINT(1) DEFAULT 0,
+                delete_penalty VARCHAR(50) DEFAULT 'none',
+                delete_penalty_duration INT DEFAULT 0,
+                delete_penalty_messages INT DEFAULT 0,
+                antiflood_enabled TINYINT(1) DEFAULT 0,
+                antiflood_messages INT DEFAULT 5,
+                antiflood_seconds INT DEFAULT 10,
+                antiflood_penalty VARCHAR(50) DEFAULT 'mute',
+                antiflood_penalty_duration INT DEFAULT 3600,
+                max_warnings INT DEFAULT 3,
+                warn_penalty VARCHAR(50) DEFAULT 'ban',
+                warn_penalty_duration INT DEFAULT 3600,
+                warn_enabled TINYINT(1) DEFAULT 0,
+                max_message_length INT DEFAULT 0,
+                night_mode_enabled TINYINT(1) DEFAULT 0,
+                night_mode_start VARCHAR(10) DEFAULT '23:00',
+                night_mode_end VARCHAR(10) DEFAULT '06:00',
+                night_mode_action VARCHAR(50) DEFAULT 'mute',
+                night_mode_action_duration INT DEFAULT 3600,
+                nsfw_enabled TINYINT(1) DEFAULT 0,
+                nsfw_threshold FLOAT DEFAULT 0.7,
+                nsfw_filter TINYINT(1) DEFAULT 0,
+                auto_approve_join TINYINT(1) DEFAULT 0,
+                auto_reject_join TINYINT(1) DEFAULT 0,
+                mute_default_duration INT DEFAULT 3600,
+                ban_default_duration INT DEFAULT 0,
+                warn_default_duration INT DEFAULT 0,
+                restrict_default_duration INT DEFAULT 1800,
+                enable_timed_penalties TINYINT(1) DEFAULT 1,
+                auto_remove_penalties TINYINT(1) DEFAULT 1,
+                violation_strikes INT DEFAULT 3,
+                violation_duration INT DEFAULT 60
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id BIGINT PRIMARY KEY,
+                locked TINYINT(1) DEFAULT 0,
+                locked_at DATETIME,
+                locked_by BIGINT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                word VARCHAR(255),
+                chat_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                UNIQUE KEY (word, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                chat_id BIGINT,
+                keyword VARCHAR(255),
+                reply TEXT,
+                reply_type VARCHAR(50) DEFAULT 'text',
+                reply_media_id TEXT,
+                reply_buttons TEXT,
+                created_at DATETIME,
+                is_active TINYINT(1) DEFAULT 1,
+                usage_count INT DEFAULT 0,
+                PRIMARY KEY (chat_id, keyword)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id BIGINT PRIMARY KEY,
+                enabled TINYINT(1) DEFAULT 0,
+                only_admins TINYINT(1) DEFAULT 0,
+                ignore_bots TINYINT(1) DEFAULT 1,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                username VARCHAR(255),
+                message TEXT,
+                media_type VARCHAR(50),
+                media_file_id TEXT,
+                ticket_number INT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at DATETIME,
+                replied TINYINT(1) DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                added_by BIGINT,
+                added_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key VARCHAR(255) PRIMARY KEY,
+                value TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        default_settings = [
+            ('publish_interval', '12'),
+            ('auto_backup', '1'),
+            ('last_ticket_number', '0'),
+            ('last_backup', ''),
+        ]
+        for key, value in default_settings:
+            await conn.execute("INSERT IGNORE INTO settings (key, value) VALUES (%s, %s)", (key, value))
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                referrer_id BIGINT,
+                referred_id BIGINT,
+                created_at DATETIME,
+                UNIQUE KEY (referrer_id, referred_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                user_id BIGINT PRIMARY KEY,
+                referral_count INT DEFAULT 0,
+                total_reward_days INT DEFAULT 0,
+                claimed_reward_days INT DEFAULT 0,
+                last_referral_date DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reminder_settings (
+                user_id BIGINT PRIMARY KEY,
+                subscription_reminder TINYINT(1) DEFAULT 1,
+                daily_stats_reminder TINYINT(1) DEFAULT 0,
+                weekly_report TINYINT(1) DEFAULT 1,
+                reminder_days_before INT DEFAULT 3,
+                last_reminder_sent DATETIME,
+                notification_lang VARCHAR(10) DEFAULT 'ar'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_translation (
+                user_id BIGINT PRIMARY KEY,
+                lang VARCHAR(10) DEFAULT 'off'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                creator_id BIGINT,
+                title VARCHAR(255),
+                description TEXT,
+                prize VARCHAR(255),
+                end_date DATETIME,
+                status VARCHAR(50) DEFAULT 'active',
+                winner_id BIGINT,
+                created_at DATETIME,
+                contest_type VARCHAR(50) DEFAULT 'raffle'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                contest_id INT,
+                answer TEXT,
+                joined_at DATETIME,
+                UNIQUE KEY (user_id, contest_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                contest_id INT,
+                winner_id BIGINT,
+                announced_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                admin_id BIGINT,
+                action VARCHAR(255),
+                target_id BIGINT,
+                reason TEXT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id BIGINT,
+                chat_id BIGINT,
+                warnings INT DEFAULT 0,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_violations (
+                user_id BIGINT,
+                chat_id BIGINT,
+                violation_count INT DEFAULT 0,
+                last_violation_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id BIGINT PRIMARY KEY,
+                rules_text TEXT,
+                updated_by BIGINT,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id BIGINT,
+                chat_id BIGINT,
+                message_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                text TEXT,
+                publish_time DATETIME,
+                fail_count INT DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentiment_history (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                text_encrypted BLOB,
+                sentiment VARCHAR(50),
+                score FLOAT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                name VARCHAR(100) UNIQUE,
+                description TEXT,
+                price INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                duration_days INT,
+                max_channels INT,
+                max_posts INT,
+                features JSON,
+                is_active TINYINT(1) DEFAULT 1,
+                is_gift TINYINT(1) DEFAULT 0,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                plan_id INT,
+                status VARCHAR(50) DEFAULT 'active',
+                start_date DATETIME,
+                end_date DATETIME,
+                auto_renew TINYINT(1) DEFAULT 0,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_subscription_id VARCHAR(255),
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                number VARCHAR(50) UNIQUE,
+                user_id BIGINT,
+                plan_id INT,
+                amount INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                status VARCHAR(50) DEFAULT 'pending',
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_payment_id VARCHAR(255),
+                paid_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                event_type VARCHAR(100),
+                data JSON,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_penalties (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type VARCHAR(50),
+                duration INT,
+                start_time DATETIME,
+                end_time DATETIME,
+                reason TEXT,
+                issued_by BIGINT,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS violation_penalties (
+                chat_id BIGINT NOT NULL,
+                violation_type VARCHAR(50) NOT NULL,
+                penalty_type VARCHAR(50) NOT NULL DEFAULT 'mute',
+                duration_seconds INT DEFAULT 3600,
+                PRIMARY KEY (chat_id, violation_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                code VARCHAR(50) UNIQUE,
+                plan_id INT,
+                creator_id BIGINT,
+                used_by BIGINT,
+                used_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_points (
+                user_id BIGINT PRIMARY KEY,
+                points INT DEFAULT 0,
+                last_updated DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
         await conn.execute("SET FOREIGN_KEY_CHECKS=1")
         logger.info("✅ تم إنشاء جميع جداول MySQL")
 
@@ -1281,7 +2439,6 @@ class Database:
                 await self._create_tables_sqlite(conn)
 
     async def _migrate_schema(self, conn):
-        # كما هو موجود
         migrations = {
             "group_security": [
                 ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -1297,7 +2454,7 @@ class Database:
                 ("violation_duration", "INTEGER DEFAULT 60"),
             ],
             "users": [
-                ("active_channel", "INTEGER"),
+                ("active_channel", "INTEGER DEFAULT NULL"),
             ],
             "auto_replies": [
                 ("usage_count", "INTEGER DEFAULT 0"),
@@ -1306,28 +2463,36 @@ class Database:
                 ("user_id", "INTEGER"),
             ],
         }
-        # ... تنفيذ الترحيل
         for table, columns in migrations.items():
             existing = set()
             if USE_POSTGRES:
-                cursor = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'")
-                existing = {row['column_name'] for row in cursor}
+                try:
+                    cursor = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'")
+                    existing = {row['column_name'] for row in cursor}
+                except Exception:
+                    pass
             elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute(f"SHOW COLUMNS FROM {table}")
-                rows = await cursor.fetchall()
-                existing = {row[0] for row in rows}
+                try:
+                    cursor = await conn.cursor()
+                    await cursor.execute(f"SHOW COLUMNS FROM {table}")
+                    rows = await cursor.fetchall()
+                    existing = {row[0] for row in rows}
+                except Exception:
+                    pass
             else:
-                cursor = await conn.execute(f"PRAGMA table_info({table})")
-                rows = await cursor.fetchall()
-                existing = {row[1] for row in rows}
+                try:
+                    cursor = await conn.execute(f"PRAGMA table_info({table})")
+                    rows = await cursor.fetchall()
+                    existing = {row[1] for row in rows}
+                except Exception:
+                    pass
             for col_name, col_def in columns:
                 if col_name not in existing:
                     try:
                         if USE_POSTGRES:
-                            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                            await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
                         elif USE_MYSQL:
-                            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                            await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
                         else:
                             await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
                         logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
@@ -1335,41 +2500,261 @@ class Database:
                         logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
     async def _create_indexes(self, conn):
-        # الفهارس كما هي
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_users_banned ON users(banned)",
-            # ... باقي الفهارس
+            "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)",
+            "CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)",
+            "CREATE INDEX IF NOT EXISTS idx_users_updated ON users(updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code)",
+            "CREATE INDEX IF NOT EXISTS idx_uc_user ON user_channels(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_uc_active ON user_channels(banned)",
+            "CREATE INDEX IF NOT EXISTS idx_uc_channel_id ON user_channels(channel_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",          # إضافة جديدة
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, fail_count)",               # إضافة جديدة
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
+            "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
+            "CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_security_chat ON group_security(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)",
+            "CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_warnings_chat ON user_warnings(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_violations_user ON user_violations(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_violations_chat ON user_violations(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_logs_chat ON admin_logs(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_logs_admin ON admin_logs(admin_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_logs_created ON admin_logs(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ar_chat ON auto_replies(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_ar_keyword ON auto_replies(keyword)",
+            "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
+            "CREATE INDEX IF NOT EXISTS idx_tickets_user ON support_tickets(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status)",
+            "CREATE INDEX IF NOT EXISTS idx_tickets_number ON support_tickets(ticket_number)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_user_status_end ON subscriptions(user_id, status, end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_inv_status ON invoices(status)",
+            "CREATE INDEX IF NOT EXISTS idx_inv_number ON invoices(number)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_id)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_created ON referrals(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)",
+            "CREATE INDEX IF NOT EXISTS idx_contests_end ON contests(end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)",
+            "CREATE INDEX IF NOT EXISTS idx_contest_participants_user ON contest_participants(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_reminders_user ON user_reminder_settings(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status ON user_penalties(user_id, chat_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_chat_status ON user_penalties(chat_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_end_time ON user_penalties(end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_chat ON anonymous_admins(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user ON anonymous_admins(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
+            "CREATE INDEX IF NOT EXISTS idx_schedule_next_channel ON schedule(next_publish_date, channel_db_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail ON posts(channel_db_id, published, fail_count)",
+            "CREATE INDEX IF NOT EXISTS idx_hidden_owner_owner ON hidden_owner_groups(owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_hidden_admin_admin ON hidden_admins(admin_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_created ON posts(channel_db_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_created ON referrals(referrer_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_unpub ON posts(channel_db_id, published, fail_count, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
         ]
         for query in indexes:
             try:
                 await conn.execute(query)
             except Exception as e:
-                if "Duplicate key name" not in str(e):
+                if "Duplicate key name" not in str(e) and "already exists" not in str(e):
                     logger.warning(f"⚠️ فشل إنشاء فهرس: {e}")
 
     async def _init_default_data(self, conn):
-        # البيانات الافتراضية للخطط
         default_plans = [
             {"name": "تجربة", "description": "تجربة مجانية لمدة 30 يوم", "price": 0, "duration_days": 30, "max_channels": 100, "max_posts": 200, "features": '{"auto_publish":true,"security":true}', "is_gift": 0},
-            # ... باقي الخطط
+            {"name": "يوم", "description": "باقة يوم واحد", "price": 5, "duration_days": 1, "max_channels": 1, "max_posts": 50, "features": '{"auto_publish":true}', "is_gift": 0},
+            {"name": "أسبوع", "description": "باقة 7 أيام", "price": 25, "duration_days": 7, "max_channels": 3, "max_posts": 300, "features": '{"auto_publish":true,"security":true}', "is_gift": 0},
+            {"name": "شهر", "description": "باقة 30 يوم", "price": 75, "duration_days": 30, "max_channels": 10, "max_posts": 1500, "features": '{"auto_publish":true,"security":true,"support":true}', "is_gift": 0},
+            {"name": "3 أشهر", "description": "باقة 90 يوم", "price": 200, "duration_days": 90, "max_channels": 25, "max_posts": 5000, "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true}', "is_gift": 0},
+            {"name": "سنة", "description": "باقة 365 يوم", "price": 700, "duration_days": 365, "max_channels": 100, "max_posts": 99999, "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true,"priority":true}', "is_gift": 0},
+            {"name": "هدية شهر", "description": "كود هدية لمدة 30 يوم", "price": 75, "duration_days": 30, "max_channels": 100, "max_posts": 1500, "features": '{}', "is_gift": 1},
         ]
         for plan in default_plans:
-            # الإدراج مع تجاهل التكرار حسب نوع DB
-            pass
+            if USE_POSTGRES:
+                existing = await conn.fetchval("SELECT id FROM plans WHERE name = $1", plan["name"])
+                if not existing:
+                    await conn.execute(
+                        """INSERT INTO plans 
+                           (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+                        plan["name"], plan["description"], plan["price"], "XTR",
+                        plan["duration_days"], plan["max_channels"], plan["max_posts"],
+                        plan["features"], 1, plan["is_gift"], TimeUtils.utc_now()
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE plans SET max_channels = $1, max_posts = $2 WHERE name = $3",
+                        plan["max_channels"], plan["max_posts"], plan["name"]
+                    )
+            elif USE_MYSQL:
+                cursor = await conn.cursor()
+                await cursor.execute("SELECT id FROM plans WHERE name = %s", (plan["name"],))
+                existing = await cursor.fetchone()
+                if not existing:
+                    await conn.execute(
+                        """INSERT INTO plans 
+                           (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (plan["name"], plan["description"], plan["price"], "XTR",
+                         plan["duration_days"], plan["max_channels"], plan["max_posts"],
+                         plan["features"], 1, plan["is_gift"], TimeUtils.sql_iso())
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE plans SET max_channels = %s, max_posts = %s WHERE name = %s",
+                        (plan["max_channels"], plan["max_posts"], plan["name"])
+                    )
+            else:
+                cursor = await conn.execute("SELECT id FROM plans WHERE name = ?", (plan["name"],))
+                existing = await cursor.fetchone()
+                if not existing:
+                    await conn.execute(
+                        """INSERT INTO plans 
+                           (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (plan["name"], plan["description"], plan["price"], "XTR",
+                         plan["duration_days"], plan["max_channels"], plan["max_posts"],
+                         plan["features"], 1, plan["is_gift"], TimeUtils.sql_iso())
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE plans SET max_channels = ?, max_posts = ? WHERE name = ?",
+                        (plan["max_channels"], plan["max_posts"], plan["name"])
+                    )
 
     async def _import_banned_words(self, conn):
         try:
             from banned_words import BANNED_WORDS
-            # ... الاستيراد
-        except:
-            pass
+            if not BANNED_WORDS:
+                return
+            words_to_insert = []
+            for word in BANNED_WORDS:
+                word = str(word).strip().lower()
+                if len(word) >= 2:
+                    words_to_insert.append((word, -1, CONFIG.PRIMARY_OWNER_ID, TimeUtils.utc_now()))
+            if words_to_insert:
+                if USE_POSTGRES:
+                    await conn.executemany(
+                        "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (word, chat_id) DO NOTHING",
+                        words_to_insert
+                    )
+                elif USE_MYSQL:
+                    await conn.executemany(
+                        "INSERT IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)",
+                        words_to_insert
+                    )
+                else:
+                    await conn.executemany(
+                        "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
+                        words_to_insert
+                    )
+                logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة من ملف banned_words.py")
+        except ImportError:
+            logger.info("ℹ️ لا يوجد ملف banned_words.py، سيتم تخطي استيراد الكلمات المحظورة")
+        except Exception as e:
+            logger.error(f"❌ خطأ في استيراد الكلمات المحظورة: {e}")
 
     async def _import_auto_replies(self, conn):
         try:
             from auto_replies import AUTO_REPLIES
-            # ... الاستيراد
-        except:
-            pass
+            if not AUTO_REPLIES:
+                return
+            if isinstance(AUTO_REPLIES, dict):
+                auto_replies_list = [AUTO_REPLIES]
+            elif isinstance(AUTO_REPLIES, (list, tuple)):
+                auto_replies_list = AUTO_REPLIES
+            else:
+                logger.warning("⚠️ AUTO_REPLIES يجب أن يكون قائمة أو قاموساً")
+                return
+            replies_to_insert = []
+            for item in auto_replies_list:
+                try:
+                    if isinstance(item, dict):
+                        chat_id = item.get('chat_id', -1)
+                        keyword = str(item.get('keyword', '')).strip().lower()
+                        reply = item.get('reply', '')
+                        reply_type = item.get('reply_type', 'text')
+                        media_id = item.get('reply_media_id')
+                        buttons = item.get('reply_buttons')
+                    elif isinstance(item, (list, tuple)):
+                        if len(item) == 2 and isinstance(item[0], str):
+                            chat_id = -1
+                            keyword = str(item[0]).strip().lower()
+                            reply = item[1]
+                            reply_type = 'text'
+                            media_id = None
+                            buttons = None
+                        elif len(item) >= 3 and isinstance(item[0], int):
+                            chat_id = item[0]
+                            keyword = str(item[1]).strip().lower()
+                            reply = item[2]
+                            reply_type = item[3] if len(item) > 3 and isinstance(item[3], str) else 'text'
+                            media_id = item[4] if len(item) > 4 else None
+                            buttons = item[5] if len(item) > 5 else None
+                        elif len(item) >= 2:
+                            chat_id = -1
+                            keyword = str(item[0]).strip().lower()
+                            reply = item[1]
+                            reply_type = item[2] if len(item) > 2 and isinstance(item[2], str) else 'text'
+                            media_id = item[3] if len(item) > 3 else None
+                            buttons = item[4] if len(item) > 4 else None
+                        else:
+                            continue
+                    else:
+                        continue
+                    if not keyword or reply_type not in self.VALID_REPLY_TYPES:
+                        continue
+                    replies_to_insert.append((
+                        chat_id, keyword, reply, reply_type, media_id, buttons,
+                        TimeUtils.utc_now(), 1, 0
+                    ))
+                except Exception as e:
+                    logger.warning(f"⚠️ تجاهل رد تلقائي غير صالح: {e}")
+            if replies_to_insert:
+                if USE_POSTGRES:
+                    await conn.executemany(
+                        """INSERT INTO auto_replies 
+                           (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (chat_id, keyword) DO NOTHING""",
+                        replies_to_insert
+                    )
+                elif USE_MYSQL:
+                    await conn.executemany(
+                        """INSERT IGNORE INTO auto_replies 
+                           (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        replies_to_insert
+                    )
+                else:
+                    await conn.executemany(
+                        """INSERT OR IGNORE INTO auto_replies 
+                           (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        replies_to_insert
+                    )
+                logger.info(f"✅ تم استيراد {len(replies_to_insert)} رد تلقائي من ملف auto_replies.py")
+        except ImportError:
+            logger.info("ℹ️ لا يوجد ملف auto_replies.py، سيتم تخطي استيراد الردود التلقائية")
+        except Exception as e:
+            logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     async def initialize_db(self) -> bool:
         try:
@@ -1388,29 +2773,225 @@ class Database:
             return False
 
     # =====================================================================
-    # 7. النسخ الاحتياطي والاستعادة والصيانة
+    # 7. النسخ الاحتياطي والاستعادة والصيانة (مكتمل مع ضغط)
     # =====================================================================
 
-    async def backup_database(self, backup_path: Optional[Path] = None) -> bool:
+    async def _compress_backup(self, file_path: Path) -> Optional[Path]:
+        """ضغط ملف النسخ الاحتياطي باستخدام gzip."""
+        try:
+            compressed_path = file_path.with_suffix(file_path.suffix + '.gz')
+            with open(file_path, 'rb') as f_in:
+                with gzip.open(compressed_path, 'wb') as f_out:
+                    f_out.writelines(f_in)
+            file_path.unlink()  # حذف الملف غير المضغوط
+            return compressed_path
+        except Exception as e:
+            logger.error(f"❌ فشل ضغط النسخ الاحتياطي: {e}")
+            return None
+
+    async def backup_database(self, backup_path: Optional[Path] = None, compress: bool = True) -> bool:
+        """أخذ نسخة احتياطية كاملة لقاعدة البيانات مع دعم الضغط."""
         try:
             if USE_POSTGRES:
-                # ... pg_dump
-                pass
+                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.dump"
+                backup_file.parent.mkdir(parents=True, exist_ok=True)
+                # التحقق من وجود pg_dump
+                try:
+                    await asyncio.create_subprocess_exec("pg_dump", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                except FileNotFoundError:
+                    logger.error("❌ pg_dump غير موجود في النظام. يرجى تثبيته.")
+                    return False
+
+                cmd = [
+                    "pg_dump",
+                    "--clean",
+                    "--if-exists",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--file", str(backup_file),
+                    DATABASE_URL
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    logger.error(f"❌ pg_dump فشل: {stderr.decode()}")
+                    return False
+                logger.info(f"✅ نسخ احتياطي PostgreSQL: {backup_file.name}")
+
+                if compress:
+                    compressed = await self._compress_backup(backup_file)
+                    if compressed:
+                        backup_file = compressed
+
+                return True
+
             elif USE_MYSQL:
-                # ... mysqldump
-                pass
+                pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
+                match = re.match(pattern, DATABASE_URL)
+                if not match:
+                    logger.error("❌ MySQL DATABASE_URL غير صالح للنسخ الاحتياطي")
+                    return False
+                user, password, host, port, database = match.groups()
+                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.sql"
+                backup_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # التحقق من وجود mysqldump
+                try:
+                    await asyncio.create_subprocess_exec("mysqldump", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                except FileNotFoundError:
+                    logger.error("❌ mysqldump غير موجود في النظام. يرجى تثبيته.")
+                    return False
+
+                cmd = [
+                    "mysqldump",
+                    f"--host={host}",
+                    f"--port={port}",
+                    f"--user={user}",
+                    f"--password={password}",
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    database,
+                    "--result-file", str(backup_file)
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    logger.error(f"❌ mysqldump فشل: {stderr.decode()}")
+                    return False
+                logger.info(f"✅ نسخ احتياطي MySQL: {backup_file.name}")
+
+                if compress:
+                    compressed = await self._compress_backup(backup_file)
+                    if compressed:
+                        backup_file = compressed
+
+                return True
+
             else:
-                # ... sqlite backup
-                pass
-            return True
+                # SQLite
+                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+                backup_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # checkpoint لضمان كتابة جميع البيانات
+                async with self.connection() as conn:
+                    await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+                def _backup():
+                    source = sqlite3.connect(str(PATHS.DB))
+                    dest = sqlite3.connect(str(backup_file))
+                    with dest:
+                        source.backup(dest)
+                    dest.close()
+                    source.close()
+
+                await asyncio.to_thread(_backup)
+                logger.info(f"✅ نسخ احتياطي SQLite: {backup_file.name}")
+
+                if compress:
+                    compressed = await self._compress_backup(backup_file)
+                    if compressed:
+                        backup_file = compressed
+
+                return True
+
         except Exception as e:
             logger.error(f"❌ فشل النسخ الاحتياطي: {e}", exc_info=True)
             return False
 
-    async def restore_database(self, backup_path: Path) -> bool:
+    async def restore_database(self, backup_path: Path, decompress: bool = True) -> bool:
+        """استعادة قاعدة البيانات من نسخة احتياطية مع دعم فك الضغط."""
         try:
-            # ... استعادة
-            return True
+            # إذا كان الملف مضغوطاً، قم بفك ضغطه
+            if backup_path.suffix == '.gz' and decompress:
+                decompressed_path = backup_path.with_suffix('')
+                with gzip.open(backup_path, 'rb') as f_in:
+                    with open(decompressed_path, 'wb') as f_out:
+                        f_out.write(f_in.read())
+                backup_path = decompressed_path
+                logger.info(f"✅ تم فك ضغط النسخة الاحتياطية إلى {backup_path.name}")
+
+            if USE_POSTGRES:
+                # التحقق من وجود pg_restore
+                try:
+                    await asyncio.create_subprocess_exec("pg_restore", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                except FileNotFoundError:
+                    logger.error("❌ pg_restore غير موجود في النظام. يرجى تثبيته.")
+                    return False
+
+                cmd = [
+                    "pg_restore",
+                    "--clean",
+                    "--if-exists",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--dbname", DATABASE_URL,
+                    str(backup_path)
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    logger.error(f"❌ pg_restore فشل: {stderr.decode()}")
+                    return False
+                logger.info("✅ استعادة PostgreSQL تمت بنجاح")
+                return True
+
+            elif USE_MYSQL:
+                pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
+                match = re.match(pattern, DATABASE_URL)
+                if not match:
+                    logger.error("❌ MySQL DATABASE_URL غير صالح للاستعادة")
+                    return False
+                user, password, host, port, database = match.groups()
+
+                # التحقق من وجود mysql
+                try:
+                    await asyncio.create_subprocess_exec("mysql", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                except FileNotFoundError:
+                    logger.error("❌ mysql غير موجود في النظام. يرجى تثبيته.")
+                    return False
+
+                cmd = [
+                    "mysql",
+                    f"--host={host}",
+                    f"--port={port}",
+                    f"--user={user}",
+                    f"--password={password}",
+                    database,
+                    "-e", f"source {backup_path}"
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    logger.error(f"❌ mysql استعادة فشل: {stderr.decode()}")
+                    return False
+                logger.info("✅ استعادة MySQL تمت بنجاح")
+                return True
+
+            else:
+                # SQLite
+                await self.close()
+                shutil.copy2(backup_path, PATHS.DB)
+                await self.initialize()
+                logger.info("✅ استعادة SQLite تمت بنجاح")
+                return True
+
         except Exception as e:
             logger.error(f"❌ فشل الاستعادة: {e}", exc_info=True)
             return False
@@ -1420,9 +3001,11 @@ class Database:
             if USE_POSTGRES:
                 async with self.connection() as conn:
                     await conn.execute("VACUUM ANALYZE")
+                logger.info("✅ PostgreSQL VACUUM ANALYZE تم")
             elif USE_MYSQL:
                 async with self.connection() as conn:
                     await conn.execute("OPTIMIZE TABLE users, user_channels, posts, schedule, last_publish, bot_groups, user_groups_link, group_admins, hidden_owner_groups, hidden_admins, anonymous_admins, group_security, chat_locks, banned_words, auto_replies, auto_reply_settings, support_tickets, bot_admins, settings, referrals, referral_rewards, user_reminder_settings, user_translation, contests, contest_participants, contest_winners, admin_logs, user_warnings, user_violations, group_rules, user_messages, scheduled_posts, sentiment_history, plans, subscriptions, invoices, payment_logs, user_penalties, violation_penalties, gift_codes, user_points")
+                logger.info("✅ MySQL OPTIMIZE TABLE تم")
             else:
                 async with self.connection() as conn:
                     await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1431,6 +3014,7 @@ class Database:
                     conn.execute("VACUUM")
                     conn.close()
                 await asyncio.to_thread(_vacuum)
+                logger.info("✅ SQLite VACUUM تم")
             return True
         except Exception as e:
             logger.error(f"❌ فشل VACUUM/OPTIMIZE: {e}")
@@ -1451,10 +3035,11 @@ class Database:
             return False
 
     # =====================================================================
-    # دوال المستخدمين (تم تحسين register_user)
+    # دوال المستخدمين (تم تحسين register_user باستخدام الدوال المساعدة)
     # =====================================================================
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
+        """تسجيل مستخدم جديد أو تحديث معلوماته."""
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
@@ -1463,7 +3048,8 @@ class Database:
                         code = secrets.token_urlsafe(12)
                         try:
                             if USE_POSTGRES:
-                                await conn.execute(
+                                await self._execute_with_conn(
+                                    conn,
                                     """INSERT INTO users 
                                        (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
                                        VALUES ($1, $2, $3, $4, 0, $5, $6)
@@ -1474,7 +3060,8 @@ class Database:
                                     user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
                                 )
                             elif USE_MYSQL:
-                                await conn.execute(
+                                await self._execute_with_conn(
+                                    conn,
                                     """INSERT INTO users 
                                        (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
                                        VALUES (%s, %s, %s, %s, 0, %s, %s)
@@ -1482,11 +3069,12 @@ class Database:
                                            username = CASE WHEN %s != '' THEN %s ELSE users.username END,
                                            first_name = CASE WHEN %s != '' THEN %s ELSE users.first_name END,
                                            updated_at = %s""",
-                                    (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                     username, username, first_name, first_name, TimeUtils.sql_iso())
+                                    user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                    username, username, first_name, first_name, TimeUtils.sql_iso()
                                 )
                             else:
-                                await conn.execute(
+                                await self._execute_with_conn(
+                                    conn,
                                     """INSERT INTO users 
                                        (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) 
                                        VALUES (?, ?, ?, ?, 0, ?, ?)
@@ -1494,8 +3082,8 @@ class Database:
                                            username = CASE WHEN ? != '' THEN ? ELSE users.username END,
                                            first_name = CASE WHEN ? != '' THEN ? ELSE users.first_name END,
                                            updated_at = ?""",
-                                    (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                     username, username, first_name, first_name, TimeUtils.sql_iso())
+                                    user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                    username, username, first_name, first_name, TimeUtils.sql_iso()
                                 )
                             referral_code = code
                             break
@@ -1507,49 +3095,58 @@ class Database:
                         import uuid
                         code = str(uuid.uuid4()).replace('-', '')[:12]
                         if USE_POSTGRES:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES ($1, $2, $3, $4, 0, $5, $6) ON CONFLICT(user_id) DO UPDATE SET username = $2, first_name = $3, updated_at = $6",
                                 user_id, username, first_name, code, TimeUtils.utc_now(), TimeUtils.utc_now()
                             )
                         elif USE_MYSQL:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (%s, %s, %s, %s, 0, %s, %s) ON DUPLICATE KEY UPDATE username = VALUES(username), first_name = VALUES(first_name), updated_at = VALUES(updated_at)",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                                user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
                         else:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, updated_at = excluded.updated_at",
-                                (user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                                user_id, username, first_name, code, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
                         referral_code = code
 
                     # user_points و referral_rewards
                     if USE_POSTGRES:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2",
                             user_id, TimeUtils.utc_now()
                         )
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING",
                             user_id
                         )
                     elif USE_MYSQL:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)",
-                            (user_id, TimeUtils.sql_iso())
+                            user_id, TimeUtils.sql_iso()
                         )
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
-                            (user_id,)
+                            user_id
                         )
                     else:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated",
-                            (user_id, TimeUtils.sql_iso())
+                            user_id, TimeUtils.sql_iso()
                         )
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
-                            (user_id,)
+                            user_id
                         )
             return True
         except Exception as e:
@@ -1615,15 +3212,15 @@ class Database:
                 now = TimeUtils.utc_now()
                 trial_end = now + timedelta(days=30)
                 async with self.transaction() as conn:
-                    trial_plan_id = await self._fetchval_in_conn(
+                    trial_plan_id = await self._fetchval_with_conn(
                         conn,
                         "SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1",
                         default=1
                     )
-                    current_end = await self._fetchval_in_conn(
+                    current_end = await self._fetchval_with_conn(
                         conn,
                         "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        (user_id, TimeUtils.utc_now())
+                        user_id, TimeUtils.utc_now()
                     )
                     current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     if current_end_dt and current_end_dt > trial_end:
@@ -1634,37 +3231,47 @@ class Database:
                         new_end = trial_end
                     if days_granted > 0:
                         if USE_POSTGRES:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "UPDATE users SET trial_used = 1, subscription_end = $1 WHERE user_id = $2",
                                 new_end, user_id
                             )
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 """INSERT INTO subscriptions 
                                    (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
                                    VALUES ($1, $2, 'active', $3, $4, 'trial', $5, $6)""",
                                 user_id, trial_plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now()
                             )
+                            # تحديث subscription_end بعد إدراج الاشتراك
+                            await self._refresh_user_subscription_end(conn, user_id)
                         else:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "UPDATE users SET trial_used = 1, subscription_end = ? WHERE user_id = ?",
-                                (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id)
+                                new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id
                             )
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 """INSERT INTO subscriptions 
                                    (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
                                    VALUES (?,?,?,?,?,?,?,?)""",
-                                (user_id, trial_plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'trial', TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                                user_id, trial_plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'trial', TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
+                            # تحديث subscription_end بعد إدراج الاشتراك
+                            await self._refresh_user_subscription_end(conn, user_id)
                     else:
                         if USE_POSTGRES:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "UPDATE users SET subscription_end = $1 WHERE user_id = $2",
                                 current_end_dt, user_id
                             )
                         else:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "UPDATE users SET subscription_end = ? WHERE user_id = ?",
-                                (current_end_dt.strftime('%Y-%m-%d %H:%M:%S'), user_id)
+                                current_end_dt.strftime('%Y-%m-%d %H:%M:%S'), user_id
                             )
                     return days_granted
         except Exception as e:
@@ -1700,7 +3307,7 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات (add_channel محسّن)
+    # دوال القنوات (add_channel محسّن باستخدام المساعدات)
     # =====================================================================
 
     async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[int]:
@@ -1709,68 +3316,44 @@ class Database:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
-                        plan_row = await conn.fetchrow("""
-                            WITH plan AS (
-                                SELECT p.max_channels
-                                FROM subscriptions s
-                                JOIN plans p ON s.plan_id = p.id
-                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                                LIMIT 1
-                            ),
-                            cnt AS (
-                                SELECT COUNT(*) AS c FROM user_channels WHERE user_id = $1 AND banned = 0
-                            )
-                            SELECT plan.max_channels, cnt.c
-                            FROM plan, cnt
-                        """, user_id, TimeUtils.utc_now())
-                        if not plan_row:
-                            return None
-                        max_channels = plan_row['max_channels']
-                        current_count = plan_row['c'] or 0
-                        if max_channels is not None and current_count >= max_channels:
-                            return None
-                        existing = await conn.fetchrow("SELECT id FROM user_channels WHERE user_id = $1 AND channel_id = $2", user_id, channel_id)
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
+                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = $1 AND banned = 0) as cnt""",
+                            user_id, TimeUtils.utc_now()
+                        )
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("""
-                            SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
-                                    WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
-                                   (SELECT COUNT(*) FROM user_channels WHERE user_id = %s AND banned = 0) as cnt
-                        """, (user_id, TimeUtils.sql_iso(), user_id))
-                        row = await cursor.fetchone()
-                        if not row:
-                            return None
-                        max_channels = row[0]
-                        current_count = row[1] or 0
-                        if max_channels is not None and current_count >= max_channels:
-                            return None
-                        await cursor.execute("SELECT id FROM user_channels WHERE user_id = %s AND channel_id = %s", (user_id, channel_id))
-                        existing_row = await cursor.fetchone()
-                        existing = {'id': existing_row[0]} if existing_row else None
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
+                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = %s AND banned = 0) as cnt""",
+                            user_id, TimeUtils.sql_iso(), user_id
+                        )
                     else:
-                        cursor = await conn.execute("""
-                            SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
-                                    WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
-                                   (SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0) as cnt
-                        """, (user_id, TimeUtils.sql_iso(), user_id))
-                        row = await cursor.fetchone()
-                        if not row:
-                            return None
-                        max_channels = row[0]
-                        current_count = row[1] or 0
-                        if max_channels is not None and current_count >= max_channels:
-                            return None
-                        cursor = await conn.execute("SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
-                        existing_row = await cursor.fetchone()
-                        existing = {'id': existing_row[0]} if existing_row else None
-
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
+                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0) as cnt""",
+                            user_id, TimeUtils.sql_iso(), user_id
+                        )
+                    if not plan_row:
+                        return None
+                    max_channels = plan_row['max_channels']
+                    current_count = plan_row['cnt'] or 0
+                    if max_channels is not None and current_count >= max_channels:
+                        return None
+                    existing = await self._fetchone_with_conn(conn, "SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?", user_id, channel_id)
                     is_new = existing is None
                     if is_new:
                         if USE_POSTGRES:
-                            row = await conn.fetchrow(
+                            row = await self._fetchone_with_conn(
+                                conn,
                                 "INSERT INTO user_channels (user_id, channel_id, channel_name, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
                                 user_id, channel_id, channel_name, TimeUtils.utc_now()
                             )
@@ -1790,48 +3373,54 @@ class Database:
                             ch_db_id = cursor.lastrowid
                     else:
                         ch_db_id = existing['id']
-                        await self._execute_in_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
-                    await self._execute_in_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
+                        await self._execute_with_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
+                    await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
                     import random
                     delay_seconds = random.randint(0, 11 * 60)
                     next_publish = TimeUtils.utc_now() + timedelta(minutes=12, seconds=delay_seconds)
 
                     if USE_POSTGRES:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             """INSERT INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
                                VALUES ($1, 'interval_minutes', 12, $2)
                                ON CONFLICT (channel_db_id) DO NOTHING""",
                             ch_db_id, next_publish
                         )
                     elif USE_MYSQL:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             """INSERT IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
                                VALUES (%s, 'interval_minutes', 12, %s)""",
-                            (ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S'))
+                            ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S')
                         )
                     else:
-                        await conn.execute(
+                        await self._execute_with_conn(
+                            conn,
                             """INSERT OR IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
                                VALUES (?, 'interval_minutes', 12, ?)""",
-                            (ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S'))
+                            ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S')
                         )
 
                     if is_new:
                         if USE_POSTGRES:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 10, $2) ON CONFLICT (user_id) DO UPDATE SET points = user_points.points + 10, last_updated = $2",
                                 user_id, TimeUtils.utc_now()
                             )
                         elif USE_MYSQL:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 10, %s) ON DUPLICATE KEY UPDATE points = points + 10, last_updated = %s",
-                                (user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                                user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
                         else:
-                            await conn.execute(
+                            await self._execute_with_conn(
+                                conn,
                                 "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,10,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 10, last_updated = ?",
-                                (user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                                user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
                     return ch_db_id
         except Exception as e:
@@ -1858,13 +3447,9 @@ class Database:
     async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
         try:
             async with self.transaction() as conn:
-                deleted = await self._execute_and_get_rowcount(
-                    conn,
-                    "DELETE FROM user_channels WHERE id = ? AND user_id = ?",
-                    channel_db_id, user_id
-                )
+                deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
                 if deleted > 0:
-                    await conn.execute("UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", (user_id, channel_db_id))
+                    await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
                     return True
                 return False
         except Exception as e:
@@ -1901,7 +3486,7 @@ class Database:
         return await self.fetchone("SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
 
     # =====================================================================
-    # دوال المنشورات (add_posts محسّن)
+    # دوال المنشورات (add_posts محسّن باستخدام المساعدات)
     # =====================================================================
 
     async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
@@ -1915,58 +3500,48 @@ class Database:
                         return 0
 
                     if USE_POSTGRES:
-                        plan_row = await conn.fetchrow("""
-                            WITH plan AS (
-                                SELECT p.max_posts
-                                FROM subscriptions s
-                                JOIN plans p ON s.plan_id = p.id
-                                WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                                ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                                LIMIT 1
-                            ),
-                            cnt AS (
-                                SELECT COUNT(*) AS c FROM posts WHERE channel_db_id = $3 AND published = 0
-                            )
-                            SELECT plan.max_posts, cnt.c
-                            FROM plan, cnt
-                        """, user_id, TimeUtils.utc_now(), channel_db_id)
-                        if not plan_row:
-                            return 0
-                        max_posts = plan_row['max_posts']
-                        current_count = plan_row['c'] or 0
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
+                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = $3 AND published = 0) as cnt""",
+                            user_id, TimeUtils.utc_now(), channel_db_id
+                        )
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("""
-                            SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
-                                    WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
-                                   (SELECT COUNT(*) FROM posts WHERE channel_db_id = %s AND published = 0) as cnt
-                        """, (user_id, TimeUtils.sql_iso(), channel_db_id))
-                        row = await cursor.fetchone()
-                        if not row:
-                            return 0
-                        max_posts = row[0]
-                        current_count = row[1] or 0
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
+                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = %s AND published = 0) as cnt""",
+                            user_id, TimeUtils.sql_iso(), channel_db_id
+                        )
                     else:
-                        cursor = await conn.execute("""
-                            SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
-                                    WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                                    ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
-                                   (SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0) as cnt
-                        """, (user_id, TimeUtils.sql_iso(), channel_db_id))
-                        row = await cursor.fetchone()
-                        if not row:
-                            return 0
-                        max_posts = row[0]
-                        current_count = row[1] or 0
+                        plan_row = await self._fetchone_with_conn(
+                            conn,
+                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id 
+                                      WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
+                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
+                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0) as cnt""",
+                            user_id, TimeUtils.sql_iso(), channel_db_id
+                        )
+                    if not plan_row:
+                        return 0
+                    max_posts = plan_row['max_posts']
+                    current_count = plan_row['cnt'] or 0
 
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
-                        key = (t or "", m or "", f or "")
+                        # تطبيق حد النص إذا كان محدداً
+                        text = t or ""
+                        if self._max_post_text_length > 0:
+                            text = text[:self._max_post_text_length]
+                        key = (text, m or "", f or "")
                         if key not in seen_local:
                             seen_local.add(key)
-                            unique_posts.append((t, m, f))
+                            unique_posts.append((text, m, f))
 
                     if not unique_posts:
                         return 0
@@ -1981,7 +3556,12 @@ class Database:
                     total = 0
                     for i in range(0, len(unique_posts), 100):
                         batch = unique_posts[i:i+100]
-                        vals = [(channel_db_id, (t or "")[:4096], m, f, TimeUtils.utc_now()) for t, m, f in batch]
+                        vals = []
+                        for t, m, f in batch:
+                            text = t or ""
+                            if self._max_post_text_length > 0:
+                                text = text[:self._max_post_text_length]
+                            vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
                         if USE_POSTGRES:
                             await conn.executemany(
                                 """INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at)
@@ -2053,10 +3633,9 @@ class Database:
                 cursor = await conn.execute("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", (channel_db_id, user_id))
                 if not await cursor.fetchone():
                     return 0
-                await conn.execute("UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?", (channel_db_id,))
-                cursor = await conn.execute("SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0", (channel_db_id,))
-                row = await cursor.fetchone()
-                return row[0] if row else 0
+                await self._execute_with_conn(conn, "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?", channel_db_id)
+                count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0", channel_db_id, default=0)
+                return count
         except Exception as e:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
             return 0
@@ -2082,7 +3661,8 @@ class Database:
         try:
             async with self.connection() as conn:
                 if USE_POSTGRES:
-                    await conn.execute(
+                    await self._execute_with_conn(
+                        conn,
                         """INSERT INTO bot_groups (chat_id, chat_name, username, added_by, added_at, updated_at)
                            VALUES ($1, $2, $3, $4, $5, $5)
                            ON CONFLICT (chat_id) DO UPDATE SET
@@ -2092,31 +3672,33 @@ class Database:
                         chat_id, chat_name, username, user_id, TimeUtils.utc_now()
                     )
                 elif USE_MYSQL:
-                    await conn.execute(
+                    await self._execute_with_conn(
+                        conn,
                         """INSERT INTO bot_groups (chat_id, chat_name, username, added_by, added_at, updated_at)
                            VALUES (%s, %s, %s, %s, %s, %s)
                            ON DUPLICATE KEY UPDATE
                                chat_name = VALUES(chat_name),
                                username = VALUES(username),
                                updated_at = VALUES(updated_at)""",
-                        (chat_id, chat_name, username, user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                        chat_id, chat_name, username, user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                     )
                 else:
-                    await conn.execute(
+                    await self._execute_with_conn(
+                        conn,
                         """INSERT INTO bot_groups (chat_id, chat_name, username, added_by, added_at, updated_at)
                            VALUES (?,?,?,?,?,?)
                            ON CONFLICT(chat_id) DO UPDATE SET
                                chat_name = excluded.chat_name,
                                username = excluded.username,
                                updated_at = excluded.updated_at""",
-                        (chat_id, chat_name, username, user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
+                        chat_id, chat_name, username, user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                     )
                 if USE_POSTGRES:
-                    await conn.execute("INSERT INTO user_groups_link (user_id, chat_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_id, chat_id)
+                    await self._execute_with_conn(conn, "INSERT INTO user_groups_link (user_id, chat_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_id, chat_id)
                 elif USE_MYSQL:
-                    await conn.execute("INSERT IGNORE INTO user_groups_link (user_id, chat_id) VALUES (%s, %s)", (user_id, chat_id))
+                    await self._execute_with_conn(conn, "INSERT IGNORE INTO user_groups_link (user_id, chat_id) VALUES (%s, %s)", user_id, chat_id)
                 else:
-                    await conn.execute("INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?,?)", (user_id, chat_id))
+                    await self._execute_with_conn(conn, "INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?,?)", user_id, chat_id)
                 logger.info(f"✅ تم تسجيل المجموعة {chat_id} بواسطة المستخدم {user_id}")
             return True
         except Exception as e:
@@ -2140,29 +3722,20 @@ class Database:
         try:
             async with self._lock:
                 async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        existing = await self._fetchall_in_conn(conn, "SELECT user_id FROM group_admins WHERE chat_id = ?", (chat_id,))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT user_id FROM group_admins WHERE chat_id = %s", (chat_id,))
-                        rows = await cursor.fetchall()
-                        existing = [{'user_id': row[0]} for row in rows]
-                    else:
-                        cursor = await conn.execute("SELECT user_id FROM group_admins WHERE chat_id = ?", (chat_id,))
-                        existing = await cursor.fetchall()
+                    existing = await self._fetchall_with_conn(conn, "SELECT user_id FROM group_admins WHERE chat_id = ?", chat_id)
                     existing_ids = {row['user_id'] for row in existing}
                     new_ids = set(admin_ids)
                     to_remove = existing_ids - new_ids
                     for uid in to_remove:
-                        await self._execute_in_conn(conn, "DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?", chat_id, uid)
+                        await self._execute_with_conn(conn, "DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?", chat_id, uid)
                     to_add = new_ids - existing_ids
                     for uid in to_add:
                         if USE_POSTGRES:
-                            await self._execute_in_conn(conn, "INSERT INTO group_admins (chat_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", chat_id, uid)
+                            await self._execute_with_conn(conn, "INSERT INTO group_admins (chat_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", chat_id, uid)
                         elif USE_MYSQL:
-                            await self._execute_in_conn(conn, "INSERT IGNORE INTO group_admins (chat_id, user_id) VALUES (%s, %s)", chat_id, uid)
+                            await self._execute_with_conn(conn, "INSERT IGNORE INTO group_admins (chat_id, user_id) VALUES (%s, %s)", chat_id, uid)
                         else:
-                            await self._execute_in_conn(conn, "INSERT OR IGNORE INTO group_admins (chat_id, user_id) VALUES (?,?)", chat_id, uid)
+                            await self._execute_with_conn(conn, "INSERT OR IGNORE INTO group_admins (chat_id, user_id) VALUES (?,?)", chat_id, uid)
                 return len(admin_ids)
         except Exception as e:
             logger.error(f"❌ Error in sync_group_admins: {e}", exc_info=True)
@@ -2174,8 +3747,8 @@ class Database:
     async def remove_hidden_admin(self, chat_id: int, admin_id: int) -> bool:
         try:
             async with self.transaction() as conn:
-                await self._execute_in_conn(conn, "DELETE FROM hidden_owner_groups WHERE chat_id = ? AND owner_id = ?", chat_id, admin_id)
-                await self._execute_in_conn(conn, "DELETE FROM hidden_admins WHERE chat_id = ? AND admin_id = ?", chat_id, admin_id)
+                await self._execute_with_conn(conn, "DELETE FROM hidden_owner_groups WHERE chat_id = ? AND owner_id = ?", chat_id, admin_id)
+                await self._execute_with_conn(conn, "DELETE FROM hidden_admins WHERE chat_id = ? AND admin_id = ?", chat_id, admin_id)
             return True
         except Exception as e:
             logger.error(f"❌ Error in remove_hidden_admin: {e}", exc_info=True)
@@ -2194,11 +3767,7 @@ class Database:
     async def remove_anonymous_admin(self, chat_id: int, anonymous_id: int) -> bool:
         try:
             async with self.connection() as conn:
-                deleted = await self._execute_and_get_rowcount(
-                    conn,
-                    "DELETE FROM anonymous_admins WHERE chat_id = ? AND anonymous_id = ?",
-                    chat_id, anonymous_id
-                )
+                deleted = await self._execute_with_conn(conn, "DELETE FROM anonymous_admins WHERE chat_id = ? AND anonymous_id = ?", chat_id, anonymous_id)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_anonymous_admin: {e}", exc_info=True)
@@ -2215,27 +3784,18 @@ class Database:
         try:
             async with self._lock:
                 async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        existing = await self._fetchall_in_conn(conn, "SELECT anonymous_id FROM anonymous_admins WHERE chat_id = ?", (chat_id,))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT anonymous_id FROM anonymous_admins WHERE chat_id = %s", (chat_id,))
-                        rows = await cursor.fetchall()
-                        existing = [{'anonymous_id': row[0]} for row in rows]
-                    else:
-                        cursor = await conn.execute("SELECT anonymous_id FROM anonymous_admins WHERE chat_id = ?", (chat_id,))
-                        existing = await cursor.fetchall()
+                    existing = await self._fetchall_with_conn(conn, "SELECT anonymous_id FROM anonymous_admins WHERE chat_id = ?", chat_id)
                     existing_ids = {row['anonymous_id'] for row in existing}
                     new_ids = set(anonymous_ids)
 
                     to_remove = existing_ids - new_ids
                     for anon_id in to_remove:
-                        await self._execute_in_conn(conn, "DELETE FROM anonymous_admins WHERE chat_id = ? AND anonymous_id = ?", chat_id, anon_id)
+                        await self._execute_with_conn(conn, "DELETE FROM anonymous_admins WHERE chat_id = ? AND anonymous_id = ?", chat_id, anon_id)
 
                     for anon_id in new_ids:
                         real_user_id = user_id_map.get(anon_id) if user_id_map else None
                         if USE_POSTGRES:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at)
                                    VALUES (?, ?, ?, ?, ?)
@@ -2245,7 +3805,7 @@ class Database:
                                 chat_id, anon_id, added_by, real_user_id, TimeUtils.utc_now()
                             )
                         elif USE_MYSQL:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at)
                                    VALUES (%s, %s, %s, %s, %s)
@@ -2255,7 +3815,7 @@ class Database:
                                 chat_id, anon_id, added_by, real_user_id, TimeUtils.sql_iso()
                             )
                         else:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at)
                                    VALUES (?,?,?,?,?)
@@ -2325,32 +3885,16 @@ class Database:
                 return False, False
             async with self.transaction() as conn:
                 if chat_id == -1:
-                    count = await self._fetchval_in_conn(
-                        conn,
-                        "SELECT COUNT(*) FROM banned_words WHERE chat_id = -1",
-                        default=0
-                    )
+                    count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM banned_words WHERE chat_id = -1", default=0)
                     if count >= getattr(CONFIG, 'MAX_GLOBAL_BANNED_WORDS', 500):
                         return False, False
                 try:
                     if USE_POSTGRES:
-                        await self._execute_in_conn(
-                            conn,
-                            "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)",
-                            word, chat_id, added_by, TimeUtils.utc_now()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)", word, chat_id, added_by, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        await self._execute_in_conn(
-                            conn,
-                            "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)",
-                            word, chat_id, added_by, TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)", word, chat_id, added_by, TimeUtils.sql_iso())
                     else:
-                        await self._execute_in_conn(
-                            conn,
-                            "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
-                            word, chat_id, added_by, TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)", word, chat_id, added_by, TimeUtils.sql_iso())
                     return True, False
                 except Exception as e:
                     if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -2364,11 +3908,7 @@ class Database:
         word = word.strip().lower()
         try:
             async with self.connection() as conn:
-                deleted = await self._execute_and_get_rowcount(
-                    conn,
-                    "DELETE FROM banned_words WHERE word = ? AND chat_id = ?",
-                    word, chat_id
-                )
+                deleted = await self._execute_with_conn(conn, "DELETE FROM banned_words WHERE word = ? AND chat_id = ?", word, chat_id)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_banned_word: {e}", exc_info=True)
@@ -2431,19 +3971,19 @@ class Database:
         try:
             async with self.connection() as conn:
                 if USE_POSTGRES:
-                    await self._execute_in_conn(
+                    await self._execute_with_conn(
                         conn,
                         "INSERT INTO auto_replies (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at) VALUES (?,?,?,?,?,?,?)",
                         chat_id, keyword, reply, reply_type, media_id, buttons, TimeUtils.utc_now()
                     )
                 elif USE_MYSQL:
-                    await self._execute_in_conn(
+                    await self._execute_with_conn(
                         conn,
                         "INSERT INTO auto_replies (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                         chat_id, keyword, reply, reply_type, media_id, buttons, TimeUtils.sql_iso()
                     )
                 else:
-                    await self._execute_in_conn(
+                    await self._execute_with_conn(
                         conn,
                         "INSERT INTO auto_replies (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at) VALUES (?,?,?,?,?,?,?)",
                         chat_id, keyword, reply, reply_type, media_id, buttons, TimeUtils.sql_iso()
@@ -2462,11 +4002,7 @@ class Database:
         keyword = keyword.lower().strip()
         try:
             async with self.connection() as conn:
-                deleted = await self._execute_and_get_rowcount(
-                    conn,
-                    "DELETE FROM auto_replies WHERE chat_id = ? AND keyword = ?",
-                    chat_id, keyword
-                )
+                deleted = await self._execute_with_conn(conn, "DELETE FROM auto_replies WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_auto_reply: {e}", exc_info=True)
@@ -2476,61 +4012,39 @@ class Database:
         keyword = keyword.lower().strip()
         async with self.connection() as conn:
             if USE_POSTGRES:
-                row = await self._fetchone_in_conn(
-                    conn,
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1",
-                    (chat_id, keyword)
-                )
+                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1", chat_id, keyword)
                 if row:
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
                     return row
-                row = await self._fetchone_in_conn(
-                    conn,
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1",
-                    (keyword,)
-                )
+                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1", keyword)
                 if row:
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
                     return row
             elif USE_MYSQL:
                 cursor = await conn.cursor()
-                await cursor.execute(
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = %s AND keyword = %s AND is_active = 1",
-                    (chat_id, keyword)
-                )
+                await cursor.execute("SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = %s AND keyword = %s AND is_active = 1", (chat_id, keyword))
                 row = await cursor.fetchone()
                 if row:
                     columns = ['reply', 'reply_type', 'reply_media_id', 'reply_buttons']
                     reply = dict(zip(columns, row))
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = %s AND keyword = %s", chat_id, keyword)
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = %s AND keyword = %s", chat_id, keyword)
                     return reply
-                await cursor.execute(
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = %s AND is_active = 1",
-                    (keyword,)
-                )
+                await cursor.execute("SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = %s AND is_active = 1", (keyword,))
                 row = await cursor.fetchone()
                 if row:
                     columns = ['reply', 'reply_type', 'reply_media_id', 'reply_buttons']
                     reply = dict(zip(columns, row))
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = %s", keyword)
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = %s", keyword)
                     return reply
             else:
-                cursor = await conn.execute(
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1",
-                    (chat_id, keyword)
-                )
-                reply = await cursor.fetchone()
-                if reply:
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
-                    return dict(reply)
-                cursor = await conn.execute(
-                    "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1",
-                    (keyword,)
-                )
-                reply = await cursor.fetchone()
-                if reply:
-                    await self._execute_in_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
-                    return dict(reply)
+                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1", chat_id, keyword)
+                if row:
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
+                    return row
+                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1", keyword)
+                if row:
+                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
+                    return row
             return None
 
     async def get_auto_reply_stats(self, chat_id: int, limit: int = 20) -> List[Dict]:
@@ -2576,7 +4090,7 @@ class Database:
                 for item in data:
                     try:
                         if USE_POSTGRES:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT INTO auto_replies 
                                    (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
@@ -2592,7 +4106,7 @@ class Database:
                                 item.get('usage_count', 0)
                             )
                         elif USE_MYSQL:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT IGNORE INTO auto_replies 
                                    (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
@@ -2608,7 +4122,7 @@ class Database:
                                 item.get('usage_count', 0)
                             )
                         else:
-                            await self._execute_in_conn(
+                            await self._execute_with_conn(
                                 conn,
                                 """INSERT OR IGNORE INTO auto_replies 
                                    (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
@@ -2659,7 +4173,7 @@ class Database:
     async def update_next_publish(self, channel_db_id: int) -> bool:
         async with self.transaction() as conn:
             if USE_POSTGRES:
-                schedule = await self._fetchone_in_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
+                schedule = await self._fetchone_with_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id)
             elif USE_MYSQL:
                 cursor = await conn.cursor()
                 await cursor.execute("SELECT * FROM schedule WHERE channel_db_id = %s", (channel_db_id,))
@@ -2668,11 +4182,11 @@ class Database:
                     columns = [desc[0] for desc in cursor.description]
                     schedule = dict(zip(columns, schedule))
             else:
-                schedule = await self._fetchone_in_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
+                schedule = await self._fetchone_with_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id)
             if not schedule:
-                await self._execute_in_conn(conn, "INSERT OR IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes) VALUES (?, 'interval_minutes', 12)", channel_db_id)
+                await self._execute_with_conn(conn, "INSERT OR IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes) VALUES (?, 'interval_minutes', 12)", channel_db_id)
                 if USE_POSTGRES:
-                    schedule = await self._fetchone_in_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
+                    schedule = await self._fetchone_with_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id)
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
                     await cursor.execute("SELECT * FROM schedule WHERE channel_db_id = %s", (channel_db_id,))
@@ -2681,8 +4195,8 @@ class Database:
                         columns = [desc[0] for desc in cursor.description]
                         schedule = dict(zip(columns, schedule))
                 else:
-                    schedule = await self._fetchone_in_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
-            last_publish = await self._fetchval_in_conn(conn, "SELECT last_publish_time FROM last_publish WHERE channel_db_id = ?", (channel_db_id,))
+                    schedule = await self._fetchone_with_conn(conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id)
+            last_publish = await self._fetchval_with_conn(conn, "SELECT last_publish_time FROM last_publish WHERE channel_db_id = ?", channel_db_id)
             last_time = TimeUtils.safe_parse_iso(last_publish) if last_publish else TimeUtils.utc_now()
             if isinstance(last_time, str):
                 last_time = TimeUtils.safe_parse_iso(last_time) or TimeUtils.utc_now()
@@ -2708,7 +4222,7 @@ class Database:
                 next_date = last_time + timedelta(seconds=interval_seconds * intervals_needed)
                 next_date += timedelta(seconds=delay_seconds)
 
-            await self._execute_in_conn(conn, "UPDATE schedule SET next_publish_date = ? WHERE channel_db_id = ?", next_date, channel_db_id)
+            await self._execute_with_conn(conn, "UPDATE schedule SET next_publish_date = ? WHERE channel_db_id = ?", next_date, channel_db_id)
         return True
 
     async def update_last_publish(self, channel_db_id: int) -> bool:
@@ -2717,6 +4231,7 @@ class Database:
 
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
+        # تحسين: استخدام COALESCE مع created_at لتوزيع عادل بين القنوات
         query = """
             WITH active_subs AS (
                 SELECT s.user_id, 
@@ -2758,10 +4273,10 @@ class Database:
               )
               AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
               AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
-            ORDER BY COALESCE(sch.next_publish_date, '1970-01-01 00:00:00') ASC
+            ORDER BY COALESCE(sch.next_publish_date, uc.created_at, ?) ASC
             LIMIT ?
         """
-        return await self.fetchall(query, (now, now, limit))
+        return await self.fetchall(query, (now, now, now, limit))
 
     # =====================================================================
     # دوال التذاكر
@@ -2771,15 +4286,8 @@ class Database:
         try:
             async with self._lock:
                 async with self.transaction() as conn:
-                    next_num = await self._fetchval_in_conn(
-                        conn,
-                        "SELECT COALESCE(MAX(ticket_number), 0) + 1 FROM support_tickets",
-                        default=1
-                    )
-                    await self._execute_in_conn(conn,
-                        "INSERT INTO support_tickets (user_id, username, message, media_type, media_file_id, ticket_number, created_at) VALUES (?,?,?,?,?,?,?)",
-                        user_id, username, content, media_type, media_file_id, next_num, TimeUtils.utc_now()
-                    )
+                    next_num = await self._fetchval_with_conn(conn, "SELECT COALESCE(MAX(ticket_number), 0) + 1 FROM support_tickets", default=1)
+                    await self._execute_with_conn(conn, "INSERT INTO support_tickets (user_id, username, message, media_type, media_file_id, ticket_number, created_at) VALUES (?,?,?,?,?,?,?)", user_id, username, content, media_type, media_file_id, next_num, TimeUtils.utc_now())
                 return next_num
         except Exception as e:
             logger.error(f"❌ Error in create_ticket: {e}", exc_info=True)
@@ -2805,40 +4313,18 @@ class Database:
             async with self.transaction() as conn:
                 today = TimeUtils.utc_now().strftime('%Y-%m-%d')
                 if USE_POSTGRES:
-                    count = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ? AND date(created_at) = ?", (referrer_id, today), default=0)
+                    count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ? AND date(created_at) = ?", referrer_id, today, default=0)
                 elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = %s AND DATE(created_at) = %s", (referrer_id, today))
-                    row = await cursor.fetchone()
-                    count = row[0] if row else 0
+                    count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s AND DATE(created_at) = %s", referrer_id, today, default=0)
                 else:
-                    count = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ? AND date(created_at) = ?", (referrer_id, today), default=0)
+                    count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ? AND date(created_at) = ?", referrer_id, today, default=0)
                 if count >= getattr(CONFIG, 'MAX_DAILY_REFERRALS', 10):
                     logger.warning(f"⚠️ User {referrer_id} reached daily referral limit")
                     return False
-                inserted = await self._execute_and_get_rowcount(
-                    conn,
-                    "INSERT INTO referrals (referrer_id, referred_id, created_at) VALUES (?,?,?)",
-                    referrer_id, referred_id, TimeUtils.utc_now()
-                )
+                inserted = await self._execute_with_conn(conn, "INSERT INTO referrals (referrer_id, referred_id, created_at) VALUES (?,?,?)", referrer_id, referred_id, TimeUtils.utc_now())
                 if inserted > 0:
-                    await self._execute_in_conn(conn,
-                        """INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date)
-                           VALUES (?,1,3,0,?)
-                           ON CONFLICT(user_id) DO UPDATE SET 
-                               referral_count = referral_count + 1,
-                               total_reward_days = total_reward_days + 3,
-                               last_referral_date = ?""",
-                        referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now()
-                    )
-                    await self._execute_in_conn(conn,
-                        """INSERT INTO user_points (user_id, points, last_updated)
-                           VALUES (?,5,?)
-                           ON CONFLICT(user_id) DO UPDATE SET 
-                               points = points + 5, 
-                               last_updated = ?""",
-                        referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now()
-                    )
+                    await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?,1,3,0,?) ON CONFLICT(user_id) DO UPDATE SET referral_count = referral_count + 1, total_reward_days = total_reward_days + 3, last_referral_date = ?", referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now())
+                    await self._execute_with_conn(conn, "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,5,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 5, last_updated = ?", referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now())
                     return True
                 return False
         except Exception as e:
@@ -2849,21 +4335,18 @@ class Database:
         try:
             async with self.connection() as conn:
                 if USE_POSTGRES:
-                    await self._execute_in_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
+                    await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
                 elif USE_MYSQL:
-                    await self._execute_in_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
+                    await self._execute_with_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
                 else:
-                    await self._execute_in_conn(conn, "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", user_id)
-                total = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,), default=0)
+                    await self._execute_with_conn(conn, "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", user_id)
+                total = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", user_id, default=0)
                 if USE_POSTGRES:
-                    reward = await self._fetchone_in_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", (user_id,))
+                    reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", user_id)
                 elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = %s", (user_id,))
-                    row = await cursor.fetchone()
-                    reward = {'total_reward': row[0], 'claimed': row[1]} if row else None
+                    reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = %s", user_id)
                 else:
-                    reward = await self._fetchone_in_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", (user_id,))
+                    reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", user_id)
                 total_reward = reward['total_reward'] if reward else 0
                 claimed = reward['claimed'] if reward else 0
             return {'total': total, 'claimed': claimed, 'available': max(0, total_reward - claimed)}
@@ -2876,20 +4359,17 @@ class Database:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
-                        await self._execute_in_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
+                        await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
                     elif USE_MYSQL:
-                        await self._execute_in_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
+                        await self._execute_with_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
                     else:
-                        await self._execute_in_conn(conn, "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", user_id)
+                        await self._execute_with_conn(conn, "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)", user_id)
                     if USE_POSTGRES:
-                        reward = await self._fetchone_in_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", (user_id,))
+                        reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", user_id)
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = %s", (user_id,))
-                        row = await cursor.fetchone()
-                        reward = {'total_reward': row[0], 'claimed': row[1]} if row else None
+                        reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = %s", user_id)
                     else:
-                        reward = await self._fetchone_in_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", (user_id,))
+                        reward = await self._fetchone_with_conn(conn, "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?", user_id)
                     if not reward:
                         return 0
                     total_reward = reward['total_reward'] or 0
@@ -2899,114 +4379,44 @@ class Database:
                         return 0
 
                     if USE_POSTGRES:
-                        plan_id = await self._fetchval_in_conn(
-                            conn,
-                            """
-                            SELECT s.plan_id
-                            FROM subscriptions s
-                            JOIN plans p ON s.plan_id = p.id
-                            WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                            ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                            LIMIT 1
-                            """,
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        plan_id = await self._fetchval_with_conn(conn, "SELECT s.plan_id FROM subscriptions s JOIN plans p ON s.plan_id = p.id WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ? ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            """
-                            SELECT s.plan_id
-                            FROM subscriptions s
-                            JOIN plans p ON s.plan_id = p.id
-                            WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                            ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                            LIMIT 1
-                            """,
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        plan_id = row[0] if row else None
+                        plan_id = await self._fetchval_with_conn(conn, "SELECT s.plan_id FROM subscriptions s JOIN plans p ON s.plan_id = p.id WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1", user_id, TimeUtils.sql_iso())
                     else:
-                        plan_id = await self._fetchval_in_conn(
-                            conn,
-                            """
-                            SELECT s.plan_id
-                            FROM subscriptions s
-                            JOIN plans p ON s.plan_id = p.id
-                            WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                            ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-                            LIMIT 1
-                            """,
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        plan_id = await self._fetchval_with_conn(conn, "SELECT s.plan_id FROM subscriptions s JOIN plans p ON s.plan_id = p.id WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ? ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1", user_id, TimeUtils.sql_iso())
                     if not plan_id:
                         if USE_POSTGRES:
-                            plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         elif USE_MYSQL:
-                            cursor = await conn.cursor()
-                            await cursor.execute("SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
-                            row = await cursor.fetchone()
-                            plan_id = row[0] if row else None
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         else:
-                            plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         if not plan_id:
                             if USE_POSTGRES:
-                                plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             elif USE_MYSQL:
-                                cursor = await conn.cursor()
-                                await cursor.execute("SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
-                                row = await cursor.fetchone()
-                                plan_id = row[0] if row else None
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             else:
-                                plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             if not plan_id:
                                 logger.warning(f"⚠️ لا توجد خطة نشطة للمستخدم {user_id} لصرف مكافأة الإحالة")
                                 return 0
 
-                    await self._execute_in_conn(conn,
-                        "UPDATE referral_rewards SET claimed_reward_days = claimed_reward_days + ? WHERE user_id = ?",
-                        available, user_id
-                    )
+                    await self._execute_with_conn(conn, "UPDATE referral_rewards SET claimed_reward_days = claimed_reward_days + ? WHERE user_id = ?", available, user_id)
                     if USE_POSTGRES:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        current_end = row[0] if row else None
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", user_id, TimeUtils.sql_iso())
                     else:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.sql_iso())
                     current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     now = TimeUtils.utc_now()
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=available)
                     if USE_POSTGRES:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?, ?, 'active', ?, ?, 'referral', ?, ?)""",
-                            user_id, plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 'referral', ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?)""",
-                            user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     return available
         except Exception as e:
@@ -3039,9 +4449,10 @@ class Database:
                 (now, now, now)
             )
         elif USE_MYSQL:
+            # استخدام TIMESTAMPDIFF بدلاً من DATEDIFF للحصول على دقة أفضل
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          DATEDIFF(MAX(s.end_date), %s) as days_left,
+                          TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) as days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
@@ -3050,7 +4461,7 @@ class Database:
                    GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
                    HAVING days_left <= r.reminder_days_before
                       AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL OR DATEDIFF(%s, r.last_reminder_sent) >= 1)""",
+                      AND (r.last_reminder_sent IS NULL OR TIMESTAMPDIFF(DAY, r.last_reminder_sent, %s) >= 1)""",
                 (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'))
             )
         else:
@@ -3081,23 +4492,14 @@ class Database:
                 return 0
             async with self.connection() as conn:
                 if USE_POSTGRES:
-                    row = await conn.fetchrow(
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-                        creator_id, title, description, prize, dt, TimeUtils.utc_now()
-                    )
-                    return row['id']
+                    row = await self._fetchone_with_conn(conn, "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", creator_id, title, description, prize, dt, TimeUtils.utc_now())
+                    return row['id'] if row else 0
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
-                    await cursor.execute(
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
-                        (creator_id, title, description, prize, dt.strftime('%Y-%m-%d %H:%M:%S'), TimeUtils.sql_iso())
-                    )
+                    await cursor.execute("INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (%s, %s, %s, %s, %s, %s)", (creator_id, title, description, prize, dt.strftime('%Y-%m-%d %H:%M:%S'), TimeUtils.sql_iso()))
                     return cursor.lastrowid
                 else:
-                    cursor = await conn.execute(
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (?,?,?,?,?,?)",
-                        (creator_id, title, description, prize, dt.strftime('%Y-%m-%d %H:%M:%S'), TimeUtils.sql_iso())
-                    )
+                    cursor = await conn.execute("INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (?,?,?,?,?,?)", (creator_id, title, description, prize, dt.strftime('%Y-%m-%d %H:%M:%S'), TimeUtils.sql_iso()))
                     return cursor.lastrowid if cursor.lastrowid else 0
         except Exception as e:
             logger.error(f"❌ Error in create_contest: {e}", exc_info=True)
@@ -3107,29 +4509,21 @@ class Database:
         return await self.fetchall(
             """SELECT c.*, (SELECT COUNT(*) FROM contest_participants WHERE contest_id = c.id) as participants
                FROM contests c
-               WHERE c.status = 'active' AND datetime(c.end_date) > ?
+               WHERE c.status = 'active' AND c.end_date > ?
                ORDER BY c.end_date ASC LIMIT ?""",
-            (TimeUtils.sql_iso(), limit)
+            (TimeUtils.utc_now(), limit)
         )
 
     async def join_contest(self, contest_id: int, user_id: int, answer: str = "") -> bool:
         try:
             async with self.transaction() as conn:
-                if USE_POSTGRES:
-                    contest = await self._fetchone_in_conn(conn, "SELECT status, end_date FROM contests WHERE id = ?", (contest_id,))
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT status, end_date FROM contests WHERE id = %s", (contest_id,))
-                    row = await cursor.fetchone()
-                    contest = {'status': row[0], 'end_date': row[1]} if row else None
-                else:
-                    contest = await self._fetchone_in_conn(conn, "SELECT status, end_date FROM contests WHERE id = ?", (contest_id,))
+                contest = await self._fetchone_with_conn(conn, "SELECT status, end_date FROM contests WHERE id = ?", contest_id)
                 if not contest or contest['status'] != 'active':
                     return False
                 end_date = TimeUtils.safe_parse_iso(contest['end_date'])
                 if end_date and end_date < TimeUtils.utc_now():
                     return False
-                await self._execute_in_conn(conn, "INSERT INTO contest_participants (contest_id, user_id, answer, joined_at) VALUES (?,?,?,?)", contest_id, user_id, answer, TimeUtils.utc_now())
+                await self._execute_with_conn(conn, "INSERT INTO contest_participants (contest_id, user_id, answer, joined_at) VALUES (?,?,?,?)", contest_id, user_id, answer, TimeUtils.utc_now())
                 return True
         except Exception as e:
             if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -3143,19 +4537,11 @@ class Database:
                 cursor = await conn.execute("SELECT 1 FROM contest_participants WHERE contest_id = ? AND user_id = ?", (contest_id, winner_id))
                 if not await cursor.fetchone():
                     return False
-                if USE_POSTGRES:
-                    contest = await self._fetchone_in_conn(conn, "SELECT status FROM contests WHERE id = ?", (contest_id,))
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT status FROM contests WHERE id = %s", (contest_id,))
-                    row = await cursor.fetchone()
-                    contest = {'status': row[0]} if row else None
-                else:
-                    contest = await self._fetchone_in_conn(conn, "SELECT status FROM contests WHERE id = ?", (contest_id,))
+                contest = await self._fetchone_with_conn(conn, "SELECT status FROM contests WHERE id = ?", contest_id)
                 if not contest or contest['status'] != 'active':
                     return False
-                await self._execute_in_conn(conn, "UPDATE contests SET status = 'closed', winner_id = ? WHERE id = ?", winner_id, contest_id)
-                await self._execute_in_conn(conn, "INSERT INTO contest_winners (contest_id, winner_id, announced_at) VALUES (?,?,?)", contest_id, winner_id, TimeUtils.utc_now())
+                await self._execute_with_conn(conn, "UPDATE contests SET status = 'closed', winner_id = ? WHERE id = ?", winner_id, contest_id)
+                await self._execute_with_conn(conn, "INSERT INTO contest_winners (contest_id, winner_id, announced_at) VALUES (?,?,?)", contest_id, winner_id, TimeUtils.utc_now())
                 return True
         except Exception as e:
             logger.error(f"❌ Error in declare_winner: {e}", exc_info=True)
@@ -3174,20 +4560,12 @@ class Database:
     async def delete_contest(self, contest_id: int, user_id: int) -> bool:
         try:
             async with self.transaction() as conn:
-                if USE_POSTGRES:
-                    contest = await self._fetchone_in_conn(conn, "SELECT creator_id FROM contests WHERE id = ?", (contest_id,))
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT creator_id FROM contests WHERE id = %s", (contest_id,))
-                    row = await cursor.fetchone()
-                    contest = {'creator_id': row[0]} if row else None
-                else:
-                    contest = await self._fetchone_in_conn(conn, "SELECT creator_id FROM contests WHERE id = ?", (contest_id,))
+                contest = await self._fetchone_with_conn(conn, "SELECT creator_id FROM contests WHERE id = ?", contest_id)
                 if not contest or contest['creator_id'] != user_id:
                     return False
-                await self._execute_in_conn(conn, "DELETE FROM contest_participants WHERE contest_id = ?", contest_id)
-                await self._execute_in_conn(conn, "DELETE FROM contest_winners WHERE contest_id = ?", contest_id)
-                await self._execute_in_conn(conn, "DELETE FROM contests WHERE id = ?", contest_id)
+                await self._execute_with_conn(conn, "DELETE FROM contest_participants WHERE contest_id = ?", contest_id)
+                await self._execute_with_conn(conn, "DELETE FROM contest_winners WHERE contest_id = ?", contest_id)
+                await self._execute_with_conn(conn, "DELETE FROM contests WHERE id = ?", contest_id)
                 return True
         except Exception as e:
             logger.error(f"❌ Error in delete_contest: {e}", exc_info=True)
@@ -3249,81 +4627,31 @@ class Database:
             code = code.strip()
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        gift_code = await self._fetchone_in_conn(conn, "SELECT * FROM gift_codes WHERE code = ?", (code,))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT * FROM gift_codes WHERE code = %s", (code,))
-                        row = await cursor.fetchone()
-                        if row:
-                            columns = [desc[0] for desc in cursor.description]
-                            gift_code = dict(zip(columns, row))
-                        else:
-                            gift_code = None
-                    else:
-                        gift_code = await self._fetchone_in_conn(conn, "SELECT * FROM gift_codes WHERE code = ?", (code,))
+                    gift_code = await self._fetchone_with_conn(conn, "SELECT * FROM gift_codes WHERE code = ?", code)
                     if not gift_code:
                         return False, 0
                     if gift_code['used_by']:
                         return False, 0
                     if gift_code['creator_id'] == user_id:
                         return False, -1
-                    if USE_POSTGRES:
-                        plan = await self._fetchone_in_conn(conn, "SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = ? AND is_gift = 1 AND is_active = 1", (gift_code['plan_id'],))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = %s AND is_gift = 1 AND is_active = 1", (gift_code['plan_id'],))
-                        row = await cursor.fetchone()
-                        if row:
-                            columns = ['id', 'name', 'description', 'price', 'days']
-                            plan = dict(zip(columns, row))
-                        else:
-                            plan = None
-                    else:
-                        plan = await self._fetchone_in_conn(conn, "SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = ? AND is_gift = 1 AND is_active = 1", (gift_code['plan_id'],))
+                    plan = await self._fetchone_with_conn(conn, "SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = ? AND is_gift = 1 AND is_active = 1", gift_code['plan_id'])
                     if not plan:
                         return False, 0
-                    await self._execute_in_conn(conn, "UPDATE gift_codes SET used_by = ?, used_at = ? WHERE id = ?", user_id, TimeUtils.utc_now(), gift_code['id'])
+                    await self._execute_with_conn(conn, "UPDATE gift_codes SET used_by = ?, used_at = ? WHERE id = ?", user_id, TimeUtils.utc_now(), gift_code['id'])
                     if USE_POSTGRES:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        current_end = row[0] if row else None
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", user_id, TimeUtils.sql_iso())
                     else:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.sql_iso())
                     current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     now = TimeUtils.utc_now()
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=plan['days'])
                     if USE_POSTGRES:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?, ?, 'active', ?, ?, 'gift', ?, ?)""",
-                            user_id, gift_code['plan_id'], TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 'gift', ?, ?)", user_id, gift_code['plan_id'], TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?)""",
-                            user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     return True, plan['days']
         except Exception as e:
@@ -3336,78 +4664,39 @@ class Database:
                 return False
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        exists = await self._fetchval_in_conn(conn, "SELECT 1 FROM users WHERE user_id = ?", (user_id,))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
-                        exists = await cursor.fetchone()
-                    else:
-                        exists = await self._fetchval_in_conn(conn, "SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+                    exists = await self._fetchval_with_conn(conn, "SELECT 1 FROM users WHERE user_id = ?", user_id)
                     if not exists:
                         return False
                     if not plan_id:
                         if USE_POSTGRES:
-                            plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         elif USE_MYSQL:
-                            cursor = await conn.cursor()
-                            await cursor.execute("SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
-                            row = await cursor.fetchone()
-                            plan_id = row[0] if row else None
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         else:
-                            plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
+                            plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1")
                         if not plan_id:
                             if USE_POSTGRES:
-                                plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             elif USE_MYSQL:
-                                cursor = await conn.cursor()
-                                await cursor.execute("SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
-                                row = await cursor.fetchone()
-                                plan_id = row[0] if row else None
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             else:
-                                plan_id = await self._fetchval_in_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
+                                plan_id = await self._fetchval_with_conn(conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1")
                             if not plan_id:
                                 return False
                     if USE_POSTGRES:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        current_end = row[0] if row else None
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", user_id, TimeUtils.sql_iso())
                     else:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.sql_iso())
                     current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     now = TimeUtils.utc_now()
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=days)
                     if USE_POSTGRES:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?, ?, 'active', ?, ?, ?, ?, ?)""",
-                            user_id, plan_id, TimeUtils.utc_now(), new_end, provider, TimeUtils.utc_now(), TimeUtils.utc_now()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?)""",
-                            user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     return True
         except Exception as e:
@@ -3422,55 +4711,33 @@ class Database:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        current_end = row[0] if row else None
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", user_id, TimeUtils.sql_iso())
                     else:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.sql_iso())
                     current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     now = TimeUtils.utc_now()
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=plan['duration_days'])
                     if USE_POSTGRES:
-                        row = await conn.fetchrow(
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at)
-                               VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id""",
-                            user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now()
-                        )
-                        return row['id']
+                        row = await self._fetchone_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now())
+                        sub_id = row['id'] if row else 0
+                        # تحديث subscription_end بعد إدراج الاشتراك
+                        await self._refresh_user_subscription_end(conn, user_id)
+                        return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
-                        await cursor.execute(
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at)
-                               VALUES (%s, %s, 'active', %s, %s, 0, %s, %s, %s, %s)""",
-                            (user_id, plan_id, TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
-                        )
-                        return cursor.lastrowid
-                    else:
-                        cursor = await conn.execute(
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                            (user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
-                        )
+                        await cursor.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (%s, %s, 'active', %s, %s, 0, %s, %s, %s, %s)", (user_id, plan_id, TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
+                        sub_id = cursor.lastrowid
+                        # تحديث subscription_end بعد إدراج الاشتراك
                         await self._refresh_user_subscription_end(conn, user_id)
-                        return cursor.lastrowid if cursor.lastrowid else 0
+                        return sub_id
+                    else:
+                        cursor = await conn.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
+                        sub_id = cursor.lastrowid if cursor.lastrowid else 0
+                        await self._refresh_user_subscription_end(conn, user_id)
+                        return sub_id
         except Exception as e:
             logger.error(f"❌ Error in create_subscription: {e}", exc_info=True)
             return 0
@@ -3484,36 +4751,23 @@ class Database:
                     await conn.execute("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date <= UTC_TIMESTAMP()")
                 else:
                     await conn.execute("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date <= datetime('now')")
-                if USE_POSTGRES:
-                    users = await conn.fetch("SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute("SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
-                    rows = await cursor.fetchall()
-                    users = [{'user_id': row[0]} for row in rows]
-                else:
-                    cursor = await conn.execute("SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
-                    users = await cursor.fetchall()
+                users = await self._fetchall_with_conn(conn, "SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
                 for user in users:
                     await self._refresh_user_subscription_end(conn, user['user_id'])
         except Exception as e:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
     async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
+        """تحديث حقل subscription_end في جدول users بناءً على أحدث اشتراك نشط."""
         if USE_POSTGRES:
-            end = await conn.fetchval("SELECT MAX(end_date) FROM subscriptions WHERE user_id = $1 AND status = 'active' AND end_date > CURRENT_TIMESTAMP AT TIME ZONE 'UTC'", user_id)
-            await conn.execute("UPDATE users SET subscription_end = $1 WHERE user_id = $2", end, user_id)
+            end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = $1 AND status = 'active' AND end_date > CURRENT_TIMESTAMP AT TIME ZONE 'UTC'", user_id)
+            await self._execute_with_conn(conn, "UPDATE users SET subscription_end = $1 WHERE user_id = $2", end, user_id)
         elif USE_MYSQL:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > UTC_TIMESTAMP()", (user_id,))
-            row = await cursor.fetchone()
-            end = row[0] if row else None
-            await conn.execute("UPDATE users SET subscription_end = %s WHERE user_id = %s", (end, user_id))
+            end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > UTC_TIMESTAMP()", user_id)
+            await self._execute_with_conn(conn, "UPDATE users SET subscription_end = %s WHERE user_id = %s", end, user_id)
         else:
-            cursor = await conn.execute("SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')", (user_id,))
-            row = await cursor.fetchone()
-            end = row[0] if row else None
-            await conn.execute("UPDATE users SET subscription_end = ? WHERE user_id = ?", (end, user_id))
+            end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')", user_id)
+            await self._execute_with_conn(conn, "UPDATE users SET subscription_end = ? WHERE user_id = ?", end, user_id)
 
     # =====================================================================
     # دوال الفواتير والدفع
@@ -3521,10 +4775,7 @@ class Database:
 
     async def create_invoice(self, user_id: int, plan_id: int, amount: int, currency: str = 'XTR', provider: str = 'xtr') -> str:
         number = f"INV-{TimeUtils.utc_now().strftime('%Y%m')}-{secrets.token_urlsafe(12).upper()}"
-        result = await self.execute(
-            "INSERT INTO invoices (number, user_id, plan_id, amount, currency, status, provider, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (number, user_id, plan_id, amount, currency, 'pending', provider, TimeUtils.utc_now())
-        )
+        result = await self.execute("INSERT INTO invoices (number, user_id, plan_id, amount, currency, status, provider, created_at) VALUES (?,?,?,?,?,?,?,?)", (number, user_id, plan_id, amount, currency, 'pending', provider, TimeUtils.utc_now()))
         return number if result > 0 else ""
 
     async def mark_invoice_paid(self, invoice_number: str, payment_id: str) -> bool:
@@ -3543,81 +4794,31 @@ class Database:
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        invoice = await self._fetchone_in_conn(conn, "SELECT * FROM invoices WHERE number = ? AND user_id = ? AND status = 'pending'", (invoice_number, user_id))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT * FROM invoices WHERE number = %s AND user_id = %s AND status = 'pending'", (invoice_number, user_id))
-                        row = await cursor.fetchone()
-                        if row:
-                            columns = [desc[0] for desc in cursor.description]
-                            invoice = dict(zip(columns, row))
-                        else:
-                            invoice = None
-                    else:
-                        invoice = await self._fetchone_in_conn(conn, "SELECT * FROM invoices WHERE number = ? AND user_id = ? AND status = 'pending'", (invoice_number, user_id))
+                    invoice = await self._fetchone_with_conn(conn, "SELECT * FROM invoices WHERE number = ? AND user_id = ? AND status = 'pending'", invoice_number, user_id)
                     if not invoice:
                         logger.error(f"❌ Invoice not found or not pending: {invoice_number}")
                         return False
                     if invoice['plan_id'] != plan_id:
                         logger.error(f"❌ Plan mismatch: invoice plan {invoice['plan_id']} vs {plan_id}")
                         return False
-                    if USE_POSTGRES:
-                        plan = await self._fetchone_in_conn(conn, "SELECT * FROM plans WHERE id = ? AND is_active = 1", (plan_id,))
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute("SELECT * FROM plans WHERE id = %s AND is_active = 1", (plan_id,))
-                        row = await cursor.fetchone()
-                        if row:
-                            columns = [desc[0] for desc in cursor.description]
-                            plan = dict(zip(columns, row))
-                        else:
-                            plan = None
-                    else:
-                        plan = await self._fetchone_in_conn(conn, "SELECT * FROM plans WHERE id = ? AND is_active = 1", (plan_id,))
+                    plan = await self._fetchone_with_conn(conn, "SELECT * FROM plans WHERE id = ? AND is_active = 1", plan_id)
                     if not plan:
                         return False
-                    await self._execute_in_conn(conn, "UPDATE invoices SET status = 'paid', provider_payment_id = ?, paid_at = ? WHERE number = ?", payment_id, TimeUtils.utc_now(), invoice_number)
+                    await self._execute_with_conn(conn, "UPDATE invoices SET status = 'paid', provider_payment_id = ?, paid_at = ? WHERE number = ?", payment_id, TimeUtils.utc_now(), invoice_number)
                     if USE_POSTGRES:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.utc_now())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.utc_now())
                     elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s",
-                            (user_id, TimeUtils.sql_iso())
-                        )
-                        row = await cursor.fetchone()
-                        current_end = row[0] if row else None
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > %s", user_id, TimeUtils.sql_iso())
                     else:
-                        current_end = await self._fetchval_in_conn(
-                            conn,
-                            "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                            (user_id, TimeUtils.sql_iso())
-                        )
+                        current_end = await self._fetchval_with_conn(conn, "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?", user_id, TimeUtils.sql_iso())
                     current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
                     now = TimeUtils.utc_now()
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=plan['duration_days'])
                     if USE_POSTGRES:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at)
-                               VALUES (?, ?, 'active', ?, ?, 0, ?, ?, ?, ?)""",
-                            user_id, plan_id, TimeUtils.utc_now(), new_end, 'xtr', payment_id, TimeUtils.utc_now(), TimeUtils.utc_now()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 0, ?, ?, ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, 'xtr', payment_id, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
-                        await self._execute_in_conn(
-                            conn,
-                            """INSERT INTO subscriptions 
-                               (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                            user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
-                        )
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     return True
         except Exception as e:
@@ -3631,11 +4832,11 @@ class Database:
                     code = secrets.token_urlsafe(12)
                     try:
                         if USE_POSTGRES:
-                            await self._execute_in_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)", code, plan_id, creator_id, TimeUtils.utc_now())
+                            await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)", code, plan_id, creator_id, TimeUtils.utc_now())
                         elif USE_MYSQL:
-                            await self._execute_in_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (%s, %s, %s, %s)", code, plan_id, creator_id, TimeUtils.sql_iso())
+                            await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (%s, %s, %s, %s)", code, plan_id, creator_id, TimeUtils.sql_iso())
                         else:
-                            await self._execute_in_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)", code, plan_id, creator_id, TimeUtils.sql_iso())
+                            await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)", code, plan_id, creator_id, TimeUtils.sql_iso())
                         return code
                     except Exception as e:
                         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -3661,38 +4862,23 @@ class Database:
                 duration = self.MAX_PENALTY_DURATION
             async with self.transaction() as conn:
                 if penalty_type != 'warn':
-                    await self._execute_in_conn(conn, "UPDATE user_penalties SET status = 'removed' WHERE user_id = ? AND chat_id = ? AND penalty_type = ? AND status = 'active'", user_id, chat_id, penalty_type)
+                    await self._execute_with_conn(conn, "UPDATE user_penalties SET status = 'removed' WHERE user_id = ? AND chat_id = ? AND penalty_type = ? AND status = 'active'", user_id, chat_id, penalty_type)
                 start_time = TimeUtils.utc_now()
                 end_time = None
                 if duration > 0:
                     end_time = start_time + timedelta(seconds=duration)
                 if USE_POSTGRES:
-                    row = await conn.fetchrow(
-                        """INSERT INTO user_penalties 
-                           (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
-                        user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time
-                    )
-                    penalty_id = row['id']
+                    row = await self._fetchone_with_conn(conn, "INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time)
+                    penalty_id = row['id'] if row else None
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
-                    await cursor.execute(
-                        """INSERT INTO user_penalties 
-                           (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time)
-                    )
+                    await cursor.execute("INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)", (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time))
                     penalty_id = cursor.lastrowid
                 else:
-                    cursor = await conn.execute(
-                        """INSERT INTO user_penalties 
-                           (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time)
-                    )
+                    cursor = await conn.execute("INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)", (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time))
                     penalty_id = cursor.lastrowid
                 if issued_by:
-                    await self._execute_in_conn(conn, "INSERT INTO admin_logs (chat_id, admin_id, action, target_id, reason, created_at) VALUES (?,?,?,?,?,?)", chat_id, issued_by, f"penalty_{penalty_type}", user_id, reason, TimeUtils.utc_now())
+                    await self._execute_with_conn(conn, "INSERT INTO admin_logs (chat_id, admin_id, action, target_id, reason, created_at) VALUES (?,?,?,?,?,?)", chat_id, issued_by, f"penalty_{penalty_type}", user_id, reason, TimeUtils.utc_now())
                 return penalty_id
         except Exception as e:
             logger.error(f"❌ Error in add_penalty: {e}", exc_info=True)
@@ -3709,7 +4895,7 @@ class Database:
                 if penalty_type:
                     query += " AND penalty_type = ?"
                     params.append(penalty_type)
-                updated = await self._execute_and_get_rowcount(conn, query, *params)
+                updated = await self._execute_with_conn(conn, query, *params)
                 return updated
         except Exception as e:
             logger.error(f"❌ Error in remove_penalties_for_user: {e}", exc_info=True)
@@ -3752,35 +4938,19 @@ class Database:
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
-                    expired_count = await self._fetchval_in_conn(
-                        conn,
-                        "SELECT COUNT(*) FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
-                        default=0
-                    )
+                    expired_count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'", default=0)
                     if expired_count > 0:
-                        await conn.execute(
-                            "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
-                        )
-                    await conn.execute(
-                        "DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '30 days'"
-                    )
+                        await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'")
+                    await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '30 days'")
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
-                    await cursor.execute(
-                        "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"
-                    )
+                    await cursor.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()")
                     expired_count = cursor.rowcount
-                    await cursor.execute(
-                        "DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < UTC_TIMESTAMP() - INTERVAL 30 DAY"
-                    )
+                    await cursor.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND created_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
                 else:
-                    cursor = await conn.execute(
-                        "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"
-                    )
+                    cursor = await conn.execute("UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')")
                     expired_count = cursor.rowcount
-                    await conn.execute(
-                        "DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND julianday('now') - julianday(created_at) > 30"
-                    )
+                    await conn.execute("DELETE FROM user_penalties WHERE status IN ('expired', 'removed') AND julianday('now') - julianday(created_at) > 30")
                 return expired_count
         except Exception as e:
             logger.error(f"❌ Error in expire_penalties: {e}", exc_info=True)
@@ -3863,31 +5033,15 @@ class Database:
     async def increment_violation_count(self, user_id: int, chat_id: int) -> int:
         async with self._lock:
             async with self.transaction() as conn:
-                last_time = await self._fetchval_in_conn(
-                    conn,
-                    "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?",
-                    (user_id, chat_id)
-                )
+                last_time = await self._fetchval_with_conn(conn, "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 if last_time:
                     dt = TimeUtils.safe_parse_iso(last_time) if isinstance(last_time, str) else last_time
                     if dt and TimeUtils.utc_now() - dt > timedelta(hours=24):
-                        await self._execute_in_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
-                current = await self._fetchval_in_conn(
-                    conn,
-                    "SELECT violation_count FROM user_violations WHERE user_id = ? AND chat_id = ?",
-                    (user_id, chat_id),
-                    default=0
-                )
+                        await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
+                current = await self._fetchval_with_conn(conn, "SELECT violation_count FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id, default=0)
                 new_count = current + 1
                 now = TimeUtils.utc_now()
-                await self._execute_in_conn(conn,
-                    """INSERT INTO user_violations (user_id, chat_id, violation_count, last_violation_time)
-                       VALUES (?,?,?,?)
-                       ON CONFLICT(user_id, chat_id) DO UPDATE SET
-                           violation_count = excluded.violation_count,
-                           last_violation_time = excluded.last_violation_time""",
-                    user_id, chat_id, new_count, now
-                )
+                await self._execute_with_conn(conn, "INSERT INTO user_violations (user_id, chat_id, violation_count, last_violation_time) VALUES (?,?,?,?) ON CONFLICT(user_id, chat_id) DO UPDATE SET violation_count = excluded.violation_count, last_violation_time = excluded.last_violation_time", user_id, chat_id, new_count, now)
                 return new_count
 
     async def reset_violation_count(self, user_id: int, chat_id: int) -> bool:
@@ -3931,13 +5085,13 @@ class Database:
 
     async def get_bot_stats(self) -> Dict:
         async with self.connection() as conn:
-            users = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM users", default=0)
-            channels = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
-            groups = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
-            posts = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
-            published = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.utc_now(),), default=0)
-            tickets = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
+            users = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM users", default=0)
+            channels = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
+            groups = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
+            posts = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
+            published = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
+            active_subs = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", TimeUtils.utc_now(), default=0)
+            tickets = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
         return {
             'users': users,
             'channels': channels,
@@ -3950,15 +5104,15 @@ class Database:
 
     async def get_general_stats(self) -> Dict:
         async with self.connection() as conn:
-            users = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM users", default=0)
-            channels = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
-            groups = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
-            posts = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
-            published = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", (TimeUtils.utc_now(),), default=0)
-            tickets = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
-            invoices = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM invoices", default=0)
-            active_penalties = await self._fetchval_in_conn(conn, "SELECT COUNT(*) FROM user_penalties WHERE status='active'", default=0)
+            users = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM users", default=0)
+            channels = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
+            groups = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
+            posts = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
+            published = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
+            active_subs = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?", TimeUtils.utc_now(), default=0)
+            tickets = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0)
+            invoices = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM invoices", default=0)
+            active_penalties = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_penalties WHERE status='active'", default=0)
             return {
                 'users': users,
                 'channels': channels,
@@ -3993,19 +5147,12 @@ class Database:
     # =====================================================================
 
     async def add_admin(self, admin_id: int, added_by: int) -> bool:
-        return await self.execute(
-            "INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)",
-            (admin_id, added_by, TimeUtils.utc_now())
-        ) > 0
+        return await self.execute("INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)", (admin_id, added_by, TimeUtils.utc_now())) > 0
 
     async def remove_admin(self, admin_id: int) -> bool:
         try:
             async with self.connection() as conn:
-                deleted = await self._execute_and_get_rowcount(
-                    conn,
-                    "DELETE FROM bot_admins WHERE user_id = ?",
-                    admin_id
-                )
+                deleted = await self._execute_with_conn(conn, "DELETE FROM bot_admins WHERE user_id = ?", admin_id)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_admin: {e}", exc_info=True)
@@ -4020,7 +5167,7 @@ class Database:
         try:
             async with self.transaction() as conn:
                 for uid in user_ids:
-                    await self._execute_in_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
+                    await self._execute_with_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
             return len(user_ids)
         except Exception as e:
             logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
@@ -4057,8 +5204,8 @@ class Database:
                     "scheduled_posts",
                 ]
                 for table in tables:
-                    await self._execute_in_conn(conn, f"DELETE FROM {table} WHERE chat_id = ?", chat_id)
-                await self._execute_in_conn(conn, "DELETE FROM bot_groups WHERE chat_id = ?", chat_id)
+                    await self._execute_with_conn(conn, f"DELETE FROM {table} WHERE chat_id = ?", chat_id)
+                await self._execute_with_conn(conn, "DELETE FROM bot_groups WHERE chat_id = ?", chat_id)
             return True
         except Exception as e:
             logger.error(f"❌ Error in delete_group: {e}", exc_info=True)
@@ -4079,122 +5226,10 @@ class Database:
     # =====================================================================
 
     async def update_reminder_sent(self, user_id: int) -> bool:
-        return await self.execute(
-            "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?",
-            (TimeUtils.utc_now(), user_id)
-        ) > 0
-
-    # =====================================================================
-    # دوال مساعدة داخلية (مع تحويل العناصر النائبة)
-    # =====================================================================
-
-    async def _fetchval_in_conn(self, conn, query: str, params: tuple = (), default: Any = None) -> Any:
-        try:
-            query = _convert_placeholders(query)
-            params = _adapt_params(params)
-            if USE_POSTGRES:
-                row = await conn.fetchrow(query, *params)
-                return row[0] if row else default
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute(query, params)
-                row = await cursor.fetchone()
-                return row[0] if row else default
-            else:
-                cursor = await conn.execute(query, params)
-                row = await cursor.fetchone()
-                return row[0] if row else default
-        except Exception as e:
-            logger.error(f"❌ _fetchval_in_conn error: {e}\nQuery: {query}\nParams: {params}")
-            return default
-
-    async def _fetchone_in_conn(self, conn, query: str, params: tuple = ()) -> Optional[Dict]:
-        try:
-            query = _convert_placeholders(query)
-            params = _adapt_params(params)
-            if USE_POSTGRES:
-                row = await conn.fetchrow(query, *params)
-                return dict(row) if row else None
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute(query, params)
-                row = await cursor.fetchone()
-                if row:
-                    columns = [desc[0] for desc in cursor.description]
-                    return dict(zip(columns, row))
-                return None
-            else:
-                cursor = await conn.execute(query, params)
-                row = await cursor.fetchone()
-                return dict(row) if row else None
-        except Exception as e:
-            logger.error(f"❌ _fetchone_in_conn error: {e}\nQuery: {query}\nParams: {params}")
-            return None
-
-    async def _fetchall_in_conn(self, conn, query: str, params: tuple = ()) -> List[Dict]:
-        try:
-            query = _convert_placeholders(query)
-            params = _adapt_params(params)
-            if USE_POSTGRES:
-                rows = await conn.fetch(query, *params)
-                return [dict(row) for row in rows]
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute(query, params)
-                rows = await cursor.fetchall()
-                if rows:
-                    columns = [desc[0] for desc in cursor.description]
-                    return [dict(zip(columns, row)) for row in rows]
-                return []
-            else:
-                cursor = await conn.execute(query, params)
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"❌ _fetchall_in_conn error: {e}\nQuery: {query}\nParams: {params}")
-            return []
-
-    async def _execute_in_conn(self, conn, query: str, *params) -> None:
-        if USE_POSTGRES or USE_MYSQL:
-            query = _convert_insert_or_ignore(query)
-            query = _convert_insert_or_replace(query)
-            query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        if params:
-            params = _adapt_params(params)
-        else:
-            params = ()
-        if USE_POSTGRES:
-            await conn.execute(query, *params)
-        else:
-            await conn.execute(query, params)
-
-    async def _execute_and_get_rowcount(self, conn, query: str, *params) -> int:
-        if USE_POSTGRES or USE_MYSQL:
-            query = _convert_insert_or_ignore(query)
-            query = _convert_insert_or_replace(query)
-            query = _convert_upsert(query)
-        query = _convert_placeholders(query)
-        if params:
-            params = _adapt_params(params)
-        else:
-            params = ()
-        if USE_POSTGRES:
-            result = await conn.execute(query, *params)
-            parts = result.split()
-            return int(parts[-1]) if parts and parts[-1].isdigit() else 0
-        elif USE_MYSQL:
-            cursor = await conn.cursor()
-            await cursor.execute(query, params)
-            await cursor.execute("SELECT ROW_COUNT()")
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-        else:
-            cursor = await conn.execute(query, params)
-            return cursor.rowcount
+        return await self.execute("UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?", (TimeUtils.utc_now(), user_id)) > 0
 
 # =====================================================================
-# 32. إنشاء كائن قاعدة البيانات
+# إنشاء كائن قاعدة البيانات
 # =====================================================================
 
 DB = Database()
