@@ -11,7 +11,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - معاملات ذرية وإعادة محاولة ذكية مع backoff
 - نسخ احتياطي واستعادة متكامل مع دعم الضغط
 - تحسين الأداء: فهارس محسّنة، استعلامات مجمّعة، تتبع الاستعلامات البطيئة
-- إصلاح شامل للتواريخ والمناطق الزمنية
+- إصلاح شامل للتواريخ والمناطق الزمنية (جميع التواريخ naive)
 - إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
 - جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
 - نسخ احتياطي واستعادة وتحسين قاعدة البيانات
@@ -31,7 +31,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح تحديث subscription_end في جميع دوال الاشتراكات
 - تصحيح تطبيق حد النص في add_posts
 - جعل دوال تحويل INSERT OR IGNORE/REPLACE غير متزامنة لاستخدام المفاتيح الديناميكية
-- تعديل _adapt_params لإزالة المنطقة الزمنية من التواريخ المرسلة إلى PostgreSQL لتجنب خطأ asyncpg
+- تعديل _adapt_params لإزالة المنطقة الزمنية من التواريخ المرسلة إلى PostgreSQL
+- إصلاح مشكلة طرح التواريخ (naive/aware) في increment_violation_count ودوال أخرى
 """
 
 import os
@@ -501,14 +502,14 @@ def _adapt_params(params: tuple) -> tuple:
         return tuple(new_params)
 
 # =====================================================================
-# 2. فئة TimeUtils (محسّنة)
+# 2. فئة TimeUtils (محسّنة) - جميع التواريخ naive
 # =====================================================================
 
 class TimeUtils:
     @staticmethod
     def utc_now() -> datetime:
-        """تعيد الوقت الحالي بتوقيت UTC مع المنطقة الزمنية."""
-        return datetime.now(timezone.utc)
+        """تعيد الوقت الحالي بتوقيت UTC بدون منطقة زمنية (naive)."""
+        return datetime.utcnow()
     
     @staticmethod
     def mecca_now() -> datetime:
@@ -529,35 +530,48 @@ class TimeUtils:
     
     @staticmethod
     def mecca_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
-        return dt - timedelta(hours=3) if dt else None
+        if dt is None:
+            return None
+        # إزالة المنطقة الزمنية إن وجدت
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt - timedelta(hours=3)
     
     @staticmethod
     def utc_to_mecca(dt: Optional[datetime]) -> Optional[datetime]:
-        return dt + timedelta(hours=3) if dt else None
+        if dt is None:
+            return None
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt + timedelta(hours=3)
     
     @staticmethod
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
         if not date_str:
             return None
         try:
-            return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            # صيغة SQLite/MySQL (بدون منطقة)
+            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+            return dt  # naive
         except ValueError:
             pass
         try:
+            # صيغة ISO مع Z أو +00:00
             dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
             return dt
         except (ValueError, TypeError):
             pass
         try:
-            return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+            # صيغة أخرى
+            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+            return dt
         except ValueError:
             pass
         try:
-            return datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            return dt
         except ValueError:
             pass
         return None
@@ -3572,7 +3586,7 @@ class Database:
                     for t, m, f in posts:
                         # تطبيق حد النص إذا كان محدداً
                         text = t or ""
-                        if self._max_post_text_length > 0 and text:
+                        if self._max_post_text_length > 0:
                             text = text[:self._max_post_text_length]
                         key = (text, m or "", f or "")
                         if key not in seen_local:
@@ -3595,7 +3609,7 @@ class Database:
                         vals = []
                         for t, m, f in batch:
                             text = t or ""
-                            if self._max_post_text_length > 0 and text:
+                            if self._max_post_text_length > 0:
                                 text = text[:self._max_post_text_length]
                             vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
                         if USE_POSTGRES:
@@ -5069,11 +5083,12 @@ class Database:
     async def increment_violation_count(self, user_id: int, chat_id: int) -> int:
         async with self._lock:
             async with self.transaction() as conn:
-                last_time = await self._fetchval_with_conn(conn, "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
-                if last_time:
-                    dt = TimeUtils.safe_parse_iso(last_time) if isinstance(last_time, str) else last_time
-                    if dt and TimeUtils.utc_now() - dt > timedelta(hours=24):
-                        await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
+                last_time_str = await self._fetchval_with_conn(conn, "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
+                dt = None
+                if last_time_str:
+                    dt = TimeUtils.safe_parse_iso(last_time_str)
+                if dt and TimeUtils.utc_now() - dt > timedelta(hours=24):
+                    await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 current = await self._fetchval_with_conn(conn, "SELECT violation_count FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id, default=0)
                 new_count = current + 1
                 now = TimeUtils.utc_now()
