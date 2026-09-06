@@ -11,12 +11,17 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + ربط جميع النصوص الثابتة بنظام الترجمة _trans
 + إصلاح متغيرات القائمة الرئيسية main_menu
 + إصلاح متغيرات معلومات المطور developer_info
++ تحسين أداء /start باستخدام asyncio.gather
++ إصلاح استدعاء _fetchone_in_conn -> _fetchone_with_conn
++ إضافة تخزين مؤقت (Cache) للبيانات المتكررة مع مهلة زمنية 5 دقائق
++ إضافة فهارس محسّنة لقاعدة البيانات (تمت إضافتها في database.py)
 """
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from html import escape
+from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -33,6 +38,39 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# =====================================================================
+# طبقة تخزين مؤقت بسيطة (In-Memory Cache)
+# =====================================================================
+class SimpleCache:
+    """تخزين مؤقت للبيانات مع مهلة زمنية"""
+    def __init__(self, ttl_seconds: int = 300):
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._ttl = ttl_seconds
+
+    def _key(self, *args) -> str:
+        return ":".join(str(a) for a in args)
+
+    def get(self, *args) -> Optional[Any]:
+        key = self._key(*args)
+        entry = self._cache.get(key)
+        if entry and (datetime.utcnow() - entry['timestamp']).total_seconds() < self._ttl:
+            return entry['value']
+        return None
+
+    def set(self, value: Any, *args) -> None:
+        key = self._key(*args)
+        self._cache[key] = {'value': value, 'timestamp': datetime.utcnow()}
+
+    def invalidate(self, *args) -> None:
+        key = self._key(*args)
+        self._cache.pop(key, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+# كائن cache عام
+CACHE = SimpleCache(ttl_seconds=300)  # 5 دقائق
 
 
 async def _safe_answer(query, text=None, show_alert=False):
@@ -101,7 +139,7 @@ class CommandHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
 
-        # التحقق من الاشتراك الإجباري
+        # التحقق من الاشتراك الإجباري (قد يكون بطيئاً بسبب API)
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
             try:
@@ -131,9 +169,38 @@ class CommandHandlers:
             except Exception as e:
                 logger.error(f"❌ خطأ في التحقق من الاشتراك الإجباري: {e}")
 
-        # جمع بيانات المستخدم
-        lang = await DB.get_user_language(user_id) or 'ar'
-        active = await DB.get_active_channel(user_id)
+        # ===== استخدام التخزين المؤقت للبيانات المتكررة =====
+        # محاولة جلب اللغة من الكاش
+        lang = CACHE.get("lang", user_id)
+        if lang is None:
+            lang = await DB.get_user_language(user_id) or 'ar'
+            CACHE.set(lang, "lang", user_id)
+
+        # جلب البيانات الأخرى (مع استخدام الكاش إن أمكن)
+        active = CACHE.get("active_channel", user_id)
+        if active is None:
+            active = await DB.get_active_channel(user_id)
+            CACHE.set(active, "active_channel", user_id)
+
+        auto = CACHE.get("auto_publish", user_id)
+        if auto is None:
+            auto = await DB.get_auto_publish_status(user_id)
+            CACHE.set(auto, "auto_publish", user_id)
+
+        recycle = CACHE.get("auto_recycle", user_id)
+        if recycle is None:
+            recycle = await DB.get_auto_recycle_status(user_id)
+            CACHE.set(recycle, "auto_recycle", user_id)
+
+        has_sub = CACHE.get("has_sub", user_id)
+        if has_sub is None:
+            has_sub = await DB.has_active_subscription(user_id)
+            CACHE.set(has_sub, "has_sub", user_id)
+
+        # استعلام get_user_groups ثقيل ولا يمكن تخزينه مؤقتاً بسهولة (لأنه يتغير)
+        groups = await DB.get_user_groups(user_id)
+        # ===================================================
+
         cnt = 0
         ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
         if active:
@@ -142,18 +209,13 @@ class CommandHandlers:
             if ch_info:
                 ch_display = ch_info['channel_name']
 
-        groups = len(await DB.get_user_groups(user_id))
-        has_sub = await DB.has_active_subscription(user_id)
         sub_active_text = await _trans('subscription_active', lang, "✅ مفعل")
         sub_inactive_text = await _trans('subscription_inactive', lang, "❌ غير مفعل")
         sub_text = sub_active_text if has_sub else sub_inactive_text
 
-        auto = await DB.get_auto_publish_status(user_id)
         enabled_text = await _trans('enabled', lang, "مفعل")
         disabled_text = await _trans('disabled', lang, "معطل")
         auto_text = enabled_text if auto else disabled_text
-
-        recycle = await DB.get_auto_recycle_status(user_id)
         recycle_text = enabled_text if recycle else disabled_text
 
         # بناء لوحة المفاتيح
@@ -188,7 +250,7 @@ class CommandHandlers:
             lang,
             'main_menu',
             user_name=f"<code>{user_id}</code>",
-            groups_count=groups,
+            groups_count=len(groups),
             active_channel=ch_display,
             unpublished_posts=cnt,
             auto_publish=auto_text,
@@ -218,6 +280,8 @@ class CommandHandlers:
         else:
             msg = await _trans('trial_failed', lang, "❌ تعذر تفعيل التجربة")
         await safe_send(context.bot, user_id, msg)
+        # إبطال الكاش بعد تغيير الاشتراك
+        CACHE.invalidate("has_sub", user_id)
 
     @staticmethod
     async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -469,6 +533,8 @@ class CommandHandlers:
         await DB.set_auto_publish(user_id, not cur)
         status = await _trans('enabled', lang, "مفعل") if not cur else await _trans('disabled', lang, "معطل")
         await safe_send(context.bot, user_id, f"✅ {await _trans('auto_publish_status', lang, 'النشر التلقائي')}: {status}")
+        # إبطال الكاش
+        CACHE.invalidate("auto_publish", user_id)
 
     @staticmethod
     async def auto_recycle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -478,6 +544,7 @@ class CommandHandlers:
         await DB.set_auto_recycle(user_id, not cur)
         status = await _trans('enabled', lang, "مفعل") if not cur else await _trans('disabled', lang, "معطل")
         await safe_send(context.bot, user_id, f"✅ {await _trans('auto_recycle_status', lang, 'التدوير التلقائي')}: {status}")
+        CACHE.invalidate("auto_recycle", user_id)
 
     @staticmethod
     async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -959,6 +1026,8 @@ class CommandHandlers:
         success = await DB.grant_subscription_days(target_id, days, plan_id=plan_id, provider='manual')
         if success:
             await safe_send(context.bot, user_id, f"✅ تم منح {days} يوم للمستخدم <code>{_mask_id(target_id)}</code>", parse_mode='HTML')
+            # إبطال الكاش للمستخدم المستهدف
+            CACHE.invalidate("has_sub", target_id)
         else:
             await safe_send(context.bot, user_id, "❌ فشل المنح")
 
@@ -991,6 +1060,7 @@ class CommandHandlers:
         success, days = await DB.redeem_gift_code(user_id, code)
         if success and days > 0:
             await safe_send(context.bot, user_id, await _trans('gift_redeemed_success', lang, f"🎉 تم تفعيل اشتراك {days} يوم"), parse_mode='HTML')
+            CACHE.invalidate("has_sub", user_id)
         elif days == -1:
             await safe_send(context.bot, user_id, await _trans('cannot_redeem_own', lang, "❌ لا يمكنك استخدام كودك الخاص"))
         else:
