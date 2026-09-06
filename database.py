@@ -25,17 +25,12 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - جعل MAX_USER_LOCKS قابل للتكوين عبر البيئة
 - إضافة MAX_POST_TEXT_LENGTH قابل للتكوين
 - تحسين _convert_placeholders للتعامل مع علامات الاقتباس المضمنة
-- جلب المفاتيح الفريدة ديناميكيًا لتجنب الاعتماد على KNOWN_UNIQUE الثابت
+- جلب المفاتيح الفريدة ديناميكيًا لتجنب الاعتماد على KNOWN_UNIQUE الثابت (تم التنفيذ)
 - تحسين استعلام get_channels_to_publish باستخدام COALESCE
 - إضافة فهارس مركبة إضافية على posts
 - إصلاح تحديث subscription_end في جميع دوال الاشتراكات
-- جعل دوال التحويل غير متزامنة واستخدام _get_unique_columns عند توفر conn
-- تحسين منطق تحديد النص في add_posts
-- إضافة فهارس (channel_db_id, published) و (channel_db_id, fail_count)
-- إصلاح خطأ asyncpg: إزالة المنطقة الزمنية من datetime في _adapt_params
-- إضافة دوال _fetchone_in_conn، _fetchall_in_conn، _fetchval_in_conn للتوافق
-- إصلاح خطأ tuple في _adapt_params (فك tuple المتداخل)
-- إصلاح خطأ مقارنة التواريخ في increment_violation_count (تحويل naive إلى aware)
+- تصحيح تطبيق حد النص في add_posts
+- جعل دوال تحويل INSERT OR IGNORE/REPLACE غير متزامنة لاستخدام المفاتيح الديناميكية
 """
 
 import os
@@ -368,66 +363,88 @@ def _convert_placeholders(query: str) -> str:
         return query
 
 async def _convert_insert_or_ignore(query: str, conn=None) -> str:
-    """تحويل INSERT OR IGNORE مع دعم المفاتيح الفريدة الديناميكية."""
+    """
+    تحويل INSERT OR IGNORE إلى الصيغة المناسبة لقاعدة البيانات.
+    إذا تم تمرير conn، نحاول جلب المفاتيح الفريدة ديناميكيًا.
+    """
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR IGNORE"):
         return query
     if USE_POSTGRES:
-        # استخراج اسم الجدول والأعمدة
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
+        new_query = query.replace("INSERT OR IGNORE", "INSERT", 1)
+        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
         if not match:
-            return query.replace("INSERT OR IGNORE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
+            return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
-        # استخدام المفاتيح الفريدة الديناميكية إذا كان conn متاحًا
-        conflict_cols = 'id'  # افتراضي
+        conflict_cols = ', '.join(columns[:1]) if columns else 'id'
+        # محاولة استخدام المفاتيح الفريدة الديناميكية إذا كان conn متاحًا
         if conn:
-            unique_cols = await _get_unique_columns(table, conn)
-            if unique_cols:
-                conflict_cols = ', '.join(unique_cols)
-            else:
-                conflict_cols = columns[0] if columns else 'id'
+            try:
+                unique_cols = await _get_unique_columns(table, conn)
+                if unique_cols:
+                    conflict_cols = ', '.join(unique_cols)
+            except Exception as e:
+                logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
+        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+        if values_match:
+            end_pos = values_match.end()
+            new_query = new_query[:end_pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING" + new_query[end_pos:]
         else:
-            conflict_cols = columns[0] if columns else 'id'
-        new_query = query.replace("INSERT OR IGNORE", "INSERT", 1)
-        return new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
+            new_query = new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
+        return new_query
     elif USE_MYSQL:
         return query.replace("INSERT OR IGNORE", "INSERT IGNORE", 1)
     else:
         return query
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
-    """تحويل INSERT OR REPLACE مع دعم المفاتيح الفريدة الديناميكية."""
+    """
+    تحويل INSERT OR REPLACE إلى الصيغة المناسبة لقاعدة البيانات.
+    إذا تم تمرير conn، نحاول جلب المفاتيح الفريدة ديناميكيًا.
+    """
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR REPLACE"):
         return query
     if USE_POSTGRES:
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", query, re.IGNORECASE)
+        new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
+        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
         if not match:
-            return query.replace("INSERT OR REPLACE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
+            return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
-        pk = ['id']  # افتراضي
+        pk = columns[:1] if columns else ['id']
+        # محاولة استخدام المفاتيح الفريدة الديناميكية
         if conn:
-            unique_cols = await _get_unique_columns(table, conn)
-            if unique_cols:
-                pk = unique_cols
-            else:
-                pk = columns[:1] if columns else ['id']
-        else:
-            pk = columns[:1] if columns else ['id']
+            try:
+                unique_cols = await _get_unique_columns(table, conn)
+                if unique_cols:
+                    pk = unique_cols
+            except Exception as e:
+                logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
         pk_cols = ', '.join(pk)
         pk_set = set(pk)
         set_columns = [col for col in columns if col not in pk_set]
-        new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
         if not set_columns:
-            return new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
+            values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+            if values_match:
+                end_pos = values_match.end()
+                new_query = new_query[:end_pos] + f" ON CONFLICT ({pk_cols}) DO NOTHING" + new_query[end_pos:]
+            else:
+                new_query = new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
+            return new_query
         set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in set_columns])
-        return new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
+        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+        if values_match:
+            end_pos = values_match.end()
+            new_query = new_query[:end_pos] + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}" + new_query[end_pos:]
+        else:
+            new_query = new_query + f" ON CONFLICT ({pk_cols}) DO UPDATE SET {set_clause}"
+        return new_query
     elif USE_MYSQL:
         return query.replace("INSERT OR REPLACE", "REPLACE", 1)
     else:
@@ -454,31 +471,21 @@ def _convert_upsert(query: str) -> str:
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
 
 def _adapt_params(params: tuple) -> tuple:
-    """
-    تكييف المعامل حسب نوع قاعدة البيانات.
-    
-    - لـ PostgreSQL: تحويل أي كائن datetime إلى naive (بدون منطقة زمنية)
-      لأن جميع أعمدة TIMESTAMP في الجداول معرفة بدون time zone.
-    - لـ SQLite و MySQL: تحويل datetime إلى نص بالصيغة المطلوبة.
-    - أيضاً: تفكيك tuple المتداخل (إذا كان params يحتوي على tuple واحد فقط).
-    """
+    """تكييف المعامل حسب نوع قاعدة البيانات."""
     if params is None:
         return ()
-    # إذا كان params يحتوي على tuple واحد فقط، فكها (لتجنب تمرير tuple داخل tuple)
-    if len(params) == 1 and isinstance(params[0], tuple):
-        params = params[0]
-    new_params = []
-    for p in params:
-        if isinstance(p, datetime):
-            if USE_POSTGRES:
-                # إزالة المنطقة الزمنية (tzinfo) لأن العمود من نوع TIMESTAMP (بدون منطقة)
-                # هذا يتجنب خطأ asyncpg: can't subtract offset-naive and offset-aware
-                p = p.replace(tzinfo=None)
+    if USE_POSTGRES:
+        # في PostgreSQL، نمرر datetime كما هو (كائن مع tzinfo)
+        return params
+    else:
+        # في SQLite و MySQL، نحول datetime إلى نص
+        new_params = []
+        for p in params:
+            if isinstance(p, datetime):
+                new_params.append(p.strftime('%Y-%m-%d %H:%M:%S'))
             else:
-                # SQLite و MySQL تخزنان التواريخ كنص
-                p = p.strftime('%Y-%m-%d %H:%M:%S')
-        new_params.append(p)
-    return tuple(new_params)
+                new_params.append(p)
+        return tuple(new_params)
 
 # =====================================================================
 # 2. فئة TimeUtils (محسّنة)
@@ -892,25 +899,14 @@ class Database:
                 return await self._fetchval_with_conn(conn, q, *p, default=default)
         return await self._execute_with_retry(query, params, _exec)
 
-    # دوال مساعدة للتوافق مع الكود القديم (مرادفات)
-    async def _fetchone_in_conn(self, conn, query: str, *params) -> Optional[Dict]:
-        """مرادف لـ _fetchone_with_conn للتوافق مع الكود القديم."""
-        return await self._fetchone_with_conn(conn, query, *params)
-
-    async def _fetchall_in_conn(self, conn, query: str, *params) -> List[Dict]:
-        """مرادف لـ _fetchall_with_conn للتوافق مع الكود القديم."""
-        return await self._fetchall_with_conn(conn, query, *params)
-
-    async def _fetchval_in_conn(self, conn, query: str, *params, default=None) -> Any:
-        """مرادف لـ _fetchval_with_conn للتوافق مع الكود القديم."""
-        return await self._fetchval_with_conn(conn, query, *params, default=default)
-
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
         if not params_list:
             return 0
         # نقوم بتحويل الاستعلام مرة واحدة (بدون conn لأننا لا نستطيع تمريره للـ executemany)
+        # ومع ذلك، يمكننا محاولة استخدام الاحتياطي، أو ترك التحويل دون استخدام المفاتيح الديناميكية
+        # (هذا مقبول لأن معظم الجداول لها مفاتيح فريدة معروفة في الاحتياطي)
         q = _convert_placeholders(query)
-        q = await _convert_insert_or_ignore(q)   # بدون conn، يستخدم الاحتياطي
+        q = await _convert_insert_or_ignore(q)  # بدون conn
         q = await _convert_insert_or_replace(q)  # بدون conn
         q = _convert_upsert(q)
         params_list = [_adapt_params(p) for p in params_list]
@@ -2540,7 +2536,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
             "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_fail ON posts(channel_db_id, fail_count)",
+            # فهرس مركب محسّن لاستعلام get_next_post
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
             "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
@@ -3563,7 +3559,7 @@ class Database:
                     for t, m, f in posts:
                         # تطبيق حد النص إذا كان محدداً
                         text = t or ""
-                        if self._max_post_text_length > 0:
+                        if self._max_post_text_length > 0 and text:
                             text = text[:self._max_post_text_length]
                         key = (text, m or "", f or "")
                         if key not in seen_local:
@@ -3586,7 +3582,7 @@ class Database:
                         vals = []
                         for t, m, f in batch:
                             text = t or ""
-                            if self._max_post_text_length > 0:
+                            if self._max_post_text_length > 0 and text:
                                 text = text[:self._max_post_text_length]
                             vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
                         if USE_POSTGRES:
@@ -4476,6 +4472,7 @@ class Database:
                 (now, now, now)
             )
         elif USE_MYSQL:
+            # استخدام TIMESTAMPDIFF بدلاً من DATEDIFF للحصول على دقة أفضل
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
                           TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) as days_left,
@@ -4749,12 +4746,14 @@ class Database:
                     if USE_POSTGRES:
                         row = await self._fetchone_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now())
                         sub_id = row['id'] if row else 0
+                        # تحديث subscription_end بعد إدراج الاشتراك
                         await self._refresh_user_subscription_end(conn, user_id)
                         return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
                         await cursor.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (%s, %s, 'active', %s, %s, 0, %s, %s, %s, %s)", (user_id, plan_id, TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
                         sub_id = cursor.lastrowid
+                        # تحديث subscription_end بعد إدراج الاشتراك
                         await self._refresh_user_subscription_end(conn, user_id)
                         return sub_id
                     else:
@@ -5060,12 +5059,8 @@ class Database:
                 last_time = await self._fetchval_with_conn(conn, "SELECT last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 if last_time:
                     dt = TimeUtils.safe_parse_iso(last_time) if isinstance(last_time, str) else last_time
-                    if dt:
-                        # تحويل dt إلى aware إذا كان naive (لأن PostgreSQL يعيد naive)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        if TimeUtils.utc_now() - dt > timedelta(hours=24):
-                            await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
+                    if dt and TimeUtils.utc_now() - dt > timedelta(hours=24):
+                        await self._execute_with_conn(conn, "UPDATE user_violations SET violation_count = 0, last_violation_time = NULL WHERE user_id = ? AND chat_id = ?", user_id, chat_id)
                 current = await self._fetchval_with_conn(conn, "SELECT violation_count FROM user_violations WHERE user_id = ? AND chat_id = ?", user_id, chat_id, default=0)
                 new_count = current + 1
                 now = TimeUtils.utc_now()
