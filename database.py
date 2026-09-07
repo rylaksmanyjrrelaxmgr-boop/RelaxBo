@@ -19,7 +19,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
 - ضمان استخدام datetime.utcnow() في جميع الأماكن
 - إضافة فهارس إضافية لتسريع الاستعلامات البطيئة (user_penalties, subscriptions, posts)
-- إصلاح تحديث active_channel: يتم تعيين القناة النشطة دائماً عند إضافة قناة (سواء جديدة أو موجودة)
+- ✅ [تم التعديل] في add_channel: تعيد الدالة الآن قاموساً يحتوي على معلومات القناة (id, channel_id, channel_name, posts_count)
+  بدلاً من المعرف فقط، لتتمكن الواجهة من عرض الاسم وعدد المنشورات فوراً بعد الإضافة.
 """
 
 import os
@@ -3266,12 +3267,22 @@ class Database:
     # دوال القنوات (مع ميزة القناة النشطة)
     # =====================================================================
 
-    async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[int]:
+    async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[Dict]:
+        """
+        إضافة قناة جديدة وتعيينها كقناة نشطة.
+        تعيد قاموساً يحتوي على معلومات القناة لعرضها فوراً:
+        {
+            'id': ch_db_id,
+            'channel_id': channel_id,
+            'channel_name': channel_name,
+            'posts_count': 0  # أو عدد المنشورات غير المنشورة
+        }
+        """
         try:
             channel_id = int(channel_id)
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # 1. جلب الخطة النشطة + عدد القنوات الحالية في استعلام واحد
+                    # 1. جلب الخطة النشطة + عدد القنوات الحالية
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -3308,7 +3319,7 @@ class Database:
                     if max_channels is not None and current_count >= max_channels:
                         return None
 
-                    # 3. إدراج القناة (مع إرجاع المعرف)
+                    # 3. إدراج القناة (أو تحديثها إذا كانت موجودة)
                     existing = await self._fetchone_with_conn(conn, "SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?", user_id, channel_id)
                     if existing:
                         ch_db_id = existing['id']
@@ -3337,12 +3348,12 @@ class Database:
                             ch_db_id = cursor.lastrowid
                         is_new = True
 
-                    # 4. تعيينها كقناة نشطة دائماً (سواء جديدة أو موجودة)
+                    # 4. تعيين القناة النشطة دائماً
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
-                    # 5. إنشاء جدولتها الافتراضية مع تأخير بسيط (30 ثانية بدلاً من 12 دقيقة)
+                    # 5. إنشاء جدولتها الافتراضية
                     import random
-                    delay_seconds = random.randint(5, 30)  # تأخير بسيط لتجنب التزاحم
+                    delay_seconds = random.randint(5, 30)
                     next_publish = TimeUtils.utc_now() + timedelta(seconds=delay_seconds)
 
                     if USE_POSTGRES:
@@ -3368,7 +3379,7 @@ class Database:
                             ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S')
                         )
 
-                    # 6. منح نقاط إضافية للقناة الجديدة (إذا كانت جديدة)
+                    # 6. منح نقاط إضافية للقناة الجديدة
                     if is_new:
                         if USE_POSTGRES:
                             await self._execute_with_conn(
@@ -3388,28 +3399,42 @@ class Database:
                                 "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,10,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 10, last_updated = ?",
                                 user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()
                             )
-                    return ch_db_id
+
+                    # 7. جلب عدد المنشورات غير المنشورة (للقناة الجديدة 0، لكن للتأكد)
+                    posts_count = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0",
+                        ch_db_id,
+                        default=0
+                    )
+
+                    # 8. إرجاع قاموس يحتوي على جميع المعلومات المطلوبة
+                    return {
+                        'id': ch_db_id,
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                        'posts_count': posts_count
+                    }
         except Exception as e:
             logger.error(f"❌ Error in add_channel: {e}", exc_info=True)
             return None
 
+    # =====================================================================
+    # بقية دوال القنوات (نفس الكود السابق، معدلة لاستخدام المعلومات الجديدة)
+    # =====================================================================
+
     async def get_active_channel(self, user_id: int) -> Optional[int]:
-        # 1. جلب القناة المخزنة في عمود active_channel
         result = await self.fetchval("SELECT active_channel FROM users WHERE user_id = ?", (user_id,))
         if result:
-            # 2. التحقق من أنها غير محظورة
             banned = await self.fetchval("SELECT banned FROM user_channels WHERE id = ? AND user_id = ?", (result, user_id), default=1)
             if banned == 0:
                 return result
-        # 3. إذا لم تكن موجودة أو محظورة، نأخذ أول قناة غير محظورة كبديل
         return await self.fetchval("SELECT id FROM user_channels WHERE user_id = ? AND banned = 0 ORDER BY id LIMIT 1", (user_id,))
 
     async def set_active_channel(self, user_id: int, channel_db_id: int) -> bool:
-        # التأكد من أن القناة تخص المستخدم وغير محظورة
         exists = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", (channel_db_id, user_id))
         if not exists:
             return False
-        # تحديث الحقل
         return await self.execute("UPDATE users SET active_channel = ? WHERE user_id = ?", (channel_db_id, user_id)) > 0
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
@@ -3449,7 +3474,6 @@ class Database:
             async with self.transaction() as conn:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
                 if deleted > 0:
-                    # إذا كانت القناة المحذوفة هي النشطة، نمسح الحقل
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
                     return True
                 return False
@@ -3474,12 +3498,10 @@ class Database:
                 return 0
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # 1. التحقق من وجود القناة وعدم حظرها
                     row = await self._fetchone_with_conn(conn, "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", channel_db_id, user_id)
                     if not row:
                         return 0
 
-                    # 2. جلب الحد الأقصى للمنشورات غير المنشورة من الخطة النشطة
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -3512,7 +3534,6 @@ class Database:
                     max_posts = plan_row['max_posts']
                     current_count = plan_row['cnt'] or 0
 
-                    # 3. إزالة التكرار داخل الدفعة الحالية
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
@@ -3524,7 +3545,6 @@ class Database:
                             seen_local.add(key)
                             unique_posts.append((text, m, f))
 
-                    # 4. التحقق من التكرار مع قاعدة البيانات
                     final_posts = []
                     for t, m, f in unique_posts:
                         text_clean = (t or "")[:4096] if self._max_post_text_length == 0 else (t or "")[:self._max_post_text_length]
@@ -3541,7 +3561,6 @@ class Database:
                     if not final_posts:
                         return 0
 
-                    # 5. تطبيق الحد الأقصى للمنشورات غير المنشورة
                     if max_posts is not None:
                         if current_count + len(final_posts) > max_posts:
                             allowed = max(0, max_posts - current_count)
@@ -3549,7 +3568,6 @@ class Database:
                                 return 0
                             final_posts = final_posts[:allowed]
 
-                    # 6. إدراج المنشورات باستخدام _executemany_with_conn
                     total = 0
                     for i in range(0, len(final_posts), 100):
                         batch = final_posts[i:i+100]
@@ -4219,9 +4237,7 @@ class Database:
 
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
-        # تحسين الاستعلام لتجنب WITH في MySQL القديم
         if USE_MYSQL:
-            # نسخة مبسطة لـ MySQL (بدون WITH)
             query = """
                 SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
                 FROM user_channels uc
@@ -4262,7 +4278,6 @@ class Database:
             """
             return await self.fetchall(query, (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), limit))
         else:
-            # استخدام WITH لـ PostgreSQL و SQLite
             query = """
                 WITH active_subs AS (
                     SELECT s.user_id, 
