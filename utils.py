@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع الحفاظ على كل الميزات)
+utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع حماية tuple)
 =================================================================================
-- جميع الدوال والفئات الموجودة سابقًا باقية كما هي
+- جميع الدوال الموجودة سابقًا باقية كما هي
 - تحسينات إضافية طفيفة لا تؤثر على السلوك الحالي
 - دمج اختياري مع cache.py (بدون إزالة الكاشات المحلية)
 - إصلاحات دقيقة في بعض النقاط
@@ -12,9 +12,7 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - تطبيق إصلاحات إضافية بعد الفحص الثاني (النقاط 1،2،5،6،8،9،11،13،14)
 - إضافة تحسينات اختيارية: timeout للطلبات، تحسين أسماء المتغيرات، فحص Content-Type
 - إضافة عرض حالة الوسائط في _format_security_text
-- إصلاح _send_media لتمرير **kwargs و reply_markup و parse_mode
-- إصلاح safe_send لتمرير جميع المعاملات بشكل صحيح
-- إضافة دالة format_user_status لعرض حالة المستخدم مع منشورات القناة النشطة فقط
+- ✅ [إصلاح] _publish_single: تحويل tuple إلى dict إذا لزم الأمر (حماية مزدوجة)
 """
 
 import asyncio
@@ -172,7 +170,7 @@ class RateLimiter:
                     wait_time = 1 - (now - self._last_calls[0])
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
-                        now = time.time()  # إعادة حساب الوقت بعد الانتظار
+                        now = time.time()
                 self._last_calls.append(now)
 
 
@@ -586,8 +584,8 @@ class CB:
     ADMIN_DEL_CONTEST = "admin_del_contest"
     ADMIN_EXPORT_REPLIES = "admin_export_replies"
     ADMIN_IMPORT_REPLIES = "admin_import_replies"
-    ADMIN_REFRESH_CACHE = "admin_refresh_cache"
     ADMIN_IMPORT_GITHUB = "admin_import_github"
+    ADMIN_REFRESH_CACHE = "admin_refresh_cache"
     ADMIN_INVOICES = "admin_invoices"
     ADMIN_PAYMENT_LOGS = "admin_payment_logs"
     ADMIN_GRANT_FREE = "admin_grant_free"
@@ -841,7 +839,6 @@ class KeyboardFactory:
             f"⚠️ تحذيرات: {st(settings.get('warn_enabled', 0))} | 📊 حد: {settings.get('max_warnings', 3)}\n",
             f"🎯 ترحيب: {st(settings.get('welcome_enabled', 0))} | 👋 وداع: {st(settings.get('goodbye_enabled', 0))}",
             f"🗑️ رسائل الخدمة: {st(settings.get('delete_service', 0))}",
-            # السطر الجديد لعرض حالة الوسائط
             f"🎬 فيديو: {st(settings.get('delete_videos', 0))} | 🎤 صوتي: {st(settings.get('delete_voice', 0))} | 🖼️ ملصقات: {st(settings.get('delete_stickers', 0))}",
             f"📄 ملفات: {st(settings.get('delete_documents', 0))} | 📸 صور: {st(settings.get('delete_photos', 0))} | 🎞️ متحرك: {st(settings.get('delete_animation', 0))}",
             f"✅ موافقة: {st(settings.get('auto_approve_join', 0))} | ❌ رفض: {st(settings.get('auto_reject_join', 0))}\n",
@@ -1038,86 +1035,40 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
-    """إرسال الوسائط حسب النوع مع تمرير جميع المعاملات الإضافية."""
-    # استخراج parse_mode و disable_web_page_preview ونحوها من kwargs
-    parse_mode = kwargs.pop('parse_mode', None)
-    # يجب إزالة parse_mode من kwargs إذا كانت غير مدعومة، ولكننا نمررها حيث تدعمها الدوال
-    # في Telegram، معظم دوال الوسائط لا تدعم parse_mode في caption، لذا نمررها فقط إذا كانت مدعومة.
-    # لكننا سنمررها لضمان التوافق.
-
+    """إرسال الوسائط حسب النوع."""
     # الأنواع التي لا تدعم caption
     no_caption_types = {'voice', 'sticker', 'video_note'}
 
-    # بناء معاملات الإرسال الأساسية مع استثناء parse_mode من caption
-    send_kwargs = {}
-    if reply_markup is not None:
-        send_kwargs['reply_markup'] = reply_markup
-    if kwargs:
-        send_kwargs.update(kwargs)  # تمرير أي معاملات إضافية (مثل disable_notification)
-    
     if media_type == 'photo':
-        if caption and parse_mode:
-            return await bot.send_photo(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
-        return await bot.send_photo(chat_id, media_file_id, caption=caption, **send_kwargs)
+        return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'video':
-        if caption and parse_mode:
-            return await bot.send_video(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
-        return await bot.send_video(chat_id, media_file_id, caption=caption, **send_kwargs)
+        return await bot.send_video(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'document':
-        if caption and parse_mode:
-            return await bot.send_document(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
-        return await bot.send_document(chat_id, media_file_id, caption=caption, **send_kwargs)
+        return await bot.send_document(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'audio':
-        if caption and parse_mode:
-            return await bot.send_audio(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
-        return await bot.send_audio(chat_id, media_file_id, caption=caption, **send_kwargs)
+        return await bot.send_audio(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'voice':
-        # لا يدعم caption، أرسل الصوت أولاً
-        voice_kwargs = {**send_kwargs}
-        if 'parse_mode' in voice_kwargs:
-            del voice_kwargs['parse_mode']  # ليس مدعومًا
-        sent = await bot.send_voice(chat_id, media_file_id, **voice_kwargs)
+        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
+        sent = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
         if caption:
-            # إرسال النص كرسالة منفصلة مع parse_mode إذا كان موجوداً
-            text_kwargs = {**send_kwargs}
-            if parse_mode:
-                text_kwargs['parse_mode'] = parse_mode
-            await bot.send_message(chat_id, caption, **text_kwargs)
+            await bot.send_message(chat_id, caption)
         return sent
     elif media_type == 'animation':
-        if caption and parse_mode:
-            return await bot.send_animation(chat_id, media_file_id, caption=caption, parse_mode=parse_mode, **send_kwargs)
-        return await bot.send_animation(chat_id, media_file_id, caption=caption, **send_kwargs)
+        return await bot.send_animation(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'sticker':
-        # لا يدعم caption
-        sticker_kwargs = {**send_kwargs}
-        if 'parse_mode' in sticker_kwargs:
-            del sticker_kwargs['parse_mode']
-        sent = await bot.send_sticker(chat_id, media_file_id, **sticker_kwargs)
+        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
+        sent = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            text_kwargs = {**send_kwargs}
-            if parse_mode:
-                text_kwargs['parse_mode'] = parse_mode
-            await bot.send_message(chat_id, caption, **text_kwargs)
+            await bot.send_message(chat_id, caption)
         return sent
     elif media_type == 'video_note':
-        # لا يدعم caption
-        video_note_kwargs = {**send_kwargs}
-        if 'parse_mode' in video_note_kwargs:
-            del video_note_kwargs['parse_mode']
-        sent = await bot.send_video_note(chat_id, media_file_id, **video_note_kwargs)
+        # لا يدعم caption، أرسل النص كرسالة منفصلة بعد الإرسال
+        sent = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            text_kwargs = {**send_kwargs}
-            if parse_mode:
-                text_kwargs['parse_mode'] = parse_mode
-            await bot.send_message(chat_id, caption, **text_kwargs)
+            await bot.send_message(chat_id, caption)
         return sent
     else:
-        # نص عادي
-        msg_kwargs = {**send_kwargs}
-        if parse_mode:
-            msg_kwargs['parse_mode'] = parse_mode
-        return await bot.send_message(chat_id, caption or ".", **msg_kwargs)
+        return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
@@ -1140,43 +1091,30 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
     # قص النص إلى 1024 حرف إذا كان سيستخدم كـ caption
     caption_text = text[:1024] if media_type else text
 
-    # إعداد kwargs للإرسال مع تمرير parse_mode إذا كان موجوداً
-    send_kwargs = kwargs.copy()
-    if parse_mode:
-        send_kwargs['parse_mode'] = parse_mode
-
     try:
         if media_type:
-            return await _send_media(
-                bot, chat_id, media_type, media_file_id,
-                caption=caption_text or None,
-                reply_markup=reply_markup,
-                **send_kwargs
-            )
+            return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
         else:
             return await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                **send_kwargs
+                parse_mode=parse_mode,
+                **kwargs
             )
     except TimedOut:
         logger.warning("⚠️ Timed out، محاولة إعادة الإرسال...")
         try:
             await asyncio.sleep(1)
             if media_type:
-                return await _send_media(
-                    bot, chat_id, media_type, media_file_id,
-                    caption=caption_text or None,
-                    reply_markup=reply_markup,
-                    **send_kwargs
-                )
+                return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
             else:
                 return await bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     reply_markup=reply_markup,
-                    **send_kwargs
+                    parse_mode=parse_mode,
+                    **kwargs
                 )
         except Exception as e2:
             logger.error(f"❌ فشل الإرسال بعد المحاولة الثانية: {e2}")
@@ -1187,23 +1125,14 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
             # محاولة الإرسال بدون parse_mode مع الحفاظ على النص
             try:
                 if media_type:
-                    # إزالة parse_mode من send_kwargs
-                    safe_kwargs = send_kwargs.copy()
-                    safe_kwargs.pop('parse_mode', None)
-                    return await _send_media(
-                        bot, chat_id, media_type, media_file_id,
-                        caption=caption_text or None,
-                        reply_markup=reply_markup,
-                        **safe_kwargs
-                    )
+                    return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
                 else:
-                    safe_kwargs = send_kwargs.copy()
-                    safe_kwargs.pop('parse_mode', None)
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=text[:4096],
                         reply_markup=reply_markup,
-                        **safe_kwargs
+                        parse_mode=None,
+                        **kwargs
                     )
             except Exception as e2:
                 logger.error(f"❌ فشل الإرسال النهائي: {e2}")
@@ -1257,7 +1186,6 @@ class MutePenalty(PenaltyStrategy):
             return False, "لا يمكن كتم البوت"
         duration = kwargs.get('duration', 60)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
-        # صلاحيات كتم صريحة: تعطيل جميع الإرساليات مع السماح بالدعوة فقط
         permissions = ChatPermissions(
             can_send_messages=False,
             can_send_media_messages=False,
@@ -1308,7 +1236,6 @@ class RestrictPenalty(PenaltyStrategy):
             return False, "لا يمكن تقييد البوت"
         duration = kwargs.get('duration', 0)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
-        # تقييد: السماح بالرسائل النصية فقط دون وسائط أو تفاعلات أخرى
         permissions = ChatPermissions(
             can_send_messages=True,
             can_send_media_messages=False,
@@ -1422,7 +1349,7 @@ async def _flush_usage_updates():
 
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
-        "SELECT keyword, reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id=? AND is_active=1",
+        "SELECT keyword, reply FROM auto_replies WHERE chat_id=? AND is_active=1",
         (chat_id,)
     )
     if not rows:
@@ -1461,15 +1388,13 @@ async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[D
             if overwrite:
                 await DB.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?", (chat_id, keyword))
             reply_type = item.get('reply_type', 'text')
-            media_id = item.get('reply_media_id')
-            buttons = item.get('reply_buttons')
-            if isinstance(buttons, (dict, list)):
-                buttons = json.dumps(buttons)
+            media_id = item.get('media_file_id')
+            buttons = item.get('buttons')
             await DB.add_auto_reply(
                 chat_id, keyword, reply,
                 reply_type=reply_type,
                 media_id=media_id,
-                buttons=buttons
+                buttons=json.dumps(buttons) if buttons else None
             )
             count += 1
         _auto_reply_cache.invalidate()
@@ -1585,19 +1510,32 @@ class BackgroundTasks:
             elif media_type == 'voice' and media_file_id:
                 await bot.send_voice(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب للصوت: {e}")
             elif media_type == 'animation' and media_file_id:
                 await bot.send_animation(channel_id, media_file_id, caption=caption)
             elif media_type == 'sticker' and media_file_id:
                 await bot.send_sticker(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب للملصق: {e}")
             elif media_type == 'video_note' and media_file_id:
                 await bot.send_video_note(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب لفيديو نوت: {e}")
             else:
-                await bot.send_message(channel_id, text[:4096] if text else ".")
+                if text and len(text) > 4096:
+                    for i in range(0, len(text), 4096):
+                        await bot.send_message(channel_id, text[i:i+4096])
+                else:
+                    await bot.send_message(channel_id, text if text else ".")
             return True
         except Exception as e:
             logger.error(f"❌ Publish error: {e}")
@@ -1614,7 +1552,34 @@ class BackgroundTasks:
                 logger.info(f"⏭️ تخطي القناة {ch['id']} لانتهاء الاشتراك")
                 return
 
-            post = await DB.get_next_post(ch['id'])
+            post_result = await DB.get_next_post(ch['id'])
+            # ✅ الحماية: إذا كان post_result tuple، نحوله إلى dict
+            if isinstance(post_result, tuple):
+                if len(post_result) == 2:
+                    post, recycled = post_result
+                else:
+                    post = post_result
+                    recycled = False
+                if post and not isinstance(post, dict):
+                    # تحويل tuple إلى dict
+                    if isinstance(post, (list, tuple)) and len(post) >= 5:
+                        post = {
+                            'id': post[0],
+                            'text': post[1],
+                            'media_type': post[2],
+                            'media_file_id': post[3],
+                            'fail_count': post[4],
+                        }
+                    elif isinstance(post, dict):
+                        pass
+                    else:
+                        logger.error(f"❌ post غير صالح: {type(post)}")
+                        return
+            else:
+                # post_result هو dict مباشرة
+                post = post_result
+                recycled = False
+
             if not post:
                 auto_recycle = await DB.get_auto_recycle_status(ch['user_id'])
                 if auto_recycle:
@@ -1637,7 +1602,6 @@ class BackgroundTasks:
                         await safe_send(bot, user_id, f"✅ تم نشر منشور في قناتك")
                 except Exception as e:
                     logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
-                # الانتظار الفعلي بعد النشر
                 await asyncio.sleep(sleep_seconds)
             else:
                 await DB.increment_post_fail(post['id'])
@@ -1651,14 +1615,12 @@ class BackgroundTasks:
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
         sleep_seconds = min_interval_minutes * 60
-        # Semaphore للحد من عدد المهام المتزامنة
         publish_semaphore = asyncio.Semaphore(max_channels)
 
         active_tasks = {}
 
         while True:
             try:
-                # إضافة مهلة زمنية لاستعلام قاعدة البيانات
                 channels = await asyncio.wait_for(
                     DB.get_channels_to_publish(max_channels),
                     timeout=10
@@ -1679,9 +1641,8 @@ class BackgroundTasks:
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
-                    await asyncio.sleep(0.5)  # مهلة صغيرة بين إنشاء المهام
+                    await asyncio.sleep(0.5)
 
-                # تنظيف المهام المنتهية
                 for cid in list(active_tasks.keys()):
                     if active_tasks[cid].done():
                         with suppress(Exception):
@@ -1828,7 +1789,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def cleanup_old_data() -> None:
-        """تنظيف البيانات القديمة والكاش المؤقت."""
         while True:
             await asyncio.sleep(3600)
             try:
@@ -1892,7 +1852,6 @@ async def webhook_handler(request):
         logger.error("❌ Webhook app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
-        # فحص Content-Type
         if request.content_type != 'application/json':
             logger.warning("⚠️ Webhook request with non-JSON content")
             return web.Response(status=400, text="Bad Request")
@@ -1905,70 +1864,7 @@ async def webhook_handler(request):
 
 
 # =====================================================================
-# 18. دالة عرض حالة المستخدم (الجديدة)
-# =====================================================================
-
-async def format_user_status(user_id: int, user_lang: str = 'ar') -> str:
-    """
-    توليد نص حالة المستخدم مع عرض منشورات القناة النشطة فقط.
-    هذه الدالة تحل مشكلة عرض إجمالي المنشورات غير المنشورة من جميع القنوات،
-    وتعرض فقط منشورات القناة النشطة.
-    """
-    user = await DB.get_user(user_id)
-    if not user:
-        return "❌ المستخدم غير موجود"
-
-    # جلب القناة النشطة
-    active_channel_id = await DB.get_active_channel(user_id)
-    active_channel_name = "لا توجد قناة نشطة"
-    unpublished_count = 0
-    if active_channel_id:
-        channel_info = await DB.get_channel_info(user_id, active_channel_id)
-        if channel_info:
-            active_channel_name = channel_info.get('channel_name', 'بدون اسم')
-        unpublished_count = await DB.get_unpublished_posts_count(user_id, active_channel_id)
-
-    # بقية البيانات
-    groups = await DB.get_user_groups(user_id)
-    auto_publish = await DB.get_auto_publish_status(user_id)
-    auto_recycle = await DB.get_auto_recycle_status(user_id)
-    has_sub = await DB.has_active_subscription(user_id)
-
-    # استخدام الترجمة إذا كانت متاحة
-    try:
-        text_template = await get_text(user_lang, 'user_status_text')
-    except:
-        text_template = None
-
-    if text_template and text_template != 'user_status_text':
-        # استخدام الترجمة
-        text = text_template.format(
-            user_id=user_id,
-            groups_count=len(groups),
-            channel_name=active_channel_name,
-            unpublished=unpublished_count,
-            auto_publish='مفعل' if auto_publish else 'معطل',
-            auto_recycle='مفعل' if auto_recycle else 'معطل',
-            sub_status='✅ نشط' if has_sub else '❌ غير نشط'
-        )
-    else:
-        # النص الافتراضي
-        text = f"""
-🌿 **Relax Manager**
-
-👤 المستخدم: <code>{user_id}</code>
-👥 المجموعات: {len(groups)}
-📡 القناة النشطة: {active_channel_name}
-📥 منشورات غير منشورة: {unpublished_count}
-📤 النشر التلقائي: {'مفعل' if auto_publish else 'معطل'}
-♻️ إعادة التدوير: {'مفعل' if auto_recycle else 'معطل'}
-💎 الاشتراك: {'✅ نشط' if has_sub else '❌ غير نشط'}
-"""
-    return text.strip()
-
-
-# =====================================================================
-# 19. معالج الأخطاء
+# 18. معالج الأخطاء
 # =====================================================================
 
 class ErrorHandler:
