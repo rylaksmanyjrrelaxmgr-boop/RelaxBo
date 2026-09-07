@@ -2,36 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (نسخة نهائية معدلة بالكامل)
-- لوحة أدمن كاملة
-- جميع معالجات الأمان
-- شراء الهدايا يعمل
-- إصلاح زر التحذير
-- إصلاح زر التحديثات
-- مدد العقوبات: دائم، نصف ساعة، ساعة، يوم، أسبوع، عشرة أيام، شهر
-- أزرار الردود التلقائية تعمل فورًا مع رسائل تأكيد
-- عدّاد النشر الجماعي دقيق
-- استخدام parse_mode آمن (نص عادي بدون Markdown)
-- معالجات خاصة لأزرار الانضمام تمنع التعارض بين الموافقة والرفض
-- دعم 12+ لغة في أزرار الترجمة
-- إزالة تكرار toggle_map
-- إضافة معالج المقاييس (Metrics) بشكل فعلي
-- إضافة معالجات الأزرار النادرة
-- إضافة حظر/فك حظر يدوي للقنوات والمجموعات من لوحة الأدمن
-- إصلاح عرض مدد الطرد (kick) بعدم عرضها نهائيًا
-- إصلاح حدود الصفحات في القوائم
-- تخزين مرجع لمهمة النسخ الاحتياطي
-- تحديث نص الردود التلقائية عند التبديل
-- إرسال النص المصاحب للوسائط التي لا تدعم caption
-- إصلاح safe_edit عند الطول الزائد
-- تجنب عرض قائمة المدد لعقوبة الطرد
-- تصحيح ترجمة النصوص الثابتة
-- ترجمة قسم التذكيرات بالكامل
-- إصلاح مشكلة _trans مع lang=None
-- إصلاح معالجة warn_penalty_set
-- إصلاح زر مدة العقوبة
-- إصلاح أزرار set_warn_penalty
-- إبطال الكاش عند إضافة/تحديد/حذف قناة لتحديث القائمة الرئيسية فوراً
+handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (نسخة معدلة)
+- تضمين normalize_post داخلياً لتجنب تعديل utils.py
+- إصلاح أزرار sec_penalty_* لاختيار العقوبة التلقائية
+- تحسين safe_delete_message لتجاهل خطأ "Message to delete not found"
+- استخدام normalize_post في دوال النشر
 """
 
 import asyncio
@@ -55,7 +30,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from handlers_command import CommandHandlers, CACHE  # استيراد CACHE لإبطاله عند تغيير القناة
+from handlers_command import CommandHandlers, CACHE
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +40,36 @@ MAX_BACKUPS = CONFIG.MAX_BACKUPS
 MAX_CONCURRENT_PUBLISH = 3
 
 ACTIVE_TASKS = weakref.WeakSet()
+
+
+# ✅ دالة normalize_post مضمنة هنا لتجنب تعديل utils.py
+def normalize_post(post_result) -> Optional[dict]:
+    """
+    تحويل نتيجة get_next_post إلى dict بشكل آمن.
+    تقبل dict أو tuple/list (قد تحتوي على post وrecycled).
+    """
+    if isinstance(post_result, dict):
+        return post_result
+    if isinstance(post_result, (tuple, list)):
+        # إذا كانت النتيجة (post, recycled)
+        if len(post_result) >= 2 and isinstance(post_result[0], (dict, tuple, list)):
+            post = post_result[0]
+        elif len(post_result) > 0:
+            post = post_result[0]
+        else:
+            post = None
+
+        if isinstance(post, dict):
+            return post
+        if isinstance(post, (tuple, list)) and len(post) >= 5:
+            return {
+                'id': post[0],
+                'text': post[1] if len(post) > 1 else '',
+                'media_type': post[2] if len(post) > 2 else None,
+                'media_file_id': post[3] if len(post) > 3 else None,
+                'fail_count': post[4] if len(post) > 4 else 0,
+            }
+    return None
 
 
 async def _safe_answer(query, text=None, show_alert=False):
@@ -130,13 +135,17 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None):
 
 
 async def safe_delete_message(query_or_message):
+    """حذف رسالة مع تجاهل الخطأ إذا كانت غير موجودة."""
     try:
         if hasattr(query_or_message, 'message') and query_or_message.message:
             await query_or_message.message.delete()
         elif query_or_message:
             await query_or_message.delete()
-    except Exception:
-        pass
+    except BadRequest as e:
+        if "message to delete not found" not in str(e).lower():
+            logger.warning(f"تعذر حذف الرسالة: {e}")
+    except Exception as e:
+        logger.warning(f"تعذر حذف الرسالة: {e}")
 
 
 def _mask_id(id_value, prefix=3, suffix=2):
@@ -575,7 +584,7 @@ class CallbackHandlers:
                     await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
                     return
                 if await DB.set_active_channel(user_id, ch_id):
-                    CACHE.invalidate("active_channel", user_id)  # إبطال الكاش لتحديث القائمة الرئيسية
+                    CACHE.invalidate("active_channel", user_id)
                     await safe_edit(query, "✅ تم تحديد القناة!", bot=context.bot)
                 else:
                     await _safe_answer(query, "❌ لا يمكنك تحديد هذه القناة", show_alert=True)
@@ -588,7 +597,7 @@ class CallbackHandlers:
                     await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
                     return
                 if await DB.delete_channel(user_id, ch_id):
-                    CACHE.invalidate("active_channel", user_id)  # إبطال الكاش لتحديث القائمة الرئيسية
+                    CACHE.invalidate("active_channel", user_id)
                     await _safe_answer(query, "✅ تم الحذف")
                     context.user_data['channel_page'] = 0
                     await CallbackHandlers._show_channel_list(update, context, query, user_id, lang)
@@ -631,7 +640,8 @@ class CallbackHandlers:
                 if not active:
                     await safe_edit(query, "❌ لا توجد قناة", bot=context.bot)
                     return
-                post = await DB.get_next_post(active)
+                post_result = await DB.get_next_post(active)
+                post = normalize_post(post_result)
                 if not post:
                     await safe_edit(query, "📭 لا توجد منشورات", bot=context.bot)
                     return
@@ -852,6 +862,10 @@ class CallbackHandlers:
     # ============ دوال النشر ============
     @staticmethod
     async def _publish_single(bot, ch_db_id, ch_tele, post) -> bool:
+        post = normalize_post(post)
+        if not post:
+            logger.warning("❌ post غير صالح في _publish_single")
+            return False
         try:
             post_id = post.get('id')
             text = post.get('text', '')
@@ -929,7 +943,8 @@ class CallbackHandlers:
             if ch.get('banned'):
                 banned_count += 1
                 continue
-            post = await DB.get_next_post(ch['id'])
+            post_result = await DB.get_next_post(ch['id'])
+            post = normalize_post(post_result)
             if post:
                 ch_info = await DB.get_channel_info(user_id, ch['id'])
                 if ch_info:
@@ -1068,6 +1083,22 @@ class CallbackHandlers:
         if action == "warn_penalty_duration":
             context.user_data['penalty_type'] = 'warn_penalty'
             await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
+            return
+
+        # ✅ معالجة أزرار اختيار العقوبة التلقائية
+        penalty_action_map = {
+            "penalty_ban": "ban",
+            "penalty_mute": "mute",
+            "penalty_kick": "kick",
+            "penalty_restrict": "restrict",
+            "penalty_none": "none",
+        }
+        if action in penalty_action_map:
+            penalty_type = penalty_action_map[action]
+            await DB.update_security_settings(chat_id, auto_penalty=penalty_type)
+            await _safe_answer(query, f"✅ تم تعيين العقوبة التلقائية: {penalty_type}")
+            settings = await DB.get_security_settings(chat_id)
+            await safe_edit(query, KeyboardFactory._format_security_text(settings), reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang), bot=context.bot)
             return
 
         try:
