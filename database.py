@@ -791,7 +791,6 @@ class Database:
             cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
             return cursor.rowcount
 
-    # دالة جديدة للإدراج المجمع مع تحويل العناصر النائبة
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
         if not params_list:
             return 0
@@ -3291,7 +3290,7 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات (add_channel محسّن)
+    # دوال القنوات (مع ميزة القناة النشطة)
     # =====================================================================
 
     async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[int]:
@@ -3299,6 +3298,7 @@ class Database:
             channel_id = int(channel_id)
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
+                    # 1. جلب الخطة النشطة + عدد القنوات الحالية في استعلام واحد
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -3330,11 +3330,17 @@ class Database:
                         return None
                     max_channels = plan_row['max_channels']
                     current_count = plan_row['cnt'] or 0
+
+                    # 2. التحقق من الحد الأقصى
                     if max_channels is not None and current_count >= max_channels:
                         return None
+
+                    # 3. إدراج القناة (مع إرجاع المعرف)
                     existing = await self._fetchone_with_conn(conn, "SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?", user_id, channel_id)
-                    is_new = existing is None
-                    if is_new:
+                    if existing:
+                        ch_db_id = existing['id']
+                        await self._execute_with_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
+                    else:
                         if USE_POSTGRES:
                             row = await self._fetchone_with_conn(
                                 conn,
@@ -3355,11 +3361,11 @@ class Database:
                                 (user_id, channel_id, channel_name, TimeUtils.sql_iso())
                             )
                             ch_db_id = cursor.lastrowid
-                    else:
-                        ch_db_id = existing['id']
-                        await self._execute_with_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
+
+                    # 4. تعيينها كقناة نشطة (هذا هو المفتاح!)
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
+                    # 5. إنشاء جدولتها الافتراضية
                     import random
                     delay_seconds = random.randint(0, 11 * 60)
                     next_publish = TimeUtils.utc_now() + timedelta(minutes=12, seconds=delay_seconds)
@@ -3387,6 +3393,7 @@ class Database:
                             ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S')
                         )
 
+                    # 6. منح نقاط إضافية للقناة الجديدة
                     if is_new:
                         if USE_POSTGRES:
                             await self._execute_with_conn(
@@ -3411,34 +3418,27 @@ class Database:
             logger.error(f"❌ Error in add_channel: {e}", exc_info=True)
             return None
 
-    async def get_user_channels(self, user_id: int) -> List[Dict]:
-        return await self.fetchall("SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
-
     async def get_active_channel(self, user_id: int) -> Optional[int]:
+        # 1. جلب القناة المخزنة في عمود active_channel
         result = await self.fetchval("SELECT active_channel FROM users WHERE user_id = ?", (user_id,))
         if result:
+            # 2. التحقق من أنها غير محظورة
             banned = await self.fetchval("SELECT banned FROM user_channels WHERE id = ? AND user_id = ?", (result, user_id), default=1)
             if banned == 0:
                 return result
+        # 3. إذا لم تكن موجودة أو محظورة، نأخذ أول قناة غير محظورة كبديل
         return await self.fetchval("SELECT id FROM user_channels WHERE user_id = ? AND banned = 0 ORDER BY id LIMIT 1", (user_id,))
 
     async def set_active_channel(self, user_id: int, channel_db_id: int) -> bool:
+        # التأكد من أن القناة تخص المستخدم وغير محظورة
         exists = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", (channel_db_id, user_id))
         if not exists:
             return False
+        # تحديث الحقل
         return await self.execute("UPDATE users SET active_channel = ? WHERE user_id = ?", (channel_db_id, user_id)) > 0
 
-    async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
-        try:
-            async with self.transaction() as conn:
-                deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
-                if deleted > 0:
-                    await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
-                    return True
-                return False
-        except Exception as e:
-            logger.error(f"❌ Error in delete_channel: {e}", exc_info=True)
-            return False
+    async def get_user_channels(self, user_id: int) -> List[Dict]:
+        return await self.fetchall("SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
 
     async def get_channel_info(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
         return await self.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
@@ -3468,6 +3468,26 @@ class Database:
 
     async def get_channel_by_user(self, user_id: int, channel_id: int) -> Optional[Dict]:
         return await self.fetchone("SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
+
+    async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
+        try:
+            async with self.transaction() as conn:
+                deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
+                if deleted > 0:
+                    # إذا كانت القناة المحذوفة هي النشطة، نمسح الحقل
+                    await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"❌ Error in delete_channel: {e}", exc_info=True)
+            return False
+
+    async def is_channel_owner(self, user_id: int, channel_db_id: int) -> bool:
+        result = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
+        return result is not None
+
+    async def count_user_posts(self, user_id: int, channel_db_id: int) -> int:
+        return await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
 
     # =====================================================================
     # دوال المنشورات (add_posts معدل لاستخدام التحقق اليدوي من التكرار)
@@ -5199,13 +5219,6 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Error in delete_group: {e}", exc_info=True)
             return False
-
-    async def is_channel_owner(self, user_id: int, channel_db_id: int) -> bool:
-        result = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
-        return result is not None
-
-    async def count_user_posts(self, user_id: int, channel_db_id: int) -> int:
-        return await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
 
     async def get_contest_by_id(self, contest_id: int) -> Optional[Dict]:
         return await self.fetchone("SELECT * FROM contests WHERE id = ?", (contest_id,))
