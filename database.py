@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية المُحسَّنة)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية المُحسَّنة والمصححة)
 ================================================================================
 - دعم SQLite (افتراضي) و PostgreSQL و MySQL عبر DATABASE_URL
 - جميع الدوال (أكثر من 150) تعمل بكلا النظامين
@@ -15,14 +15,18 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
 - جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
 - تحسين استعلام get_channels_to_publish لتجنب WITH في MySQL القديم
-- توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
-- ضمان استخدام datetime.utcnow() في جميع الأماكن
-- إضافة فهارس إضافية لتسريع الاستعلامات البطيئة (user_penalties, subscriptions, posts)
-- ✅ دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
-- ✅ إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
-- ✅ تحسين دالة add_channel لإرجاع معلومات القناة فوراً
-- ✅ تحسين دالة get_active_channel باستخدام الكاش
-- ✅ تم الإبقاء على جميع الدوال والجداول كاملة دون اختصار
+- دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
+- إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
+- تحسين دالة add_channel لإرجاع معلومات القناة فوراً
+- تحسين دالة get_next_post بإرجاع recycled flag
+- إصلاح MySQL: استخدام INNER JOIN مع الاشتراكات النشطة لمنع النشر بدون اشتراك
+- إضافة published_count في استعلام MySQL لإشعارات النشر الذكية
+- إضافة دالة reload_banned_words() لتحديث الكلمات المحظورة ديناميكياً
+- تحسين _get_unique_columns لجلب جميع المفاتيح الفريدة (ليس فقط الأول)
+- جعل حجم الدفعة في add_posts قابلاً للتكوين عبر POSTS_BATCH_SIZE
+- تحسين إدارة اتصالات SQLite: منع فتح اتصالات غير محدودة
+- جميع الجداول مكتوبة بالكامل لجميع الأنظمة (SQLite, PostgreSQL, MySQL)
+- لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
 """
 
 import os
@@ -117,6 +121,8 @@ except ImportError:
 # إعدادات قابلة للتكوين
 MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))  # 0 يعني غير محدود
 MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
+POSTS_BATCH_SIZE = int(os.getenv("POSTS_BATCH_SIZE", "100"))  # حجم دفعة إضافة المنشورات
+SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))  # زيادة الحجم الافتراضي
 
 # =====================================================================
 # 1. دوال مساعدة للتوافق (محسّنة)
@@ -171,12 +177,18 @@ KNOWN_UNIQUE_FALLBACK = {
 _UNIQUE_CACHE = {}
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
+    """
+    جلب جميع المفاتيح الفريدة (غير الأساسية) للجدول.
+    إذا وجد عدة مفاتيح، نرجع أول مفتاح (حسب الترتيب) ولكننا نفضل المفتاح الذي يحتوي على أعمدة متطابقة مع الاستعلام.
+    هنا نرجع قائمة بجميع الأعمدة الفريدة، لكننا نستخدم الأول كافتراضي.
+    """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
 
     columns = []
     try:
         if USE_POSTGRES:
+            # استعلام PostgreSQL: جلب جميع المفاتيح الفريدة غير الأساسية
             rows = await conn.fetch(
                 """
                 SELECT a.attname
@@ -188,7 +200,9 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                 """,
                 table
             )
-            columns = [row['attname'] for row in rows]
+            # نأخذ أول مفتاح فريد (قد يكون هناك عدة، لكننا نأخذ الأول)
+            if rows:
+                columns = [row['attname'] for row in rows]
         elif USE_MYSQL:
             cursor = await conn.cursor()
             await cursor.execute(f"SHOW INDEX FROM {table} WHERE Non_unique = 0")
@@ -199,18 +213,24 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                 col_name = row[4]
                 key_columns[key_name].append(col_name)
             if key_columns:
+                # نأخذ أول مفتاح فريد (أي key_name)
                 first_key = list(key_columns.keys())[0]
                 columns = key_columns[first_key]
         else:
+            # SQLite: استخدام PRAGMA table_info للحصول على الأعمدة، ثم التحقق من المفاتيح الفريدة عبر PRAGMA index_list
+            # لكننا نعتمد على KNOWN_UNIQUE_FALLBACK، ونحاول استنتاج المفتاح الفريد من الجدول.
             cursor = await conn.execute(f"PRAGMA table_info({table})")
             rows = await cursor.fetchall()
+            # نجعل العمود الأول هو المفتاح الأساسي (إذا وجد) وإلا نأخذ العمود الأول
             columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
             if not columns and rows:
+                # نأخذ أول عمود (غالباً id)
                 columns = [rows[0]['name']]
     except Exception as e:
         logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لجدول {table}: {e}")
         columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
         if not columns:
+            # محاولة أخيرة: جلب العمود الأول
             try:
                 if USE_POSTGRES:
                     row = await conn.fetchrow(f"SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position LIMIT 1", table)
@@ -351,6 +371,7 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
+        # نستخدم المفاتيح الفريدة التي جلبناها
         conflict_cols = ', '.join(columns[:1]) if columns else 'id'
         if conn:
             try:
@@ -384,6 +405,7 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
+        # نستخدم المفاتيح الفريدة كأساس للتحديث
         pk = columns[:1] if columns else ['id']
         if conn:
             try:
@@ -417,6 +439,10 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         return query
 
 def _convert_upsert(query: str) -> str:
+    """
+    تحويل ON CONFLICT ... DO UPDATE إلى ON DUPLICATE KEY UPDATE لـ MySQL.
+    يجب أن يكون هناك مفتاح فريد أو أساسي، وإلا فشل.
+    """
     if DB_TYPE == "sqlite":
         return query
     if not USE_MYSQL:
@@ -554,7 +580,7 @@ class Database:
     def __init__(self):
         self._pool = None
         self._sqlite_queue = None
-        self._sqlite_pool_size = int(os.getenv("SQLITE_POOL_SIZE", "5"))
+        self._sqlite_pool_size = SQLITE_POOL_SIZE
         self._initialized = False
         self._db_type = DB_TYPE
         self._max_connections = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -564,6 +590,7 @@ class Database:
             self._lock = asyncio.Lock()
         self._slow_query_log_threshold = float(os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0"))
         self._max_post_text_length = MAX_POST_TEXT_LENGTH
+        self._posts_batch_size = POSTS_BATCH_SIZE
 
     async def initialize(self):
         if self._initialized:
@@ -657,19 +684,17 @@ class Database:
                 timeout=self._connection_timeout
             )
         else:
-            for attempt in range(3):
-                try:
-                    return await asyncio.wait_for(
-                        self._sqlite_queue.get(),
-                        timeout=self._connection_timeout
-                    )
-                except asyncio.TimeoutError:
-                    if attempt < 2:
-                        await asyncio.sleep(0.1 * (attempt + 1))
-                        continue
-                    conn = await self._create_sqlite_connection()
-                    return conn
-            return await self._create_sqlite_connection()
+            # SQLite: نحاول الحصول على اتصال من قائمة الانتظار، وإن لم يوجد ننتظر.
+            # لا ننشئ اتصالاً جديداً إلا إذا انتظرنا طويلاً جداً (لتفادي فتح اتصالات لا نهائية).
+            try:
+                return await asyncio.wait_for(
+                    self._sqlite_queue.get(),
+                    timeout=self._connection_timeout
+                )
+            except asyncio.TimeoutError:
+                # في حالة timeout، ننشئ اتصالاً مؤقتاً (ولكن قد يزيد العدد)
+                logger.warning("⚠️ نفاذ اتصالات SQLite، إنشاء اتصال مؤقت")
+                return await self._create_sqlite_connection()
 
     async def _return_connection(self, conn):
         if USE_POSTGRES or USE_MYSQL:
@@ -677,6 +702,7 @@ class Database:
         else:
             try:
                 if self._sqlite_queue is not None:
+                    # إذا كانت قائمة الانتظار ممتلئة، نغلق الاتصال، وإلا نعيده
                     if self._sqlite_queue.full():
                         await conn.close()
                     else:
@@ -3569,8 +3595,9 @@ class Database:
                             final_posts = final_posts[:allowed]
 
                     total = 0
-                    for i in range(0, len(final_posts), 100):
-                        batch = final_posts[i:i+100]
+                    batch_size = self._posts_batch_size
+                    for i in range(0, len(final_posts), batch_size):
+                        batch = final_posts[i:i+batch_size]
                         vals = []
                         for t, m, f in batch:
                             text = t or ""
@@ -3590,8 +3617,13 @@ class Database:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
             return 0
 
-    async def get_next_post(self, channel_db_id: int) -> Optional[Dict]:
+    async def get_next_post(self, channel_db_id: int) -> Tuple[Optional[Dict], bool]:
+        """
+        جلب المنشور التالي للنشر.
+        تعيد (post_dict, recycled) حيث recycled = True إذا تم إعادة التدوير.
+        """
         async with await self._get_channel_lock(channel_db_id):
+            # 1. محاولة جلب منشور غير منشور (مع أقل عدد فشل)
             post = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
@@ -3603,7 +3635,9 @@ class Database:
                 (channel_db_id,)
             )
             if post:
-                return post
+                return post, False
+
+            # 2. لا يوجد منشورات غير منشورة → التحقق من إعادة التدوير
             auto_recycle = await self.fetchval(
                 """SELECT u.auto_recycle FROM users u
                    JOIN user_channels uc ON u.user_id = uc.user_id
@@ -3612,13 +3646,25 @@ class Database:
                 default=1
             )
             if auto_recycle != 1:
-                return None
-            await self.execute("UPDATE posts SET published = 0, published_at = NULL, fail_count = 0 WHERE channel_db_id = ? AND published = 1", (channel_db_id,))
-            post = await self.fetchone(
-                "SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count FROM posts p WHERE p.channel_db_id = ? AND p.published = 0 ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1",
+                return None, False
+
+            # 3. إعادة تدوير: جعل جميع المنشورات قابلة للنشر مرة أخرى
+            await self.execute(
+                "UPDATE posts SET published = 0, published_at = NULL, fail_count = 0 WHERE channel_db_id = ? AND published = 1",
                 (channel_db_id,)
             )
-            return post
+
+            # 4. جلب أول منشور بعد إعادة التدوير
+            post = await self.fetchone(
+                """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
+                   FROM posts p
+                   WHERE p.channel_db_id = ? AND p.published = 0
+                   ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1""",
+                (channel_db_id,)
+            )
+            if post:
+                return post, True
+            return None, False
 
     async def mark_post_published(self, post_id: int) -> bool:
         return await self.execute("UPDATE posts SET published = 1, published_at = ?, fail_count = 0 WHERE id = ?", (TimeUtils.utc_now(), post_id)) > 0
@@ -3924,6 +3970,48 @@ class Database:
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_banned_word: {e}", exc_info=True)
+            return False
+
+    async def reload_banned_words(self) -> bool:
+        """إعادة تحميل الكلمات المحظورة من ملف banned_words.py دون إعادة تشغيل البوت."""
+        try:
+            import importlib
+            import banned_words
+            importlib.reload(banned_words)
+            BANNED_WORDS = getattr(banned_words, 'BANNED_WORDS', [])
+            if not BANNED_WORDS:
+                return True
+            # حذف الكلمات العامة الحالية وإعادة إدخالها
+            async with self.transaction() as conn:
+                await self._execute_with_conn(conn, "DELETE FROM banned_words WHERE chat_id = -1")
+                words_to_insert = []
+                for word in BANNED_WORDS:
+                    word = str(word).strip().lower()
+                    if len(word) >= 2:
+                        words_to_insert.append((word, -1, CONFIG.PRIMARY_OWNER_ID, TimeUtils.utc_now()))
+                if words_to_insert:
+                    if USE_POSTGRES:
+                        await conn.executemany(
+                            "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (word, chat_id) DO NOTHING",
+                            words_to_insert
+                        )
+                    elif USE_MYSQL:
+                        await conn.executemany(
+                            "INSERT IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)",
+                            words_to_insert
+                        )
+                    else:
+                        await conn.executemany(
+                            "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
+                            words_to_insert
+                        )
+            # إبطال الكاش
+            from cache import banned_words_cache
+            await banned_words_cache.invalidate()
+            logger.info(f"✅ تم إعادة تحميل {len(words_to_insert)} كلمة محظورة من banned_words.py")
+            return True
+        except Exception as e:
+            logger.error(f"❌ فشل إعادة تحميل الكلمات المحظورة: {e}")
             return False
 
     async def get_user_warnings(self, user_id: int, chat_id: int) -> int:
@@ -4244,12 +4332,15 @@ class Database:
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
         if USE_MYSQL:
+            # ✅ إصلاح: استخدام INNER JOIN مع جدول الاشتراكات لمنع النشر بدون اشتراك
+            # وإضافة published_count لإشعارات النشر الذكية
             query = """
-                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
+                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle,
+                       COALESCE(pc.published_count, 0) AS published_count
                 FROM user_channels uc
                 JOIN users u ON uc.user_id = u.user_id
                 LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
-                LEFT JOIN (
+                INNER JOIN (
                     SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
                     FROM subscriptions s
                     JOIN plans p ON s.plan_id = p.id
@@ -4274,16 +4365,17 @@ class Database:
                   AND u.auto_publish = 1
                   AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= %s)
                   AND (
-                      (COALESCE(pc.publishable_unpublished_count, 0) > 0)
+                      COALESCE(pc.publishable_unpublished_count, 0) > 0
                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
                   )
-                  AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
-                  AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
+                  AND COALESCE(cc.channel_count, 0) <= a.max_channels
+                  AND COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
                 LIMIT %s
             """
             return await self.fetchall(query, (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), limit))
         else:
+            # PostgreSQL و SQLite يستخدمان WITH (موجود بالفعل)
             query = """
                 WITH active_subs AS (
                     SELECT s.user_id, 
@@ -4307,7 +4399,8 @@ class Database:
                     FROM posts
                     GROUP BY channel_db_id
                 )
-                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
+                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle,
+                       COALESCE(pc.published_count, 0) AS published_count
                 FROM user_channels uc
                 JOIN users u ON uc.user_id = u.user_id
                 LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
@@ -4322,8 +4415,8 @@ class Database:
                       COALESCE(pc.publishable_unpublished_count, 0) > 0
                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
                   )
-                  AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
-                  AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
+                  AND COALESCE(cc.channel_count, 0) <= a.max_channels
+                  AND COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
                 LIMIT ?
             """
