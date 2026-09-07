@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (نسخة محسّنة ومصححة)
+🌿 Relax Manager – البوت الرئيسي (نسخة نهائية محسّنة ومصححة)
 - إصلاحات أمنية في معالجة الدفع
 - تسجيل جميع الأوامر
 - دعم video_note
@@ -14,8 +14,6 @@
 - تنظيف دوري لأقفال المستخدمين
 - دمج نظام الكاش الموحد cache.py (مع fallback)
 - إزالة filters.PAYMENT (غير موجود في الإصدار 22.8)
-- إزالة app.initialize() الزائدة (تسبب مشاكل في تلقي التحديثات)
-- تحسين معالجة الأخطاء في webhook
 """
 
 import asyncio
@@ -215,6 +213,15 @@ async def successful_payment(update, context):
         await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع أثناء معالجة الدفع.")
 
 
+async def payment_error(update, context):
+    """معالج الأخطاء المتعلقة بالدفع (احتياطي)"""
+    logger.error(f"❌ Payment error: {update}")
+    try:
+        await safe_send(context.bot, update.effective_user.id, "❌ حدث خطأ أثناء معالجة الدفع. يرجى المحاولة مرة أخرى.")
+    except Exception as e:
+        logger.error(f"❌ Failed to send payment error message: {e}")
+
+
 async def main():
     """الدالة الرئيسية"""
     try:
@@ -261,6 +268,12 @@ async def main():
 
     app = Application.builder().token(CONFIG.TOKEN).build()
     app.bot_data['start_time'] = time.monotonic()
+
+    try:
+        await app.initialize()
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize app: {e}")
+        raise
 
     # ========== قائمة الأوامر الخاصة ==========
     private_commands = [
@@ -375,6 +388,7 @@ async def main():
     # معالجات الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    # تم حذف السطر: app.add_handler(MessageHandler(filters.PAYMENT, payment_error))
 
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
