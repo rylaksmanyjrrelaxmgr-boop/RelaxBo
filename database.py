@@ -18,8 +18,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح خطأ is_new غير معرف في add_channel
 - توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
 - ضمان استخدام datetime.utcnow() في جميع الأماكن
-- تحسين الفهارس لتسريع الاستعلامات الأكثر استخداماً
-- إضافة فهارس إضافية على group_security و user_penalties لتسريع الاستعلامات البطيئة
+- إضافة فهارس إضافية لتسريع الاستعلامات البطيئة (user_penalties, subscriptions, posts)
 """
 
 import os
@@ -2499,13 +2498,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
             "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
-            # فهرس مركب محسّن لـ get_next_post (ترتيب حسب fail_count ثم created_at)
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
-            # فهرس مركب محسّن للاستعلامات غير المنشورة
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_unpub ON posts(channel_db_id, published, fail_count, created_at)",
-            # فهرس لتسريع الترتيب حسب created_at
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_created ON posts(channel_db_id, created_at)",
-            # فهرس مركب لـ get_channels_to_publish
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail ON posts(channel_db_id, published, fail_count)",
             # فهارس الجدولة
             "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
@@ -2535,7 +2530,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_tickets_user ON support_tickets(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_number ON support_tickets(ticket_number)",
-            # فهارس الاشتراكات
+            # فهارس الاشتراكات - محسّنة
             "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
             "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
@@ -2556,13 +2551,16 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_contest_participants_user ON contest_participants(user_id)",
             # فهارس التذكيرات
             "CREATE INDEX IF NOT EXISTS idx_reminders_user ON user_reminder_settings(user_id)",
-            # فهارس العقوبات
+            # فهارس العقوبات - إضافية لتسريع الاستعلامات البطيئة
             "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status ON user_penalties(user_id, chat_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_chat_status ON user_penalties(chat_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_end_time ON user_penalties(end_time)",
+            # فهارس خاصة لتسريع expire_penalties
+            "CREATE INDEX IF NOT EXISTS idx_penalties_expiry ON user_penalties(status, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_cleanup ON user_penalties(status, created_at)",
             # فهارس النقاط
             "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
             # فهارس المشرفين المخفيين والمجهولين
@@ -2574,12 +2572,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
-            # فهارس إضافية لتسريع الاستعلامات البطيئة (تم رصدها في السجلات)
-            "CREATE INDEX IF NOT EXISTS idx_group_security_chat ON group_security(chat_id)",
-            "CREATE INDEX IF NOT EXISTS idx_user_penalties_expiry ON user_penalties(status, end_time)",
-            "CREATE INDEX IF NOT EXISTS idx_user_penalties_cleanup ON user_penalties(status, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
+            # فهارس إضافية لتسريع get_channels_to_publish
             "CREATE INDEX IF NOT EXISTS idx_posts_next ON posts(channel_db_id, published, fail_count, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
         ]
         for query in indexes:
             try:
@@ -3344,10 +3339,10 @@ class Database:
                     # 4. تعيينها كقناة نشطة (هذا هو المفتاح!)
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
-                    # 5. إنشاء جدولتها الافتراضية
+                    # 5. إنشاء جدولتها الافتراضية مع تأخير بسيط (30 ثانية بدلاً من 12 دقيقة)
                     import random
-                    delay_seconds = random.randint(0, 11 * 60)
-                    next_publish = TimeUtils.utc_now() + timedelta(minutes=12, seconds=delay_seconds)
+                    delay_seconds = random.randint(5, 30)  # تأخير بسيط لتجنب التزاحم
+                    next_publish = TimeUtils.utc_now() + timedelta(seconds=delay_seconds)
 
                     if USE_POSTGRES:
                         await self._execute_with_conn(
@@ -4246,10 +4241,9 @@ class Database:
                 ) cc ON uc.user_id = cc.user_id
                 LEFT JOIN (
                     SELECT channel_db_id,
-                           SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END) AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 0 AND (fail_count IS NULL OR fail_count < 3) THEN 1 ELSE 0 END) AS publishable_unpublished_count,
                            SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count
                     FROM posts
-                    WHERE (fail_count IS NULL OR fail_count < 3) OR published = 1
                     GROUP BY channel_db_id
                 ) pc ON uc.id = pc.channel_db_id
                 WHERE uc.banned = 0 
@@ -4261,6 +4255,7 @@ class Database:
                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
                   )
                   AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
+                  AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
                 LIMIT %s
             """
@@ -4306,6 +4301,7 @@ class Database:
                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
                   )
                   AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
+                  AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
                 LIMIT ?
             """
