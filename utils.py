@@ -13,6 +13,8 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - إضافة تحسينات اختيارية: timeout للطلبات، تحسين أسماء المتغيرات، فحص Content-Type
 - إضافة عرض حالة الوسائط في _format_security_text
 - ✅ [إصلاح] _publish_single: تحويل tuple إلى dict إذا لزم الأمر (حماية مزدوجة)
+- ✅ [إصلاح] _publish_single_channel: معالجة آمنة لنتيجة get_next_post
+- ✅ [إصلاح] auto_publish: تحويل result من get_next_post إلى dict إذا كان tuple
 """
 
 import asyncio
@@ -1406,7 +1408,7 @@ async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[D
 
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
-        timeout = aiohttp.ClientTimeout(total=10)  # إضافة مهلة 10 ثوانٍ
+        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as response:
                 response.raise_for_status()
@@ -1552,39 +1554,55 @@ class BackgroundTasks:
                 logger.info(f"⏭️ تخطي القناة {ch['id']} لانتهاء الاشتراك")
                 return
 
+            # ✅ الحماية: استدعاء get_next_post ومعالجة النتيجة بأمان
             post_result = await DB.get_next_post(ch['id'])
-            # ✅ الحماية: إذا كان post_result tuple، نحوله إلى dict
-            if isinstance(post_result, tuple):
+            
+            # ✅ تحويل النتيجة إلى dict بشكل آمن
+            post = None
+            recycled = False
+            
+            if isinstance(post_result, dict):
+                post = post_result
+                recycled = False
+            elif isinstance(post_result, (list, tuple)):
                 if len(post_result) == 2:
+                    # الحالة: (post, recycled)
                     post, recycled = post_result
                 else:
                     post = post_result
                     recycled = False
-                if post and not isinstance(post, dict):
-                    # تحويل tuple إلى dict
-                    if isinstance(post, (list, tuple)) and len(post) >= 5:
-                        post = {
-                            'id': post[0],
-                            'text': post[1],
-                            'media_type': post[2],
-                            'media_file_id': post[3],
-                            'fail_count': post[4],
-                        }
-                    elif isinstance(post, dict):
-                        pass
-                    else:
-                        logger.error(f"❌ post غير صالح: {type(post)}")
-                        return
+                
+                # ✅ تحويل post إلى dict إذا كان tuple/list
+                if isinstance(post, (list, tuple)) and len(post) >= 5:
+                    post = {
+                        'id': post[0],
+                        'text': post[1] if len(post) > 1 else '',
+                        'media_type': post[2] if len(post) > 2 else None,
+                        'media_file_id': post[3] if len(post) > 3 else None,
+                        'fail_count': post[4] if len(post) > 4 else 0,
+                    }
             else:
-                # post_result هو dict مباشرة
-                post = post_result
-                recycled = False
+                logger.error(f"❌ post_result غير صالح: {type(post_result)}")
+                return
 
             if not post:
                 auto_recycle = await DB.get_auto_recycle_status(ch['user_id'])
                 if auto_recycle:
                     await DB.reset_posts(ch['user_id'], ch['id'])
-                    post = await DB.get_next_post(ch['id'])
+                    # إعادة محاولة جلب منشور بعد إعادة التدوير
+                    post_result = await DB.get_next_post(ch['id'])
+                    if isinstance(post_result, dict):
+                        post = post_result
+                    elif isinstance(post_result, (list, tuple)) and len(post_result) >= 2:
+                        post = post_result[0]
+                        if isinstance(post, (list, tuple)) and len(post) >= 5:
+                            post = {
+                                'id': post[0],
+                                'text': post[1] if len(post) > 1 else '',
+                                'media_type': post[2] if len(post) > 2 else None,
+                                'media_file_id': post[3] if len(post) > 3 else None,
+                                'fail_count': post[4] if len(post) > 4 else 0,
+                            }
                     if not post:
                         return
                 else:
