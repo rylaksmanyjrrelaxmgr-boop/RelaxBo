@@ -19,6 +19,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
 - ضمان استخدام datetime.utcnow() في جميع الأماكن
 - إضافة فهارس إضافية لتسريع الاستعلامات البطيئة (user_penalties, subscriptions, posts)
+- إصلاح تحديث active_channel: يتم تعيين القناة النشطة دائماً عند إضافة قناة (سواء جديدة أو موجودة)
 """
 
 import os
@@ -3336,7 +3337,7 @@ class Database:
                             ch_db_id = cursor.lastrowid
                         is_new = True
 
-                    # 4. تعيينها كقناة نشطة (هذا هو المفتاح!)
+                    # 4. تعيينها كقناة نشطة دائماً (سواء جديدة أو موجودة)
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
                     # 5. إنشاء جدولتها الافتراضية مع تأخير بسيط (30 ثانية بدلاً من 12 دقيقة)
