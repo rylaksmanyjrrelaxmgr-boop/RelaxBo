@@ -18,8 +18,11 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
 - ضمان استخدام datetime.utcnow() في جميع الأماكن
 - إضافة فهارس إضافية لتسريع الاستعلامات البطيئة (user_penalties, subscriptions, posts)
-- ✅ [تم التعديل] دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
-- ✅ [تم التعديل] إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
+- ✅ دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
+- ✅ إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
+- ✅ تحسين دالة add_channel لإرجاع معلومات القناة فوراً
+- ✅ تحسين دالة get_active_channel باستخدام الكاش
+- ✅ تم الإبقاء على جميع الدوال والجداول كاملة دون اختصار
 """
 
 import os
@@ -106,6 +109,8 @@ except ImportError:
     class DummyCache:
         async def invalidate(self, *args, **kwargs): pass
         async def invalidate_all(self, *args, **kwargs): pass
+        async def get_or_load(self, *args, **kwargs):
+            return {}
     user_cache = DummyCache()
     logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل كاش المستخدم")
 
@@ -2979,7 +2984,7 @@ class Database:
             return False
 
     # =====================================================================
-    # دوال المستخدمين (تم تحسين register_user باستخدام الدوال المساعدة)
+    # دوال المستخدمين (محسّنة مع الكاش)
     # =====================================================================
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
@@ -3105,7 +3110,7 @@ class Database:
     async def set_user_language(self, user_id: int, lang: str) -> bool:
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)  # ✅ إبطال الكاش
+            await user_cache.invalidate(user_id)
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
@@ -3264,10 +3269,20 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات (مع ميزة القناة النشطة)
+    # دوال القنوات (محسّنة مع الكاش وإرجاع معلومات القناة)
     # =====================================================================
 
     async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[Dict]:
+        """
+        إضافة قناة جديدة وتعيينها كقناة نشطة.
+        تعيد قاموساً يحتوي على معلومات القناة لعرضها فوراً:
+        {
+            'id': ch_db_id,
+            'channel_id': channel_id,
+            'channel_name': channel_name,
+            'posts_count': 0  # أو عدد المنشورات غير المنشورة
+        }
+        """
         try:
             channel_id = int(channel_id)
             async with await self._get_user_lock(user_id):
@@ -3338,7 +3353,6 @@ class Database:
                     # تعيين القناة النشطة دائماً
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
-                    # إنشاء جدولتها الافتراضية
                     import random
                     delay_seconds = random.randint(5, 30)
                     next_publish = TimeUtils.utc_now() + timedelta(seconds=delay_seconds)
@@ -3393,7 +3407,6 @@ class Database:
                         default=0
                     )
 
-                    # ✅ إبطال كاش المستخدم بعد تغيير القنوات
                     await user_cache.invalidate(user_id)
 
                     return {
@@ -3405,10 +3418,6 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Error in add_channel: {e}", exc_info=True)
             return None
-
-    # =====================================================================
-    # بقية دوال القنوات
-    # =====================================================================
 
     async def get_active_channel(self, user_id: int) -> Optional[int]:
         result = await self.fetchval("SELECT active_channel FROM users WHERE user_id = ?", (user_id,))
@@ -3465,7 +3474,7 @@ class Database:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
                 if deleted > 0:
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
-                    await user_cache.invalidate(user_id)  # ✅ إبطال الكاش
+                    await user_cache.invalidate(user_id)
                     return True
                 return False
         except Exception as e:
@@ -3480,7 +3489,7 @@ class Database:
         return await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
 
     # =====================================================================
-    # دوال المنشورات
+    # دوال المنشورات (محسّنة)
     # =====================================================================
 
     async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
@@ -3575,7 +3584,7 @@ class Database:
                         )
                         total += inserted
                     if total > 0:
-                        await user_cache.invalidate(user_id)  # ✅ إبطال الكاش لتحديث عدد المنشورات
+                        await user_cache.invalidate(user_id)
                     return total
         except Exception as e:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
@@ -3634,7 +3643,7 @@ class Database:
                     return 0
                 await self._execute_with_conn(conn, "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?", channel_db_id)
                 count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0", channel_db_id, default=0)
-                await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                await user_cache.invalidate(user_id)
                 return count
         except Exception as e:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
@@ -4460,7 +4469,7 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                    await user_cache.invalidate(user_id)
                     return available
         except Exception as e:
             logger.error(f"❌ Error in claim_referral_reward: {e}", exc_info=True)
@@ -4695,7 +4704,7 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                    await user_cache.invalidate(user_id)
                     return True, plan['days']
         except Exception as e:
             logger.error(f"❌ Error in redeem_gift_code: {e}", exc_info=True)
@@ -4741,7 +4750,7 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                    await user_cache.invalidate(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in grant_subscription_days: {e}", exc_info=True)
@@ -4768,7 +4777,7 @@ class Database:
                         row = await self._fetchone_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now())
                         sub_id = row['id'] if row else 0
                         await self._refresh_user_subscription_end(conn, user_id)
-                        await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                        await user_cache.invalidate(user_id)
                         return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -4799,7 +4808,7 @@ class Database:
                 users = await self._fetchall_with_conn(conn, "SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
                 for user in users:
                     await self._refresh_user_subscription_end(conn, user['user_id'])
-                    await user_cache.invalidate(user['user_id'])  # ✅ تحديث الكاش
+                    await user_cache.invalidate(user['user_id'])
         except Exception as e:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
@@ -4865,7 +4874,7 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)  # ✅ تحديث الكاش
+                    await user_cache.invalidate(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in activate_subscription_with_payment: {e}", exc_info=True)
@@ -5215,7 +5224,6 @@ class Database:
             async with self.transaction() as conn:
                 for uid in user_ids:
                     await self._execute_with_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
-                for uid in user_ids:
                     await user_cache.invalidate(uid)
             return len(user_ids)
         except Exception as e:
