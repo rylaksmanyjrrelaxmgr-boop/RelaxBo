@@ -14,37 +14,12 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح شامل للتواريخ والمناطق الزمنية (جميع التواريخ naive)
 - إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
 - جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
-- نسخ احتياطي واستعادة وتحسين قاعدة البيانات
-- إصلاح توافق PostgreSQL: تمرير datetime بدلاً من str
-- دوال مساعدة لتوحيد التفاعل مع قواعد البيانات المختلفة وتقليل التكرار
-- تحسين إدارة الاتصالات في SQLite مع إعادة محاولة ذكية
-- إصلاح مشكلة cursor.description في MySQL
-- تحسين _convert_upsert لـ MySQL
-- آلية إعادة محاولة مع backoff تصاعدي
-- دعم ضغط النسخ الاحتياطي (gzip)
-- جعل MAX_USER_LOCKS قابل للتكوين عبر البيئة
-- إضافة MAX_POST_TEXT_LENGTH قابل للتكوين
-- تحسين _convert_placeholders للتعامل مع علامات الاقتباس المضمنة
-- جلب المفاتيح الفريدة ديناميكيًا لتجنب الاعتماد على KNOWN_UNIQUE الثابت (تم التنفيذ)
-- تحسين استعلام get_channels_to_publish باستخدام COALESCE
-- إضافة فهارس مركبة إضافية على posts
-- إصلاح تحديث subscription_end في جميع دوال الاشتراكات
-- تصحيح تطبيق حد النص في add_posts
-- جعل دوال تحويل INSERT OR IGNORE/REPLACE غير متزامنة لاستخدام المفاتيح الديناميكية
-- تعديل _adapt_params لإزالة المنطقة الزمنية من التواريخ المرسلة إلى PostgreSQL
-- إصلاح مشكلة طرح التواريخ (naive/aware) في increment_violation_count ودوال أخرى
-- إصلاح دالة safe_parse_iso لقبول datetime أيضاً (لتلافي TypeError)
-- تعديل add_posts لاستخدام التحقق اليدوي من التكرار (كما في الكود القديم) بدلاً من الاعتماد على INSERT IGNORE
-- إضافة _executemany_with_conn لتحويل العناصر النائبة في الإدراج المجمع
-- إصلاح جميع الاستعلامات المباشرة في add_posts لاستخدام الدوال المساعدة
-
-🔍 تحسين الفهارس والاستعلامات:
-- idx_posts_channel_pub_fail_created: فهرس مركب لتحسين get_next_post (ترتيب حسب fail_count, created_at)
-- idx_posts_channel_unpub: فهرس مركب لاستعلامات المنشورات غير المنشورة
-- idx_user_channels_id_user: فهرس مركب لتحسين استعلامات القنوات
-- idx_posts_channel_created: فهرس لتسريع الترتيب حسب created_at
-- idx_user_channels_user_created: فهرس لتسريع استعلامات قنوات المستخدم
-- جميع الفهارس تمت إضافتها مع التحقق من عدم التكرار (IF NOT EXISTS)
+- تحسين استعلام get_channels_to_publish لتجنب WITH في MySQL القديم
+- إصلاح خطأ is_new غير معرف في add_channel
+- توحيد التعامل مع التواريخ: جميع التواريخ تُخزن بصيغة ISO نصية (SQLite/MySQL) أو timestamp (PostgreSQL)
+- ضمان استخدام datetime.utcnow() في جميع الأماكن
+- تحسين الفهارس لتسريع الاستعلامات الأكثر استخداماً
+- إضافة فهارس إضافية على group_security و user_penalties لتسريع الاستعلامات البطيئة
 """
 
 import os
@@ -444,24 +419,20 @@ def _convert_upsert(query: str) -> str:
 def _adapt_params(params: tuple) -> tuple:
     if params is None:
         return ()
-    if USE_POSTGRES:
-        new_params = []
-        for p in params:
-            if isinstance(p, datetime):
-                if p.tzinfo is not None:
-                    p = p.replace(tzinfo=None)
+    new_params = []
+    for p in params:
+        if isinstance(p, datetime):
+            if p.tzinfo is not None:
+                p = p.replace(tzinfo=None)
+            if USE_POSTGRES:
+                # تمرير datetime مباشرة لـ PostgreSQL
                 new_params.append(p)
             else:
-                new_params.append(p)
-        return tuple(new_params)
-    else:
-        new_params = []
-        for p in params:
-            if isinstance(p, datetime):
+                # SQLite و MySQL: تخزين كنص
                 new_params.append(p.strftime('%Y-%m-%d %H:%M:%S'))
-            else:
-                new_params.append(p)
-        return tuple(new_params)
+        else:
+            new_params.append(p)
+    return tuple(new_params)
 
 # =====================================================================
 # 2. فئة TimeUtils (محسّنة) - جميع التواريخ naive
@@ -2603,6 +2574,12 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
+            # فهارس إضافية لتسريع الاستعلامات البطيئة (تم رصدها في السجلات)
+            "CREATE INDEX IF NOT EXISTS idx_group_security_chat ON group_security(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_penalties_expiry ON user_penalties(status, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_user_penalties_cleanup ON user_penalties(status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_next ON posts(channel_db_id, published, fail_count, created_at)",
         ]
         for query in indexes:
             try:
@@ -3340,6 +3317,7 @@ class Database:
                     if existing:
                         ch_db_id = existing['id']
                         await self._execute_with_conn(conn, "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?", channel_name, ch_db_id)
+                        is_new = False
                     else:
                         if USE_POSTGRES:
                             row = await self._fetchone_with_conn(
@@ -3361,6 +3339,7 @@ class Database:
                                 (user_id, channel_id, channel_name, TimeUtils.sql_iso())
                             )
                             ch_db_id = cursor.lastrowid
+                        is_new = True
 
                     # 4. تعيينها كقناة نشطة (هذا هو المفتاح!)
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
@@ -3393,7 +3372,7 @@ class Database:
                             ch_db_id, next_publish.strftime('%Y-%m-%d %H:%M:%S')
                         )
 
-                    # 6. منح نقاط إضافية للقناة الجديدة
+                    # 6. منح نقاط إضافية للقناة الجديدة (إذا كانت جديدة)
                     if is_new:
                         if USE_POSTGRES:
                             await self._execute_with_conn(
@@ -4244,51 +4223,93 @@ class Database:
 
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
-        query = """
-            WITH active_subs AS (
-                SELECT s.user_id, 
-                       MAX(p.max_channels) AS max_channels,
-                       MAX(p.max_posts) AS max_posts
-                FROM subscriptions s
-                JOIN plans p ON s.plan_id = p.id
-                WHERE s.status = 'active' AND s.end_date > ?
-                GROUP BY s.user_id
-            ),
-            channel_counts AS (
-                SELECT user_id, COUNT(*) AS channel_count
-                FROM user_channels
-                WHERE banned = 0
-                GROUP BY user_id
-            ),
-            post_counts AS (
-                SELECT channel_db_id,
-                       SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END) AS unpublished_count,
-                       SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count,
-                       SUM(CASE WHEN published = 0 AND (fail_count IS NULL OR fail_count < 3) THEN 1 ELSE 0 END) AS publishable_unpublished_count
-                FROM posts
-                GROUP BY channel_db_id
-            )
-            SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
-            FROM user_channels uc
-            JOIN users u ON uc.user_id = u.user_id
-            LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
-            INNER JOIN active_subs a ON uc.user_id = a.user_id
-            LEFT JOIN channel_counts cc ON uc.user_id = cc.user_id
-            LEFT JOIN post_counts pc ON uc.id = pc.channel_db_id
-            WHERE uc.banned = 0 
-              AND u.banned = 0 
-              AND u.auto_publish = 1
-              AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
-              AND (
-                  (pc.publishable_unpublished_count > 0)
-                  OR (u.auto_recycle = 1 AND pc.published_count > 0)
-              )
-              AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
-              AND (a.max_posts IS NULL OR COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts)
-            ORDER BY COALESCE(sch.next_publish_date, uc.created_at, ?) ASC
-            LIMIT ?
-        """
-        return await self.fetchall(query, (now, now, now, limit))
+        # تحسين الاستعلام لتجنب WITH في MySQL القديم
+        if USE_MYSQL:
+            # نسخة مبسطة لـ MySQL (بدون WITH)
+            query = """
+                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
+                FROM user_channels uc
+                JOIN users u ON uc.user_id = u.user_id
+                LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
+                LEFT JOIN (
+                    SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
+                    FROM subscriptions s
+                    JOIN plans p ON s.plan_id = p.id
+                    WHERE s.status = 'active' AND s.end_date > %s
+                    GROUP BY s.user_id
+                ) a ON uc.user_id = a.user_id
+                LEFT JOIN (
+                    SELECT user_id, COUNT(*) AS channel_count
+                    FROM user_channels
+                    WHERE banned = 0
+                    GROUP BY user_id
+                ) cc ON uc.user_id = cc.user_id
+                LEFT JOIN (
+                    SELECT channel_db_id,
+                           SUM(CASE WHEN published = 0 THEN 1 ELSE 0 END) AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count
+                    FROM posts
+                    WHERE (fail_count IS NULL OR fail_count < 3) OR published = 1
+                    GROUP BY channel_db_id
+                ) pc ON uc.id = pc.channel_db_id
+                WHERE uc.banned = 0 
+                  AND u.banned = 0 
+                  AND u.auto_publish = 1
+                  AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= %s)
+                  AND (
+                      (COALESCE(pc.publishable_unpublished_count, 0) > 0)
+                      OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
+                  )
+                  AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
+                ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
+                LIMIT %s
+            """
+            return await self.fetchall(query, (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), limit))
+        else:
+            # استخدام WITH لـ PostgreSQL و SQLite
+            query = """
+                WITH active_subs AS (
+                    SELECT s.user_id, 
+                           MAX(p.max_channels) AS max_channels,
+                           MAX(p.max_posts) AS max_posts
+                    FROM subscriptions s
+                    JOIN plans p ON s.plan_id = p.id
+                    WHERE s.status = 'active' AND s.end_date > ?
+                    GROUP BY s.user_id
+                ),
+                channel_counts AS (
+                    SELECT user_id, COUNT(*) AS channel_count
+                    FROM user_channels
+                    WHERE banned = 0
+                    GROUP BY user_id
+                ),
+                post_counts AS (
+                    SELECT channel_db_id,
+                           SUM(CASE WHEN published = 0 AND (fail_count IS NULL OR fail_count < 3) THEN 1 ELSE 0 END) AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count
+                    FROM posts
+                    GROUP BY channel_db_id
+                )
+                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle
+                FROM user_channels uc
+                JOIN users u ON uc.user_id = u.user_id
+                LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
+                INNER JOIN active_subs a ON uc.user_id = a.user_id
+                LEFT JOIN channel_counts cc ON uc.user_id = cc.user_id
+                LEFT JOIN post_counts pc ON uc.id = pc.channel_db_id
+                WHERE uc.banned = 0 
+                  AND u.banned = 0 
+                  AND u.auto_publish = 1
+                  AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
+                  AND (
+                      COALESCE(pc.publishable_unpublished_count, 0) > 0
+                      OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0)
+                  )
+                  AND (a.max_channels IS NULL OR COALESCE(cc.channel_count, 0) <= a.max_channels)
+                ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
+                LIMIT ?
+            """
+            return await self.fetchall(query, (now, now, limit))
 
     # =====================================================================
     # دوال التذاكر
