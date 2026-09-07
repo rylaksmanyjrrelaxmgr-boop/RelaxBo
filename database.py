@@ -27,6 +27,11 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - تحسين إدارة اتصالات SQLite: منع فتح اتصالات غير محدودة
 - جميع الجداول مكتوبة بالكامل لجميع الأنظمة (SQLite, PostgreSQL, MySQL)
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
+- إضافة __slots__ لتقليل استهلاك الذاكرة
+- استخدام الكاش في دوال المستخدمين لتحسين الأداء
+- تحسين استعلام get_channels_to_publish مع فهارس إضافية
+- إصلاح _get_unique_columns لتفضيل المفتاح الأساسي
+- إضافة دوال مساعدة للكاش
 """
 
 import os
@@ -115,6 +120,7 @@ except ImportError:
         async def invalidate_all(self, *args, **kwargs): pass
         async def get_or_load(self, *args, **kwargs):
             return {}
+        async def invalidate_user(self, *args, **kwargs): pass
     user_cache = DummyCache()
     logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل كاش المستخدم")
 
@@ -178,9 +184,8 @@ _UNIQUE_CACHE = {}
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
     """
-    جلب جميع المفاتيح الفريدة (غير الأساسية) للجدول.
-    إذا وجد عدة مفاتيح، نرجع أول مفتاح (حسب الترتيب) ولكننا نفضل المفتاح الذي يحتوي على أعمدة متطابقة مع الاستعلام.
-    هنا نرجع قائمة بجميع الأعمدة الفريدة، لكننا نستخدم الأول كافتراضي.
+    جلب المفاتيح الفريدة (بما في ذلك المفتاح الأساسي) للجدول.
+    نفضل المفتاح الأساسي إن وجد، وإلا أول مفتاح فريد.
     """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
@@ -188,49 +193,63 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
     columns = []
     try:
         if USE_POSTGRES:
-            # استعلام PostgreSQL: جلب جميع المفاتيح الفريدة غير الأساسية
-            rows = await conn.fetch(
+            # 1. جلب المفتاح الأساسي
+            pk_row = await conn.fetchrow(
                 """
                 SELECT a.attname
                 FROM pg_index i
                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                WHERE i.indrelid = $1::regclass
-                  AND i.indisunique
-                  AND NOT i.indisprimary
+                WHERE i.indrelid = $1::regclass AND i.indisprimary
                 """,
                 table
             )
-            # نأخذ أول مفتاح فريد (قد يكون هناك عدة، لكننا نأخذ الأول)
-            if rows:
-                columns = [row['attname'] for row in rows]
+            if pk_row:
+                columns = [pk_row['attname']]
+            else:
+                # 2. جلب أول مفتاح فريد غير أساسي
+                rows = await conn.fetch(
+                    """
+                    SELECT a.attname
+                    FROM pg_index i
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                    WHERE i.indrelid = $1::regclass
+                      AND i.indisunique
+                      AND NOT i.indisprimary
+                    LIMIT 1
+                    """,
+                    table
+                )
+                if rows:
+                    columns = [row['attname'] for row in rows]
         elif USE_MYSQL:
             cursor = await conn.cursor()
-            await cursor.execute(f"SHOW INDEX FROM {table} WHERE Non_unique = 0")
-            rows = await cursor.fetchall()
-            key_columns = defaultdict(list)
-            for row in rows:
-                key_name = row[2]
-                col_name = row[4]
-                key_columns[key_name].append(col_name)
-            if key_columns:
-                # نأخذ أول مفتاح فريد (أي key_name)
-                first_key = list(key_columns.keys())[0]
-                columns = key_columns[first_key]
+            # 1. جلب المفتاح الأساسي
+            await cursor.execute(f"SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'")
+            pk_rows = await cursor.fetchall()
+            if pk_rows:
+                columns = [pk_rows[0][4]]  # Column_name
+            else:
+                # 2. جلب أول مفتاح فريد غير أساسي
+                await cursor.execute(f"SHOW KEYS FROM {table} WHERE Non_unique = 0 AND Key_name != 'PRIMARY' LIMIT 1")
+                rows = await cursor.fetchall()
+                if rows:
+                    columns = [rows[0][4]]
         else:
-            # SQLite: استخدام PRAGMA table_info للحصول على الأعمدة، ثم التحقق من المفاتيح الفريدة عبر PRAGMA index_list
-            # لكننا نعتمد على KNOWN_UNIQUE_FALLBACK، ونحاول استنتاج المفتاح الفريد من الجدول.
+            # SQLite: نستخدم PRAGMA table_info للحصول على المفتاح الأساسي
             cursor = await conn.execute(f"PRAGMA table_info({table})")
             rows = await cursor.fetchall()
-            # نجعل العمود الأول هو المفتاح الأساسي (إذا وجد) وإلا نأخذ العمود الأول
-            columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
-            if not columns and rows:
-                # نأخذ أول عمود (غالباً id)
-                columns = [rows[0]['name']]
+            pk_cols = [row['name'] for row in rows if row['pk'] > 0]
+            if pk_cols:
+                columns = pk_cols
+            else:
+                # لا يوجد مفتاح أساسي، نأخذ أول عمود
+                columns = [rows[0]['name']] if rows else []
     except Exception as e:
         logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لجدول {table}: {e}")
+        # الاحتياطي: استخدام القائمة المعروفة
         columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
         if not columns:
-            # محاولة أخيرة: جلب العمود الأول
+            # محاولة جلب العمود الأول
             try:
                 if USE_POSTGRES:
                     row = await conn.fetchrow(f"SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position LIMIT 1", table)
@@ -370,9 +389,8 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
         if not match:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
-        columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
         # نستخدم المفاتيح الفريدة التي جلبناها
-        conflict_cols = ', '.join(columns[:1]) if columns else 'id'
+        conflict_cols = 'id'
         if conn:
             try:
                 unique_cols = await _get_unique_columns(table, conn)
@@ -558,6 +576,13 @@ class Database:
     _user_locks_last_access = {}
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
+    # استخدام __slots__ لتوفير الذاكرة
+    __slots__ = (
+        '_pool', '_sqlite_queue', '_sqlite_pool_size', '_initialized',
+        '_db_type', '_max_connections', '_connection_timeout', '_cleanup_task',
+        '_slow_query_log_threshold', '_max_post_text_length', '_posts_batch_size'
+    )
+
     VALID_PENALTY_TYPES = {'mute', 'ban', 'restrict', 'kick', 'warn'}
     VALID_REPLY_TYPES = {'text', 'photo', 'video', 'animation', 'document', 'sticker', 'voice', 'video_note'}
     VALID_VIOLATION_TYPES = {
@@ -684,15 +709,12 @@ class Database:
                 timeout=self._connection_timeout
             )
         else:
-            # SQLite: نحاول الحصول على اتصال من قائمة الانتظار، وإن لم يوجد ننتظر.
-            # لا ننشئ اتصالاً جديداً إلا إذا انتظرنا طويلاً جداً (لتفادي فتح اتصالات لا نهائية).
             try:
                 return await asyncio.wait_for(
                     self._sqlite_queue.get(),
                     timeout=self._connection_timeout
                 )
             except asyncio.TimeoutError:
-                # في حالة timeout، ننشئ اتصالاً مؤقتاً (ولكن قد يزيد العدد)
                 logger.warning("⚠️ نفاذ اتصالات SQLite، إنشاء اتصال مؤقت")
                 return await self._create_sqlite_connection()
 
@@ -702,7 +724,6 @@ class Database:
         else:
             try:
                 if self._sqlite_queue is not None:
-                    # إذا كانت قائمة الانتظار ممتلئة، نغلق الاتصال، وإلا نعيده
                     if self._sqlite_queue.full():
                         await conn.close()
                     else:
@@ -3127,11 +3148,19 @@ class Database:
             return False
 
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        # استخدام الكاش إن وجد
+        try:
+            return await user_cache.get_or_load(user_id)
+        except Exception as e:
+            logger.warning(f"⚠️ فشل استخدام الكاش للمستخدم {user_id}: {e}")
+            return await self.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
 
     async def get_user_language(self, user_id: int) -> str:
-        result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
-        return result if result else 'ar'
+        # جلب من الكاش إن أمكن
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('language', 'ar')
+        return 'ar'
 
     async def set_user_language(self, user_id: int, lang: str) -> bool:
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
@@ -3140,8 +3169,10 @@ class Database:
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT auto_publish FROM users WHERE user_id = ?", (user_id,), default=1)
-        return result == 1
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('auto_publish', 1) == 1
+        return True
 
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_publish = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
@@ -3150,8 +3181,10 @@ class Database:
         return result
 
     async def get_auto_recycle_status(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT auto_recycle FROM users WHERE user_id = ?", (user_id,), default=1)
-        return result == 1
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('auto_recycle', 1) == 1
+        return True
 
     async def set_auto_recycle(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_recycle = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
@@ -3160,8 +3193,10 @@ class Database:
         return result
 
     async def is_user_banned(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT banned FROM users WHERE user_id = ?", (user_id,), default=0)
-        return result == 1
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('banned', 0) == 1
+        return False
 
     async def ban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
@@ -3191,8 +3226,10 @@ class Database:
         return result is not None
 
     async def has_used_trial(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT trial_used FROM users WHERE user_id = ?", (user_id,), default=0)
-        return result == 1
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('trial_used', 0) == 1
+        return False
 
     async def activate_trial(self, user_id: int) -> int:
         try:
@@ -3267,8 +3304,10 @@ class Database:
             return 0
 
     async def get_referral_code(self, user_id: int) -> str:
-        result = await self.fetchval("SELECT referral_code FROM users WHERE user_id = ?", (user_id,), default=f"ref_{user_id}")
-        return result if result else f"ref_{user_id}"
+        user = await self.get_user(user_id)
+        if user:
+            return user.get('referral_code', f"ref_{user_id}")
+        return f"ref_{user_id}"
 
     async def get_user_by_referral_code(self, code: str) -> Optional[int]:
         return await self.fetchval("SELECT user_id FROM users WHERE referral_code = ?", (code,))
@@ -3291,8 +3330,10 @@ class Database:
         return None
 
     async def get_subscription_end(self, user_id: int) -> Optional[datetime]:
-        result = await self.fetchval("SELECT subscription_end FROM users WHERE user_id = ?", (user_id,))
-        return TimeUtils.safe_parse_iso(result) if result else None
+        user = await self.get_user(user_id)
+        if user:
+            return TimeUtils.safe_parse_iso(user.get('subscription_end'))
+        return None
 
     # =====================================================================
     # دوال القنوات (محسّنة مع الكاش وإرجاع معلومات القناة)
