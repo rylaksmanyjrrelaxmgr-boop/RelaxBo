@@ -37,6 +37,14 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - تعديل add_posts لاستخدام التحقق اليدوي من التكرار (كما في الكود القديم) بدلاً من الاعتماد على INSERT IGNORE
 - إضافة _executemany_with_conn لتحويل العناصر النائبة في الإدراج المجمع
 - إصلاح جميع الاستعلامات المباشرة في add_posts لاستخدام الدوال المساعدة
+
+🔍 تحسين الفهارس والاستعلامات:
+- idx_posts_channel_pub_fail_created: فهرس مركب لتحسين get_next_post (ترتيب حسب fail_count, created_at)
+- idx_posts_channel_unpub: فهرس مركب لاستعلامات المنشورات غير المنشورة
+- idx_user_channels_id_user: فهرس مركب لتحسين استعلامات القنوات
+- idx_posts_channel_created: فهرس لتسريع الترتيب حسب created_at
+- idx_user_channels_user_created: فهرس لتسريع استعلامات قنوات المستخدم
+- جميع الفهارس تمت إضافتها مع التحقق من عدم التكرار (IF NOT EXISTS)
 """
 
 import os
@@ -2501,73 +2509,100 @@ class Database:
                         logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
     async def _create_indexes(self, conn):
+        """
+        إنشاء الفهارس المحسّنة لتحسين أداء الاستعلامات.
+        جميع الفهارس تستخدم IF NOT EXISTS لتجنب الأخطاء في حالة وجودها مسبقاً.
+        """
         indexes = [
+            # فهارس المستخدمين
             "CREATE INDEX IF NOT EXISTS idx_users_banned ON users(banned)",
             "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)",
             "CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)",
             "CREATE INDEX IF NOT EXISTS idx_users_updated ON users(updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code)",
+            # فهارس القنوات
             "CREATE INDEX IF NOT EXISTS idx_uc_user ON user_channels(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_uc_active ON user_channels(banned)",
             "CREATE INDEX IF NOT EXISTS idx_uc_channel_id ON user_channels(channel_id)",
+            # فهارس المنشورات - محسّنة
             "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
             "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
             "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
+            # فهرس مركب محسّن لـ get_next_post (ترتيب حسب fail_count ثم created_at)
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
+            # فهرس مركب محسّن للاستعلامات غير المنشورة
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_unpub ON posts(channel_db_id, published, fail_count, created_at)",
+            # فهرس لتسريع الترتيب حسب created_at
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_created ON posts(channel_db_id, created_at)",
+            # فهرس مركب لـ get_channels_to_publish
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail ON posts(channel_db_id, published, fail_count)",
+            # فهارس الجدولة
             "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
+            "CREATE INDEX IF NOT EXISTS idx_schedule_next_channel ON schedule(next_publish_date, channel_db_id)",
+            # فهارس المجموعات
             "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
             "CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)",
+            # فهارس الأمان
             "CREATE INDEX IF NOT EXISTS idx_security_chat ON group_security(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)",
+            # فهارس التحذيرات والمخالفات
             "CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_warnings_chat ON user_warnings(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_violations_user ON user_violations(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_violations_chat ON user_violations(chat_id)",
+            # فهارس السجلات
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_chat ON admin_logs(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_admin ON admin_logs(admin_id)",
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_created ON admin_logs(created_at)",
+            # فهارس الردود التلقائية
             "CREATE INDEX IF NOT EXISTS idx_ar_chat ON auto_replies(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_ar_keyword ON auto_replies(keyword)",
             "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
+            # فهارس التذاكر
             "CREATE INDEX IF NOT EXISTS idx_tickets_user ON support_tickets(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_number ON support_tickets(ticket_number)",
+            # فهارس الاشتراكات
             "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
             "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
             "CREATE INDEX IF NOT EXISTS idx_sub_user_status_end ON subscriptions(user_id, status, end_date)",
+            # فهارس الفواتير
             "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_inv_status ON invoices(status)",
             "CREATE INDEX IF NOT EXISTS idx_inv_number ON invoices(number)",
+            # فهارس الإحالات
             "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_id)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_created ON referrals(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_created ON referrals(referrer_id, created_at)",
+            # فهارس المسابقات
             "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)",
             "CREATE INDEX IF NOT EXISTS idx_contests_end ON contests(end_date)",
             "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)",
             "CREATE INDEX IF NOT EXISTS idx_contest_participants_user ON contest_participants(user_id)",
+            # فهارس التذكيرات
             "CREATE INDEX IF NOT EXISTS idx_reminders_user ON user_reminder_settings(user_id)",
+            # فهارس العقوبات
             "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status ON user_penalties(user_id, chat_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_chat_status ON user_penalties(chat_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_end_time ON user_penalties(end_time)",
+            # فهارس النقاط
             "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
+            # فهارس المشرفين المخفيين والمجهولين
             "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_chat ON anonymous_admins(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user ON anonymous_admins(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
-            "CREATE INDEX IF NOT EXISTS idx_schedule_next_channel ON schedule(next_publish_date, channel_db_id)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail ON posts(channel_db_id, published, fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_hidden_owner_owner ON hidden_owner_groups(owner_id)",
             "CREATE INDEX IF NOT EXISTS idx_hidden_admin_admin ON hidden_admins(admin_id)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_created ON posts(channel_db_id, created_at)",
+            # فهارس القنوات والمستخدمين
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_created ON referrals(referrer_id, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_unpub ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
         ]
         for query in indexes:
