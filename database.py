@@ -35,6 +35,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح مشكلة طرح التواريخ (naive/aware) في increment_violation_count ودوال أخرى
 - إصلاح دالة safe_parse_iso لقبول datetime أيضاً (لتلافي TypeError)
 - تعديل add_posts لاستخدام التحقق اليدوي من التكرار (كما في الكود القديم) بدلاً من الاعتماد على INSERT IGNORE
+- إضافة _executemany_with_conn لتحويل العناصر النائبة في الإدراج المجمع
+- إصلاح جميع الاستعلامات المباشرة في add_posts لاستخدام الدوال المساعدة
 """
 
 import os
@@ -170,10 +172,6 @@ KNOWN_UNIQUE_FALLBACK = {
 _UNIQUE_CACHE = {}
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
-    """
-    جلب أعمدة المفتاح الفريد لجدول معين من قاعدة البيانات.
-    إذا لم يتم العثور على معلومات، يتم استخدام القائمة الاحتياطية.
-    """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
 
@@ -783,6 +781,26 @@ class Database:
             return row[0] if row else 0
         else:
             cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            return cursor.rowcount
+
+    # دالة جديدة للإدراج المجمع مع تحويل العناصر النائبة
+    async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
+        if not params_list:
+            return 0
+        q = _convert_placeholders(query)
+        q = await _convert_insert_or_ignore(q, conn)
+        q = await _convert_insert_or_replace(q, conn)
+        q = _convert_upsert(q)
+        params_list = [_adapt_params(p) for p in params_list]
+        if USE_POSTGRES:
+            await self._execute_with_logging(q, params_list, conn, lambda q2, p2: conn.executemany(q2, p2))
+            return len(params_list)
+        elif USE_MYSQL:
+            cursor = await conn.cursor()
+            await self._execute_with_logging(q, params_list, conn, lambda q2, p2: cursor.executemany(q2, p2))
+            return cursor.rowcount
+        else:
+            cursor = await self._execute_with_logging(q, params_list, conn, lambda q2, p2: conn.executemany(q2, p2))
             return cursor.rowcount
 
     async def _fetchone_with_conn(self, conn, query: str, *params) -> Optional[Dict]:
@@ -3426,10 +3444,12 @@ class Database:
                 return 0
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    cursor = await conn.execute("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", (channel_db_id, user_id))
-                    if not await cursor.fetchone():
+                    # 1. التحقق من وجود القناة وعدم حظرها
+                    row = await self._fetchone_with_conn(conn, "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", channel_db_id, user_id)
+                    if not row:
                         return 0
 
+                    # 2. جلب الحد الأقصى للمنشورات غير المنشورة من الخطة النشطة
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -3462,6 +3482,7 @@ class Database:
                     max_posts = plan_row['max_posts']
                     current_count = plan_row['cnt'] or 0
 
+                    # 3. إزالة التكرار داخل الدفعة الحالية
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
@@ -3473,22 +3494,24 @@ class Database:
                             seen_local.add(key)
                             unique_posts.append((text, m, f))
 
+                    # 4. التحقق من التكرار مع قاعدة البيانات
                     final_posts = []
                     for t, m, f in unique_posts:
                         text_clean = (t or "")[:4096] if self._max_post_text_length == 0 else (t or "")[:self._max_post_text_length]
                         media_type = m or ''
                         media_file_id = f or ''
-                        cursor = await conn.execute(
+                        exists = await self._fetchone_with_conn(
+                            conn,
                             "SELECT 1 FROM posts WHERE channel_db_id = ? AND text = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
-                            (channel_db_id, text_clean, media_type, media_file_id)
+                            channel_db_id, text_clean, media_type, media_file_id
                         )
-                        exists = await cursor.fetchone()
                         if not exists:
                             final_posts.append((t, m, f))
 
                     if not final_posts:
                         return 0
 
+                    # 5. تطبيق الحد الأقصى للمنشورات غير المنشورة
                     if max_posts is not None:
                         if current_count + len(final_posts) > max_posts:
                             allowed = max(0, max_posts - current_count)
@@ -3496,6 +3519,7 @@ class Database:
                                 return 0
                             final_posts = final_posts[:allowed]
 
+                    # 6. إدراج المنشورات باستخدام _executemany_with_conn
                     total = 0
                     for i in range(0, len(final_posts), 100):
                         batch = final_posts[i:i+100]
@@ -3505,22 +3529,12 @@ class Database:
                             if self._max_post_text_length > 0:
                                 text = text[:self._max_post_text_length]
                             vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
-                        if USE_POSTGRES:
-                            await conn.executemany(
-                                "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES ($1, $2, $3, $4, $5)",
-                                vals
-                            )
-                        elif USE_MYSQL:
-                            await conn.executemany(
-                                "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (%s, %s, %s, %s, %s)",
-                                vals
-                            )
-                        else:
-                            await conn.executemany(
-                                "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?,?,?,?,?)",
-                                vals
-                            )
-                        total += len(vals)
+                        inserted = await self._executemany_with_conn(
+                            conn,
+                            "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                            vals
+                        )
+                        total += inserted
                     return total
         except Exception as e:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
