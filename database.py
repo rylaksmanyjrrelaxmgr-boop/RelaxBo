@@ -18,7 +18,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
 - إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
 - تحسين دالة add_channel لإرجاع معلومات القناة فوراً
-- تحسين دالة get_next_post بإرجاع recycled flag
+- تحسين دالة get_next_post بإرجاع recycled flag وضمان إرجاع dict
 - إصلاح MySQL: استخدام INNER JOIN مع الاشتراكات النشطة لمنع النشر بدون اشتراك
 - إضافة published_count في استعلام MySQL لإشعارات النشر الذكية
 - إضافة دالة reload_banned_words() لتحديث الكلمات المحظورة ديناميكياً
@@ -29,9 +29,9 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - استخدام user_cache.get_or_load في get_user
 - إضافة معامل set_active اختياري في add_channel
 - فحص وجود الأدوات الخارجية (pg_dump, mysqldump) قبل النسخ الاحتياطي
-- إضافة توثيق للدوال الديناميكية
 - ✅ [إصلاح] get_next_post تعيد قاموساً (dict) وليس tuple
 - ✅ [إصلاح] جميع دوال fetch تعيد dict دائماً
+- ✅ [إصلاح] تحويل tuple إلى dict في get_next_post كإجراء احترازي
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
 """
 
@@ -3707,6 +3707,7 @@ class Database:
         جلب المنشور التالي للنشر.
         تعيد (post_dict, recycled) حيث recycled = True إذا تم إعادة التدوير.
         ✅ مؤكد: post_dict هو قاموس (dict) وليس tuple.
+        ✅ إجراء احترازي: إذا كانت fetchone تعيد tuple، نحولها إلى dict.
         """
         async with await self._get_channel_lock(channel_db_id):
             # 1. محاولة جلب منشور غير منشور (مع أقل عدد فشل)
@@ -3721,7 +3722,17 @@ class Database:
                 (channel_db_id,)
             )
             if post_row:
-                # post_row هو dict بفضل fetchone
+                # ✅ تحويل إلى dict إذا كان tuple
+                if isinstance(post_row, tuple):
+                    # افتراض أن الأعمدة بنفس الترتيب: id, text, media_type, media_file_id, fail_count
+                    post_dict = {
+                        'id': post_row[0] if len(post_row) > 0 else None,
+                        'text': post_row[1] if len(post_row) > 1 else '',
+                        'media_type': post_row[2] if len(post_row) > 2 else None,
+                        'media_file_id': post_row[3] if len(post_row) > 3 else None,
+                        'fail_count': post_row[4] if len(post_row) > 4 else 0,
+                    }
+                    return post_dict, False
                 return post_row, False
 
             # 2. لا يوجد منشورات غير منشورة → التحقق من إعادة التدوير
@@ -3750,6 +3761,15 @@ class Database:
                 (channel_db_id,)
             )
             if post_row:
+                if isinstance(post_row, tuple):
+                    post_dict = {
+                        'id': post_row[0] if len(post_row) > 0 else None,
+                        'text': post_row[1] if len(post_row) > 1 else '',
+                        'media_type': post_row[2] if len(post_row) > 2 else None,
+                        'media_file_id': post_row[3] if len(post_row) > 3 else None,
+                        'fail_count': post_row[4] if len(post_row) > 4 else 0,
+                    }
+                    return post_dict, True
                 return post_row, True
             return None, False
 
