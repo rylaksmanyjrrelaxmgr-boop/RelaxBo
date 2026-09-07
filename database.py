@@ -22,16 +22,17 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إصلاح MySQL: استخدام INNER JOIN مع الاشتراكات النشطة لمنع النشر بدون اشتراك
 - إضافة published_count في استعلام MySQL لإشعارات النشر الذكية
 - إضافة دالة reload_banned_words() لتحديث الكلمات المحظورة ديناميكياً
-- تحسين _get_unique_columns لجلب جميع المفاتيح الفريدة (ليس فقط الأول)
+- تحسين _get_unique_columns لجلب PRIMARY KEY أولاً ثم المفاتيح الفريدة
 - جعل حجم الدفعة في add_posts قابلاً للتكوين عبر POSTS_BATCH_SIZE
 - تحسين إدارة اتصالات SQLite: منع فتح اتصالات غير محدودة
 - جميع الجداول مكتوبة بالكامل لجميع الأنظمة (SQLite, PostgreSQL, MySQL)
+- استخدام user_cache.get_or_load في get_user
+- إضافة معامل set_active اختياري في add_channel
+- فحص وجود الأدوات الخارجية (pg_dump, mysqldump) قبل النسخ الاحتياطي
+- إضافة توثيق للدوال الديناميكية
+- ✅ [إصلاح] get_next_post تعيد قاموساً (dict) وليس tuple
+- ✅ [إصلاح] جميع دوال fetch تعيد dict دائماً
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
-- إضافة __slots__ لتقليل استهلاك الذاكرة
-- استخدام الكاش في دوال المستخدمين لتحسين الأداء
-- تحسين استعلام get_channels_to_publish مع فهارس إضافية
-- إصلاح _get_unique_columns لتفضيل المفتاح الأساسي
-- إضافة دوال مساعدة للكاش
 """
 
 import os
@@ -51,6 +52,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any, Union
 from contextlib import asynccontextmanager
 from collections import defaultdict
+from weakref import WeakValueDictionary
 import asyncio
 
 # =====================================================================
@@ -120,7 +122,7 @@ except ImportError:
         async def invalidate_all(self, *args, **kwargs): pass
         async def get_or_load(self, *args, **kwargs):
             return {}
-        async def invalidate_user(self, *args, **kwargs): pass
+        async def get(self, *args, **kwargs): return None
     user_cache = DummyCache()
     logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل كاش المستخدم")
 
@@ -129,6 +131,7 @@ MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))  # 0 يعني
 MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
 POSTS_BATCH_SIZE = int(os.getenv("POSTS_BATCH_SIZE", "100"))  # حجم دفعة إضافة المنشورات
 SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))  # زيادة الحجم الافتراضي
+EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "true"
 
 # =====================================================================
 # 1. دوال مساعدة للتوافق (محسّنة)
@@ -184,8 +187,9 @@ _UNIQUE_CACHE = {}
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
     """
-    جلب المفاتيح الفريدة (بما في ذلك المفتاح الأساسي) للجدول.
-    نفضل المفتاح الأساسي إن وجد، وإلا أول مفتاح فريد.
+    جلب المفتاح الفريد الأفضل للجدول.
+    الأولوية: PRIMARY KEY > UNIQUE KEY > العمود الأول.
+    هذا يضمن أن تحويل ON CONFLICT يستخدم المفتاح الصحيح.
     """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
@@ -193,21 +197,22 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
     columns = []
     try:
         if USE_POSTGRES:
-            # 1. جلب المفتاح الأساسي
-            pk_row = await conn.fetchrow(
+            # 1. محاولة جلب PRIMARY KEY
+            pk_rows = await conn.fetch(
                 """
                 SELECT a.attname
                 FROM pg_index i
                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                WHERE i.indrelid = $1::regclass AND i.indisprimary
+                WHERE i.indrelid = $1::regclass
+                  AND i.indisprimary
                 """,
                 table
             )
-            if pk_row:
-                columns = [pk_row['attname']]
+            if pk_rows:
+                columns = [row['attname'] for row in pk_rows]
             else:
-                # 2. جلب أول مفتاح فريد غير أساسي
-                rows = await conn.fetch(
+                # 2. جلب أول UNIQUE KEY
+                unique_rows = await conn.fetch(
                     """
                     SELECT a.attname
                     FROM pg_index i
@@ -219,37 +224,43 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                     """,
                     table
                 )
-                if rows:
-                    columns = [row['attname'] for row in rows]
+                if unique_rows:
+                    columns = [row['attname'] for row in unique_rows]
         elif USE_MYSQL:
+            # MySQL: جلب PRIMARY KEY أولاً
             cursor = await conn.cursor()
-            # 1. جلب المفتاح الأساسي
             await cursor.execute(f"SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'")
             pk_rows = await cursor.fetchall()
             if pk_rows:
-                columns = [pk_rows[0][4]]  # Column_name
+                # PRIMARY KEY قد يكون مركباً، نأخذ جميع الأعمدة
+                columns = [row[4] for row in pk_rows]  # Column_name هو العمود 4
             else:
-                # 2. جلب أول مفتاح فريد غير أساسي
+                # جلب أول UNIQUE KEY
                 await cursor.execute(f"SHOW KEYS FROM {table} WHERE Non_unique = 0 AND Key_name != 'PRIMARY' LIMIT 1")
-                rows = await cursor.fetchall()
-                if rows:
-                    columns = [rows[0][4]]
+                unique_rows = await cursor.fetchall()
+                if unique_rows:
+                    # قد يكون المفتاح مركباً، نأخذ جميع الأعمدة لنفس Key_name
+                    key_name = unique_rows[0][2]  # Key_name
+                    await cursor.execute(f"SHOW KEYS FROM {table} WHERE Key_name = '{key_name}'")
+                    all_rows = await cursor.fetchall()
+                    columns = [row[4] for row in all_rows]
         else:
-            # SQLite: نستخدم PRAGMA table_info للحصول على المفتاح الأساسي
+            # SQLite: استخدام PRAGMA table_info للحصول على PRIMARY KEY
             cursor = await conn.execute(f"PRAGMA table_info({table})")
             rows = await cursor.fetchall()
-            pk_cols = [row['name'] for row in rows if row['pk'] > 0]
-            if pk_cols:
-                columns = pk_cols
+            pk_columns = [row[1] for row in rows if row[5] == 1]  # row[5] هو pk
+            if pk_columns:
+                columns = pk_columns
             else:
-                # لا يوجد مفتاح أساسي، نأخذ أول عمود
-                columns = [rows[0]['name']] if rows else []
+                # استخدام KNOWN_UNIQUE_FALLBACK أو العمود الأول
+                columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
+                if not columns and rows:
+                    columns = [rows[0][1]]  # العمود الأول
     except Exception as e:
         logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لجدول {table}: {e}")
-        # الاحتياطي: استخدام القائمة المعروفة
         columns = KNOWN_UNIQUE_FALLBACK.get(table, [])
         if not columns:
-            # محاولة جلب العمود الأول
+            # محاولة أخيرة: جلب العمود الأول
             try:
                 if USE_POSTGRES:
                     row = await conn.fetchrow(f"SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position LIMIT 1", table)
@@ -265,7 +276,7 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                     cursor = await conn.execute(f"PRAGMA table_info({table})")
                     row = await cursor.fetchone()
                     if row:
-                        columns = [row['name']]
+                        columns = [row[1]]
             except Exception:
                 columns = ['id']
             if not columns:
@@ -389,8 +400,8 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
         if not match:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
-        # نستخدم المفاتيح الفريدة التي جلبناها
-        conflict_cols = 'id'
+        columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
+        conflict_cols = ', '.join(columns[:1]) if columns else 'id'
         if conn:
             try:
                 unique_cols = await _get_unique_columns(table, conn)
@@ -423,7 +434,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(',') if c.strip()]
-        # نستخدم المفاتيح الفريدة كأساس للتحديث
         pk = columns[:1] if columns else ['id']
         if conn:
             try:
@@ -576,13 +586,6 @@ class Database:
     _user_locks_last_access = {}
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
-    # استخدام __slots__ لتوفير الذاكرة
-    __slots__ = (
-        '_pool', '_sqlite_queue', '_sqlite_pool_size', '_initialized',
-        '_db_type', '_max_connections', '_connection_timeout', '_cleanup_task',
-        '_slow_query_log_threshold', '_max_post_text_length', '_posts_batch_size'
-    )
-
     VALID_PENALTY_TYPES = {'mute', 'ban', 'restrict', 'kick', 'warn'}
     VALID_REPLY_TYPES = {'text', 'photo', 'video', 'animation', 'document', 'sticker', 'voice', 'video_note'}
     VALID_VIOLATION_TYPES = {
@@ -616,6 +619,7 @@ class Database:
         self._slow_query_log_threshold = float(os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0"))
         self._max_post_text_length = MAX_POST_TEXT_LENGTH
         self._posts_batch_size = POSTS_BATCH_SIZE
+        self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
 
     async def initialize(self):
         if self._initialized:
@@ -709,12 +713,15 @@ class Database:
                 timeout=self._connection_timeout
             )
         else:
+            # SQLite: نحاول الحصول على اتصال من قائمة الانتظار، وإن لم يوجد ننتظر.
+            # لا ننشئ اتصالاً جديداً إلا إذا انتظرنا طويلاً جداً (لتفادي فتح اتصالات لا نهائية).
             try:
                 return await asyncio.wait_for(
                     self._sqlite_queue.get(),
                     timeout=self._connection_timeout
                 )
             except asyncio.TimeoutError:
+                # في حالة timeout، ننشئ اتصالاً مؤقتاً (ولكن قد يزيد العدد)
                 logger.warning("⚠️ نفاذ اتصالات SQLite، إنشاء اتصال مؤقت")
                 return await self._create_sqlite_connection()
 
@@ -724,6 +731,7 @@ class Database:
         else:
             try:
                 if self._sqlite_queue is not None:
+                    # إذا كانت قائمة الانتظار ممتلئة، نغلق الاتصال، وإلا نعيده
                     if self._sqlite_queue.full():
                         await conn.close()
                     else:
@@ -773,6 +781,8 @@ class Database:
 
     # =====================================================================
     # 4. دوال الاستعلام (محسّنة مع تتبع وقت التنفيذ وإعادة محاولة متقدمة)
+    # ملاحظة: دوال execute, fetchone, fetchall, fetchval, executemany
+    # تُستخدم فقط مع استعلامات ثابتة من داخل البوت. لا تُمرر استعلامات من المستخدم مباشرة.
     # =====================================================================
 
     async def _execute_with_logging(self, query: str, params: tuple, conn, executor):
@@ -782,6 +792,22 @@ class Database:
             elapsed = time.monotonic() - start
             if elapsed > self._slow_query_log_threshold:
                 logger.warning(f"🐌 استعلام بطيء ({elapsed:.2f}s): {query[:200]}...")
+                if self._explain_slow_queries:
+                    try:
+                        if USE_POSTGRES:
+                            explain = await conn.fetch(f"EXPLAIN {query}", *params)
+                            logger.info(f"📊 EXPLAIN:\n{chr(10).join([str(row) for row in explain])}")
+                        elif USE_MYSQL:
+                            cursor = await conn.cursor()
+                            await cursor.execute(f"EXPLAIN {query}", params)
+                            explain = await cursor.fetchall()
+                            logger.info(f"📊 EXPLAIN:\n{chr(10).join([str(row) for row in explain])}")
+                        else:
+                            cursor = await conn.execute(f"EXPLAIN QUERY PLAN {query}", params)
+                            explain = await cursor.fetchall()
+                            logger.info(f"📊 EXPLAIN:\n{chr(10).join([str(row) for row in explain])}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل تنفيذ EXPLAIN: {e}")
             return result
         except Exception as e:
             elapsed = time.monotonic() - start
@@ -859,7 +885,10 @@ class Database:
         else:
             cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            if row:
+                # aiosqlite.Row يمكن تحويله إلى dict
+                return dict(row)
+            return None
 
     async def _fetchall_with_conn(self, conn, query: str, *params) -> List[Dict]:
         q = _convert_placeholders(query)
@@ -896,6 +925,8 @@ class Database:
             row = await cursor.fetchone()
             return row[0] if row else default
 
+    # هذه الدوال تستخدم فقط مع استعلامات ثابتة من داخل البوت،
+    # ولا تقبل استعلامات من المستخدم مباشرة.
     async def execute(self, query: str, params: tuple = ()) -> int:
         async def _exec(q, p):
             async with self.connection() as conn:
@@ -993,6 +1024,7 @@ class Database:
     # 6. إنشاء الجداول (كاملة) - مع تحسينات
     # =====================================================================
 
+    # 6.1 جداول SQLite (كاملة)
     async def _create_tables_sqlite(self, conn):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1483,6 +1515,7 @@ class Database:
         """)
         logger.info("✅ تم إنشاء جميع جداول SQLite")
 
+    # 6.2 جداول PostgreSQL (كاملة)
     async def _create_tables_postgres(self, conn):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1975,6 +2008,7 @@ class Database:
         """)
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL")
 
+    # 6.3 جداول MySQL (كاملة)
     async def _create_tables_mysql(self, conn):
         await conn.execute("SET FOREIGN_KEY_CHECKS=0")
         await conn.execute("""
@@ -2612,6 +2646,10 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
             "CREATE INDEX IF NOT EXISTS idx_posts_next ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
+            # فهارس إضافية لتسريع get_channels_to_publish
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status, end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_count ON posts(channel_db_id, published, fail_count)",
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)",
         ]
         for query in indexes:
             try:
@@ -2831,16 +2869,28 @@ class Database:
             logger.error(f"❌ فشل ضغط النسخ الاحتياطي: {e}")
             return None
 
+    async def _check_tool_exists(self, tool_name: str) -> bool:
+        """التحقق من وجود أداة خارجية في النظام"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                tool_name, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            return proc.returncode == 0
+        except FileNotFoundError:
+            return False
+
     async def backup_database(self, backup_path: Optional[Path] = None, compress: bool = True) -> bool:
         try:
             if USE_POSTGRES:
-                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.dump"
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    await asyncio.create_subprocess_exec("pg_dump", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                except FileNotFoundError:
+                # التحقق من وجود pg_dump
+                if not await self._check_tool_exists("pg_dump"):
                     logger.error("❌ pg_dump غير موجود في النظام. يرجى تثبيته.")
                     return False
+                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.dump"
+                backup_file.parent.mkdir(parents=True, exist_ok=True)
                 cmd = [
                     "pg_dump",
                     "--clean",
@@ -2866,6 +2916,10 @@ class Database:
                         backup_file = compressed
                 return True
             elif USE_MYSQL:
+                # التحقق من وجود mysqldump
+                if not await self._check_tool_exists("mysqldump"):
+                    logger.error("❌ mysqldump غير موجود في النظام. يرجى تثبيته.")
+                    return False
                 pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
                 match = re.match(pattern, DATABASE_URL)
                 if not match:
@@ -2874,11 +2928,6 @@ class Database:
                 user, password, host, port, database = match.groups()
                 backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.sql"
                 backup_file.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    await asyncio.create_subprocess_exec("mysqldump", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                except FileNotFoundError:
-                    logger.error("❌ mysqldump غير موجود في النظام. يرجى تثبيته.")
-                    return False
                 cmd = [
                     "mysqldump",
                     f"--host={host}",
@@ -2939,9 +2988,8 @@ class Database:
                 backup_path = decompressed_path
                 logger.info(f"✅ تم فك ضغط النسخة الاحتياطية إلى {backup_path.name}")
             if USE_POSTGRES:
-                try:
-                    await asyncio.create_subprocess_exec("pg_restore", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                except FileNotFoundError:
+                # التحقق من وجود pg_restore
+                if not await self._check_tool_exists("pg_restore"):
                     logger.error("❌ pg_restore غير موجود في النظام. يرجى تثبيته.")
                     return False
                 cmd = [
@@ -2965,17 +3013,16 @@ class Database:
                 logger.info("✅ استعادة PostgreSQL تمت بنجاح")
                 return True
             elif USE_MYSQL:
+                # التحقق من وجود mysql
+                if not await self._check_tool_exists("mysql"):
+                    logger.error("❌ mysql غير موجود في النظام. يرجى تثبيته.")
+                    return False
                 pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
                 match = re.match(pattern, DATABASE_URL)
                 if not match:
                     logger.error("❌ MySQL DATABASE_URL غير صالح للاستعادة")
                     return False
                 user, password, host, port, database = match.groups()
-                try:
-                    await asyncio.create_subprocess_exec("mysql", "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                except FileNotFoundError:
-                    logger.error("❌ mysql غير موجود في النظام. يرجى تثبيته.")
-                    return False
                 cmd = [
                     "mysql",
                     f"--host={host}",
@@ -3148,19 +3195,28 @@ class Database:
             return False
 
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        # استخدام الكاش إن وجد
+        """جلب بيانات المستخدم (مع استخدام الكاش)"""
         try:
-            return await user_cache.get_or_load(user_id)
-        except Exception as e:
-            logger.warning(f"⚠️ فشل استخدام الكاش للمستخدم {user_id}: {e}")
+            # استخدام الكاش إن أمكن
+            cached = await user_cache.get(user_id)
+            if cached:
+                return {
+                    'user_id': user_id,
+                    'language': cached.get('language', 'ar'),
+                    'active_channel': cached.get('active_channel'),
+                    'banned': 0,  # الكاش لا يحتوي على banned، نجلبه من قاعدة البيانات إذا لزم الأمر
+                    'auto_publish': cached.get('auto_publish', 1),
+                    'auto_recycle': cached.get('auto_recycle', 1),
+                }
+            # إذا لم يكن في الكاش، نجلبه من قاعدة البيانات
             return await self.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        except Exception as e:
+            logger.error(f"❌ Error in get_user: {e}", exc_info=True)
+            return None
 
     async def get_user_language(self, user_id: int) -> str:
-        # جلب من الكاش إن أمكن
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('language', 'ar')
-        return 'ar'
+        result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
+        return result if result else 'ar'
 
     async def set_user_language(self, user_id: int, lang: str) -> bool:
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
@@ -3169,10 +3225,8 @@ class Database:
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('auto_publish', 1) == 1
-        return True
+        result = await self.fetchval("SELECT auto_publish FROM users WHERE user_id = ?", (user_id,), default=1)
+        return result == 1
 
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_publish = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
@@ -3181,10 +3235,8 @@ class Database:
         return result
 
     async def get_auto_recycle_status(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('auto_recycle', 1) == 1
-        return True
+        result = await self.fetchval("SELECT auto_recycle FROM users WHERE user_id = ?", (user_id,), default=1)
+        return result == 1
 
     async def set_auto_recycle(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_recycle = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
@@ -3193,10 +3245,8 @@ class Database:
         return result
 
     async def is_user_banned(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('banned', 0) == 1
-        return False
+        result = await self.fetchval("SELECT banned FROM users WHERE user_id = ?", (user_id,), default=0)
+        return result == 1
 
     async def ban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
@@ -3226,10 +3276,8 @@ class Database:
         return result is not None
 
     async def has_used_trial(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('trial_used', 0) == 1
-        return False
+        result = await self.fetchval("SELECT trial_used FROM users WHERE user_id = ?", (user_id,), default=0)
+        return result == 1
 
     async def activate_trial(self, user_id: int) -> int:
         try:
@@ -3304,10 +3352,8 @@ class Database:
             return 0
 
     async def get_referral_code(self, user_id: int) -> str:
-        user = await self.get_user(user_id)
-        if user:
-            return user.get('referral_code', f"ref_{user_id}")
-        return f"ref_{user_id}"
+        result = await self.fetchval("SELECT referral_code FROM users WHERE user_id = ?", (user_id,), default=f"ref_{user_id}")
+        return result if result else f"ref_{user_id}"
 
     async def get_user_by_referral_code(self, code: str) -> Optional[int]:
         return await self.fetchval("SELECT user_id FROM users WHERE referral_code = ?", (code,))
@@ -3330,18 +3376,16 @@ class Database:
         return None
 
     async def get_subscription_end(self, user_id: int) -> Optional[datetime]:
-        user = await self.get_user(user_id)
-        if user:
-            return TimeUtils.safe_parse_iso(user.get('subscription_end'))
-        return None
+        result = await self.fetchval("SELECT subscription_end FROM users WHERE user_id = ?", (user_id,))
+        return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
     # دوال القنوات (محسّنة مع الكاش وإرجاع معلومات القناة)
     # =====================================================================
 
-    async def add_channel(self, user_id: int, channel_id: int, channel_name: str) -> Optional[Dict]:
+    async def add_channel(self, user_id: int, channel_id: int, channel_name: str, set_active: bool = True) -> Optional[Dict]:
         """
-        إضافة قناة جديدة وتعيينها كقناة نشطة.
+        إضافة قناة جديدة وتعيينها كقناة نشطة (إذا كان set_active=True).
         تعيد قاموساً يحتوي على معلومات القناة لعرضها فوراً:
         {
             'id': ch_db_id,
@@ -3417,8 +3461,8 @@ class Database:
                             ch_db_id = cursor.lastrowid
                         is_new = True
 
-                    # تعيين القناة النشطة دائماً
-                    await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
+                    if set_active:
+                        await self._execute_with_conn(conn, "UPDATE users SET active_channel = ? WHERE user_id = ?", ch_db_id, user_id)
 
                     import random
                     delay_seconds = random.randint(5, 30)
@@ -3662,10 +3706,11 @@ class Database:
         """
         جلب المنشور التالي للنشر.
         تعيد (post_dict, recycled) حيث recycled = True إذا تم إعادة التدوير.
+        ✅ مؤكد: post_dict هو قاموس (dict) وليس tuple.
         """
         async with await self._get_channel_lock(channel_db_id):
             # 1. محاولة جلب منشور غير منشور (مع أقل عدد فشل)
-            post = await self.fetchone(
+            post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
                    JOIN user_channels uc ON p.channel_db_id = uc.id
@@ -3675,8 +3720,9 @@ class Database:
                    ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1""",
                 (channel_db_id,)
             )
-            if post:
-                return post, False
+            if post_row:
+                # post_row هو dict بفضل fetchone
+                return post_row, False
 
             # 2. لا يوجد منشورات غير منشورة → التحقق من إعادة التدوير
             auto_recycle = await self.fetchval(
@@ -3696,15 +3742,15 @@ class Database:
             )
 
             # 4. جلب أول منشور بعد إعادة التدوير
-            post = await self.fetchone(
+            post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
                    WHERE p.channel_db_id = ? AND p.published = 0
                    ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1""",
                 (channel_db_id,)
             )
-            if post:
-                return post, True
+            if post_row:
+                return post_row, True
             return None, False
 
     async def mark_post_published(self, post_id: int) -> bool:
@@ -4416,7 +4462,7 @@ class Database:
             """
             return await self.fetchall(query, (now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S'), limit))
         else:
-            # PostgreSQL و SQLite يستخدمان WITH (موجود بالفعل)
+            # PostgreSQL و SQLite يستخدمان WITH
             query = """
                 WITH active_subs AS (
                     SELECT s.user_id, 
