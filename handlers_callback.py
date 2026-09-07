@@ -31,6 +31,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - إصلاح معالجة warn_penalty_set
 - إصلاح زر مدة العقوبة
 - إصلاح أزرار set_warn_penalty
+- إبطال الكاش عند إضافة/تحديد/حذف قناة لتحديث القائمة الرئيسية فوراً
 """
 
 import asyncio
@@ -54,7 +55,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from handlers_command import CommandHandlers
+from handlers_command import CommandHandlers, CACHE  # استيراد CACHE لإبطاله عند تغيير القناة
 
 logger = logging.getLogger(__name__)
 
@@ -574,6 +575,7 @@ class CallbackHandlers:
                     await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
                     return
                 if await DB.set_active_channel(user_id, ch_id):
+                    CACHE.invalidate("active_channel", user_id)  # إبطال الكاش لتحديث القائمة الرئيسية
                     await safe_edit(query, "✅ تم تحديد القناة!", bot=context.bot)
                 else:
                     await _safe_answer(query, "❌ لا يمكنك تحديد هذه القناة", show_alert=True)
@@ -586,6 +588,7 @@ class CallbackHandlers:
                     await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
                     return
                 if await DB.delete_channel(user_id, ch_id):
+                    CACHE.invalidate("active_channel", user_id)  # إبطال الكاش لتحديث القائمة الرئيسية
                     await _safe_answer(query, "✅ تم الحذف")
                     context.user_data['channel_page'] = 0
                     await CallbackHandlers._show_channel_list(update, context, query, user_id, lang)
