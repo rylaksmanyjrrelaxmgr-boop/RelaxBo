@@ -14,6 +14,7 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - إضافة عرض حالة الوسائط في _format_security_text
 - إصلاح _send_media لتمرير **kwargs و reply_markup و parse_mode
 - إصلاح safe_send لتمرير جميع المعاملات بشكل صحيح
+- إضافة دالة format_user_status لعرض حالة المستخدم مع منشورات القناة النشطة فقط
 """
 
 import asyncio
@@ -1904,7 +1905,70 @@ async def webhook_handler(request):
 
 
 # =====================================================================
-# 18. معالج الأخطاء
+# 18. دالة عرض حالة المستخدم (الجديدة)
+# =====================================================================
+
+async def format_user_status(user_id: int, user_lang: str = 'ar') -> str:
+    """
+    توليد نص حالة المستخدم مع عرض منشورات القناة النشطة فقط.
+    هذه الدالة تحل مشكلة عرض إجمالي المنشورات غير المنشورة من جميع القنوات،
+    وتعرض فقط منشورات القناة النشطة.
+    """
+    user = await DB.get_user(user_id)
+    if not user:
+        return "❌ المستخدم غير موجود"
+
+    # جلب القناة النشطة
+    active_channel_id = await DB.get_active_channel(user_id)
+    active_channel_name = "لا توجد قناة نشطة"
+    unpublished_count = 0
+    if active_channel_id:
+        channel_info = await DB.get_channel_info(user_id, active_channel_id)
+        if channel_info:
+            active_channel_name = channel_info.get('channel_name', 'بدون اسم')
+        unpublished_count = await DB.get_unpublished_posts_count(user_id, active_channel_id)
+
+    # بقية البيانات
+    groups = await DB.get_user_groups(user_id)
+    auto_publish = await DB.get_auto_publish_status(user_id)
+    auto_recycle = await DB.get_auto_recycle_status(user_id)
+    has_sub = await DB.has_active_subscription(user_id)
+
+    # استخدام الترجمة إذا كانت متاحة
+    try:
+        text_template = await get_text(user_lang, 'user_status_text')
+    except:
+        text_template = None
+
+    if text_template and text_template != 'user_status_text':
+        # استخدام الترجمة
+        text = text_template.format(
+            user_id=user_id,
+            groups_count=len(groups),
+            channel_name=active_channel_name,
+            unpublished=unpublished_count,
+            auto_publish='مفعل' if auto_publish else 'معطل',
+            auto_recycle='مفعل' if auto_recycle else 'معطل',
+            sub_status='✅ نشط' if has_sub else '❌ غير نشط'
+        )
+    else:
+        # النص الافتراضي
+        text = f"""
+🌿 **Relax Manager**
+
+👤 المستخدم: <code>{user_id}</code>
+👥 المجموعات: {len(groups)}
+📡 القناة النشطة: {active_channel_name}
+📥 منشورات غير منشورة: {unpublished_count}
+📤 النشر التلقائي: {'مفعل' if auto_publish else 'معطل'}
+♻️ إعادة التدوير: {'مفعل' if auto_recycle else 'معطل'}
+💎 الاشتراك: {'✅ نشط' if has_sub else '❌ غير نشط'}
+"""
+    return text.strip()
+
+
+# =====================================================================
+# 19. معالج الأخطاء
 # =====================================================================
 
 class ErrorHandler:
