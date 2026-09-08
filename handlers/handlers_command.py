@@ -12,6 +12,11 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + دمج كاش المستخدم (user_cache) لتسريع /start
 + إبطال الكاش عند تغيير بيانات المستخدم
 + الحفاظ على المنطقة الزمنية (جميع التواريخ naive UTC)
++ ✅ [إصلاح] syncgroup: ربط المشرفين المجهولين بالمعرفات الحقيقية
++ ✅ [إصلاح] syncgroup: التحقق من صلاحيات البوت باستخدام check_bot_permissions
++ ✅ [إصلاح] list_hidden_admins: عرض المشرفين المجهولين أيضاً
++ ✅ [إصلاح] تحديث updated_at عند تسجيل المجموعة
++ ✅ [إصلاح] التحقق من الصلاحيات في أوامر المجموعات
 """
 
 import asyncio
@@ -663,12 +668,19 @@ class CommandHandlers:
             return
         owners = await DB.fetchall("SELECT owner_id FROM hidden_owner_groups WHERE chat_id=?", (chat_id,))
         admins = await DB.fetchall("SELECT admin_id FROM hidden_admins WHERE chat_id=?", (chat_id,))
+        # ✅ جلب المشرفين المجهولين أيضاً
+        anonymous_admins = await DB.fetchall("SELECT anonymous_id, user_id FROM anonymous_admins WHERE chat_id=?", (chat_id,))
+
         text = "👤 <b>المخفيون</b>\n"
         for o in owners:
             text += f"👑 <code>{o['owner_id']}</code>\n"
         for a in admins:
             text += f"🛡️ <code>{a['admin_id']}</code>\n"
-        await safe_send(context.bot, user_id, text if owners or admins else "📭 لا يوجد", parse_mode='HTML')
+        for a in anonymous_admins:
+            real = f"<code>{a['user_id']}</code>" if a['user_id'] else "غير معروف"
+            text += f"🕵️ مجهول: <code>{a['anonymous_id']}</code> (حقيقي: {real})\n"
+
+        await safe_send(context.bot, user_id, text if (owners or admins or anonymous_admins) else "📭 لا يوجد", parse_mode='HTML')
 
     @staticmethod
     async def syncgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -683,16 +695,14 @@ class CommandHandlers:
         logger.info(f"🔍 محاولة تسجيل المجموعة: chat_id={chat_id}, user_id={user_id}")
 
         try:
-            bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-            if bot_member.status != 'administrator':
+            # ✅ التحقق من صلاحيات البوت
+            perms = await check_bot_permissions(context.bot, chat_id)
+            if not perms['can_act']:
                 await safe_send(
                     context.bot, user_id,
-                    "❌ <b>البوت ليس مشرفاً في المجموعة!</b>\n\n"
-                    "يجب ترقية البوت إلى مشرف أولاً:\n"
-                    "1. افتح إعدادات المجموعة\n"
-                    "2. اختر «المشرفون»\n"
-                    "3. أضف البوت كمشرف\n"
-                    "4. منحه صلاحية حذف الرسائل على الأقل",
+                    f"❌ <b>البوت لا يملك الصلاحيات الكافية!</b>\n\n"
+                    f"يجب أن يكون البوت مشرفاً مع صلاحية حذف الرسائل وتقييد الأعضاء.\n"
+                    f"السبب: {perms.get('reason', 'غير معروف')}",
                     parse_mode='HTML'
                 )
                 return
@@ -728,6 +738,17 @@ class CommandHandlers:
         if not is_admin and hasattr(CONFIG, 'ANONYMOUS_ADMIN_ID') and user_id == CONFIG.ANONYMOUS_ADMIN_ID:
             is_admin = True
             real_user_id = user_id
+
+        # ✅ التحقق من المشرفين المجهولين (إذا لم يتم التعرف عليهم كـ is_admin)
+        if not is_admin:
+            row = await DB.fetchone(
+                "SELECT 1 FROM anonymous_admins WHERE chat_id=? AND (user_id=? OR anonymous_id=?) LIMIT 1",
+                (chat_id, user_id, user_id)
+            )
+            if row:
+                is_admin = True
+                # معرف حقيقي قد يكون غير معروف، لكننا نستخدم user_id كمؤقت
+                real_user_id = user_id
 
         if not is_admin:
             await safe_send(context.bot, user_id, "❌ <b>أنت لست مشرفاً في هذه المجموعة!</b>", parse_mode='HTML')
@@ -765,6 +786,38 @@ class CommandHandlers:
         except Exception as e:
             admin_count = 0
 
+        # ✅ معالجة المشرفين المجهولين وربطهم بالمعرفات الحقيقية
+        anonymous_ids = []
+        user_id_map = {}
+
+        for admin in all_admins:
+            if admin.user.is_bot and admin.status == 'administrator':
+                anon_id = admin.user.id
+                anonymous_ids.append(anon_id)
+                # محاولة جلب المعرف الحقيقي من قاعدة البيانات (إذا كان مسجلاً مسبقاً)
+                row = await DB.fetchone(
+                    "SELECT user_id FROM anonymous_admins WHERE chat_id=? AND anonymous_id=?",
+                    (chat_id, anon_id)
+                )
+                if row and row['user_id']:
+                    user_id_map[anon_id] = row['user_id']
+
+        if anonymous_ids:
+            await DB.sync_anonymous_admins(
+                chat_id,
+                anonymous_ids,
+                added_by=real_user_id,
+                user_id_map=user_id_map
+            )
+            # ربط المشرفين المجهولين بالمجموعة (لظهورهم في قائمة المجموعات)
+            for anon_id, real_id in user_id_map.items():
+                if real_id:
+                    await DB.execute(
+                        "INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?,?)",
+                        (real_id, chat_id)
+                    )
+            logger.info(f"✅ تم تسجيل {len(anonymous_ids)} مشرف مجهول في المجموعة {chat_id}")
+
         msg = (
             f"🎉 <b>تم تفعيل المجموعة بنجاح!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -775,6 +828,8 @@ class CommandHandlers:
             msg += f"👑 <b>المالك:</b> <code>{creator_id}</code>\n"
         msg += f"👤 <b>مشرف:</b> <code>{real_user_id}</code>\n"
         msg += f"👥 <b>المشرفون:</b> {admin_count}\n"
+        if anonymous_ids:
+            msg += f"🕵️ <b>المشرفون المجهولون:</b> {len(anonymous_ids)}\n"
         msg += (
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🛡️ <b>الحماية:</b> مفعّلة\n"
@@ -839,7 +894,7 @@ class CommandHandlers:
             return
         if update.message.reply_to_message:
             perms = await check_bot_permissions(context.bot, chat_id)
-            if not perms.get('can_pin_messages', False):
+            if not perms.get('can_pin', False):
                 await safe_send(context.bot, user_id, await _trans('no_pin_permission', lang, "❌ البوت لا يملك صلاحية تثبيت الرسائل."))
                 return
             try:
