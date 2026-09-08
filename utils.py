@@ -15,8 +15,6 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - ✅ [إصلاح] _publish_single: تحويل tuple إلى dict إذا لزم الأمر (حماية مزدوجة)
 - ✅ [إصلاح] _publish_single_channel: معالجة آمنة لنتيجة get_next_post
 - ✅ [إصلاح] auto_publish: تحويل result من get_next_post إلى dict إذا كان tuple
-- ✅ [إصلاح] webhook_handler: استخدام process_update مباشرة لتجنب التأخير
-- ✅ [إصلاح] safe_send: التحقق من صحة chat_id قبل الإرسال
 """
 
 import asyncio
@@ -1076,22 +1074,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, rep
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
-    """إرسال آمن مع دعم جميع أنواع الوسائط وإعادة المحاولة عند TimedOut.
-       يقوم بالتحقق من صحة chat_id قبل الإرسال."""
-    # ✅ التحقق من صحة chat_id
-    if not chat_id:
-        logger.error("❌ محاولة إرسال إلى chat_id فارغ (None أو 0)")
-        return None
-    if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (ValueError, TypeError):
-            logger.error(f"❌ chat_id غير صالح (ليس رقماً صحيحاً): {chat_id}")
-            return None
-    if chat_id <= 0:
-        logger.error(f"❌ chat_id غير صالح (يجب أن يكون موجباً): {chat_id}")
-        return None
-
+    """إرسال آمن مع دعم جميع أنواع الوسائط وإعادة المحاولة عند TimedOut."""
     if not text and not any(k in kwargs for k in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']):
         return None
 
@@ -1631,15 +1614,12 @@ class BackgroundTasks:
                 await DB.update_last_publish(ch['id'])
                 await DB.update_next_publish(ch['id'])
                 logger.info(f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة...")
-                # ✅ التحقق من صحة user_id قبل الإرسال
-                user_id = ch.get('user_id')
-                if user_id and isinstance(user_id, int) and user_id > 0:
-                    try:
+                try:
+                    user_id = ch.get('user_id')
+                    if user_id:
                         await safe_send(bot, user_id, f"✅ تم نشر منشور في قناتك")
-                    except Exception as e:
-                        logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
-                else:
-                    logger.warning(f"⚠️ user_id غير صالح للقناة {ch.get('id')}")
+                except Exception as e:
+                    logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
                 await asyncio.sleep(sleep_seconds)
             else:
                 await DB.increment_post_fail(post['id'])
@@ -1748,10 +1728,7 @@ class BackgroundTasks:
                         text = await get_text(lang, 'reminder_subscription_expires', days=days)
                         if text == 'reminder_subscription_expires':
                             text = f"⚠️ اشتراكك سينتهي بعد {days} يوم"
-                        # ✅ التحقق من صحة user_id
-                        user_id = u.get('user_id')
-                        if user_id and isinstance(user_id, int) and user_id > 0:
-                            await safe_send(bot, user_id, text)
+                        await safe_send(bot, u['user_id'], text)
                         await asyncio.sleep(0.1)
                     except Exception:
                         pass
@@ -1768,15 +1745,7 @@ class BackgroundTasks:
                 log_channel = await DB.get_log_channel()
                 try:
                     if log_channel:
-                        # التحقق من صحة log_channel
-                        if isinstance(log_channel, (int, str)):
-                            try:
-                                log_channel_id = int(log_channel)
-                                await safe_send(bot, log_channel_id, msg, parse_mode='Markdown')
-                            except (ValueError, TypeError):
-                                logger.warning(f"⚠️ log_channel غير صالح: {log_channel}")
-                        else:
-                            await safe_send(bot, CONFIG.PRIMARY_OWNER_ID, msg, parse_mode='Markdown')
+                        await safe_send(bot, log_channel, msg, parse_mode='Markdown')
                     else:
                         await safe_send(bot, CONFIG.PRIMARY_OWNER_ID, msg, parse_mode='Markdown')
                 except Exception as e:
@@ -1810,9 +1779,6 @@ class BackgroundTasks:
                 )
                 for group in groups:
                     chat_id = group['chat_id'] if isinstance(group, dict) else group[0]
-                    # التحقق من صحة chat_id
-                    if not chat_id or not isinstance(chat_id, int) or chat_id <= 0:
-                        continue
                     try:
                         admins = await bot.get_chat_administrators(chat_id)
                         admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
@@ -1900,30 +1866,18 @@ async def setup_webhook(app, port: int):
 
 async def webhook_handler(request):
     global _webhook_app
-    if _webhook_app is None:
+    if _webhook_app is None or not hasattr(_webhook_app, 'bot'):
         logger.error("❌ Webhook app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
-        # التحقق من نوع المحتوى
         if request.content_type != 'application/json':
             logger.warning("⚠️ Webhook request with non-JSON content")
             return web.Response(status=400, text="Bad Request")
-        
         data = await request.json()
-        logger.info(f"📩 Webhook received: update_id={data.get('update_id', 'unknown')}")
-        
-        update = Update.de_json(data, _webhook_app.bot)
-        
-        # ✅ الطريقة الصحيحة لمعالجة التحديث مباشرة (حل التأخير)
-        if hasattr(_webhook_app, 'process_update'):
-            await _webhook_app.process_update(update)
-        else:
-            # لـ python-telegram-bot الإصدارات الأقدم أو في حال عدم توفر method
-            await _webhook_app.update_queue.put(update)
-        
+        await _webhook_app.process_update(Update.de_json(data, _webhook_app.bot))
         return web.Response(status=200, text="OK")
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        logger.error(f"❌ Webhook error: {e}")
         return web.Response(status=500, text="ERROR")
 
 
