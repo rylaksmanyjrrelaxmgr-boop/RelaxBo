@@ -16,6 +16,7 @@
 - دمج نظام الكاش الموحد cache.py
 - إضافة مهمة cache_cleanup_task
 - الحفاظ على المنطقة الزمنية (جميع التواريخ naive UTC)
+- ✅ تحسينات أداء: تهيئة أسرع، طلب تسخين، قياس زمن الإقلاع
 """
 
 import asyncio
@@ -187,6 +188,7 @@ async def successful_payment(update, context):
 
 async def main():
     """الدالة الرئيسية"""
+    t_start = time.monotonic()
     try:
         CONFIG.validate()
     except ValueError as e:
@@ -197,7 +199,13 @@ async def main():
     logger.info(f"👨‍💼 المالك: {CONFIG.PRIMARY_OWNER_ID}")
 
     # تهيئة قاعدة البيانات
-    await initialize_db()
+    t0 = time.monotonic()
+    # استخدام pre_initialize إذا كانت متوفرة لتسريع الإقلاع
+    if hasattr(DB, 'pre_initialize'):
+        await DB.pre_initialize()
+    else:
+        await initialize_db()
+    logger.info(f"⏱️ قاعدة البيانات تمت تهيئتها في {time.monotonic()-t0:.2f} ثانية")
 
     # تسجيل المطورين
     for dev_id in CONFIG.DEVELOPER_IDS:
@@ -211,11 +219,12 @@ async def main():
         logger.error(f"❌ Failed to register owner: {e}")
 
     # تحميل الإعدادات
+    t1 = time.monotonic()
     KeyboardFactory.load_config()
     available_langs = TranslationManager.get_available_languages()
     for lang in available_langs:
         TranslationManager.load_translation(lang)
-    logger.info(f"✅ تم تحميل {len(available_langs)} لغة")
+    logger.info(f"✅ تم تحميل {len(available_langs)} لغة في {time.monotonic()-t1:.2f} ثانية")
 
     # المنفذ: استخدام PORT من البيئة أو الافتراضي
     port = int(os.getenv("PORT", CONFIG.WEB_PORT))
@@ -233,6 +242,7 @@ async def main():
     # إضافة وقت بدء التشغيل
     app.bot_data['start_time'] = time.monotonic()
     await app.initialize()
+    logger.info(f"⏱️ تم تهيئة التطبيق في {time.monotonic()-t0:.2f} ثانية")
 
     # ========== قائمة الأوامر الخاصة ==========
     private_commands = [
@@ -428,6 +438,14 @@ async def main():
             )
             logger.info("✅ Webhook تم التعيين")
             runner = await setup_webhook(app, port)
+            # ✅ طلب تسخين داخلي لضمان جاهزية الخادم
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    await session.get(f"http://127.0.0.1:{port}/health")
+                    logger.info("🔥 تم تسخين الخادم بنجاح")
+            except Exception as e:
+                logger.warning(f"⚠️ فشل طلب التسخين: {e}")
             try:
                 await asyncio.Event().wait()
             finally:
@@ -448,6 +466,8 @@ async def main():
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await app.shutdown()
+
+    logger.info(f"✅ اكتمل الإقلاع في {time.monotonic()-t_start:.2f} ثانية")
 
 
 if __name__ == "__main__":
