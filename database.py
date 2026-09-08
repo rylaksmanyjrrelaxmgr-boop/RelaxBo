@@ -34,6 +34,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - ✅ [إصلاح] تحويل tuple إلى dict في get_next_post كإجراء احترازي
 - ✅ [إصلاح] دالة restore_database تبحث عن الملف المضغوط وتفك ضغطه تلقائياً
 - ✅ [إصلاح] دالة _compress_backup لا تحذف الملف الأصلي للحفاظ على التوافق
+- ✅ [إصلاح] sync_anonymous_admins: دعم user_id_map لربط المعرفات المجهولة بالحقيقية
+- ✅ [إصلاح] _refresh_user_subscription_end: تحديث updated_at عند تغيير الاشتراك
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
 - ✅ [إصلاحات إضافية 15 خطأ] تم معالجة جميع الأخطاء المذكورة دون فقدان أي ميزة
 """
@@ -123,6 +125,7 @@ except ImportError:
         async def get_or_load(self, *args, **kwargs):
             return {}
         async def get(self, *args, **kwargs): return None
+        async def set(self, *args, **kwargs): pass
     user_cache = DummyCache()
     logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل كاش المستخدم")
 
@@ -4067,8 +4070,9 @@ class Database:
                   OR EXISTS (SELECT 1 FROM hidden_owner_groups ho WHERE ho.chat_id = bg.chat_id AND ho.owner_id = ?)
                   OR EXISTS (SELECT 1 FROM hidden_admins ha WHERE ha.chat_id = bg.chat_id AND ha.admin_id = ?)
                   OR EXISTS (SELECT 1 FROM group_admins ga WHERE ga.chat_id = bg.chat_id AND ga.user_id = ?)
-                  OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)""",
-            (user_id, user_id, user_id, user_id, user_id, user_id)
+                  OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)
+                  OR EXISTS (SELECT 1 FROM anonymous_admins aa2 WHERE aa2.chat_id = bg.chat_id AND aa2.anonymous_id = ?)""",
+            (user_id, user_id, user_id, user_id, user_id, user_id, user_id)
         )
 
     async def sync_group_admins(self, chat_id: int, admin_ids: List[int]) -> int:
@@ -4084,7 +4088,7 @@ class Database:
                     to_add = new_ids - existing_ids
                     for uid in to_add:
                         if USE_POSTGRES:
-                            await self._execute_with_conn(conn, "INSERT INTO group_admins (chat_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", chat_id, uid)
+                            await self._execute_with_conn(conn, "INSERT INTO group_admins (chat_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", chat_id, uid)
                         elif USE_MYSQL:
                             await self._execute_with_conn(conn, "INSERT IGNORE INTO group_admins (chat_id, user_id) VALUES (%s, %s)", chat_id, uid)
                         else:
@@ -4111,7 +4115,7 @@ class Database:
         return await self.fetchall("SELECT admin_id, added_by, added_at FROM hidden_admins WHERE chat_id = ? ORDER BY added_at DESC", (chat_id,))
 
     # =====================================================================
-    # دوال المشرفين المجهولين
+    # دوال المشرفين المجهولين (محسّنة مع دعم user_id_map)
     # =====================================================================
 
     async def add_anonymous_admin(self, chat_id: int, anonymous_id: int, added_by: int = None, user_id: int = None) -> bool:
@@ -4131,12 +4135,16 @@ class Database:
 
     async def is_anonymous_admin(self, chat_id: int, user_id: int) -> bool:
         result = await self.fetchval(
-            "SELECT 1 FROM anonymous_admins WHERE chat_id = ? AND (anonymous_id = ? OR user_id = ?) LIMIT 1",
+            "SELECT 1 FROM anonymous_admins WHERE chat_id = ? AND (user_id = ? OR anonymous_id = ?) LIMIT 1",
             (chat_id, user_id, user_id)
         )
         return result is not None
 
     async def sync_anonymous_admins(self, chat_id: int, anonymous_ids: List[int], added_by: int = None, user_id_map: Optional[Dict[int, int]] = None) -> int:
+        """
+        مزامنة المشرفين المجهولين مع دعم ربط المعرفات الحقيقية.
+        user_id_map: قاموس يربط anonymous_id بالمعرف الحقيقي للمستخدم (إن وجد).
+        """
         try:
             async with self._lock:
                 async with self.transaction() as conn:
@@ -4154,7 +4162,7 @@ class Database:
                             await self._execute_with_conn(
                                 conn,
                                 """INSERT INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at)
-                                   VALUES (?, ?, ?, ?, ?)
+                                   VALUES ($1, $2, $3, $4, $5)
                                    ON CONFLICT (chat_id, anonymous_id) DO UPDATE SET
                                        user_id = EXCLUDED.user_id,
                                        added_by = EXCLUDED.added_by""",
@@ -4246,7 +4254,7 @@ class Database:
                         return False, False
                 try:
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)", word, chat_id, added_by, TimeUtils.utc_now())
+                        await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES ($1, $2, $3, $4)", word, chat_id, added_by, TimeUtils.utc_now())
                     elif USE_MYSQL:
                         await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)", word, chat_id, added_by, TimeUtils.sql_iso())
                     else:
@@ -4368,7 +4376,7 @@ class Database:
                 if USE_POSTGRES:
                     await self._execute_with_conn(
                         conn,
-                        "INSERT INTO auto_replies (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at) VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO auto_replies (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                         chat_id, keyword, reply, reply_type, media_id, buttons, TimeUtils.utc_now()
                     )
                 elif USE_MYSQL:
@@ -4489,7 +4497,7 @@ class Database:
                                 conn,
                                 """INSERT INTO auto_replies 
                                    (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
-                                   VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT (chat_id, keyword) DO NOTHING""",
+                                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (chat_id, keyword) DO NOTHING""",
                                 item.get('chat_id', -1),
                                 item.get('keyword', '').lower(),
                                 item.get('reply', ''),
@@ -4771,7 +4779,7 @@ class Database:
         try:
             async with self.connection() as conn:
                 if USE_POSTGRES:
-                    await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
+                    await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
                 elif USE_MYSQL:
                     await self._execute_with_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
                 else:
@@ -4795,7 +4803,7 @@ class Database:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
+                        await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING", user_id)
                     elif USE_MYSQL:
                         await self._execute_with_conn(conn, "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)", user_id)
                     else:
@@ -4850,7 +4858,7 @@ class Database:
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=available)
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 'referral', ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 'referral', $5, $6)", user_id, plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
@@ -5085,7 +5093,7 @@ class Database:
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=plan['days'])
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 'gift', ?, ?)", user_id, gift_code['plan_id'], TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 'gift', $5, $6)", user_id, gift_code['plan_id'], TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
@@ -5131,7 +5139,7 @@ class Database:
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=days)
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, $5, $6, $7)", user_id, plan_id, TimeUtils.utc_now(), new_end, provider, TimeUtils.utc_now(), TimeUtils.utc_now())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
@@ -5258,7 +5266,7 @@ class Database:
                     base = current_end if current_end and current_end > now else now
                     new_end = base + timedelta(days=plan['duration_days'])
                     if USE_POSTGRES:
-                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, 0, ?, ?, ?, ?)", user_id, plan_id, TimeUtils.utc_now(), new_end, 'xtr', payment_id, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7)", user_id, plan_id, TimeUtils.utc_now(), new_end, 'xtr', payment_id, TimeUtils.utc_now())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
@@ -5275,7 +5283,7 @@ class Database:
                     code = secrets.token_urlsafe(12)
                     try:
                         if USE_POSTGRES:
-                            await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)", code, plan_id, creator_id, TimeUtils.utc_now())
+                            await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES ($1, $2, $3, $4)", code, plan_id, creator_id, TimeUtils.utc_now())
                         elif USE_MYSQL:
                             await self._execute_with_conn(conn, "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (%s, %s, %s, %s)", code, plan_id, creator_id, TimeUtils.sql_iso())
                         else:
@@ -5681,6 +5689,7 @@ class Database:
 
     async def update_reminder_sent(self, user_id: int) -> bool:
         return await self.execute("UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?", (TimeUtils.utc_now(), user_id)) > 0
+
 
 # =====================================================================
 # إنشاء كائن قاعدة البيانات
