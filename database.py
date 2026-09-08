@@ -659,11 +659,11 @@ class Database:
             )
             logger.info(f"✅ Pool MySQL جاهز (max={self._max_connections})")
         else:
+            # ✅ تحسين: فتح اتصال واحد فقط في البداية، والباقي عند الطلب
             self._sqlite_queue = asyncio.Queue(maxsize=self._sqlite_pool_size)
-            for _ in range(self._sqlite_pool_size):
-                conn = await self._create_sqlite_connection()
-                await self._sqlite_queue.put(conn)
-            logger.info(f"✅ Pool SQLite جاهز (size={self._sqlite_pool_size})")
+            conn = await self._create_sqlite_connection()
+            await self._sqlite_queue.put(conn)
+            logger.info(f"✅ Pool SQLite جاهز (size={self._sqlite_pool_size}, initial=1)")
         self._initialized = True
         if self._cleanup_task is None:
             self._cleanup_task = asyncio.create_task(self._auto_cleanup_locks())
@@ -713,17 +713,20 @@ class Database:
                 timeout=self._connection_timeout
             )
         else:
-            # SQLite: نحاول الحصول على اتصال من قائمة الانتظار، وإن لم يوجد ننتظر.
-            # لا ننشئ اتصالاً جديداً إلا إذا انتظرنا طويلاً جداً (لتفادي فتح اتصالات لا نهائية).
+            # ✅ تحسين: جلب اتصال من القائمة، وإذا لم يتوفر خلال 0.1 ثانية، ننشئ اتصالًا جديدًا
             try:
                 return await asyncio.wait_for(
                     self._sqlite_queue.get(),
-                    timeout=self._connection_timeout
+                    timeout=0.1
                 )
             except asyncio.TimeoutError:
-                # في حالة timeout، ننشئ اتصالاً مؤقتاً (ولكن قد يزيد العدد)
-                logger.warning("⚠️ نفاذ اتصالات SQLite، إنشاء اتصال مؤقت")
-                return await self._create_sqlite_connection()
+                if self._sqlite_queue.qsize() < self._sqlite_pool_size:
+                    return await self._create_sqlite_connection()
+                else:
+                    return await asyncio.wait_for(
+                        self._sqlite_queue.get(),
+                        timeout=self._connection_timeout
+                    )
 
     async def _return_connection(self, conn):
         if USE_POSTGRES or USE_MYSQL:
@@ -2574,30 +2577,47 @@ class Database:
                         logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
     async def _create_indexes(self, conn):
-        indexes = [
+        essential_indexes = [
             "CREATE INDEX IF NOT EXISTS idx_users_banned ON users(banned)",
+            "CREATE INDEX IF NOT EXISTS idx_uc_user ON user_channels(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
+            "CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_ar_chat ON auto_replies(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_user_status_end ON subscriptions(user_id, status, end_date)",
+            "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status ON user_penalties(user_id, chat_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_chat_status ON user_penalties(chat_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_penalties_expiry ON user_penalties(status, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
+        ]
+        secondary_indexes = [
             "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)",
             "CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)",
             "CREATE INDEX IF NOT EXISTS idx_users_updated ON users(updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code)",
-            "CREATE INDEX IF NOT EXISTS idx_uc_user ON user_channels(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_uc_active ON user_channels(banned)",
             "CREATE INDEX IF NOT EXISTS idx_uc_channel_id ON user_channels(channel_id)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
             "CREATE INDEX IF NOT EXISTS idx_posts_fail ON posts(fail_count)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
-            "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_unpub ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_created ON posts(channel_db_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail ON posts(channel_db_id, published, fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_sched_next ON schedule(next_publish_date)",
             "CREATE INDEX IF NOT EXISTS idx_schedule_next_channel ON schedule(next_publish_date, channel_db_id)",
-            "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
             "CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_group_admins_chat ON group_admins(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_security_chat ON group_security(chat_id)",
-            "CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)",
             "CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_warnings_chat ON user_warnings(chat_id)",
@@ -2606,37 +2626,22 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_chat ON admin_logs(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_admin ON admin_logs(admin_id)",
             "CREATE INDEX IF NOT EXISTS idx_admin_logs_created ON admin_logs(created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_ar_chat ON auto_replies(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_ar_keyword ON auto_replies(keyword)",
             "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_user ON support_tickets(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_number ON support_tickets(ticket_number)",
-            "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
-            "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
-            "CREATE INDEX IF NOT EXISTS idx_sub_user_status_end ON subscriptions(user_id, status, end_date)",
-            "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_inv_status ON invoices(status)",
             "CREATE INDEX IF NOT EXISTS idx_inv_number ON invoices(number)",
-            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_id)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_created ON referrals(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_created ON referrals(referrer_id, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)",
             "CREATE INDEX IF NOT EXISTS idx_contests_end ON contests(end_date)",
             "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)",
             "CREATE INDEX IF NOT EXISTS idx_contest_participants_user ON contest_participants(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_user ON user_reminder_settings(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status ON user_penalties(user_id, chat_id, status)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_chat_status ON user_penalties(chat_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_end_time ON user_penalties(end_time)",
-            "CREATE INDEX IF NOT EXISTS idx_penalties_expiry ON user_penalties(status, end_time)",
             "CREATE INDEX IF NOT EXISTS idx_penalties_cleanup ON user_penalties(status, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_chat ON anonymous_admins(chat_id)",
             "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user ON anonymous_admins(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_hidden_owner_owner ON hidden_owner_groups(owner_id)",
@@ -2646,17 +2651,38 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)",
             "CREATE INDEX IF NOT EXISTS idx_posts_next ON posts(channel_db_id, published, fail_count, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
-            # فهارس إضافية لتسريع get_channels_to_publish
             "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status, end_date)",
             "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_count ON posts(channel_db_id, published, fail_count)",
             "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)",
         ]
-        for query in indexes:
+
+        # تنفيذ الفهارس الأساسية فوراً
+        for query in essential_indexes:
             try:
                 await conn.execute(query)
             except Exception as e:
                 if "Duplicate key name" not in str(e) and "already exists" not in str(e):
                     logger.warning(f"⚠️ فشل إنشاء فهرس: {e}")
+
+        # جدولة الفهارس الثانوية في الخلفية
+        asyncio.create_task(self._create_secondary_indexes(secondary_indexes))
+
+    async def _create_secondary_indexes(self, indexes):
+        try:
+            await asyncio.sleep(2)  # انتظر حتى يستقر النظام
+            async with self.connection() as conn:
+                for query in indexes:
+                    try:
+                        await conn.execute(query)
+                    except Exception as e:
+                        if "Duplicate key name" not in str(e) and "already exists" not in str(e):
+                            logger.warning(f"⚠️ فشل إنشاء فهرس ثانوي: {e}")
+        except Exception as e:
+            logger.error(f"❌ فشل إنشاء الفهارس الثانوية: {e}")
+
+    # =====================================================================
+    # 6.4 البيانات الافتراضية والاستيراد
+    # =====================================================================
 
     async def _init_default_data(self, conn):
         default_plans = [
@@ -2851,6 +2877,24 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True)
+            return False
+
+    async def pre_initialize(self):
+        """تهيئة قاعدة البيانات وإنشاء الجداول والفهارس الأساسية مبكراً.
+        يُستدعى هذا من main.py قبل بدء الخادم."""
+        try:
+            await self.initialize()
+            async with self.connection() as conn:
+                await self._create_tables()
+                await self._migrate_schema(conn)
+                await self._create_indexes(conn)
+                await self._init_default_data(conn)
+                await self._import_banned_words(conn)
+                await self._import_auto_replies(conn)
+            logger.info("✅ تم التهيئة المبكرة لقاعدة البيانات")
+            return True
+        except Exception as e:
+            logger.error(f"❌ فشل التهيئة المبكرة: {e}")
             return False
 
     # =====================================================================
@@ -3194,22 +3238,45 @@ class Database:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
             return False
 
+    async def get_user_full_data(self, user_id: int) -> Optional[Dict]:
+        """جلب بيانات المستخدم مع معلومات القناة والاشتراك في استعلام واحد."""
+        query = """
+            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
+                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned,
+                   (SELECT COUNT(*) FROM posts p WHERE p.channel_db_id = uc.id AND p.published = 0) as unpublished_posts,
+                   (SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.user_id AND s.status = 'active' AND s.end_date > ?) as has_subscription,
+                   (SELECT COUNT(*) FROM user_channels uc2 WHERE uc2.user_id = u.user_id AND uc2.banned = 0) as channels_count,
+                   (SELECT COUNT(*) FROM user_groups_link gl WHERE gl.user_id = u.user_id) as groups_count
+            FROM users u
+            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            WHERE u.user_id = ?
+        """
+        row = await self.fetchone(query, (TimeUtils.utc_now(), user_id))
+        if row:
+            result = dict(row)
+            result['has_subscription'] = bool(result.get('has_subscription', 0))
+            result['channel_info'] = None
+            if result.get('channel_id'):
+                result['channel_info'] = {
+                    'id': result['channel_id'],
+                    'channel_name': result.get('channel_name', ''),
+                    'banned': result.get('channel_banned', 0),
+                }
+            return result
+        return None
+
     async def get_user(self, user_id: int) -> Optional[Dict]:
         """جلب بيانات المستخدم (مع استخدام الكاش)"""
         try:
-            # استخدام الكاش إن أمكن
             cached = await user_cache.get(user_id)
             if cached:
-                return {
-                    'user_id': user_id,
-                    'language': cached.get('language', 'ar'),
-                    'active_channel': cached.get('active_channel'),
-                    'banned': 0,  # الكاش لا يحتوي على banned، نجلبه من قاعدة البيانات إذا لزم الأمر
-                    'auto_publish': cached.get('auto_publish', 1),
-                    'auto_recycle': cached.get('auto_recycle', 1),
-                }
-            # إذا لم يكن في الكاش، نجلبه من قاعدة البيانات
-            return await self.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+                return cached
+            data = await self.get_user_full_data(user_id)
+            if data:
+                await user_cache.set(user_id, data)
+                return data
+            return None
         except Exception as e:
             logger.error(f"❌ Error in get_user: {e}", exc_info=True)
             return None
