@@ -32,7 +32,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - ✅ [إصلاح] defaultdict(asyncio.Lock) → defaultdict(lambda: asyncio.Lock())
 - ✅ [إصلاح] إزالة استيراد asyncio المكرر
 - ✅ [إصلاح] _get_unique_columns: التحقق من وجود العمود قبل إرجاعه
-- ✅ [إصلاح] _migrate_schema: استخدام منطق آمن لجميع الأنظمة
+- ✅ [إصلاح] _migrate_schema: استخدام منطق آمن لجميع الأنظمة (مع إضافة text_hash)
 - ✅ [إصلاح] _create_indexes: التحقق من وجود الفهرس قبل إنشائه
 - ✅ [إصلاح] activate_trial: تعيين trial_used = 1 بغض النظر عن منح أيام
 - ✅ [إصلاح] get_next_post: استخدام dict(row) دائماً
@@ -54,7 +54,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - ✅ [إصلاح] _compute_text_hash التعامل مع None
 - ✅ [إصلاح] استخدام default=None في fetchval والتحقق من is not None
 - ✅ [إصلاح] استخدام last_insert_rowid و LAST_INSERT_ID بدلاً من lastrowid
-- ✅ [إصلاح] استخدام WeakValueDictionary للأقفال لمنع تسرب الذاكرة
+- ✅ [إصلاح] استخدام WeakValueDictionary للأقفال مع التحقق من وجود المفتاح
 - ✅ [إصلاح] إضافة رسائل خطأ واضحة عند عدم وجود اشتراك
 - ✅ [إصلاح] إغلاق Pool مؤقتاً أثناء النسخ الاحتياطي لـ SQLite
 - ✅ [إصلاح] ضمان row_factory بعد الاستعادة
@@ -1178,8 +1178,8 @@ class Database:
     # 5. دوال الأقفال (محسّنة مع LRU)
     # =====================================================================
 
+    # ✅ [إصلاح] التأكد من وجود القفل قبل الوصول إليه (مع WeakValueDictionary)
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
-        # ✅ [توثيق] ترتيب الأقفال: _user_locks_lock أولاً
         async with self._user_locks_lock:
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
                 sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
@@ -1189,12 +1189,12 @@ class Database:
                     self._user_locks_last_access.pop(uid, None)
                 logger.warning(f"🧹 تم تنظيف {len(to_remove)} قفل مستخدم للحد من الذاكرة")
             self._user_locks_last_access[user_id] = time.monotonic()
+            # التحقق من وجود القفل وإنشاؤه إذا لم يكن موجوداً
             if user_id not in self._user_locks:
                 self._user_locks[user_id] = asyncio.Lock()
             return self._user_locks[user_id]
 
     async def _get_channel_lock(self, channel_db_id: int) -> asyncio.Lock:
-        # ✅ [توثيق] ترتيب الأقفال: _channel_locks_lock أولاً
         async with self._channel_locks_lock:
             self._channel_locks_last_access[channel_db_id] = time.monotonic()
             return self._channel_locks[channel_db_id]
@@ -5849,7 +5849,7 @@ class Database:
         try:
             async with self.transaction() as conn:
                 # التحقق من وجود جدول penalty_archive
-                archive_exists = await self._table_exists(conn, "penalty_archive")
+                archive_exists = await _table_exists(conn, "penalty_archive")
                 if not archive_exists:
                     logger.warning("⚠️ جدول penalty_archive غير موجود، سيتم إنشاؤه")
                     if USE_POSTGRES:
