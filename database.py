@@ -31,7 +31,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - فحص وجود الأدوات الخارجية (pg_dump, mysqldump) قبل النسخ الاحتياطي
 - ✅ [إصلاح] استخدام dict عادي بدلاً من WeakValueDictionary للأقفال مع تنظيف LRU
 - ✅ [إصلاح] _get_user_lock: التحقق من وجود المفتاح وإنشائه إذا لم يكن موجوداً
-- ✅ [إصلاح] _add_column_safe: استخدام DO $$ في PostgreSQL لإضافة الأعمدة بشكل آمن
+- ✅ [إصلاح] _add_column_safe: استخدام quote_ident مع concatenation في PostgreSQL
 - ✅ [إصلاح] _migrate_schema: تحسين إضافة عمود text_hash
 - ✅ [إصلاح] جميع الإصلاحات السابقة محفوظة
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
@@ -2770,21 +2770,23 @@ class Database:
     # 6.4 ترحيل المخطط (مُحسَّن)
     # =====================================================================
 
-    # ✅ [إصلاح] استخدام DO $$ في PostgreSQL لإضافة الأعمدة بشكل آمن
+    # ✅ [إصلاح] استخدام quote_ident مع concatenation في PostgreSQL
     async def _add_column_safe(self, conn, table: str, col_name: str, col_def: str):
         if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table) or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col_name):
             return
         try:
             if USE_POSTGRES:
-                await conn.execute(f"""
+                # استخدام quote_ident مع concatenation لتجنب مشاكل format
+                sql = f"""
                     DO $$
                     BEGIN
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                        WHERE table_name='{table}' AND column_name='{col_name}') THEN
-                            EXECUTE format('ALTER TABLE %I ADD COLUMN %I {col_def}', '{table}', '{col_name}');
+                            EXECUTE 'ALTER TABLE ' || quote_ident('{table}') || ' ADD COLUMN ' || quote_ident('{col_name}') || ' {col_def}';
                         END IF;
                     END $$;
-                """)
+                """
+                await conn.execute(sql)
             elif USE_MYSQL:
                 await conn.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{col_name}` {col_def}")
             else:
