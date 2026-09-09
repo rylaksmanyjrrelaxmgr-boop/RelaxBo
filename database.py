@@ -12,6 +12,10 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - تحسين أداء `/start` باستخدام كاش المستخدم وتقليل عدد الاستعلامات
 - جميع الدوال مكتملة بدون حذف أي ميزة
 - تحسين استعلام active_channel بإضافة فهارس وتحسين الاستعلامات الفرعية
+- إضافة فهارس إضافية لتسريع البحث في auto_replies و banned_words
+- تحسين get_auto_reply باستخدام استعلام واحد مع أولوية
+- إضافة كاش للكلمات المحظورة لتجنب جلبها من قاعدة البيانات في كل رسالة
+- تحسين get_user لجعل include_stats=False افتراضياً لتقليل الحمل
 """
 
 import os
@@ -681,6 +685,33 @@ class Database:
         self._posts_batch_size = POSTS_BATCH_SIZE
         self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
 
+        # كاش للكلمات المحظورة (تجنب جلبها من قاعدة البيانات في كل رسالة)
+        self._banned_words_cache = {}
+        self._banned_words_cache_ttl = 300  # 5 دقائق
+
+    # =====================================================================
+    # دوال الكاش للكلمات المحظورة
+    # =====================================================================
+
+    async def _get_banned_words_from_cache(self, chat_id: int) -> Optional[List[str]]:
+        entry = self._banned_words_cache.get(chat_id)
+        if entry and time.time() - entry['time'] < self._banned_words_cache_ttl:
+            return entry['words']
+        return None
+
+    async def _set_banned_words_cache(self, chat_id: int, words: List[str]):
+        self._banned_words_cache[chat_id] = {'words': words, 'time': time.time()}
+
+    async def _invalidate_banned_words_cache(self, chat_id: int = None):
+        if chat_id is not None:
+            self._banned_words_cache.pop(chat_id, None)
+        else:
+            self._banned_words_cache.clear()
+
+    # =====================================================================
+    # 3.1 دوال التهيئة والإتصال
+    # =====================================================================
+
     async def initialize(self):
         if self._initialized:
             return
@@ -757,6 +788,9 @@ class Database:
             await conn.execute("PRAGMA synchronous=NORMAL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA busy_timeout=10000")
+            # تحسين الأداء
+            await conn.execute("PRAGMA cache_size=-20000")
+            await conn.execute("PRAGMA temp_store=MEMORY")
             return conn
         except Exception as e:
             logger.error(f"❌ فشل إنشاء اتصال SQLite: {e}")
@@ -1678,10 +1712,14 @@ class Database:
                 archived_at TEXT
             )
         """)
+        # الفهارس الأساسية
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
-        logger.info("✅ تم إنشاء جميع جداول SQLite")
+        # فهارس إضافية لتسريع البحث
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)")
+        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
 
     # =====================================================================
     # 6.2 جداول PostgreSQL (كاملة)
@@ -2196,8 +2234,12 @@ class Database:
                 archived_at TIMESTAMP
             )
         """)
+        # الفهارس الأساسية
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
-        logger.info("✅ تم إنشاء جميع جداول PostgreSQL")
+        # فهارس إضافية
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)")
+        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
 
     # =====================================================================
     # 6.3 جداول MySQL (كاملة)
@@ -2713,7 +2755,10 @@ class Database:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         await conn.execute("SET FOREIGN_KEY_CHECKS=1")
-        logger.info("✅ تم إنشاء جميع جداول MySQL")
+        # فهارس إضافية
+        await conn.execute("CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+        await conn.execute("CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)")
+        logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
 
     async def _create_tables(self):
         if USE_POSTGRES:
@@ -2874,6 +2919,33 @@ class Database:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_active_channel: {e}")
 
+            # فهارس إضافية
+            if await _table_exists(conn, "auto_replies"):
+                if not await self._index_exists(conn, "auto_replies", "idx_auto_replies_lookup"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
+                        logger.info("✅ تم إنشاء فهرس idx_auto_replies_lookup")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_auto_replies_lookup: {e}")
+            if await _table_exists(conn, "banned_words"):
+                if not await self._index_exists(conn, "banned_words", "idx_banned_words_chat_word"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)")
+                        logger.info("✅ تم إنشاء فهرس idx_banned_words_chat_word")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_banned_words_chat_word: {e}")
         finally:
             if USE_MYSQL:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -3015,17 +3087,24 @@ class Database:
             ("user_channels", "idx_user_channels_user_banned_id", "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)"),
         ]
 
-        # إنشاء الفهارس الأساسية (الأكثر استخداماً) فوراً
+        # إنشاء الفهارس الأساسية ثم الثانوية
         for table, idx_name, create_sql in essential_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
 
-        # الفهارس الثانوية سيتم إنشاؤها في الخلفية لتجنب تأخير بدء التشغيل
+        # نضيف الفهارس الجديدة هنا أيضاً
+        additional_indexes = [
+            ("auto_replies", "idx_auto_replies_lookup", "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)"),
+            ("banned_words", "idx_banned_words_chat_word", "CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)"),
+        ]
+        for table, idx_name, create_sql in additional_indexes:
+            await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
+
         if self._secondary_index_task is None:
             self._secondary_index_task = asyncio.create_task(self._create_secondary_indexes(secondary_indexes))
 
     async def _create_secondary_indexes(self, indexes):
         try:
-            await asyncio.sleep(2)  # ننتظر قليلاً حتى ينتهي بدء التشغيل
+            await asyncio.sleep(2)
             async with self.connection() as conn:
                 for table, idx_name, create_sql in indexes:
                     if asyncio.current_task().cancelled():
@@ -3136,6 +3215,7 @@ class Database:
                             batch
                         )
                 logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة من ملف banned_words.py")
+                await self._invalidate_banned_words_cache()  # مسح الكاش
         except ImportError:
             logger.info("ℹ️ لا يوجد ملف banned_words.py، سيتم تخطي استيراد الكلمات المحظورة")
         except Exception as e:
@@ -3736,13 +3816,8 @@ class Database:
         
         return result
 
-    # الدالة الأساسية لجلب بيانات المستخدم (مع إمكانية تضمين الإحصائيات)
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """
-        جلب بيانات المستخدم مع إمكانية تضمين الإحصائيات أو لا.
-        - include_stats=False (افتراضي) للحصول على البيانات الأساسية فقط، وهذا أسرع.
-        - استخدم include_stats=True فقط عند الحاجة الفعلية للإحصائيات.
-        """
+        """جلب بيانات المستخدم مع إمكانية تضمين الإحصائيات (افتراضياً false لتوفير الأداء)"""
         try:
             cached = await user_cache.get(user_id)
             if cached:
@@ -3756,15 +3831,6 @@ class Database:
             logger.error(f"❌ Error in get_user: {e}", exc_info=True)
             return None
 
-    # دالة مختصرة لجلب البيانات الأساسية فقط (دون إحصائيات) لتسريع الاستجابة
-    async def get_user_basic(self, user_id: int) -> Optional[Dict]:
-        """
-        نسخة سريعة من get_user تُرجع البيانات الأساسية فقط (بدون إحصائيات).
-        استخدمها في معالجات الأوامر السريعة مثل /start لتقليل زمن الاستجابة.
-        """
-        return await self.get_user(user_id, include_stats=False)
-
-    # باقي دوال المستخدمين (نفس ما كان موجوداً)
     async def get_user_language(self, user_id: int) -> str:
         result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
         return result if result else 'ar'
@@ -4595,7 +4661,7 @@ class Database:
             return 0
 
     # =====================================================================
-    # دوال الأمان
+    # دوال الأمان (محسّنة مع الكاش للكلمات المحظورة)
     # =====================================================================
 
     async def get_security_settings(self, chat_id: int) -> Dict:
@@ -4640,8 +4706,14 @@ class Database:
         return await self.execute(query, tuple(values)) > 0
 
     async def get_banned_words(self, chat_id: int) -> List[str]:
+        # استخدام الكاش
+        cached = await self._get_banned_words_from_cache(chat_id)
+        if cached is not None:
+            return cached
         words = await self.fetchall("SELECT DISTINCT word FROM banned_words WHERE chat_id = ? OR chat_id = -1", (chat_id,))
-        return [word['word'] for word in words]
+        result = [row['word'] for row in words]
+        await self._set_banned_words_cache(chat_id, result)
+        return result
 
     async def add_banned_word(self, word: str, chat_id: int, added_by: int) -> Tuple[bool, bool]:
         try:
@@ -4660,6 +4732,7 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)", word, chat_id, added_by, TimeUtils.sql_iso())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)", word, chat_id, added_by, TimeUtils.sql_iso())
+                    await self._invalidate_banned_words_cache(chat_id)
                     return True, False
                 except Exception as e:
                     if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -4674,6 +4747,8 @@ class Database:
         try:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM banned_words WHERE word = ? AND chat_id = ?", word, chat_id)
+                if deleted > 0:
+                    await self._invalidate_banned_words_cache(chat_id)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_banned_word: {e}", exc_info=True)
@@ -4710,6 +4785,7 @@ class Database:
                             "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
                             words_to_insert
                         )
+            await self._invalidate_banned_words_cache()  # مسح الكاش العام
             from cache import banned_words_cache
             await banned_words_cache.invalidate()
             logger.info(f"✅ تم إعادة تحميل {len(words_to_insert)} كلمة محظورة من banned_words.py")
@@ -4743,7 +4819,7 @@ class Database:
         return await self.fetchall("SELECT admin_id, action, target_id, reason, created_at FROM admin_logs WHERE chat_id = ? ORDER BY id DESC LIMIT ?", (chat_id, limit))
 
     # =====================================================================
-    # دوال الردود التلقائية
+    # دوال الردود التلقائية (محسّنة)
     # =====================================================================
 
     async def get_auto_reply_settings(self, chat_id: int) -> Dict:
@@ -4816,43 +4892,28 @@ class Database:
             return False
 
     async def get_auto_reply(self, keyword: str, chat_id: int) -> Optional[Dict]:
+        """
+        البحث عن رد تلقائي مع تحسين الأداء باستخدام استعلام واحد وترتيب الأولوية.
+        """
         keyword = keyword.lower().strip()
-        async with self.connection() as conn:
-            if USE_POSTGRES:
-                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1", chat_id, keyword)
-                if row:
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
-                    return row
-                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1", keyword)
-                if row:
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
-                    return row
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute("SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = %s AND keyword = %s AND is_active = 1", (chat_id, keyword))
-                row = await cursor.fetchone()
-                if row:
-                    columns = ['reply', 'reply_type', 'reply_media_id', 'reply_buttons']
-                    reply = dict(zip(columns, row))
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = %s AND keyword = %s", chat_id, keyword)
-                    return reply
-                await cursor.execute("SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = %s AND is_active = 1", (keyword,))
-                row = await cursor.fetchone()
-                if row:
-                    columns = ['reply', 'reply_type', 'reply_media_id', 'reply_buttons']
-                    reply = dict(zip(columns, row))
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = %s", keyword)
-                    return reply
-            else:
-                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = ? AND keyword = ? AND is_active = 1", chat_id, keyword)
-                if row:
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", chat_id, keyword)
-                    return row
-                row = await self._fetchone_with_conn(conn, "SELECT reply, reply_type, reply_media_id, reply_buttons FROM auto_replies WHERE chat_id = -1 AND keyword = ? AND is_active = 1", keyword)
-                if row:
-                    await self._execute_with_conn(conn, "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = -1 AND keyword = ?", keyword)
-                    return row
+        if not keyword:
             return None
+        # استعلام واحد مع ترتيب الأولوية (المجموعة أولاً ثم العام)
+        row = await self.fetchone(
+            """SELECT reply, reply_type, reply_media_id, reply_buttons
+               FROM auto_replies
+               WHERE keyword = ? AND is_active = 1 AND (chat_id = ? OR chat_id = -1)
+               ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END
+               LIMIT 1""",
+            (keyword, chat_id, chat_id)
+        )
+        if row:
+            # تحديث عداد الاستخدام بشكل غير متزامن (لا ننتظر)
+            asyncio.create_task(
+                self.execute("UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", (chat_id, keyword))
+            )
+            return row
+        return None
 
     async def get_auto_reply_stats(self, chat_id: int, limit: int = 20) -> List[Dict]:
         return await self.fetchall(
