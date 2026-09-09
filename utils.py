@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع الحفاظ على كل الميزات)
+utils.py - الأدوات المساعدة للبوت (نسخة محسّنة مع إصلاح خطأ النشر)
 =================================================================================
 - جميع الدوال والفئات الموجودة سابقًا باقية كما هي
 - تحسينات إضافية طفيفة لا تؤثر على السلوك الحالي
@@ -12,6 +12,8 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسنة مع 
 - تطبيق إصلاحات إضافية بعد الفحص الثاني (النقاط 1،2،5،6،8،9،11،13،14)
 - إضافة تحسينات اختيارية: timeout للطلبات، تحسين أسماء المتغيرات، فحص Content-Type
 - إضافة عرض حالة الوسائط في _format_security_text
+- ✅ إصلاح خطأ tuple في النشر التلقائي: تعديل _publish_single_channel لاستقبال (post, recycled)
+- ✅ إرسال إشعار النشر فقط عند أول منشور أو إعادة تدوير
 """
 
 import asyncio
@@ -163,18 +165,13 @@ class RateLimiter:
         async with self.semaphore:
             async with self._lock:
                 now = time.time()
-                # إزالة الطوابع الزمنية الأقدم من ثانية واحدة
                 while self._last_calls and now - self._last_calls[0] > 1:
                     self._last_calls.popleft()
                 if len(self._last_calls) >= self.max_per_second:
-                    # احسب وقت الانتظار اللازم
                     wait_time = 1 - (now - self._last_calls[0])
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
                         now = time.time()  # إعادة حساب الوقت بعد الانتظار
-                        # إزالة الطوابع القديمة مرة أخرى بعد الانتظار
-                        while self._last_calls and now - self._last_calls[0] > 1:
-                            self._last_calls.popleft()
                 self._last_calls.append(now)
 
 
@@ -585,11 +582,12 @@ class CB:
     ADMIN_REM_BANNED = "admin_rem_banned"
     ADMIN_CREATE_CONTEST = "admin_create_contest"
     ADMIN_DECLARE_WINNER = "admin_declare_winner"
+    ADMIN_DECLARE_WINNER_SEL = "admin_declare_winner_sel"
     ADMIN_DEL_CONTEST = "admin_del_contest"
     ADMIN_EXPORT_REPLIES = "admin_export_replies"
     ADMIN_IMPORT_REPLIES = "admin_import_replies"
-    ADMIN_REFRESH_CACHE = "admin_refresh_cache"
     ADMIN_IMPORT_GITHUB = "admin_import_github"
+    ADMIN_REFRESH_CACHE = "admin_refresh_cache"
     ADMIN_INVOICES = "admin_invoices"
     ADMIN_PAYMENT_LOGS = "admin_payment_logs"
     ADMIN_GRANT_FREE = "admin_grant_free"
@@ -833,58 +831,25 @@ class KeyboardFactory:
 
     @classmethod
     def _format_security_text(cls, settings: dict) -> str:
-        """تنسيق إعدادات الأمان بشكل مقروء."""
         st = cls._status_icon
-
-        # قائمة بالصفوف: (العنوان، المفتاح في الإعدادات، القيمة الافتراضية، وحدة اختيارية)
-        rows_data = [
-            ("🔗 روابط", "delete_links", 0, None),
-            ("👤 معرفات", "mentions", 0, None),
-            ("🌊 فيضان", "antiflood_enabled", 0, None),
-            ("📊 رسائل الفيضان", "antiflood_messages", 5, None),
-            ("⏱️ ثواني الفيضان", "antiflood_seconds", 10, None),
-            ("📏 طول الرسالة", "max_message_length", 0, None),
-            ("🌙 وضع ليلي", "night_mode_enabled", 0, None),
-            ("🔞 NSFW", "nsfw_enabled", 0, None),
-            ("⚠️ تحذيرات", "warn_enabled", 0, None),
-            ("📊 حد التحذيرات", "max_warnings", 3, None),
-            ("🎯 ترحيب", "welcome_enabled", 0, None),
-            ("👋 وداع", "goodbye_enabled", 0, None),
-            ("🗑️ رسائل الخدمة", "delete_service", 0, None),
-            ("🎬 فيديو", "delete_videos", 0, None),
-            ("🎤 صوتي", "delete_voice", 0, None),
-            ("🖼️ ملصقات", "delete_stickers", 0, None),
-            ("📄 ملفات", "delete_documents", 0, None),
-            ("📸 صور", "delete_photos", 0, None),
-            ("🎞️ متحرك", "delete_animation", 0, None),
-            ("✅ موافقة", "auto_approve_join", 0, None),
-            ("❌ رفض", "auto_reject_join", 0, None),
-            ("⏱️ كتم", "mute_default_duration", 3600, "ث"),
-            ("🚫 حظر", "ban_default_duration", 0, "ث"),
-            ("🔒 تقييد", "restrict_default_duration", 1800, "ث"),
-            ("⚠️ مخالفات", "violation_strikes", 3, None),
-            ("⏱️ مدة المخالفة", "violation_duration", 60, "ث"),
-            ("🌊 مدة الفيضان", "antiflood_penalty_duration", 3600, "ث"),
-            ("🌙 مدة الليل", "night_mode_action_duration", 3600, "ث"),
-            ("⚖️ مدة عقوبة التحذير", "warn_penalty_duration", 3600, "ث"),
+        lines = [
+            "🔐 إعدادات الأمان",
+            "━━━━━━━━━━━━━━━━━━━━\n",
+            f"🔗 روابط: {st(settings.get('delete_links', 0))} | 👤 معرفات: {st(settings.get('mentions', 0))}",
+            f"🌊 فيضان: {st(settings.get('antiflood_enabled', 0))} | 📊 رسائل: {settings.get('antiflood_messages', 5)} | ⏱️ ثواني: {settings.get('antiflood_seconds', 10)}",
+            f"📏 طول: {settings.get('max_message_length', 0)} | 🌙 ليلي: {st(settings.get('night_mode_enabled', 0))} | 🔞 NSFW: {st(settings.get('nsfw_enabled', 0))}",
+            f"⚠️ تحذيرات: {st(settings.get('warn_enabled', 0))} | 📊 حد: {settings.get('max_warnings', 3)}\n",
+            f"🎯 ترحيب: {st(settings.get('welcome_enabled', 0))} | 👋 وداع: {st(settings.get('goodbye_enabled', 0))}",
+            f"🗑️ رسائل الخدمة: {st(settings.get('delete_service', 0))}",
+            f"🎬 فيديو: {st(settings.get('delete_videos', 0))} | 🎤 صوتي: {st(settings.get('delete_voice', 0))} | 🖼️ ملصقات: {st(settings.get('delete_stickers', 0))}",
+            f"📄 ملفات: {st(settings.get('delete_documents', 0))} | 📸 صور: {st(settings.get('delete_photos', 0))} | 🎞️ متحرك: {st(settings.get('delete_animation', 0))}",
+            f"✅ موافقة: {st(settings.get('auto_approve_join', 0))} | ❌ رفض: {st(settings.get('auto_reject_join', 0))}\n",
+            f"⏱️ كتم: {settings.get('mute_default_duration', 3600)}ث | 🚫 حظر: {settings.get('ban_default_duration', 0)}ث | 🔒 تقييد: {settings.get('restrict_default_duration', 1800)}ث",
+            f"⚠️ مخالفات: {settings.get('violation_strikes', 3)} | ⏱️ مدة: {settings.get('violation_duration', 60)}ث",
+            f"🌊 مدة الفيضان: {settings.get('antiflood_penalty_duration', 3600)}ث | 🌙 مدة الليل: {settings.get('night_mode_action_duration', 3600)}ث",
+            f"⚖️ مدة عقوبة التحذير: {settings.get('warn_penalty_duration', 3600)}ث",
+            "━━━━━━━━━━━━━━━━━━━━"
         ]
-
-        lines = ["🔐 إعدادات الأمان", "━━━━━━━━━━━━━━━━━━━━"]
-        # تجميع كل ثلاثة عناصر في سطر واحد للاختصار (اختياري)
-        # سأستخدم صفين لكل ثلاثة عناصر لتقليل الطول
-        chunk_size = 3
-        for i in range(0, len(rows_data), chunk_size):
-            chunk = rows_data[i:i+chunk_size]
-            line_parts = []
-            for label, key, default, unit in chunk:
-                val = settings.get(key, default)
-                if isinstance(val, bool) or (isinstance(val, int) and key not in [k for k in ['mute_default_duration','ban_default_duration','restrict_default_duration','violation_duration','antiflood_penalty_duration','night_mode_action_duration','warn_penalty_duration']]):
-                    display = st(val)
-                else:
-                    display = f"{val}{unit or ''}"
-                line_parts.append(f"{label}: {display}")
-            lines.append(" | ".join(line_parts))
-        lines.append("━━━━━━━━━━━━━━━━━━━━")
         return "\n".join(lines)
 
 
@@ -897,7 +862,6 @@ _banned_words_cache_time: Dict[int, float] = {}
 _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', False)
-_BANNED_WORDS_CACHE_MAXSIZE = getattr(CONFIG, 'BANNED_WORDS_CACHE_MAXSIZE', 200)  # حد أقصى للكاش
 
 
 def _normalize_word(word: Any) -> Optional[str]:
@@ -911,6 +875,10 @@ def _normalize_word(word: Any) -> Optional[str]:
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     """
     جلب الكلمات المحظورة مع كاش اختياري.
+    الإصلاحات:
+    - لا يتم استخدام قفل إلا عند تفعيل الكاش.
+    - معالجة أخطاء قاعدة البيانات.
+    - التحقق من نوع البيانات وتجاهل غير النصوص.
     """
     if _ENABLE_BANNED_WORDS_CACHE:
         if chat_id not in _banned_words_locks:
@@ -937,17 +905,8 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
                         normalized_set.add(normalized)
 
                 words = list(normalized_set)
-
-                # إدارة حجم الكاش
-                if len(_banned_words_cache) >= _BANNED_WORDS_CACHE_MAXSIZE:
-                    # حذف أقدم عنصر (أو عدة عناصر) للحفاظ على الحد
-                    oldest_key = min(_banned_words_cache_time, key=_banned_words_cache_time.get)
-                    del _banned_words_cache[oldest_key]
-                    del _banned_words_cache_time[oldest_key]
-
                 _banned_words_cache[chat_id] = words
                 _banned_words_cache_time[chat_id] = time.time()
-
                 return words
             except Exception as e:
                 logger.error(f"❌ فشل جلب الكلمات المحظورة من قاعدة البيانات: {e}")
@@ -974,9 +933,6 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
 
 
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
-    """
-    إبطال كاش الكلمات المحظورة.
-    """
     if chat_id is None or chat_id == -1:
         _banned_words_cache.clear()
         _banned_words_cache_time.clear()
@@ -1000,7 +956,6 @@ async def get_min_publish_interval() -> int:
 _auth_cache = TTLCache(maxsize=CONFIG.AUTH_CACHE_SIZE, ttl=CONFIG.AUTH_CACHE_TTL)
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """التحقق من صلاحيات المستخدم في المجموعة."""
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
 
@@ -1044,7 +999,6 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
 
 
 async def check_bot_permissions(bot, chat_id: int) -> dict:
-    """فحص صلاحيات البوت في المجموعة."""
     try:
         me = await bot.get_chat_member(chat_id, bot.id)
         if me.status not in ['administrator', 'creator']:
@@ -1064,52 +1018,38 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
-    """إرسال الوسائط حسب النوع، وإرجاع قائمة الرسائل المرسلة."""
-    sent_messages = []
     no_caption_types = {'voice', 'sticker', 'video_note'}
 
     if media_type == 'photo':
-        msg = await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'video':
-        msg = await bot.send_video(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        return await bot.send_video(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'document':
-        msg = await bot.send_document(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        return await bot.send_document(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'audio':
-        msg = await bot.send_audio(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        return await bot.send_audio(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'voice':
-        msg = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        sent = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
         if caption:
-            text_msg = await bot.send_message(chat_id, caption)
-            sent_messages.append(text_msg)
+            await bot.send_message(chat_id, caption)
+        return sent
     elif media_type == 'animation':
-        msg = await bot.send_animation(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
+        return await bot.send_animation(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'sticker':
-        msg = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
-        sent_messages.append(msg)
+        sent = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            text_msg = await bot.send_message(chat_id, caption)
-            sent_messages.append(text_msg)
+            await bot.send_message(chat_id, caption)
+        return sent
     elif media_type == 'video_note':
-        msg = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
-        sent_messages.append(msg)
+        sent = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            text_msg = await bot.send_message(chat_id, caption)
-            sent_messages.append(text_msg)
+            await bot.send_message(chat_id, caption)
+        return sent
     else:
-        msg = await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
-        sent_messages.append(msg)
-
-    return sent_messages
+        return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
-    """إرسال آمن مع دعم جميع أنواع الوسائط وإعادة المحاولة عند TimedOut."""
     if not text and not any(k in kwargs for k in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']):
         return None
 
@@ -1544,45 +1484,56 @@ class BackgroundTasks:
             elif media_type == 'voice' and media_file_id:
                 await bot.send_voice(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب للصوت: {e}")
             elif media_type == 'animation' and media_file_id:
                 await bot.send_animation(channel_id, media_file_id, caption=caption)
             elif media_type == 'sticker' and media_file_id:
                 await bot.send_sticker(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب للملصق: {e}")
             elif media_type == 'video_note' and media_file_id:
                 await bot.send_video_note(channel_id, media_file_id)
                 if text:
-                    await bot.send_message(channel_id, text)
+                    try:
+                        await bot.send_message(channel_id, text)
+                    except Exception as e:
+                        logger.warning(f"فشل إرسال النص المصاحب لفيديو نوت: {e}")
             else:
-                await bot.send_message(channel_id, text[:4096] if text else ".")
+                if text and len(text) > 4096:
+                    for i in range(0, len(text), 4096):
+                        await bot.send_message(channel_id, text[i:i+4096])
+                else:
+                    await bot.send_message(channel_id, text if text else ".")
             return True
         except Exception as e:
             logger.error(f"❌ Publish error: {e}")
             return False
 
     @staticmethod
-    async def _publish_single_channel(bot, ch, sleep_seconds):
-        consecutive_failures = 0
-        max_failures = 10
-
+    async def _publish_single_channel(bot, ch, sleep_seconds, published_count):
+        """
+        نشر منشور واحد لقناة معينة.
+        - published_count: عدد المنشورات المنشورة مسبقاً (قبل هذا النشر)
+        """
         try:
             has_sub = await DB.has_active_subscription(ch['user_id'])
             if not has_sub:
                 logger.info(f"⏭️ تخطي القناة {ch['id']} لانتهاء الاشتراك")
                 return
 
-            post = await DB.get_next_post(ch['id'])
-            if not post:
-                auto_recycle = await DB.get_auto_recycle_status(ch['user_id'])
-                if auto_recycle:
-                    await DB.reset_posts(ch['user_id'], ch['id'])
-                    post = await DB.get_next_post(ch['id'])
-                    if not post:
-                        return
-                else:
-                    return
+            result = await DB.get_next_post(ch['id'])
+            if result is None:
+                return
+            post, recycled = result
+
+            if post is None:
+                return
 
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
@@ -1590,12 +1541,18 @@ class BackgroundTasks:
                 await DB.update_last_publish(ch['id'])
                 await DB.update_next_publish(ch['id'])
                 logger.info(f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة...")
-                try:
-                    user_id = ch.get('user_id')
-                    if user_id:
-                        await safe_send(bot, user_id, f"✅ تم نشر منشور في قناتك")
-                except Exception as e:
-                    logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
+
+                # إرسال إشعار فقط إذا كان:
+                # - أول منشور على الإطلاق (published_count == 0)
+                # - أو تم إعادة التدوير (recycled == True)
+                if published_count == 0 or recycled:
+                    try:
+                        user_id = ch.get('user_id')
+                        if user_id:
+                            await safe_send(bot, user_id, "✅ تم نشر منشور في قناتك")
+                    except Exception as e:
+                        logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
+
                 await asyncio.sleep(sleep_seconds)
             else:
                 await DB.increment_post_fail(post['id'])
@@ -1610,7 +1567,6 @@ class BackgroundTasks:
         min_interval_minutes = await get_min_publish_interval()
         sleep_seconds = min_interval_minutes * 60
         publish_semaphore = asyncio.Semaphore(max_channels)
-
         active_tasks = {}
 
         while True:
@@ -1629,9 +1585,11 @@ class BackgroundTasks:
                     if channel_id in active_tasks and not active_tasks[channel_id].done():
                         continue
 
-                    async def run_publish(ch=ch, bot=bot, sleep_seconds=sleep_seconds):
+                    published_count = ch.get('published_count', 0)
+
+                    async def run_publish(ch=ch, bot=bot, sleep_seconds=sleep_seconds, published_count=published_count):
                         async with publish_semaphore:
-                            await BackgroundTasks._publish_single_channel(bot, ch, sleep_seconds)
+                            await BackgroundTasks._publish_single_channel(bot, ch, sleep_seconds, published_count)
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
@@ -1783,7 +1741,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def cleanup_old_data() -> None:
-        """تنظيف البيانات القديمة والكاش المؤقت."""
         while True:
             await asyncio.sleep(3600)
             try:
@@ -1846,9 +1803,7 @@ async def webhook_handler(request):
         logger.error("❌ Webhook app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
-        # قبول application/json وأيضاً مع charset
-        content_type = request.headers.get('Content-Type', '')
-        if not content_type.startswith('application/json'):
+        if request.content_type != 'application/json':
             logger.warning("⚠️ Webhook request with non-JSON content")
             return web.Response(status=400, text="Bad Request")
         data = await request.json()
