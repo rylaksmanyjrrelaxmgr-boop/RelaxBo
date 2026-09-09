@@ -6,6 +6,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - جميع الميزات السابقة مع إضافة معالجات لجميع الأزرار بما فيها المفقودة
 - إضافة معالج لتعطيل الاشتراك الإجباري (admin_disable_force)
 - إضافة معالج لرفع نسخة احتياطية (admin_upload_backup)
+- تصحيح خطأ عمود timestamp إلى created_at في admin_logs
 - بدون تبسيط أو حذف أو تخريب
 """
 
@@ -30,7 +31,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from .handlers_command import CommandHandlers
+from handlers_command import CommandHandlers
 
 logger = logging.getLogger(__name__)
 
@@ -1439,7 +1440,8 @@ class CallbackHandlers:
                         violation_penalty_duration=0
                     )
                     success_msg = await _trans("deactivate_all_success", lang, "✅ تم تعطيل جميع الإعدادات الأمنية")
-                await DB.execute("INSERT INTO admin_logs (admin_id, action, chat_id, timestamp) VALUES (?, ?, ?, ?)",
+                # تسجيل العملية (تم تصحيح اسم العمود إلى created_at)
+                await DB.execute("INSERT INTO admin_logs (admin_id, action, chat_id, created_at) VALUES (?, ?, ?, ?)",
                                  (user_id, f"{'activate' if is_activate else 'deactivate'}_all_security", chat_id, TimeUtils.mecca_now()))
                 await _safe_answer(query, success_msg)
                 settings = await DB.get_security_settings(chat_id)
