@@ -2,21 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المحسّنة)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة)
 ================================================================================
-- إصلاحات أمنية في معالجة الدفع
-- تسجيل جميع الأوامر
-- دعم video_note
-- المهام الخلفية مع إعادة تشغيل عند الفشل
-- دعم webhook و polling
-- فتح المنفذ تلقائياً لتفعيل الخدمة على Render
-- قوائم أوامر منفصلة للخاص والمجموعة
-- تحسين تسجيل الأخطاء والمرونة
-- تنظيف دوري لأقفال المستخدمين
-- دمج نظام الكاش الموحد cache.py
-- إضافة مهمة cache_cleanup_task
-- الحفاظ على المنطقة الزمنية (جميع التواريخ naive UTC)
-- ✅ تحسينات أداء: تهيئة أسرع، طلب تسخين، قياس زمن الإقلاع
+- دمج نظام الكاش (cache.py) بالكامل
+- استخدام user_cache.get_or_load() في المعالجات (يُعدَّل في handlers.py)
+- إضافة مسار /health للتحقق من صحة البوت
+- تحسين إدارة المهام الخلفية
+- تسجيل زمن الإقلاع بدقة
+- تعيين مستوى التسجيل من البيئة
+- دعم webhook و polling مع إعادة محاولة تلقائية
 """
 
 import asyncio
@@ -25,11 +19,9 @@ import logging
 import traceback
 import json
 import time
+from aiohttp import web
 
-from telegram import (
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeAllGroupChats
-)
+from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatJoinRequestHandler, filters,
@@ -43,11 +35,15 @@ from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send
 )
-from cache import cache_cleanup_task, user_cache
+from cache import cache_cleanup_task, user_cache, invalidate_user_cache
 
+# =====================================================================
+# إعدادات التسجيل
+# =====================================================================
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=getattr(logging, LOG_LEVEL, logging.INFO)
 )
 logger = logging.getLogger(__name__)
 
@@ -58,6 +54,9 @@ ALLOWED_UPDATES = [
     "pre_checkout_query"
 ]
 
+# =====================================================================
+# دوال مساعدة للدفع
+# =====================================================================
 
 async def _validate_invoice_for_payment(user_id: int, payload: str):
     """التحقق من صحة الفاتورة للدفع"""
@@ -89,7 +88,6 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
 
     return invoice, plan, data
 
-
 async def pre_checkout(update, context):
     """معالجة ما قبل الدفع"""
     query = update.pre_checkout_query
@@ -109,7 +107,6 @@ async def pre_checkout(update, context):
     # التحقق من المبلغ
     if hasattr(query, 'total_amount'):
         expected_amount = plan.get('price')
-        # السماح بالدفع إذا كان السعر 0 (تجربة مجانية) أو مطابق
         if expected_amount is not None and expected_amount > 0 and query.total_amount != expected_amount:
             logger.warning(f"❌ Amount mismatch for user {user_id}: expected {expected_amount}, got {query.total_amount}")
             try:
@@ -123,7 +120,6 @@ async def pre_checkout(update, context):
         logger.info(f"✅ Pre-checkout success: {query.id}")
     except Exception as e:
         logger.error(f"❌ Failed to answer pre-checkout success: {e}")
-
 
 async def successful_payment(update, context):
     """معالجة الدفع الناجح"""
@@ -141,7 +137,6 @@ async def successful_payment(update, context):
         await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
         return
 
-    # التحقق من المبلغ (مع السماح بالتجربة المجانية)
     if plan.get('price', 0) > 0 and plan.get('price') != total_amount:
         logger.error(f"❌ Amount mismatch in successful payment for user {user_id}: invoice {invoice['number']}")
         await safe_send(context.bot, user_id, "❌ المبلغ المدفوع غير مطابق.")
@@ -162,8 +157,8 @@ async def successful_payment(update, context):
                 await DB.add_payment_log(user_id, 'xtr', 'subscription_paid', {'invoice': invoice['number'], 'plan_id': plan['id']})
                 await safe_send(context.bot, user_id, f"✅ تم تفعيل اشتراك {plan['name']} بنجاح!")
                 logger.info(f"✅ Subscription activated for user {user_id}, plan {plan['id']}")
-                # ✅ إبطال كاش المستخدم
-                await user_cache.invalidate(user_id)
+                # إبطال كاش المستخدم
+                await invalidate_user_cache(user_id)
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
                 logger.error(f"❌ Failed to activate subscription for user {user_id}, invoice {invoice['number']}")
@@ -185,10 +180,23 @@ async def successful_payment(update, context):
             logger.exception(f"❌ Exception in gift payment: {e}")
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
 
+# =====================================================================
+# معالج الصحة (Health Check)
+# =====================================================================
+
+async def health_check(request):
+    """نقطة نهاية للتحقق من صحة البوت"""
+    return web.Response(text="OK", status=200)
+
+# =====================================================================
+# المهمة الرئيسية
+# =====================================================================
 
 async def main():
     """الدالة الرئيسية"""
     t_start = time.monotonic()
+
+    # التحقق من صحة الإعدادات
     try:
         CONFIG.validate()
     except ValueError as e:
@@ -200,14 +208,13 @@ async def main():
 
     # تهيئة قاعدة البيانات
     t0 = time.monotonic()
-    # استخدام pre_initialize إذا كانت متوفرة لتسريع الإقلاع
     if hasattr(DB, 'pre_initialize'):
         await DB.pre_initialize()
     else:
         await initialize_db()
     logger.info(f"⏱️ قاعدة البيانات تمت تهيئتها في {time.monotonic()-t0:.2f} ثانية")
 
-    # تسجيل المطورين
+    # تسجيل المطورين والمالك
     for dev_id in CONFIG.DEVELOPER_IDS:
         try:
             await DB.register_user(dev_id)
@@ -218,7 +225,7 @@ async def main():
     except Exception as e:
         logger.error(f"❌ Failed to register owner: {e}")
 
-    # تحميل الإعدادات
+    # تحميل الترجمات
     t1 = time.monotonic()
     KeyboardFactory.load_config()
     available_langs = TranslationManager.get_available_languages()
@@ -226,10 +233,10 @@ async def main():
         TranslationManager.load_translation(lang)
     logger.info(f"✅ تم تحميل {len(available_langs)} لغة في {time.monotonic()-t1:.2f} ثانية")
 
-    # المنفذ: استخدام PORT من البيئة أو الافتراضي
+    # المنفذ
     port = int(os.getenv("PORT", CONFIG.WEB_PORT))
 
-    # تحديد عنوان Webhook
+    # عنوان Webhook
     hostname = (
         os.getenv("RENDER_EXTERNAL_HOSTNAME") or
         os.getenv("RENDER_EXTERNAL_URL") or
@@ -238,8 +245,8 @@ async def main():
         os.getenv("WEBHOOK_URL")
     )
 
+    # بناء التطبيق
     app = Application.builder().token(CONFIG.TOKEN).build()
-    # إضافة وقت بدء التشغيل
     app.bot_data['start_time'] = time.monotonic()
     await app.initialize()
     logger.info(f"⏱️ تم تهيئة التطبيق في {time.monotonic()-t0:.2f} ثانية")
@@ -294,12 +301,11 @@ async def main():
         ("pin", "📌 تثبيت رسالة"),
     ]
 
-    # تعيين الأوامر حسب النطاق
+    # تعيين الأوامر
     await app.bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
 
     # ========== تسجيل المعالجات ==========
-    # الأوامر الأساسية
     app.add_handler(CommandHandler("start", CommandHandlers.start))
     app.add_handler(CommandHandler("help", CommandHandlers.help_command))
     app.add_handler(CommandHandler("trial", CommandHandlers.trial))
@@ -315,7 +321,6 @@ async def main():
     app.add_handler(CommandHandler("gift_plans", CommandHandlers.gift_plans))
     app.add_handler(CommandHandler("redeem_gift", CommandHandlers.redeem_gift))
 
-    # أوامر المجموعات
     app.add_handler(CommandHandler("syncgroup", CommandHandlers.syncgroup))
     app.add_handler(CommandHandler("security", CommandHandlers.security))
     app.add_handler(CommandHandler("panel", CommandHandlers.panel))
@@ -336,7 +341,6 @@ async def main():
     app.add_handler(CommandHandler("remove_hidden_admin", CommandHandlers.remove_hidden_admin))
     app.add_handler(CommandHandler("list_hidden_admins", CommandHandlers.list_hidden_admins))
 
-    # الأوامر الجديدة
     app.add_handler(CommandHandler("mood", CommandHandlers.mood))
     app.add_handler(CommandHandler("admin", CommandHandlers.admin))
     app.add_handler(CommandHandler("broadcast", CommandHandlers.broadcast))
@@ -399,12 +403,11 @@ async def main():
                 logger.info(f"🔄 إعادة تشغيل المهمة {task_name} بعد 5 ثوانٍ...")
                 await asyncio.sleep(5)
 
-    # مهمة تنظيف الأقفال غير المستخدمة
     async def cleanup_locks():
         while True:
             try:
                 await DB.cleanup_user_locks(max_idle_seconds=3600)
-                await asyncio.sleep(3600)  # كل ساعة
+                await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -438,21 +441,17 @@ async def main():
             )
             logger.info("✅ Webhook تم التعيين")
             runner = await setup_webhook(app, port)
-            # ✅ طلب تسخين داخلي لضمان جاهزية الخادم
+            # طلب تسخين
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
                     await session.get(f"http://127.0.0.1:{port}/health")
                     logger.info("🔥 تم تسخين الخادم بنجاح")
-            except Exception as e:
-                logger.warning(f"⚠️ فشل طلب التسخين: {e}")
-            try:
-                await asyncio.Event().wait()
-            finally:
-                await runner.cleanup()
+            except Exception:
+                pass
+            await asyncio.Event().wait()
         else:
             logger.info("⚠️ Polling")
-            # فتح المنفذ حتى لو كنا في وضع Polling لتفعيل الخدمة على Render
             runner = await setup_webhook(app, port)
             try:
                 await app.run_polling(
@@ -468,7 +467,6 @@ async def main():
         await app.shutdown()
 
     logger.info(f"✅ اكتمل الإقلاع في {time.monotonic()-t_start:.2f} ثانية")
-
 
 if __name__ == "__main__":
     try:
