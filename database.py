@@ -35,8 +35,9 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - ✅ [إصلاح] _migrate_schema: تحسين إضافة عمود text_hash
 - ✅ [إصلاح] جميع الإصلاحات السابقة محفوظة
 - ✅ [إصلاح] إضافة دالة _column_exists للتحقق من وجود العمود
+- ✅ [إصلاح] إضافة دالة _ensure_text_hash_column لضمان وجود العمود text_hash في جميع البيئات
 - ✅ [إصلاح] تعديل add_posts للتحقق من وجود text_hash والتكيف معه
-- ✅ [إصلاح] تحسين _migrate_schema لإضافة text_hash بشكل آمن في PostgreSQL
+- ✅ [إصلاح] تحسين pre_initialize و initialize_db لاستدعاء _ensure_text_hash_column بعد الترحيل
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
 """
 
@@ -2803,7 +2804,7 @@ class Database:
 
     # دالة للتحقق من وجود عمود
     async def _column_exists(self, conn, table: str, column: str) -> bool:
-        """التحقق من وجود عمود في جدول"""
+        """التحقق من وجود عمود في جدول مع التعامل مع الأخطاء"""
         try:
             if USE_POSTGRES:
                 row = await conn.fetchval(
@@ -2820,7 +2821,60 @@ class Database:
                 cursor = await conn.execute(f"PRAGMA table_info({table})")
                 rows = await cursor.fetchall()
                 return any(row[1] == column for row in rows)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"⚠️ فشل التحقق من وجود العمود {column} في {table}: {e}")
+            return False
+
+    # دالة ضمان وجود text_hash (✅ إضافة جديدة)
+    async def _ensure_text_hash_column(self, conn) -> bool:
+        """
+        التأكد من وجود عمود text_hash في جدول posts.
+        تعيد True إذا كان العمود موجوداً (أو تم إضافته)، False في حالة الفشل.
+        """
+        try:
+            if not await _table_exists(conn, "posts"):
+                logger.warning("⚠️ جدول posts غير موجود، لا يمكن إضافة text_hash")
+                return False
+
+            if await self._column_exists(conn, "posts", "text_hash"):
+                return True
+
+            # محاولة إضافة العمود
+            try:
+                if USE_POSTGRES:
+                    await conn.execute('ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT \'\'')
+                    # تأكيد التغيير (PostgreSQL تلقائي لكن للتأكد)
+                    await conn.execute('COMMIT')
+                    logger.info("✅ تم إضافة عمود text_hash إلى posts (PostgreSQL)")
+                elif USE_MYSQL:
+                    await conn.execute('ALTER TABLE posts ADD COLUMN text_hash VARCHAR(64) DEFAULT \'\'')
+                    logger.info("✅ تم إضافة عمود text_hash إلى posts (MySQL)")
+                else:
+                    await conn.execute('ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT \'\'')
+                    logger.info("✅ تم إضافة عمود text_hash إلى posts (SQLite)")
+
+                # إنشاء فهرس إذا لم يكن موجوداً
+                if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
+                        logger.info("✅ تم إنشاء فهرس idx_posts_text_hash")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس text_hash: {e}")
+
+                return True
+
+            except Exception as e:
+                logger.error(f"❌ فشل إضافة عمود text_hash: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ خطأ في _ensure_text_hash_column: {e}")
             return False
 
     async def _migrate_schema(self, conn):
@@ -2862,28 +2916,9 @@ class Database:
                     if col_name not in existing:
                         await self._add_column_safe(conn, table, col_name, col_def)
 
-            # ✅ تحقق إضافي وإضافة text_hash في PostgreSQL (إذا لم يضف)
-            if await _table_exists(conn, "posts"):
-                if not await self._column_exists(conn, "posts", "text_hash"):
-                    try:
-                        await self._add_column_safe(conn, "posts", "text_hash", "TEXT DEFAULT ''")
-                        logger.info("✅ تم إضافة عمود text_hash إلى جدول posts (من _migrate_schema)")
-                    except Exception as e:
-                        logger.warning(f"⚠️ فشل إضافة text_hash: {e}")
+            # ✅ التأكد من وجود text_hash (بعد الترحيل)
+            await self._ensure_text_hash_column(conn)
 
-                # إضافة فهرس text_hash إذا لم يكن موجوداً
-                if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
-                    try:
-                        if USE_POSTGRES:
-                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
-                        elif USE_MYSQL:
-                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
-                        else:
-                            await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
-                        logger.info("✅ تم إنشاء فهرس idx_posts_text_hash")
-                    except Exception as e:
-                        if "duplicate" not in str(e).lower():
-                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_posts_text_hash: {e}")
         finally:
             if USE_MYSQL:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -3254,6 +3289,8 @@ class Database:
                 await self._init_default_data(conn)
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
+                # ✅ التأكد من وجود text_hash بعد كل شيء
+                await self._ensure_text_hash_column(conn)
             logger.info("✅ تم تهيئة قاعدة البيانات بنجاح")
             return True
         except Exception as e:
@@ -3266,6 +3303,8 @@ class Database:
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
+                # ✅ التأكد من وجود text_hash بعد الترحيل (قبل الفهارس)
+                await self._ensure_text_hash_column(conn)
                 await self._create_indexes(conn)
                 await self._init_default_data(conn)
                 await self._import_banned_words(conn)
@@ -4247,17 +4286,8 @@ class Database:
                     max_posts = plan_row['max_posts'] or 0
                     current_count = plan_row['cnt'] or 0
 
-                    # التحقق من وجود عمود text_hash
-                    has_text_hash = await self._column_exists(conn, "posts", "text_hash")
-                    if not has_text_hash:
-                        # حاول إضافته
-                        try:
-                            await self._add_column_safe(conn, "posts", "text_hash", "TEXT DEFAULT ''")
-                            has_text_hash = True
-                            logger.info("✅ تم إضافة عمود text_hash إلى جدول posts (ضمن add_posts)")
-                        except Exception as e:
-                            logger.warning(f"⚠️ فشل إضافة text_hash في add_posts: {e}")
-                            has_text_hash = False
+                    # ✅ التأكد من وجود عمود text_hash
+                    has_text_hash = await self._ensure_text_hash_column(conn)
 
                     # إزالة التكرار داخل الدفعة
                     unique_posts = []
