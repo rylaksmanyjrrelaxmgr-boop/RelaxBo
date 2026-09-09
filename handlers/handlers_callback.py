@@ -2,46 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (نسخة نهائية معدلة بالكامل)
-- لوحة أدمن كاملة
-- جميع معالجات الأمان
-- شراء الهدايا يعمل
-- إصلاح زر التحذير
-- إصلاح زر التحديثات
-- مدد العقوبات: دائم، نصف ساعة، ساعة، يوم، أسبوع، عشرة أيام، شهر
-- أزرار الردود التلقائية تعمل فورًا مع رسائل تأكيد
-- عدّاد النشر الجماعي دقيق
-- استخدام parse_mode آمن (نص عادي بدون Markdown)
-- معالجات خاصة لأزرار الانضمام تمنع التعارض بين الموافقة والرفض
-- دعم 12+ لغة في أزرار الترجمة
-- إزالة تكرار toggle_map
-- إضافة معالج المقاييس (Metrics) بشكل فعلي
-- إضافة معالجات الأزرار النادرة
-- إضافة حظر/فك حظر يدوي للقنوات والمجموعات من لوحة الأدمن
-- إصلاح عرض مدد الطرد (kick) بعدم عرضها نهائيًا
-- إصلاح حدود الصفحات في القوائم
-- تخزين مرجع لمهمة النسخ الاحتياطي
-- تحديث نص الردود التلقائية عند التبديل
-- إرسال النص المصاحب للوسائط التي لا تدعم caption
-- إصلاح safe_edit عند الطول الزائد
-- تجنب عرض قائمة المدد لعقوبة الطرد
-- تصحيح ترجمة النصوص الثابتة
-- ترجمة قسم التذكيرات بالكامل
-- إصلاح مشكلة _trans مع lang=None
-- إصلاح معالجة warn_penalty_set
-- إصلاح زر مدة العقوبة
-- إصلاح أزرار set_warn_penalty
-- ✅ إضافة معالج كامل لـ sec_del_pen (عقوبات الحذف)
-- ✅ إضافة معالج sec_set_del_penalty و sec_set_del_penalty_duration
-- ✅ دعم delete_penalty في set_duration
-- ✅ إضافة معالج sec_penalty_durations
-- ✅ إضافة معالجات sec_antiflood_duration و sec_night_duration
-- ✅ إضافة معالج sec_set_mute_duration, sec_set_ban_duration, sec_set_restrict_duration
-- ✅ [إصلاح] إضافة معالجات sec_penalty_ban, sec_penalty_mute, sec_penalty_kick, sec_penalty_restrict, sec_penalty_none (اختيار العقوبة التلقائية)
-- ✅ [إصلاح] إضافة معالجات sec_set_antiflood_messages, sec_set_antiflood_seconds, sec_antiflood_penalty
-- ✅ [إصلاح] إضافة معالجات sec_set_night_start, sec_set_night_end, sec_night_action
-- ✅ [إصلاح] إضافة معالجات sec_set_antiflood_penalty و sec_set_night_action
-- ✅ جميع الأزرار أصبحت لها معالجات كاملة
+handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (نسخة نهائية مع إضافة تفعيل/تعطيل الكل)
+- جميع الميزات السابقة مع إضافة أزرار "تفعيل الكل" و "تعطيل الكل" في لوحة الأمان
+- معالجات كاملة للتأكيد والتنفيذ مع دعم الترجمة والتسجيل
+- بدون تبسيط أو حذف أو تخريب
 """
 
 import asyncio
@@ -65,7 +29,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from .handlers_command import CommandHandlers
+from handlers_command import CommandHandlers
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +184,7 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
             return
 
-        # ========== معالجة set_duration (لجميع العقوبات بما فيها delete_penalty) ==========
+        # ========== معالجة set_duration (لجميع العقوبات بما فيها delete_penalty و violation) ==========
         if data.startswith("set_duration:"):
             parts = data.split(":")
             if len(parts) >= 4:
@@ -239,7 +203,8 @@ class CallbackHandlers:
                     'antiflood': 'antiflood_penalty_duration',
                     'night': 'night_mode_action_duration',
                     'warn_penalty': 'warn_penalty_duration',
-                    'delete_penalty': 'delete_penalty_duration',  # ✅ دعم عقوبة الحذف
+                    'delete_penalty': 'delete_penalty_duration',
+                    'violation': 'violation_penalty_duration',
                 }
 
                 col = col_map.get(penalty_type)
@@ -487,6 +452,200 @@ class CallbackHandlers:
                     await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
             except Exception as e:
                 logger.error(f"خطأ في sec_set_night_action: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة عقوبات المخالفات (violation) ==========
+        if data.startswith("sec_violation_settings:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_violation_penalties(update, context, query, chat_id, lang)
+            except Exception as e:
+                logger.error(f"خطأ في sec_violation_settings: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_set_violation_strikes:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                StateManager.set(user_id, UserState.WAIT_VIOLATION_STRIKES)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "🔢 أرسل عدد المخالفات المسموحة:", bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_violation_strikes: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_set_violation_duration:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'violation')
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_violation_duration: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_set_violation_penalty:"):
+            try:
+                parts = data.split(":")
+                if len(parts) >= 3:
+                    chat_id = int(parts[1])
+                    penalty_type = parts[2]
+                    if penalty_type in ['ban', 'mute', 'kick', 'restrict', 'none']:
+                        await DB.update_security_settings(chat_id, violation_penalty=penalty_type)
+                        await _safe_answer(query, f"✅ تم تعيين عقوبة المخالفات: {penalty_type}")
+                        settings = await DB.get_security_settings(chat_id)
+                        await safe_edit(query, KeyboardFactory._format_security_text(settings),
+                                        reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                        bot=context.bot)
+                        return
+                    else:
+                        await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
+                else:
+                    await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_violation_penalty: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة أزرار تفعيل/تعطيل الكل (جديد) ==========
+        if data.startswith("sec_activate_all:") or data.startswith("sec_deactivate_all:"):
+            try:
+                parts = data.split(":")
+                action = parts[0].replace("sec_", "")
+                chat_id = int(parts[1])
+                if not await is_authorized_in_group(context.bot, chat_id, user_id):
+                    await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
+                    return
+                # عرض تأكيد
+                confirm_action = "activate_all_confirm" if action == "activate_all" else "deactivate_all_confirm"
+                confirm_text = await _trans("activate_all_confirmation", lang, "⚠️ هل أنت متأكد من تفعيل جميع الإعدادات الأمنية؟") if action == "activate_all" else await _trans("deactivate_all_confirmation", lang, "⚠️ هل أنت متأكد من تعطيل جميع الإعدادات الأمنية؟")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ نعم", callback_data=f"sec_{confirm_action}:{chat_id}"),
+                     InlineKeyboardButton("❌ إلغاء", callback_data=f"grp_set:{chat_id}")]
+                ])
+                await safe_edit(query, confirm_text, reply_markup=kb, bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في تفعيل/تعطيل الكل: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_activate_all_confirm:") or data.startswith("sec_deactivate_all_confirm:"):
+            try:
+                parts = data.split(":")
+                action = parts[0].replace("sec_", "").replace("_confirm", "")
+                chat_id = int(parts[1])
+                if not await is_authorized_in_group(context.bot, chat_id, user_id):
+                    await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
+                    return
+                if action == "activate_all":
+                    # تفعيل جميع الإعدادات مع قيم افتراضية معقولة
+                    await DB.update_security_settings(chat_id,
+                        delete_links=1,
+                        delete_mentions=1,
+                        slow_mode=1,
+                        slow_mode_seconds=5,
+                        delete_videos=1,
+                        delete_audio=1,
+                        delete_animation=1,
+                        delete_service=1,
+                        delete_documents=1,
+                        delete_stickers=1,
+                        delete_forwarded=1,
+                        delete_polls=1,
+                        delete_games=1,
+                        delete_voice=1,
+                        delete_video_note=1,
+                        welcome_enabled=1,
+                        goodbye_enabled=1,
+                        antiflood_enabled=1,
+                        antiflood_messages=5,
+                        antiflood_seconds=5,
+                        antiflood_penalty="mute",
+                        antiflood_penalty_duration=60,
+                        night_mode_enabled=1,
+                        night_start="22:00",
+                        night_end="06:00",
+                        night_mode_action="mute",
+                        night_mode_action_duration=3600,
+                        auto_approve_join=0,
+                        auto_reject_join=0,
+                        nsfw_enabled=0,
+                        warn_enabled=1,
+                        warn_limit=3,
+                        warn_penalty="mute",
+                        warn_penalty_duration=3600,
+                        delete_banned_words=1,
+                        auto_penalty="mute",
+                        delete_penalty="mute",
+                        delete_penalty_duration=3600,
+                        violation_enabled=1,
+                        violation_strikes=3,
+                        violation_penalty="mute",
+                        violation_penalty_duration=3600
+                    )
+                    success_msg = await _trans("activate_all_success", lang, "✅ تم تفعيل جميع الإعدادات الأمنية")
+                    await _safe_answer(query, success_msg)
+                else:
+                    # تعطيل جميع الإعدادات
+                    await DB.update_security_settings(chat_id,
+                        delete_links=0,
+                        delete_mentions=0,
+                        slow_mode=0,
+                        slow_mode_seconds=0,
+                        delete_videos=0,
+                        delete_audio=0,
+                        delete_animation=0,
+                        delete_service=0,
+                        delete_documents=0,
+                        delete_stickers=0,
+                        delete_forwarded=0,
+                        delete_polls=0,
+                        delete_games=0,
+                        delete_voice=0,
+                        delete_video_note=0,
+                        welcome_enabled=0,
+                        goodbye_enabled=0,
+                        antiflood_enabled=0,
+                        antiflood_messages=0,
+                        antiflood_seconds=0,
+                        antiflood_penalty="none",
+                        antiflood_penalty_duration=0,
+                        night_mode_enabled=0,
+                        night_start="",
+                        night_end="",
+                        night_mode_action="none",
+                        night_mode_action_duration=0,
+                        auto_approve_join=0,
+                        auto_reject_join=0,
+                        nsfw_enabled=0,
+                        warn_enabled=0,
+                        warn_limit=0,
+                        warn_penalty="none",
+                        warn_penalty_duration=0,
+                        delete_banned_words=0,
+                        auto_penalty="none",
+                        delete_penalty="none",
+                        delete_penalty_duration=0,
+                        violation_enabled=0,
+                        violation_strikes=0,
+                        violation_penalty="none",
+                        violation_penalty_duration=0
+                    )
+                    success_msg = await _trans("deactivate_all_success", lang, "✅ تم تعطيل جميع الإعدادات الأمنية")
+                    await _safe_answer(query, success_msg)
+                # تسجيل العملية
+                await DB.execute("INSERT INTO admin_logs (admin_id, action, chat_id, timestamp) VALUES (?, ?, ?, ?)",
+                                 (user_id, f"{action}_all_security", chat_id, TimeUtils.mecca_now()))
+                settings = await DB.get_security_settings(chat_id)
+                await safe_edit(query, KeyboardFactory._format_security_text(settings),
+                                reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في تأكيد تفعيل/تعطيل الكل: {e}", exc_info=True)
                 await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
             return
 
@@ -1376,7 +1535,6 @@ class CallbackHandlers:
                 return
 
             elif action == "del_pen":
-                # ✅ معالج عقوبة الحذف
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🚫 حظر", callback_data=f"sec_set_del_penalty:ban:{chat_id}"),
                      InlineKeyboardButton("🔇 كتم", callback_data=f"sec_set_del_penalty:mute:{chat_id}")],
@@ -1453,7 +1611,6 @@ class CallbackHandlers:
                 return
 
             elif action == "penalty_durations":
-                # قائمة مدد العقوبات الرئيسية
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("⏱️ مدة الكتم", callback_data=f"sec_set_mute_duration:{chat_id}"),
                      InlineKeyboardButton("⏱️ مدة الحظر", callback_data=f"sec_set_ban_duration:{chat_id}")],
@@ -1467,7 +1624,6 @@ class CallbackHandlers:
                 await safe_edit(query, "⏱️ اختر نوع العقوبة لتعديل مدتها:", reply_markup=kb, bot=context.bot)
                 return
 
-            # ===== معالجات جديدة =====
             elif action == "set_antiflood_messages":
                 StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
                 context.user_data['sec_chat'] = chat_id
@@ -1485,7 +1641,6 @@ class CallbackHandlers:
                 return
 
             elif action.startswith("set_antiflood_penalty"):
-                # يتم التعامل معها في handle
                 await _safe_answer(query, "⏳ جارٍ التحميل...")
                 return
 
@@ -1506,15 +1661,26 @@ class CallbackHandlers:
                 return
 
             elif action.startswith("set_night_action"):
-                # يتم التعامل معها في handle
                 await _safe_answer(query, "⏳ جارٍ التحميل...")
                 return
 
-            # معالجات المدعومة الآن (تم نقلها إلى الأعلى)
+            elif action == "violation_settings":
+                await CallbackHandlers._show_violation_penalties(update, context, query, chat_id, lang)
+                return
+
+            elif action == "violation_penalty":
+                await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'violation_penalty')
+                return
+
+            elif action.startswith("set_violation_strikes") or action.startswith("set_violation_duration") or action.startswith("set_violation_penalty"):
+                await _safe_answer(query, "⏳ جارٍ التحميل...")
+                return
+
             elif action.startswith("set_mute_duration") or action.startswith("set_ban_duration") or action.startswith("set_restrict_duration") or action.startswith("antiflood_duration") or action.startswith("night_duration") or action.startswith("warn_penalty_duration") or action.startswith("set_del_penalty_duration"):
                 await _safe_answer(query, "⏳ جارٍ التحميل...")
                 return
 
+            # ===== معالجات أزرار تفعيل/تعطيل الكل (تم نقلها إلى الأعلى) =====
             else:
                 await _safe_answer(query, "⚠️ غير معروف", show_alert=True)
                 return
@@ -1567,7 +1733,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_penalty_durations(update, context, query, chat_id, lang, penalty_type='mute'):
-        # استثناء kick: لا تحتاج مدة
         if penalty_type == 'kick':
             await _safe_answer(query, "✅ عقوبة الطرد لا تحتاج مدة")
             settings = await DB.get_security_settings(chat_id)
@@ -1596,18 +1761,20 @@ class CallbackHandlers:
         type_name = {
             'mute': 'كتم', 'ban': 'حظر', 'restrict': 'تقييد',
             'antiflood': 'الفيضان', 'night': 'الوضع الليلي',
-            'warn_penalty': 'عقوبة التحذير', 'delete_penalty': 'عقوبة الحذف'
+            'warn_penalty': 'عقوبة التحذير', 'delete_penalty': 'عقوبة الحذف',
+            'violation': 'عقوبات المخالفات'
         }.get(penalty_type, penalty_type)
         await safe_edit(query, f"⏱️ اختر مدة {type_name}:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     @staticmethod
     async def _show_violation_penalties(update, context, query, chat_id, lang):
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("عدد الضربات", callback_data=f"sec_set_violation_strikes:{chat_id}"),
-             InlineKeyboardButton("المدة", callback_data=f"sec_set_violation_duration:{chat_id}")],
+            [InlineKeyboardButton("🔢 عدد المخالفات", callback_data=f"sec_set_violation_strikes:{chat_id}"),
+             InlineKeyboardButton("⏱️ مدة العقوبة", callback_data=f"sec_set_violation_duration:{chat_id}")],
+            [InlineKeyboardButton("⚖️ نوع العقوبة", callback_data=f"sec_violation_penalty:{chat_id}")],
             [InlineKeyboardButton("🔙", callback_data=f"grp_set:{chat_id}")]
         ])
-        await safe_edit(query, "🚨 إعدادات المخالفات:", reply_markup=kb, bot=context.bot)
+        await safe_edit(query, "🚨 إعدادات عقوبات المخالفات:", reply_markup=kb, bot=context.bot)
 
     @staticmethod
     async def _show_antiflood_settings(update, context, query, chat_id, lang):
@@ -1638,7 +1805,20 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_advanced_actions(update, context, query, chat_id, lang):
-        kb = KeyboardFactory.build("advanced_actions", chat_id=chat_id, lang=lang)
+        # إضافة أزرار تفعيل/تعطيل الكل
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔴 تعطيل الكل", callback_data=f"sec_deactivate_all:{chat_id}"),
+             InlineKeyboardButton("🟢 تفعيل الكل", callback_data=f"sec_activate_all:{chat_id}")],
+            [InlineKeyboardButton("🚫 حظر", callback_data=f"act_ban:{chat_id}"),
+             InlineKeyboardButton("🔇 كتم", callback_data=f"act_mute:{chat_id}")],
+            [InlineKeyboardButton("👢 طرد", callback_data=f"act_kick:{chat_id}"),
+             InlineKeyboardButton("🔒 تقييد", callback_data=f"act_restrict:{chat_id}")],
+            [InlineKeyboardButton("🔓 فك الحظر", callback_data=f"act_unban:{chat_id}"),
+             InlineKeyboardButton("⚠️ تحذير", callback_data=f"act_warn:{chat_id}")],
+            [InlineKeyboardButton("📌 تثبيت", callback_data=f"act_pin:{chat_id}"),
+             InlineKeyboardButton("📋 السجل", callback_data=f"act_log:{chat_id}")],
+            [InlineKeyboardButton("🔙", callback_data=f"grp_set:{chat_id}")]
+        ])
         await safe_edit(query, "🛠️ الإجراءات المتقدمة:", reply_markup=kb, bot=context.bot)
 
     @staticmethod
@@ -1918,7 +2098,6 @@ class CallbackHandlers:
                 return
 
             elif data == CB.ADMIN_REFRESH_CACHE:
-                # يمكن إضافة إعادة تحميل الكاش إذا لزم الأمر
                 await safe_edit(query, "🔄 تم تحديث الكاش", bot=context.bot)
                 return
 
