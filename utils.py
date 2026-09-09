@@ -14,6 +14,7 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسّنة م�
 - إضافة عرض حالة الوسائط في _format_security_text
 - ✅ إصلاح خطأ tuple في النشر التلقائي: تعديل _publish_single_channel لاستقبال (post, recycled)
 - ✅ إرسال إشعار النشر فقط عند أول منشور أو إعادة تدوير
+- ✅ إضافة حالة WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي
 """
 
 import asyncio
@@ -336,7 +337,7 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
 
 
 # =====================================================================
-# 7. إدارة الحالات
+# 7. إدارة الحالات (مع إضافة WAIT_BACKUP_FILE)
 # =====================================================================
 
 class UserState(Enum):
@@ -401,6 +402,7 @@ class UserState(Enum):
     WAIT_PENALTY_RESTRICT_DURATION = auto()
     WAIT_MOOD = auto()
     WAIT_RESTORE = auto()
+    WAIT_BACKUP_FILE = auto()  # ✅ حالة جديدة لاستقبال ملف النسخ الاحتياطي
 
 
 class StateManager:
@@ -591,6 +593,8 @@ class CB:
     ADMIN_INVOICES = "admin_invoices"
     ADMIN_PAYMENT_LOGS = "admin_payment_logs"
     ADMIN_GRANT_FREE = "admin_grant_free"
+    ADMIN_UPLOAD_BACKUP = "admin_upload_backup"       # ✅ زر رفع نسخة احتياطية
+    ADMIN_DISABLE_FORCE = "admin_disable_force"       # ✅ تعطيل الاشتراك الإجباري
 
     AUTO_REPLY_MENU = "auto_reply_menu"
     AUTO_REPLY_TOGGLE = "auto_reply_toggle"
