@@ -44,7 +44,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage, RATE_LIMITER
 )
-from .handlers_command import CommandHandlers, CACHE
+from .handlers_command import CommandHandlers
 from cache import (
     user_cache, invalidate_user_cache,
     banned_words_cache, settings_cache,
