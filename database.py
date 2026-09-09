@@ -3015,15 +3015,17 @@ class Database:
             ("user_channels", "idx_user_channels_user_banned_id", "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)"),
         ]
 
+        # إنشاء الفهارس الأساسية (الأكثر استخداماً) فوراً
         for table, idx_name, create_sql in essential_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
 
+        # الفهارس الثانوية سيتم إنشاؤها في الخلفية لتجنب تأخير بدء التشغيل
         if self._secondary_index_task is None:
             self._secondary_index_task = asyncio.create_task(self._create_secondary_indexes(secondary_indexes))
 
     async def _create_secondary_indexes(self, indexes):
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(2)  # ننتظر قليلاً حتى ينتهي بدء التشغيل
             async with self.connection() as conn:
                 for table, idx_name, create_sql in indexes:
                     if asyncio.current_task().cancelled():
@@ -3734,7 +3736,13 @@ class Database:
         
         return result
 
+    # الدالة الأساسية لجلب بيانات المستخدم (مع إمكانية تضمين الإحصائيات)
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+        """
+        جلب بيانات المستخدم مع إمكانية تضمين الإحصائيات أو لا.
+        - include_stats=False (افتراضي) للحصول على البيانات الأساسية فقط، وهذا أسرع.
+        - استخدم include_stats=True فقط عند الحاجة الفعلية للإحصائيات.
+        """
         try:
             cached = await user_cache.get(user_id)
             if cached:
@@ -3748,6 +3756,15 @@ class Database:
             logger.error(f"❌ Error in get_user: {e}", exc_info=True)
             return None
 
+    # دالة مختصرة لجلب البيانات الأساسية فقط (دون إحصائيات) لتسريع الاستجابة
+    async def get_user_basic(self, user_id: int) -> Optional[Dict]:
+        """
+        نسخة سريعة من get_user تُرجع البيانات الأساسية فقط (بدون إحصائيات).
+        استخدمها في معالجات الأوامر السريعة مثل /start لتقليل زمن الاستجابة.
+        """
+        return await self.get_user(user_id, include_stats=False)
+
+    # باقي دوال المستخدمين (نفس ما كان موجوداً)
     async def get_user_language(self, user_id: int) -> str:
         result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
         return result if result else 'ar'
