@@ -31,6 +31,7 @@ handlers_message.py - معالجات الرسائل - النسخة النهائ�
 - استخدام safe_send الموحدة في الردود التلقائية
 - إزالة المتغيرات غير المستخدمة
 - ربط جميع النصوص الثابتة بنظام الترجمة _trans بنسبة 100%
+- ✅ إضافة معالج WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي من زر admin_upload_backup
 """
 
 import asyncio
@@ -74,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# دالة الترجمة المساعدة (تمت إضافتها لإصلاح الخطأ NameError)
+# دالة الترجمة المساعدة
 # =====================================================================
 async def _trans(key: str, lang: str, default: str = "") -> str:
     """
@@ -245,6 +246,8 @@ class MessageHandlers:
                 UserState.WAIT_VIOLATION_DURATION: MessageHandlers._handle_violation_duration_input,
                 UserState.WAIT_REDEEM_GIFT: MessageHandlers._handle_redeem_gift_input,
                 UserState.WAIT_RESTORE: MessageHandlers._handle_restore_input,
+                # ✅ الحالة الجديدة لاستقبال ملف النسخ الاحتياطي
+                UserState.WAIT_BACKUP_FILE: MessageHandlers._handle_backup_file_input,
             }
 
             handler = handlers.get(state)
@@ -1956,6 +1959,56 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error(f"فشل استعادة النسخة: {e}")
+            await safe_send(context.bot, user_id, f"❌ فشل الاستعادة: {str(e)[:100]}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            StateManager.clear(user_id)
+
+
+    # =================================================================
+    # ✅ معالج استقبال ملف النسخ الاحتياطي (WAIT_BACKUP_FILE)
+    # =================================================================
+
+    @staticmethod
+    async def _handle_backup_file_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        معالج استقبال ملف النسخ الاحتياطي (.db) من زر admin_upload_backup
+        """
+        user_id = update.effective_user.id
+        lang = context.user_data.get('lang', 'ar')
+        if not CONFIG.is_developer(user_id):
+            await safe_send(context.bot, user_id, await _trans('unauthorized', lang, "❌ غير مصرح"))
+            StateManager.clear(user_id)
+            return
+
+        doc = update.effective_message.document
+        if not doc or not doc.file_name.endswith('.db'):
+            await safe_send(context.bot, user_id, "❌ أرسل ملف .db صالح")
+            StateManager.clear(user_id)
+            return
+
+        tmp_path = None
+        try:
+            # تحميل الملف
+            file = await doc.get_file()
+            tmp_path = os.path.join(tempfile.gettempdir(), f"restore_{user_id}_{int(time.time())}.db")
+            await file.download_to_drive(tmp_path)
+
+            # نسخة احتياطية قبل الاستعادة
+            pre_restore = PATHS.BACKUPS / f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+            shutil.copy2(PATHS.DB, pre_restore)
+
+            # استعادة النسخة
+            shutil.copy2(tmp_path, PATHS.DB)
+
+            await safe_send(context.bot, user_id, "✅ تمت الاستعادة بنجاح! أعد تشغيل البوت لتفعيل التغييرات.")
+            logger.info(f"✅ تم استعادة قاعدة البيانات من ملف مرفوع بواسطة المستخدم {user_id}")
+        except Exception as e:
+            logger.error(f"فشل استعادة النسخة من ملف مرفوع: {e}")
             await safe_send(context.bot, user_id, f"❌ فشل الاستعادة: {str(e)[:100]}")
         finally:
             if tmp_path and os.path.exists(tmp_path):
