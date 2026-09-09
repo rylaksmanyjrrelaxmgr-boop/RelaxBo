@@ -47,7 +47,7 @@ from utils import (
     normalize_post, _trans, safe_edit, safe_delete_message, _mask_id, _safe_answer
 )
 # ✅ [إصلاح] استيراد CommandHandlers بشكل صحيح
-from .handlers.handlers_command import CommandHandlers
+from .handlers_command import CommandHandlers
 from cache import (
     user_cache, invalidate_user_cache,
     banned_words_cache, settings_cache,
