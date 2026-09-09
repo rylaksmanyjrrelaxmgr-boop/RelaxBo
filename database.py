@@ -16,6 +16,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - تحسين get_auto_reply باستخدام استعلام واحد مع أولوية
 - إضافة كاش للكلمات المحظورة لتجنب جلبها من قاعدة البيانات في كل رسالة
 - تحسين get_user لجعل include_stats=False افتراضياً لتقليل الحمل
+- إضافة كاش عام للاستعلامات المتكررة لتسريع الأزرار
 """
 
 import os
@@ -118,6 +119,108 @@ EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "tr
 # 0.1 تعريف UTC ثابت
 # =====================================================================
 UTC = timezone.utc
+
+# =====================================================================
+# 0.2 كاش عام للاستعلامات المتكررة
+# =====================================================================
+
+class QueryCache:
+    """كاش عام للاستعلامات المتكررة لتسريع الأزرار"""
+    def __init__(self, ttl: int = 60):
+        self._cache = {}
+        self._ttl = ttl
+        self._lock = asyncio.Lock()
+        self._admin_cache = None
+        self._admin_cache_time = 0
+        self._lang_cache = {}
+        self._lang_cache_time = {}
+        self._lang_cache_ttl = 300
+        self._settings_cache = {}
+        self._settings_cache_time = {}
+        self._settings_cache_ttl = 60
+    
+    async def get(self, key: str):
+        """جلب بيانات من الكاش"""
+        async with self._lock:
+            if key in self._cache:
+                data, timestamp = self._cache[key]
+                if time.time() - timestamp < self._ttl:
+                    return data
+        return None
+    
+    async def set(self, key: str, data):
+        """تخزين بيانات في الكاش"""
+        async with self._lock:
+            self._cache[key] = (data, time.time())
+    
+    async def invalidate(self, key: str = None):
+        """مسح الكاش"""
+        async with self._lock:
+            if key:
+                self._cache.pop(key, None)
+            else:
+                self._cache.clear()
+    
+    async def get_admin_list_fast(self, db) -> List[Dict]:
+        """جلب قائمة المشرفين بسرعة مع كاش"""
+        if self._admin_cache and time.time() - self._admin_cache_time < 60:
+            return self._admin_cache
+        result = await db.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
+        self._admin_cache = result
+        self._admin_cache_time = time.time()
+        return result
+    
+    async def get_user_language_fast(self, db, user_id: int) -> str:
+        """جلب لغة المستخدم بسرعة مع كاش"""
+        if user_id in self._lang_cache:
+            if time.time() - self._lang_cache_time.get(user_id, 0) < self._lang_cache_ttl:
+                return self._lang_cache[user_id]
+        lang = await db.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
+        lang = lang if lang else 'ar'
+        self._lang_cache[user_id] = lang
+        self._lang_cache_time[user_id] = time.time()
+        if len(self._lang_cache) > 1000:
+            self._lang_cache.clear()
+            self._lang_cache_time.clear()
+        return lang
+    
+    async def get_setting_fast(self, db, key: str, default: str = None) -> Optional[str]:
+        """جلب إعداد بسرعة مع كاش"""
+        cache_key = f"setting_{key}"
+        if cache_key in self._settings_cache:
+            if time.time() - self._settings_cache_time.get(cache_key, 0) < self._settings_cache_ttl:
+                return self._settings_cache[cache_key]
+        result = await db.fetchval("SELECT value FROM settings WHERE key = ?", (key,), default=default)
+        self._settings_cache[cache_key] = result
+        self._settings_cache_time[cache_key] = time.time()
+        return result
+    
+    async def invalidate_admin_cache(self):
+        """مسح كاش المشرفين"""
+        self._admin_cache = None
+        self._admin_cache_time = 0
+    
+    async def invalidate_lang_cache(self, user_id: int = None):
+        """مسح كاش اللغة"""
+        if user_id:
+            self._lang_cache.pop(user_id, None)
+            self._lang_cache_time.pop(user_id, None)
+        else:
+            self._lang_cache.clear()
+            self._lang_cache_time.clear()
+    
+    async def invalidate_settings_cache(self, key: str = None):
+        """مسح كاش الإعدادات"""
+        if key:
+            cache_key = f"setting_{key}"
+            self._settings_cache.pop(cache_key, None)
+            self._settings_cache_time.pop(cache_key, None)
+        else:
+            self._settings_cache.clear()
+            self._settings_cache_time.clear()
+
+# إنشاء كائن الكاش العام
+query_cache = QueryCache(ttl=60)
 
 # =====================================================================
 # 1. دوال مساعدة للتوافق (محسّنة)
@@ -3727,6 +3830,34 @@ class Database:
             return False
 
     # =====================================================================
+    # 7.1 دوال الكاش المحسنة للاستعلامات السريعة
+    # =====================================================================
+
+    async def get_admin_list_fast(self) -> List[Dict]:
+        """جلب قائمة المشرفين بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_admin_list_fast(self)
+
+    async def get_user_language_fast(self, user_id: int) -> str:
+        """جلب لغة المستخدم بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_user_language_fast(self, user_id)
+
+    async def get_setting_fast(self, key: str, default: str = None) -> Optional[str]:
+        """جلب إعداد بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_setting_fast(self, key, default)
+
+    async def invalidate_admin_cache(self):
+        """مسح كاش المشرفين"""
+        await query_cache.invalidate_admin_cache()
+
+    async def invalidate_lang_cache(self, user_id: int = None):
+        """مسح كاش اللغة"""
+        await query_cache.invalidate_lang_cache(user_id)
+
+    async def invalidate_settings_cache(self, key: str = None):
+        """مسح كاش الإعدادات"""
+        await query_cache.invalidate_settings_cache(key)
+
+    # =====================================================================
     # دوال المستخدمين (محسّنة مع الكاش)
     # =====================================================================
 
@@ -3926,13 +4057,24 @@ class Database:
             return None
 
     async def get_user_language(self, user_id: int) -> str:
-        result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
-        return result if result else 'ar'
+        """جلب لغة المستخدم مع كاش محلي"""
+        try:
+            # محاولة استخدام الكاش السريع أولاً
+            lang = await self.get_user_language_fast(user_id)
+            if lang:
+                return lang
+            # إذا لم يكن في الكاش، جلب من قاعدة البيانات
+            result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
+            return result if result else 'ar'
+        except Exception as e:
+            logger.error(f"❌ Error in get_user_language: {e}")
+            return 'ar'
 
     async def set_user_language(self, user_id: int, lang: str) -> bool:
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_lang_cache(user_id)
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
@@ -5203,8 +5345,7 @@ class Database:
                 INNER JOIN (
                     SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
                     FROM subscriptions s
-                    JOIN plans p ON s.plan_id = p.id
-                    WHERE s.status = 'active' AND s.end_date > %s
+                    JOIN plans p ON s.plan_id = p.id                    WHERE s.status = 'active' AND s.end_date > %s
                     GROUP BY s.user_id
                 ) a ON uc.user_id = a.user_id
                 LEFT JOIN (
@@ -5608,13 +5749,13 @@ class Database:
         return await self.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)) > 0
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
-        return await self.get_setting('force_subscribe_channel')
+        return await self.get_setting_fast('force_subscribe_channel')
 
     async def get_updates_channel(self) -> Optional[str]:
-        return await self.get_setting('updates_channel')
+        return await self.get_setting_fast('updates_channel')
 
     async def get_log_channel(self) -> Optional[str]:
-        return await self.get_setting('log_channel_id')
+        return await self.get_setting_fast('log_channel_id')
 
     async def get_publish_interval(self) -> int:
         value = await self.get_setting('publish_interval', '12')
@@ -6232,19 +6373,29 @@ class Database:
     # =====================================================================
 
     async def add_admin(self, admin_id: int, added_by: int) -> bool:
-        return await self.execute("INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)", (admin_id, added_by, TimeUtils.utc_now())) > 0
+        result = await self.execute("INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)", (admin_id, added_by, TimeUtils.utc_now())) > 0
+        if result:
+            await self.invalidate_admin_cache()
+        return result
 
     async def remove_admin(self, admin_id: int) -> bool:
         try:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM bot_admins WHERE user_id = ?", admin_id)
+                if deleted > 0:
+                    await self.invalidate_admin_cache()
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_admin: {e}", exc_info=True)
             return False
 
     async def get_admin_list(self) -> List[Dict]:
-        return await self.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
+        """جلب قائمة المشرفين مع استخدام الكاش"""
+        try:
+            return await self.get_admin_list_fast()
+        except Exception as e:
+            logger.error(f"❌ Error in get_admin_list: {e}", exc_info=True)
+            return await self.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
 
     async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
         if not user_ids:
