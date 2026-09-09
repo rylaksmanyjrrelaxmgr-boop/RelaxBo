@@ -34,6 +34,9 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - ✅ [إصلاح] _add_column_safe: التحقق المباشر من وجود العمود ثم ALTER TABLE بسيط في PostgreSQL
 - ✅ [إصلاح] _migrate_schema: تحسين إضافة عمود text_hash
 - ✅ [إصلاح] جميع الإصلاحات السابقة محفوظة
+- ✅ [إصلاح] إضافة دالة _column_exists للتحقق من وجود العمود
+- ✅ [إصلاح] تعديل add_posts للتحقق من وجود text_hash والتكيف معه
+- ✅ [إصلاح] تحسين _migrate_schema لإضافة text_hash بشكل آمن في PostgreSQL
 - لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
 """
 
@@ -2798,6 +2801,28 @@ class Database:
             if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                 logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
+    # دالة للتحقق من وجود عمود
+    async def _column_exists(self, conn, table: str, column: str) -> bool:
+        """التحقق من وجود عمود في جدول"""
+        try:
+            if USE_POSTGRES:
+                row = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    table, column
+                )
+                return row is not None
+            elif USE_MYSQL:
+                cursor = await conn.cursor()
+                await cursor.execute(f"SHOW COLUMNS FROM `{table}` LIKE '{column}'")
+                row = await cursor.fetchone()
+                return row is not None
+            else:
+                cursor = await conn.execute(f"PRAGMA table_info({table})")
+                rows = await cursor.fetchall()
+                return any(row[1] == column for row in rows)
+        except Exception:
+            return False
+
     async def _migrate_schema(self, conn):
         # تعطيل foreign_keys مؤقتاً في MySQL
         if USE_MYSQL:
@@ -2837,8 +2862,16 @@ class Database:
                     if col_name not in existing:
                         await self._add_column_safe(conn, table, col_name, col_def)
 
-            # إضافة فهرس text_hash إذا لم يكن موجوداً
+            # ✅ تحقق إضافي وإضافة text_hash في PostgreSQL (إذا لم يضف)
             if await _table_exists(conn, "posts"):
+                if not await self._column_exists(conn, "posts", "text_hash"):
+                    try:
+                        await self._add_column_safe(conn, "posts", "text_hash", "TEXT DEFAULT ''")
+                        logger.info("✅ تم إضافة عمود text_hash إلى جدول posts (من _migrate_schema)")
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل إضافة text_hash: {e}")
+
+                # إضافة فهرس text_hash إذا لم يكن موجوداً
                 if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
                     try:
                         if USE_POSTGRES:
@@ -4167,7 +4200,7 @@ class Database:
         return await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
 
     # =====================================================================
-    # دوال المنشورات
+    # دوال المنشورات (محسّنة للتعامل مع text_hash)
     # =====================================================================
 
     async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
@@ -4176,10 +4209,12 @@ class Database:
                 return 0
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
+                    # التحقق من وجود القناة
                     row = await self._fetchone_with_conn(conn, "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", channel_db_id, user_id)
                     if not row:
                         return 0
 
+                    # جلب الحد الأقصى للمنشورات
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -4212,6 +4247,19 @@ class Database:
                     max_posts = plan_row['max_posts'] or 0
                     current_count = plan_row['cnt'] or 0
 
+                    # التحقق من وجود عمود text_hash
+                    has_text_hash = await self._column_exists(conn, "posts", "text_hash")
+                    if not has_text_hash:
+                        # حاول إضافته
+                        try:
+                            await self._add_column_safe(conn, "posts", "text_hash", "TEXT DEFAULT ''")
+                            has_text_hash = True
+                            logger.info("✅ تم إضافة عمود text_hash إلى جدول posts (ضمن add_posts)")
+                        except Exception as e:
+                            logger.warning(f"⚠️ فشل إضافة text_hash في add_posts: {e}")
+                            has_text_hash = False
+
+                    # إزالة التكرار داخل الدفعة
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
@@ -4223,29 +4271,42 @@ class Database:
                             seen_local.add(key)
                             unique_posts.append((text, m, f))
 
+                    # التحقق من التكرار مع قاعدة البيانات
                     final_posts = []
                     for t, m, f in unique_posts:
                         text_clean = (t or "")[:4096] if self._max_post_text_length == 0 else (t or "")[:self._max_post_text_length]
                         media_type = m or ''
                         media_file_id = f or ''
-                        text_hash = self._compute_text_hash(text_clean)
-                        exists = await self._fetchone_with_conn(
-                            conn,
-                            "SELECT 1 FROM posts WHERE channel_db_id = ? AND text_hash = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
-                            channel_db_id, text_hash, media_type, media_file_id
-                        )
+
+                        if has_text_hash:
+                            text_hash = self._compute_text_hash(text_clean)
+                            exists = await self._fetchone_with_conn(
+                                conn,
+                                "SELECT 1 FROM posts WHERE channel_db_id = ? AND text_hash = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
+                                channel_db_id, text_hash, media_type, media_file_id
+                            )
+                        else:
+                            # استخدم النص مباشرة (أقل دقة لكن يعمل)
+                            exists = await self._fetchone_with_conn(
+                                conn,
+                                "SELECT 1 FROM posts WHERE channel_db_id = ? AND text = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
+                                channel_db_id, text_clean, media_type, media_file_id
+                            )
+
                         if not exists:
                             final_posts.append((t, m, f))
 
                     if not final_posts:
                         return 0
 
+                    # تطبيق الحد الأقصى
                     if current_count + len(final_posts) > max_posts:
                         allowed = max(0, max_posts - current_count)
                         if allowed == 0:
                             return 0
                         final_posts = final_posts[:allowed]
 
+                    # إدراج المنشورات
                     total = 0
                     batch_size = self._posts_batch_size
                     for i in range(0, len(final_posts), batch_size):
@@ -4255,14 +4316,26 @@ class Database:
                             text = t or ""
                             if self._max_post_text_length > 0:
                                 text = text[:self._max_post_text_length]
-                            text_hash = self._compute_text_hash(text)
-                            vals.append((channel_db_id, text, text_hash, m, f, TimeUtils.utc_now()))
-                        inserted = await self._executemany_with_conn(
-                            conn,
-                            "INSERT INTO posts (channel_db_id, text, text_hash, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            vals
-                        )
+                            if has_text_hash:
+                                text_hash = self._compute_text_hash(text)
+                                vals.append((channel_db_id, text, text_hash, m, f, TimeUtils.utc_now()))
+                            else:
+                                vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
+
+                        if has_text_hash:
+                            inserted = await self._executemany_with_conn(
+                                conn,
+                                "INSERT INTO posts (channel_db_id, text, text_hash, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                vals
+                            )
+                        else:
+                            inserted = await self._executemany_with_conn(
+                                conn,
+                                "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                                vals
+                            )
                         total += inserted
+
                     if total > 0:
                         await user_cache.invalidate(user_id)
                     return total
