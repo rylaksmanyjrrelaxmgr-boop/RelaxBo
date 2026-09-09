@@ -65,7 +65,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from handlers_command import CommandHandlers
+from .handlers_command import CommandHandlers
 
 logger = logging.getLogger(__name__)
 
