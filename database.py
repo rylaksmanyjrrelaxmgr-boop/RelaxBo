@@ -16,8 +16,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - تحسين get_auto_reply باستخدام استعلام واحد مع أولوية
 - إضافة كاش للكلمات المحظورة لتجنب جلبها من قاعدة البيانات في كل رسالة
 - تحسين get_user لجعل include_stats=False افتراضياً لتقليل الحمل
-- إضافة كاش عام للاستعلامات المتكررة لتسريع الأزرار
-- تحسين سرعة /start باستخدام كاش متقدم واستعلامات محسنة
+- دمج كامل مع نظام الكاش المتقدم من cache.py
 """
 
 import os
@@ -82,7 +81,10 @@ USE_MYSQL = (DB_TYPE == "mysql")
 logger = logging.getLogger(__name__)
 logger.info(f"📌 سيتم استخدام قاعدة البيانات: {DB_TYPE.upper()}")
 
-# استيراد التكوينات والكاش
+# =====================================================================
+# 0.1 استيراد التكوينات والكاش
+# =====================================================================
+
 try:
     from config import PATHS, CONFIG
 except ImportError:
@@ -97,18 +99,70 @@ except ImportError:
         MAX_GLOBAL_BANNED_WORDS = 500
         pass
 
+# استيراد الكاش المتقدم من cache.py
 try:
-    from cache import user_cache
+    from cache import (
+        user_cache,
+        banned_words_cache,
+        settings_cache,
+        channels_cache,
+        groups_cache,
+        auth_cache,
+        posts_cache,
+        invalidate_user_cache,
+        clear_all_caches,
+        get_cache_stats,
+        cache_cleanup_task
+    )
+    CACHE_AVAILABLE = True
+    logger.info("✅ تم تحميل نظام الكاش المتقدم من cache.py")
 except ImportError:
+    # كاش وهمي إذا لم يوجد الملف
     class DummyCache:
-        async def invalidate(self, *args, **kwargs): pass
-        async def invalidate_all(self, *args, **kwargs): pass
-        async def get_or_load(self, *args, **kwargs):
-            return {}
         async def get(self, *args, **kwargs): return None
         async def set(self, *args, **kwargs): pass
+        async def invalidate(self, *args, **kwargs): pass
+        async def invalidate_all(self, *args, **kwargs): pass
+        async def get_or_load(self, *args, **kwargs): return {}
+        async def clear(self, *args, **kwargs): pass
+        async def get_stats(self, *args, **kwargs): return {}
+        async def get_with_ttl(self, *args, **kwargs): return None, None
+        async def set_many(self, *args, **kwargs): pass
+        async def delete_many(self, *args, **kwargs): return 0
+        async def get_keys(self, *args, **kwargs): return []
+        async def get_all(self, *args, **kwargs): return {}
+        async def get_security(self, *args, **kwargs): return None
+        async def set_security(self, *args, **kwargs): pass
+        async def invalidate_security(self, *args, **kwargs): pass
+        async def get_auto_reply_settings(self, *args, **kwargs): return None
+        async def set_auto_reply_settings(self, *args, **kwargs): pass
+        async def invalidate_auto_reply(self, *args, **kwargs): pass
+        async def get_bot_setting(self, *args, **kwargs): return None
+        async def set_bot_setting(self, *args, **kwargs): pass
+        async def invalidate_bot_settings(self, *args, **kwargs): pass
+        async def set_custom_ttl(self, *args, **kwargs): pass
+        async def get_admin_list(self, *args, **kwargs): return None
+        async def set_admin_list(self, *args, **kwargs): pass
+        async def get_channel_info(self, *args, **kwargs): return None
+        async def set_channel_info(self, *args, **kwargs): pass
+        async def get_group_info(self, *args, **kwargs): return None
+        async def set_group_info(self, *args, **kwargs): pass
+        async def get_posts(self, *args, **kwargs): return None
+        async def set_posts(self, *args, **kwargs): pass
+        async def get_next_post(self, *args, **kwargs): return None
+        async def set_next_post(self, *args, **kwargs): pass
     user_cache = DummyCache()
-    logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل كاش المستخدم")
+    banned_words_cache = DummyCache()
+    settings_cache = DummyCache()
+    channels_cache = DummyCache()
+    groups_cache = DummyCache()
+    auth_cache = DummyCache()
+    posts_cache = DummyCache()
+    invalidate_user_cache = lambda x: None
+    clear_all_caches = lambda: None
+    get_cache_stats = lambda: {}
+    CACHE_AVAILABLE = False
+    logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل الكاش المتقدم")
 
 MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))
 MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
@@ -117,40 +171,22 @@ SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))
 EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "true"
 
 # =====================================================================
-# 0.1 تعريف UTC ثابت
+# 0.2 تعريف UTC ثابت
 # =====================================================================
 UTC = timezone.utc
 
 # =====================================================================
-# 0.2 كاش عام للاستعلامات المتكررة
+# 0.3 كاش داخلي للاستعلامات المتكررة (طبقة ثانية)
 # =====================================================================
 
-class QueryCache:
-    """كاش عام للاستعلامات المتكررة لتسريع الأزرار و /start"""
+class InternalQueryCache:
+    """كاش داخلي للاستعلامات المتكررة (طبقة ثانية بعد cache.py)"""
     def __init__(self, ttl: int = 60):
         self._cache = {}
         self._ttl = ttl
         self._lock = asyncio.Lock()
-        self._admin_cache = None
-        self._admin_cache_time = 0
-        self._lang_cache = {}
-        self._lang_cache_time = {}
-        self._lang_cache_ttl = 300
-        self._settings_cache = {}
-        self._settings_cache_time = {}
-        self._settings_cache_ttl = 60
-        self._user_cache = {}
-        self._user_cache_time = {}
-        self._user_cache_ttl = 120
-        self._stats_cache = {}
-        self._stats_cache_time = {}
-        self._stats_cache_ttl = 30
-        self._channel_cache = {}
-        self._channel_cache_time = {}
-        self._channel_cache_ttl = 60
     
     async def get(self, key: str):
-        """جلب بيانات من الكاش"""
         async with self._lock:
             if key in self._cache:
                 data, timestamp = self._cache[key]
@@ -159,195 +195,22 @@ class QueryCache:
         return None
     
     async def set(self, key: str, data):
-        """تخزين بيانات في الكاش"""
         async with self._lock:
             self._cache[key] = (data, time.time())
     
     async def invalidate(self, key: str = None):
-        """مسح الكاش"""
         async with self._lock:
             if key:
                 self._cache.pop(key, None)
             else:
                 self._cache.clear()
     
-    async def get_admin_list_fast(self, db) -> List[Dict]:
-        """جلب قائمة المشرفين بسرعة مع كاش"""
-        if self._admin_cache and time.time() - self._admin_cache_time < 60:
-            return self._admin_cache
-        result = await db.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
-        self._admin_cache = result
-        self._admin_cache_time = time.time()
-        return result
-    
-    async def get_user_language_fast(self, db, user_id: int) -> str:
-        """جلب لغة المستخدم بسرعة مع كاش"""
-        if user_id in self._lang_cache:
-            if time.time() - self._lang_cache_time.get(user_id, 0) < self._lang_cache_ttl:
-                return self._lang_cache[user_id]
-        lang = await db.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
-        lang = lang if lang else 'ar'
-        self._lang_cache[user_id] = lang
-        self._lang_cache_time[user_id] = time.time()
-        if len(self._lang_cache) > 1000:
-            self._lang_cache.clear()
-            self._lang_cache_time.clear()
-        return lang
-    
-    async def get_setting_fast(self, db, key: str, default: str = None) -> Optional[str]:
-        """جلب إعداد بسرعة مع كاش"""
-        cache_key = f"setting_{key}"
-        if cache_key in self._settings_cache:
-            if time.time() - self._settings_cache_time.get(cache_key, 0) < self._settings_cache_ttl:
-                return self._settings_cache[cache_key]
-        result = await db.fetchval("SELECT value FROM settings WHERE key = ?", (key,), default=default)
-        self._settings_cache[cache_key] = result
-        self._settings_cache_time[cache_key] = time.time()
-        return result
-    
-    async def get_user_fast(self, db, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """جلب بيانات المستخدم بسرعة مع كاش محسّن"""
-        cache_key = f"user_{user_id}_{include_stats}"
-        if cache_key in self._user_cache:
-            if time.time() - self._user_cache_time.get(cache_key, 0) < self._user_cache_ttl:
-                return self._user_cache[cache_key]
-        
-        # استعلام محسّن - جلب البيانات الأساسية فقط
-        query = """
-            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
-                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
-            FROM users u
-            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
-            WHERE u.user_id = ?
-        """
-        row = await db.fetchone(query, (user_id,))
-        if not row:
-            return None
-        
-        result = dict(row)
-        
-        if include_stats:
-            # جلب الإحصائيات في استعلام واحد
-            stats = await db.fetchone("""
-                SELECT 
-                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
-                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
-                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
-                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
-            """, (user_id, user_id, TimeUtils.utc_now(), user_id, user_id))
-            
-            if stats:
-                result['unpublished_posts'] = stats.get('unpublished_posts', 0)
-                result['has_subscription'] = bool(stats.get('has_subscription', 0))
-                result['channels_count'] = stats.get('channels_count', 0)
-                result['groups_count'] = stats.get('groups_count', 0)
-        else:
-            result['has_subscription'] = False
-            result['unpublished_posts'] = 0
-            result['channels_count'] = 0
-            result['groups_count'] = 0
-        
-        result['channel_info'] = None
-        if result.get('channel_id'):
-            result['channel_info'] = {
-                'id': result['channel_id'],
-                'channel_name': result.get('channel_name', ''),
-                'banned': result.get('channel_banned', 0),
-            }
-        
-        # تخزين في الكاش
-        self._user_cache[cache_key] = result
-        self._user_cache_time[cache_key] = time.time()
-        
-        # تنظيف الكاش
-        if len(self._user_cache) > 500:
-            self._user_cache.clear()
-            self._user_cache_time.clear()
-        
-        return result
-    
-    async def get_stats_fast(self, db) -> Dict:
-        """جلب الإحصائيات بسرعة مع كاش"""
-        cache_key = "stats"
-        if cache_key in self._stats_cache:
-            if time.time() - self._stats_cache_time.get(cache_key, 0) < self._stats_cache_ttl:
-                return self._stats_cache[cache_key]
-        
-        stats = await db.get_bot_stats()
-        self._stats_cache[cache_key] = stats
-        self._stats_cache_time[cache_key] = time.time()
-        return stats
-    
-    async def get_channel_info_fast(self, db, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        """جلب معلومات القناة بسرعة مع كاش"""
-        cache_key = f"channel_{user_id}_{channel_db_id}"
-        if cache_key in self._channel_cache:
-            if time.time() - self._channel_cache_time.get(cache_key, 0) < self._channel_cache_ttl:
-                return self._channel_cache[cache_key]
-        
-        result = await db.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
-        if result:
-            self._channel_cache[cache_key] = result
-            self._channel_cache_time[cache_key] = time.time()
-        return result
-    
-    async def invalidate_admin_cache(self):
-        """مسح كاش المشرفين"""
-        self._admin_cache = None
-        self._admin_cache_time = 0
-    
-    async def invalidate_lang_cache(self, user_id: int = None):
-        """مسح كاش اللغة"""
-        if user_id:
-            self._lang_cache.pop(user_id, None)
-            self._lang_cache_time.pop(user_id, None)
-        else:
-            self._lang_cache.clear()
-            self._lang_cache_time.clear()
-    
-    async def invalidate_settings_cache(self, key: str = None):
-        """مسح كاش الإعدادات"""
-        if key:
-            cache_key = f"setting_{key}"
-            self._settings_cache.pop(cache_key, None)
-            self._settings_cache_time.pop(cache_key, None)
-        else:
-            self._settings_cache.clear()
-            self._settings_cache_time.clear()
-    
-    async def invalidate_user_cache(self, user_id: int = None):
-        """مسح كاش المستخدم"""
-        if user_id:
-            keys_to_remove = [k for k in self._user_cache.keys() if f"user_{user_id}" in k]
-            for key in keys_to_remove:
-                self._user_cache.pop(key, None)
-                self._user_cache_time.pop(key, None)
-        else:
-            self._user_cache.clear()
-            self._user_cache_time.clear()
-    
-    async def invalidate_stats_cache(self):
-        """مسح كاش الإحصائيات"""
-        self._stats_cache.clear()
-        self._stats_cache_time.clear()
-    
-    async def invalidate_channel_cache(self, user_id: int = None, channel_db_id: int = None):
-        """مسح كاش القنوات"""
-        if user_id and channel_db_id:
-            self._channel_cache.pop(f"channel_{user_id}_{channel_db_id}", None)
-            self._channel_cache_time.pop(f"channel_{user_id}_{channel_db_id}", None)
-        elif user_id:
-            keys_to_remove = [k for k in self._channel_cache.keys() if f"channel_{user_id}" in k]
-            for key in keys_to_remove:
-                self._channel_cache.pop(key, None)
-                self._channel_cache_time.pop(key, None)
-        else:
-            self._channel_cache.clear()
-            self._channel_cache_time.clear()
+    async def clear(self):
+        async with self._lock:
+            self._cache.clear()
 
-# إنشاء كائن الكاش العام
-query_cache = QueryCache(ttl=60)
+# إنشاء كائن الكاش الداخلي
+internal_cache = InternalQueryCache(ttl=30)
 
 # =====================================================================
 # 1. دوال مساعدة للتوافق (محسّنة)
@@ -915,28 +778,28 @@ class Database:
         self._posts_batch_size = POSTS_BATCH_SIZE
         self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
 
-        # كاش للكلمات المحظورة (تجنب جلبها من قاعدة البيانات في كل رسالة)
-        self._banned_words_cache = {}
-        self._banned_words_cache_ttl = 300  # 5 دقائق
+        # كاش محلي للكلمات المحظورة (كاش احتياطي)
+        self._banned_words_local_cache = {}
+        self._banned_words_cache_ttl = 300
 
     # =====================================================================
-    # دوال الكاش للكلمات المحظورة
+    # دوال الكاش المحلي للكلمات المحظورة
     # =====================================================================
 
-    async def _get_banned_words_from_cache(self, chat_id: int) -> Optional[List[str]]:
-        entry = self._banned_words_cache.get(chat_id)
+    async def _get_banned_words_from_local_cache(self, chat_id: int) -> Optional[List[str]]:
+        entry = self._banned_words_local_cache.get(chat_id)
         if entry and time.time() - entry['time'] < self._banned_words_cache_ttl:
             return entry['words']
         return None
 
-    async def _set_banned_words_cache(self, chat_id: int, words: List[str]):
-        self._banned_words_cache[chat_id] = {'words': words, 'time': time.time()}
+    async def _set_banned_words_local_cache(self, chat_id: int, words: List[str]):
+        self._banned_words_local_cache[chat_id] = {'words': words, 'time': time.time()}
 
-    async def _invalidate_banned_words_cache(self, chat_id: int = None):
+    async def _invalidate_banned_words_local_cache(self, chat_id: int = None):
         if chat_id is not None:
-            self._banned_words_cache.pop(chat_id, None)
+            self._banned_words_local_cache.pop(chat_id, None)
         else:
-            self._banned_words_cache.clear()
+            self._banned_words_local_cache.clear()
 
     # =====================================================================
     # 3.1 دوال التهيئة والإتصال
@@ -1018,7 +881,6 @@ class Database:
             await conn.execute("PRAGMA synchronous=NORMAL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA busy_timeout=10000")
-            # تحسين الأداء
             await conn.execute("PRAGMA cache_size=-20000")
             await conn.execute("PRAGMA temp_store=MEMORY")
             return conn
@@ -1946,16 +1808,13 @@ class Database:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
-        # فهارس إضافية لتسريع البحث
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)")
-        # فهارس إضافية محسّنة
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
-        # فهارس إضافية لتسريع get_user
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
@@ -2473,18 +2332,14 @@ class Database:
                 archived_at TIMESTAMP
             )
         """)
-        # الفهارس الأساسية
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
-        # فهارس إضافية
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)")
-        # فهارس إضافية محسّنة
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
-        # فهارس إضافية لتسريع get_user
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
@@ -3003,16 +2858,13 @@ class Database:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         await conn.execute("SET FOREIGN_KEY_CHECKS=1")
-        # فهارس إضافية
         await conn.execute("CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)")
         await conn.execute("CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)")
-        # فهارس إضافية محسّنة
         await conn.execute("CREATE INDEX idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)")
         await conn.execute("CREATE INDEX idx_subscriptions_user_status ON subscriptions(user_id, status)")
         await conn.execute("CREATE INDEX idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX idx_users_auto_publish_banned ON users(auto_publish, banned)")
-        # فهارس إضافية لتسريع get_user
         await conn.execute("CREATE INDEX idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
@@ -3161,7 +3013,7 @@ class Database:
 
             await self._ensure_text_hash_column(conn)
 
-            # إضافة فهارس جديدة لتسريع الاستعلامات البطيئة
+            # إضافة فهارس جديدة
             if await _table_exists(conn, "users"):
                 if not await self._index_exists(conn, "users", "idx_users_active_channel"):
                     try:
@@ -3176,7 +3028,6 @@ class Database:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_active_channel: {e}")
 
-            # فهارس إضافية
             if await _table_exists(conn, "auto_replies"):
                 if not await self._index_exists(conn, "auto_replies", "idx_auto_replies_lookup"):
                     try:
@@ -3190,6 +3041,7 @@ class Database:
                     except Exception as e:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_auto_replies_lookup: {e}")
+            
             if await _table_exists(conn, "banned_words"):
                 if not await self._index_exists(conn, "banned_words", "idx_banned_words_chat_word"):
                     try:
@@ -3204,7 +3056,6 @@ class Database:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_banned_words_chat_word: {e}")
             
-            # فهارس إضافية محسّنة
             if await _table_exists(conn, "schedule"):
                 if not await self._index_exists(conn, "schedule", "idx_schedule_channel_next"):
                     try:
@@ -3275,7 +3126,6 @@ class Database:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_auto_publish_banned: {e}")
                 
-                # فهارس إضافية لتسريع get_user
                 if not await self._index_exists(conn, "users", "idx_users_language"):
                     try:
                         if USE_POSTGRES:
@@ -3442,11 +3292,9 @@ class Database:
             ("user_channels", "idx_user_channels_user_banned_id", "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)"),
         ]
 
-        # إنشاء الفهارس الأساسية ثم الثانوية
         for table, idx_name, create_sql in essential_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
 
-        # نضيف الفهارس الجديدة هنا أيضاً
         additional_indexes = [
             ("auto_replies", "idx_auto_replies_lookup", "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)"),
             ("banned_words", "idx_banned_words_chat_word", "CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)"),
@@ -3577,7 +3425,9 @@ class Database:
                             batch
                         )
                 logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة من ملف banned_words.py")
-                await self._invalidate_banned_words_cache()  # مسح الكاش
+                await self._invalidate_banned_words_local_cache()
+                if CACHE_AVAILABLE:
+                    await banned_words_cache.invalidate()
         except ImportError:
             logger.info("ℹ️ لا يوجد ملف banned_words.py، سيتم تخطي استيراد الكلمات المحظورة")
         except Exception as e:
@@ -3995,60 +3845,103 @@ class Database:
             return False
 
     # =====================================================================
-    # 7.1 دوال الكاش المحسنة للاستعلامات السريعة
+    # 7.1 دوال المستخدمين المحسنة مع الكاش
     # =====================================================================
 
-    async def get_admin_list_fast(self) -> List[Dict]:
-        """جلب قائمة المشرفين بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_admin_list_fast(self)
+    async def get_user_full_data(self, user_id: int, include_stats: bool = True) -> Optional[Dict]:
+        """
+        جلب بيانات المستخدم الكاملة مع تحسين الأداء.
+        """
+        query = """
+            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
+                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
+            FROM users u
+            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            WHERE u.user_id = ?
+        """
+        row = await self.fetchone(query, (user_id,))
+        if not row:
+            return None
+        
+        result = dict(row)
+        
+        if include_stats:
+            stats = await self.fetchone("""
+                SELECT 
+                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
+                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
+                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
+                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
+            """, (user_id, user_id, TimeUtils.utc_now(), user_id, user_id))
+            
+            if stats:
+                result['unpublished_posts'] = stats.get('unpublished_posts', 0)
+                result['has_subscription'] = bool(stats.get('has_subscription', 0))
+                result['channels_count'] = stats.get('channels_count', 0)
+                result['groups_count'] = stats.get('groups_count', 0)
+        else:
+            result['has_subscription'] = False
+            result['unpublished_posts'] = 0
+            result['channels_count'] = 0
+            result['groups_count'] = 0
+        
+        result['channel_info'] = None
+        if result.get('channel_id'):
+            result['channel_info'] = {
+                'id': result['channel_id'],
+                'channel_name': result.get('channel_name', ''),
+                'banned': result.get('channel_banned', 0),
+            }
+        
+        return result
 
-    async def get_user_language_fast(self, user_id: int) -> str:
-        """جلب لغة المستخدم بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_user_language_fast(self, user_id)
-
-    async def get_setting_fast(self, key: str, default: str = None) -> Optional[str]:
-        """جلب إعداد بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_setting_fast(self, key, default)
-
-    async def get_user_fast(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """جلب بيانات المستخدم بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_user_fast(self, user_id, include_stats)
-
-    async def get_stats_fast(self) -> Dict:
-        """جلب الإحصائيات بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_stats_fast(self)
-
-    async def get_channel_info_fast(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        """جلب معلومات القناة بسرعة باستخدام الكاش العام"""
-        return await query_cache.get_channel_info_fast(self, user_id, channel_db_id)
-
-    async def invalidate_admin_cache(self):
-        """مسح كاش المشرفين"""
-        await query_cache.invalidate_admin_cache()
-
-    async def invalidate_lang_cache(self, user_id: int = None):
-        """مسح كاش اللغة"""
-        await query_cache.invalidate_lang_cache(user_id)
-
-    async def invalidate_settings_cache(self, key: str = None):
-        """مسح كاش الإعدادات"""
-        await query_cache.invalidate_settings_cache(key)
-
-    async def invalidate_user_cache(self, user_id: int = None):
-        """مسح كاش المستخدم"""
-        await query_cache.invalidate_user_cache(user_id)
-
-    async def invalidate_stats_cache(self):
-        """مسح كاش الإحصائيات"""
-        await query_cache.invalidate_stats_cache()
-
-    async def invalidate_channel_cache(self, user_id: int = None, channel_db_id: int = None):
-        """مسح كاش القنوات"""
-        await query_cache.invalidate_channel_cache(user_id, channel_db_id)
-
-    # =====================================================================
-    # دوال المستخدمين (محسّنة مع الكاش)
-    # =====================================================================
+    async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+        """جلب بيانات المستخدم مع كاش متقدم"""
+        try:
+            # 1. محاولة من كاش المستخدم الشامل (من cache.py)
+            if CACHE_AVAILABLE:
+                cached_data = await user_cache.get(user_id)
+                if cached_data:
+                    user_data = cached_data.get('user_data')
+                    if user_data:
+                        if include_stats:
+                            user_data['unpublished_posts'] = cached_data.get('unpublished_posts', 0)
+                            user_data['has_subscription'] = cached_data.get('has_subscription', False)
+                            user_data['channels_count'] = cached_data.get('channels_count', 0)
+                            user_data['groups_count'] = cached_data.get('groups_count', 0)
+                            user_data['channel_info'] = cached_data.get('channel_info')
+                        return user_data
+            
+            # 2. محاولة من الكاش الداخلي
+            cached = await internal_cache.get(f"user_{user_id}_{include_stats}")
+            if cached:
+                return cached
+            
+            # 3. جلب من قاعدة البيانات
+            data = await self.get_user_full_data(user_id, include_stats)
+            if data:
+                # 4. تخزين في الكاشات
+                await internal_cache.set(f"user_{user_id}_{include_stats}", data)
+                if CACHE_AVAILABLE and not include_stats:
+                    full_data = {
+                        'user_data': data,
+                        'language': data.get('language', 'ar'),
+                        'active_channel': data.get('active_channel'),
+                        'channel_info': data.get('channel_info'),
+                        'unpublished_posts': data.get('unpublished_posts', 0),
+                        'has_subscription': data.get('has_subscription', False),
+                        'auto_publish': data.get('auto_publish', True),
+                        'auto_recycle': data.get('auto_recycle', True),
+                        'groups_count': data.get('groups_count', 0),
+                        'channels_count': data.get('channels_count', 0),
+                    }
+                    await user_cache.set(user_id, full_data)
+                return data
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error in get_user: {e}", exc_info=True)
+            return None
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
         try:
@@ -4172,102 +4065,31 @@ class Database:
                             user_id
                         )
             
-            # مسح كاش المستخدم بعد التسجيل
-            await self.invalidate_user_cache(user_id)
-            await user_cache.invalidate(user_id)
+            # مسح الكاش بعد التسجيل
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
             return False
 
-    # =====================================================================
-    # دوال المستخدمين المُحسَّنة (تحسين استعلام active_channel)
-    # =====================================================================
-
-    async def get_user_full_data(self, user_id: int, include_stats: bool = True) -> Optional[Dict]:
-        """
-        جلب بيانات المستخدم الكاملة مع تحسين الأداء.
-        استخدم هذا بدلاً من get_user للحصول على جميع البيانات دفعة واحدة.
-        """
-        query = """
-            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
-                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
-            FROM users u
-            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
-            WHERE u.user_id = ?
-        """
-        row = await self.fetchone(query, (user_id,))
-        if not row:
-            return None
-        
-        result = dict(row)
-        
-        if include_stats:
-            # جلب الإحصائيات في استعلام واحد
-            stats = await self.fetchone("""
-                SELECT 
-                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
-                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
-                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
-                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
-            """, (user_id, user_id, TimeUtils.utc_now(), user_id, user_id))
-            
-            if stats:
-                result['unpublished_posts'] = stats.get('unpublished_posts', 0)
-                result['has_subscription'] = bool(stats.get('has_subscription', 0))
-                result['channels_count'] = stats.get('channels_count', 0)
-                result['groups_count'] = stats.get('groups_count', 0)
-        else:
-            result['has_subscription'] = False
-            result['unpublished_posts'] = 0
-            result['channels_count'] = 0
-            result['groups_count'] = 0
-        
-        result['channel_info'] = None
-        if result.get('channel_id'):
-            result['channel_info'] = {
-                'id': result['channel_id'],
-                'channel_name': result.get('channel_name', ''),
-                'banned': result.get('channel_banned', 0),
-            }
-        
-        return result
-
-    async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """جلب بيانات المستخدم مع إمكانية تضمين الإحصائيات (افتراضياً false لتوفير الأداء)"""
-        try:
-            # استخدام الكاش السريع أولاً
-            cached = await query_cache.get(f"user_{user_id}_{include_stats}")
-            if cached:
-                return cached
-            
-            # محاولة من كاش المستخدم القديم
-            cached_old = await user_cache.get(user_id)
-            if cached_old and not include_stats:
-                return cached_old
-            
-            data = await self.get_user_full_data(user_id, include_stats)
-            if data:
-                await query_cache.set(f"user_{user_id}_{include_stats}", data)
-                if not include_stats:
-                    await user_cache.set(user_id, data)
-                return data
-            return None
-        except Exception as e:
-            logger.error(f"❌ Error in get_user: {e}", exc_info=True)
-            return None
-
     async def get_user_language(self, user_id: int) -> str:
-        """جلب لغة المستخدم مع كاش محلي"""
+        """جلب لغة المستخدم مع كاش"""
         try:
-            # محاولة استخدام الكاش السريع أولاً
-            lang = await self.get_user_language_fast(user_id)
-            if lang:
-                return lang
-            # إذا لم يكن في الكاش، جلب من قاعدة البيانات
+            if CACHE_AVAILABLE:
+                cached_data = await user_cache.get(user_id)
+                if cached_data:
+                    return cached_data.get('language', 'ar')
+            
+            cached_lang = await internal_cache.get(f"lang_{user_id}")
+            if cached_lang:
+                return cached_lang
+            
             result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default='ar')
-            return result if result else 'ar'
+            lang = result if result else 'ar'
+            await internal_cache.set(f"lang_{user_id}", lang)
+            return lang
         except Exception as e:
             logger.error(f"❌ Error in get_user_language: {e}")
             return 'ar'
@@ -4275,9 +4097,10 @@ class Database:
     async def set_user_language(self, user_id: int, lang: str) -> bool:
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_lang_cache(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"lang_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
@@ -4287,8 +4110,9 @@ class Database:
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_publish = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def get_auto_recycle_status(self, user_id: int) -> bool:
@@ -4298,8 +4122,9 @@ class Database:
     async def set_auto_recycle(self, user_id: int, status: bool) -> bool:
         result = await self.execute("UPDATE users SET auto_recycle = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def is_user_banned(self, user_id: int) -> bool:
@@ -4309,15 +4134,17 @@ class Database:
     async def ban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def unban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def get_all_users(self) -> List[Dict]:
@@ -4419,8 +4246,9 @@ class Database:
                                 current_end_dt.strftime('%Y-%m-%d %H:%M:%S'), user_id
                             )
 
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
                     return days_granted
         except Exception as e:
             logger.error(f"❌ Error in activate_trial: {e}", exc_info=True)
@@ -4455,7 +4283,7 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات (محسّنة)
+    # دوال القنوات (محسّنة مع كاش)
     # =====================================================================
 
     async def add_channel(self, user_id: int, channel_id: int, channel_name: str, set_active: bool = True) -> Optional[Dict]:
@@ -4615,9 +4443,10 @@ class Database:
                         default=0
                     )
 
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
-                    await self.invalidate_channel_cache(user_id, ch_db_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
+                        await channels_cache.invalidate(user_id)
 
                     return {
                         'id': ch_db_id,
@@ -4643,21 +4472,47 @@ class Database:
             return False
         result = await self.execute("UPDATE users SET active_channel = ? WHERE user_id = ?", (channel_db_id, user_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
         return result
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
-        return await self.fetchall("SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+        # محاولة من الكاش
+        if CACHE_AVAILABLE:
+            cached = await channels_cache.get(user_id)
+            if cached is not None:
+                return cached
+        
+        cached = await internal_cache.get(f"channels_{user_id}")
+        if cached is not None:
+            return cached
+        
+        channels = await self.fetchall(
+            "SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        )
+        
+        await internal_cache.set(f"channels_{user_id}", channels)
+        if CACHE_AVAILABLE:
+            await channels_cache.set(user_id, channels)
+        return channels
 
     async def get_channel_info(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        # استخدام الكاش السريع
-        cached = await self.get_channel_info_fast(user_id, channel_db_id)
-        if cached:
+        if CACHE_AVAILABLE:
+            cached = await channels_cache.get_channel_info(channel_db_id)
+            if cached is not None:
+                return cached
+        
+        cached = await internal_cache.get(f"channel_info_{channel_db_id}")
+        if cached is not None:
             return cached
+        
         result = await self.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
         if result:
-            await query_cache.set(f"channel_{user_id}_{channel_db_id}", result)
+            await internal_cache.set(f"channel_info_{channel_db_id}", result)
+            if CACHE_AVAILABLE:
+                await channels_cache.set_channel_info(channel_db_id, result)
         return result
 
     async def get_channel_stats(self, user_id: int, channel_db_id: int) -> Dict:
@@ -4692,9 +4547,11 @@ class Database:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?", channel_db_id, user_id)
                 if deleted > 0:
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
-                    await self.invalidate_channel_cache(user_id, channel_db_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    await internal_cache.invalidate(f"channels_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
+                        await channels_cache.invalidate(user_id)
                     return True
                 return False
         except Exception as e:
@@ -4829,8 +4686,10 @@ class Database:
                         total += inserted
 
                     if total > 0:
-                        await user_cache.invalidate(user_id)
-                        await self.invalidate_user_cache(user_id)
+                        await internal_cache.invalidate(f"user_{user_id}")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(user_id)
+                            await posts_cache.invalidate(channel_db_id)
                     return total
         except Exception as e:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
@@ -4838,6 +4697,12 @@ class Database:
 
     async def get_next_post(self, channel_db_id: int) -> Tuple[Optional[Dict], bool]:
         async with await self._get_channel_lock(channel_db_id):
+            # محاولة من الكاش
+            if CACHE_AVAILABLE:
+                cached = await posts_cache.get_next_post(channel_db_id)
+                if cached:
+                    return cached, False
+            
             post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
@@ -4857,7 +4722,11 @@ class Database:
                         'media_file_id': post_row[3] if len(post_row) > 3 else None,
                         'fail_count': post_row[4] if len(post_row) > 4 else 0,
                     }
+                    if CACHE_AVAILABLE:
+                        await posts_cache.set_next_post(channel_db_id, post_dict)
                     return post_dict, False
+                if CACHE_AVAILABLE:
+                    await posts_cache.set_next_post(channel_db_id, post_row)
                 return post_row, False
 
             auto_recycle = await self.fetchval(
@@ -4891,12 +4760,19 @@ class Database:
                         'media_file_id': post_row[3] if len(post_row) > 3 else None,
                         'fail_count': post_row[4] if len(post_row) > 4 else 0,
                     }
+                    if CACHE_AVAILABLE:
+                        await posts_cache.set_next_post(channel_db_id, post_dict)
                     return post_dict, True
+                if CACHE_AVAILABLE:
+                    await posts_cache.set_next_post(channel_db_id, post_row)
                 return post_row, True
             return None, False
 
     async def mark_post_published(self, post_id: int) -> bool:
-        return await self.execute("UPDATE posts SET published = 1, published_at = ?, fail_count = 0 WHERE id = ?", (TimeUtils.utc_now(), post_id)) > 0
+        result = await self.execute("UPDATE posts SET published = 1, published_at = ?, fail_count = 0 WHERE id = ?", (TimeUtils.utc_now(), post_id)) > 0
+        if result and CACHE_AVAILABLE:
+            await posts_cache.invalidate()
+        return result
 
     async def increment_post_fail(self, post_id: int) -> bool:
         return await self.execute("UPDATE posts SET fail_count = fail_count + 1 WHERE id = ?", (post_id,)) > 0
@@ -4907,8 +4783,10 @@ class Database:
             return False
         result = await self.execute("DELETE FROM posts WHERE id = ? AND channel_db_id = ?", (post_id, channel_db_id)) > 0
         if result:
-            await user_cache.invalidate(user_id)
-            await self.invalidate_user_cache(user_id)
+            await internal_cache.invalidate(f"user_{user_id}")
+            if CACHE_AVAILABLE:
+                await invalidate_user_cache(user_id)
+                await posts_cache.invalidate(channel_db_id)
         return result
 
     async def reset_posts(self, user_id: int, channel_db_id: int) -> int:
@@ -4919,8 +4797,10 @@ class Database:
                     return 0
                 await self._execute_with_conn(conn, "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?", channel_db_id)
                 count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0", channel_db_id, default=0)
-                await user_cache.invalidate(user_id)
-                await self.invalidate_user_cache(user_id)
+                await internal_cache.invalidate(f"user_{user_id}")
+                if CACHE_AVAILABLE:
+                    await invalidate_user_cache(user_id)
+                    await posts_cache.invalidate(channel_db_id)
                 return count
         except Exception as e:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
@@ -4930,7 +4810,14 @@ class Database:
         exists = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
         if not exists:
             return []
-        return await self.fetchall(
+        
+        # محاولة من الكاش
+        if CACHE_AVAILABLE:
+            cached = await posts_cache.get_posts(channel_db_id, limit)
+            if cached is not None:
+                return cached
+        
+        posts = await self.fetchall(
             """SELECT id, text, media_type, published, fail_count, created_at 
                FROM posts 
                WHERE channel_db_id = ? 
@@ -4938,6 +4825,10 @@ class Database:
                LIMIT ?""",
             (channel_db_id, limit)
         )
+        
+        if CACHE_AVAILABLE:
+            await posts_cache.set_posts(channel_db_id, posts, limit)
+        return posts
 
     # =====================================================================
     # دوال المجموعات
@@ -4986,13 +4877,25 @@ class Database:
                 else:
                     await self._execute_with_conn(conn, "INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?,?)", user_id, chat_id)
                 logger.info(f"✅ تم تسجيل المجموعة {chat_id} بواسطة المستخدم {user_id}")
+                if CACHE_AVAILABLE:
+                    await groups_cache.invalidate(user_id)
+                await internal_cache.invalidate(f"groups_{user_id}")
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_group: {e}", exc_info=True)
             return False
 
     async def get_user_groups(self, user_id: int) -> List[Dict]:
-        return await self.fetchall(
+        if CACHE_AVAILABLE:
+            cached = await groups_cache.get(user_id)
+            if cached is not None:
+                return cached
+        
+        cached = await internal_cache.get(f"groups_{user_id}")
+        if cached is not None:
+            return cached
+        
+        groups = await self.fetchall(
             """SELECT DISTINCT bg.chat_id, bg.chat_name, bg.username, bg.banned
                FROM bot_groups bg
                WHERE bg.added_by = ?
@@ -5004,6 +4907,11 @@ class Database:
                   OR EXISTS (SELECT 1 FROM anonymous_admins aa2 WHERE aa2.chat_id = bg.chat_id AND aa2.anonymous_id = ?)""",
             (user_id, user_id, user_id, user_id, user_id, user_id, user_id)
         )
+        
+        await internal_cache.set(f"groups_{user_id}", groups)
+        if CACHE_AVAILABLE:
+            await groups_cache.set(user_id, groups)
+        return groups
 
     async def sync_group_admins(self, chat_id: int, admin_ids: List[int]) -> int:
         try:
@@ -5023,6 +4931,8 @@ class Database:
                             await self._execute_with_conn(conn, "INSERT IGNORE INTO group_admins (chat_id, user_id) VALUES (%s, %s)", chat_id, uid)
                         else:
                             await self._execute_with_conn(conn, "INSERT OR IGNORE INTO group_admins (chat_id, user_id) VALUES (?,?)", chat_id, uid)
+                if CACHE_AVAILABLE:
+                    await auth_cache.invalidate(chat_id)
                 return len(admin_ids)
         except Exception as e:
             logger.error(f"❌ Error in sync_group_admins: {e}", exc_info=True)
@@ -5120,15 +5030,22 @@ class Database:
             return 0
 
     # =====================================================================
-    # دوال الأمان (محسّنة مع الكاش للكلمات المحظورة)
+    # دوال الأمان (محسّنة مع الكاش)
     # =====================================================================
 
     async def get_security_settings(self, chat_id: int) -> Dict:
+        if CACHE_AVAILABLE:
+            cached = await settings_cache.get_security(chat_id)
+            if cached is not None:
+                return cached
+        
         settings = await self.fetchone("SELECT * FROM group_security WHERE chat_id = ?", (chat_id,))
-        if settings:
-            return settings
-        await self.execute("INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)", (chat_id,))
-        settings = await self.fetchone("SELECT * FROM group_security WHERE chat_id = ?", (chat_id,))
+        if not settings:
+            await self.execute("INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)", (chat_id,))
+            settings = await self.fetchone("SELECT * FROM group_security WHERE chat_id = ?", (chat_id,))
+        
+        if settings and CACHE_AVAILABLE:
+            await settings_cache.set_security(chat_id, settings)
         return settings if settings else {}
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
@@ -5162,16 +5079,31 @@ class Database:
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
         query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
-        return await self.execute(query, tuple(values)) > 0
+        result = await self.execute(query, tuple(values)) > 0
+        if result and CACHE_AVAILABLE:
+            await settings_cache.invalidate_security(chat_id)
+        return result
 
     async def get_banned_words(self, chat_id: int) -> List[str]:
-        # استخدام الكاش
-        cached = await self._get_banned_words_from_cache(chat_id)
-        if cached is not None:
-            return cached
+        # 1. محاولة من الكاش الخارجي
+        if CACHE_AVAILABLE:
+            cached = await banned_words_cache.get(chat_id)
+            if cached is not None:
+                return cached
+        
+        # 2. محاولة من الكاش المحلي
+        cached_local = await self._get_banned_words_from_local_cache(chat_id)
+        if cached_local is not None:
+            return cached_local
+        
+        # 3. جلب من قاعدة البيانات
         words = await self.fetchall("SELECT DISTINCT word FROM banned_words WHERE chat_id = ? OR chat_id = -1", (chat_id,))
         result = [row['word'] for row in words]
-        await self._set_banned_words_cache(chat_id, result)
+        
+        # 4. تخزين في الكاشات
+        await self._set_banned_words_local_cache(chat_id, result)
+        if CACHE_AVAILABLE:
+            await banned_words_cache.set(chat_id, result)
         return result
 
     async def add_banned_word(self, word: str, chat_id: int, added_by: int) -> Tuple[bool, bool]:
@@ -5191,7 +5123,9 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (%s, %s, %s, %s)", word, chat_id, added_by, TimeUtils.sql_iso())
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)", word, chat_id, added_by, TimeUtils.sql_iso())
-                    await self._invalidate_banned_words_cache(chat_id)
+                    await self._invalidate_banned_words_local_cache(chat_id)
+                    if CACHE_AVAILABLE:
+                        await banned_words_cache.invalidate(chat_id)
                     return True, False
                 except Exception as e:
                     if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -5207,7 +5141,9 @@ class Database:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM banned_words WHERE word = ? AND chat_id = ?", word, chat_id)
                 if deleted > 0:
-                    await self._invalidate_banned_words_cache(chat_id)
+                    await self._invalidate_banned_words_local_cache(chat_id)
+                    if CACHE_AVAILABLE:
+                        await banned_words_cache.invalidate(chat_id)
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_banned_word: {e}", exc_info=True)
@@ -5244,9 +5180,9 @@ class Database:
                             "INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
                             words_to_insert
                         )
-            await self._invalidate_banned_words_cache()  # مسح الكاش العام
-            from cache import banned_words_cache
-            await banned_words_cache.invalidate()
+            await self._invalidate_banned_words_local_cache()
+            if CACHE_AVAILABLE:
+                await banned_words_cache.invalidate()
             logger.info(f"✅ تم إعادة تحميل {len(words_to_insert)} كلمة محظورة من banned_words.py")
             return True
         except ImportError:
@@ -5282,11 +5218,18 @@ class Database:
     # =====================================================================
 
     async def get_auto_reply_settings(self, chat_id: int) -> Dict:
+        if CACHE_AVAILABLE:
+            cached = await settings_cache.get_auto_reply_settings(chat_id)
+            if cached is not None:
+                return cached
+        
         settings = await self.fetchone("SELECT * FROM auto_reply_settings WHERE chat_id = ?", (chat_id,))
-        if settings:
-            return settings
-        await self.execute("INSERT OR IGNORE INTO auto_reply_settings (chat_id) VALUES (?)", (chat_id,))
-        settings = await self.fetchone("SELECT * FROM auto_reply_settings WHERE chat_id = ?", (chat_id,))
+        if not settings:
+            await self.execute("INSERT OR IGNORE INTO auto_reply_settings (chat_id) VALUES (?)", (chat_id,))
+            settings = await self.fetchone("SELECT * FROM auto_reply_settings WHERE chat_id = ?", (chat_id,))
+        
+        if settings and CACHE_AVAILABLE:
+            await settings_cache.set_auto_reply_settings(chat_id, settings)
         return settings if settings else {'enabled': 0, 'only_admins': 0, 'ignore_bots': 1}
 
     async def update_auto_reply_settings(self, chat_id: int, **kwargs) -> bool:
@@ -5303,7 +5246,10 @@ class Database:
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
         query = f"UPDATE auto_reply_settings SET {', '.join(updates)} WHERE chat_id = ?"
-        return await self.execute(query, tuple(values)) > 0
+        result = await self.execute(query, tuple(values)) > 0
+        if result and CACHE_AVAILABLE:
+            await settings_cache.invalidate_auto_reply(chat_id)
+        return result
 
     async def add_auto_reply(self, chat_id: int, keyword: str, reply: str, reply_type: str = 'text', media_id: str = None, buttons: str = None) -> bool:
         keyword = keyword.lower().strip()
@@ -5351,13 +5297,10 @@ class Database:
             return False
 
     async def get_auto_reply(self, keyword: str, chat_id: int) -> Optional[Dict]:
-        """
-        البحث عن رد تلقائي مع تحسين الأداء باستخدام استعلام واحد وترتيب الأولوية.
-        """
         keyword = keyword.lower().strip()
         if not keyword:
             return None
-        # استعلام واحد مع ترتيب الأولوية (المجموعة أولاً ثم العام)
+        
         row = await self.fetchone(
             """SELECT reply, reply_type, reply_media_id, reply_buttons
                FROM auto_replies
@@ -5367,7 +5310,6 @@ class Database:
             (keyword, chat_id, chat_id)
         )
         if row:
-            # تحديث عداد الاستخدام بشكل غير متزامن (لا ننتظر)
             asyncio.create_task(
                 self.execute("UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", (chat_id, keyword))
             )
@@ -5715,6 +5657,9 @@ class Database:
                     if inserted > 0:
                         await self._execute_with_conn(conn, "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?,1,3,0,?) ON CONFLICT(user_id) DO UPDATE SET referral_count = referral_count + 1, total_reward_days = total_reward_days + 3, last_referral_date = ?", referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now())
                         await self._execute_with_conn(conn, "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,5,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 5, last_updated = ?", referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now())
+                        await internal_cache.invalidate(f"user_{referrer_id}")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(referrer_id)
                         return True
                     return False
         except Exception as e:
@@ -5808,8 +5753,9 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
                     return available
         except Exception as e:
             logger.error(f"❌ Error in claim_referral_reward: {e}", exc_info=True)
@@ -5967,23 +5913,30 @@ class Database:
     # =====================================================================
 
     async def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        if CACHE_AVAILABLE:
+            cached = await settings_cache.get_bot_setting(key)
+            if cached is not None:
+                return cached
+        
         result = await self.fetchval("SELECT value FROM settings WHERE key = ?", (key,), default=default)
-        return result if result is not None else default
+        if result and CACHE_AVAILABLE:
+            await settings_cache.set_bot_setting(key, result)
+        return result
 
     async def set_setting(self, key: str, value: str) -> bool:
         result = await self.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)) > 0
-        if result:
-            await self.invalidate_settings_cache(key)
+        if result and CACHE_AVAILABLE:
+            await settings_cache.invalidate_bot_settings(key)
         return result
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
-        return await self.get_setting_fast('force_subscribe_channel')
+        return await self.get_setting('force_subscribe_channel')
 
     async def get_updates_channel(self) -> Optional[str]:
-        return await self.get_setting_fast('updates_channel')
+        return await self.get_setting('updates_channel')
 
     async def get_log_channel(self) -> Optional[str]:
-        return await self.get_setting_fast('log_channel_id')
+        return await self.get_setting('log_channel_id')
 
     async def get_publish_interval(self) -> int:
         value = await self.get_setting('publish_interval', '12')
@@ -6047,8 +6000,9 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
                     return True, plan['days']
         except Exception as e:
             logger.error(f"❌ Error in redeem_gift_code: {e}", exc_info=True)
@@ -6094,8 +6048,9 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in grant_subscription_days: {e}", exc_info=True)
@@ -6123,8 +6078,9 @@ class Database:
                         sub_id = row['id'] if row else 0
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = $1 WHERE user_id = $2", TimeUtils.utc_now(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
-                        await user_cache.invalidate(user_id)
-                        await self.invalidate_user_cache(user_id)
+                        await internal_cache.invalidate(f"user_{user_id}")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(user_id)
                         return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -6132,16 +6088,18 @@ class Database:
                         sub_id = cursor.lastrowid
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = %s WHERE user_id = %s", TimeUtils.sql_iso(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
-                        await user_cache.invalidate(user_id)
-                        await self.invalidate_user_cache(user_id)
+                        await internal_cache.invalidate(f"user_{user_id}")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(user_id)
                         return sub_id
                     else:
                         cursor = await conn.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
                         sub_id = cursor.lastrowid if cursor.lastrowid else 0
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = ? WHERE user_id = ?", TimeUtils.sql_iso(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
-                        await user_cache.invalidate(user_id)
-                        await self.invalidate_user_cache(user_id)
+                        await internal_cache.invalidate(f"user_{user_id}")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(user_id)
                         return sub_id
         except Exception as e:
             logger.error(f"❌ Error in create_subscription: {e}", exc_info=True)
@@ -6159,8 +6117,9 @@ class Database:
                 users = await self._fetchall_with_conn(conn, "SELECT DISTINCT user_id FROM subscriptions WHERE status = 'expired'")
                 for user in users:
                     await self._refresh_user_subscription_end(conn, user['user_id'])
-                    await user_cache.invalidate(user['user_id'])
-                    await self.invalidate_user_cache(user['user_id'])
+                    await internal_cache.invalidate(f"user_{user['user_id']}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user['user_id'])
         except Exception as e:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
@@ -6228,8 +6187,9 @@ class Database:
                     else:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
-                    await user_cache.invalidate(user_id)
-                    await self.invalidate_user_cache(user_id)
+                    await internal_cache.invalidate(f"user_{user_id}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in activate_subscription_with_payment: {e}", exc_info=True)
@@ -6353,7 +6313,10 @@ class Database:
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
         query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
-        return await self.execute(query, tuple(values)) > 0
+        result = await self.execute(query, tuple(values)) > 0
+        if result and CACHE_AVAILABLE:
+            await settings_cache.invalidate_security(chat_id)
+        return result
 
     async def expire_penalties(self) -> int:
         try:
@@ -6609,28 +6572,31 @@ class Database:
 
     async def add_admin(self, admin_id: int, added_by: int) -> bool:
         result = await self.execute("INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)", (admin_id, added_by, TimeUtils.utc_now())) > 0
-        if result:
-            await self.invalidate_admin_cache()
+        if result and CACHE_AVAILABLE:
+            await auth_cache.invalidate()
         return result
 
     async def remove_admin(self, admin_id: int) -> bool:
         try:
             async with self.connection() as conn:
                 deleted = await self._execute_with_conn(conn, "DELETE FROM bot_admins WHERE user_id = ?", admin_id)
-                if deleted > 0:
-                    await self.invalidate_admin_cache()
+                if deleted > 0 and CACHE_AVAILABLE:
+                    await auth_cache.invalidate()
                 return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_admin: {e}", exc_info=True)
             return False
 
     async def get_admin_list(self) -> List[Dict]:
-        """جلب قائمة المشرفين مع استخدام الكاش"""
-        try:
-            return await self.get_admin_list_fast()
-        except Exception as e:
-            logger.error(f"❌ Error in get_admin_list: {e}", exc_info=True)
-            return await self.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
+        if CACHE_AVAILABLE:
+            cached = await auth_cache.get_admin_list(0)  # 0 يعني الكاش العام
+            if cached is not None:
+                return cached
+        
+        admins = await self.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
+        if CACHE_AVAILABLE:
+            await auth_cache.set_admin_list(0, [a['user_id'] for a in admins])
+        return admins
 
     async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
         if not user_ids:
@@ -6639,8 +6605,9 @@ class Database:
             async with self.transaction() as conn:
                 for uid in user_ids:
                     await self._execute_with_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
-                    await user_cache.invalidate(uid)
-                    await self.invalidate_user_cache(uid)
+                    await internal_cache.invalidate(f"user_{uid}")
+                    if CACHE_AVAILABLE:
+                        await invalidate_user_cache(uid)
             return len(user_ids)
         except Exception as e:
             logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
@@ -6679,6 +6646,10 @@ class Database:
                 for table in tables:
                     await self._execute_with_conn(conn, f"DELETE FROM {table} WHERE chat_id = ?", chat_id)
                 await self._execute_with_conn(conn, "DELETE FROM bot_groups WHERE chat_id = ?", chat_id)
+            if CACHE_AVAILABLE:
+                await groups_cache.invalidate()
+                await settings_cache.invalidate_security(chat_id)
+                await settings_cache.invalidate_auto_reply(chat_id)
             return True
         except Exception as e:
             logger.error(f"❌ Error in delete_group: {e}", exc_info=True)
