@@ -20,6 +20,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - دعم الردود التلقائية والجدولة والإجراءات المتقدمة
 - دعم المسابقات والاستيراد والنسخ الاحتياطي
 - ✅ [إصلاح] استيراد CommandHandlers بشكل صحيح من handlers.handlers_command
+- ✅ [إصلاح] استيراد normalize_post من utils
 """
 
 import asyncio
