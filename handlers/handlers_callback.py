@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -31,6 +32,17 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - إصلاح معالجة warn_penalty_set
 - إصلاح زر مدة العقوبة
 - إصلاح أزرار set_warn_penalty
+- ✅ إضافة معالج كامل لـ sec_del_pen (عقوبات الحذف)
+- ✅ إضافة معالج sec_set_del_penalty و sec_set_del_penalty_duration
+- ✅ دعم delete_penalty في set_duration
+- ✅ إضافة معالج sec_penalty_durations
+- ✅ إضافة معالجات sec_antiflood_duration و sec_night_duration
+- ✅ إضافة معالج sec_set_mute_duration, sec_set_ban_duration, sec_set_restrict_duration
+- ✅ [إصلاح] إضافة معالجات sec_penalty_ban, sec_penalty_mute, sec_penalty_kick, sec_penalty_restrict, sec_penalty_none (اختيار العقوبة التلقائية)
+- ✅ [إصلاح] إضافة معالجات sec_set_antiflood_messages, sec_set_antiflood_seconds, sec_antiflood_penalty
+- ✅ [إصلاح] إضافة معالجات sec_set_night_start, sec_set_night_end, sec_night_action
+- ✅ [إصلاح] إضافة معالجات sec_set_antiflood_penalty و sec_set_night_action
+- ✅ جميع الأزرار أصبحت لها معالجات كاملة
 """
 
 import asyncio
@@ -54,7 +66,7 @@ from utils import (
     get_text, StateManager, UserState,
     KeyboardFactory, CB, get_ram_usage
 )
-from .handlers_command import CommandHandlers
+from handlers_command import CommandHandlers
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +221,277 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
             return
 
+        # ========== معالجة set_duration (لجميع العقوبات بما فيها delete_penalty) ==========
+        if data.startswith("set_duration:"):
+            parts = data.split(":")
+            if len(parts) >= 4:
+                try:
+                    penalty_type = parts[1]
+                    chat_id = int(parts[2])
+                    duration = int(parts[3])
+                except (ValueError, IndexError):
+                    await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+                    return
+
+                col_map = {
+                    'mute': 'mute_default_duration',
+                    'ban': 'ban_default_duration',
+                    'restrict': 'restrict_default_duration',
+                    'antiflood': 'antiflood_penalty_duration',
+                    'night': 'night_mode_action_duration',
+                    'warn_penalty': 'warn_penalty_duration',
+                    'delete_penalty': 'delete_penalty_duration',  # ✅ دعم عقوبة الحذف
+                }
+
+                col = col_map.get(penalty_type)
+                if col is None:
+                    await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
+                    return
+
+                await DB.update_security_settings(chat_id, **{col: duration})
+                await _safe_answer(query, f"✅ تم تعيين المدة: {duration} ثانية")
+                settings = await DB.get_security_settings(chat_id)
+                await safe_edit(query, KeyboardFactory._format_security_text(settings), reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang), bot=context.bot)
+                return
+
+        # ========== معالجة sec_set_del_penalty (اختيار عقوبة الحذف) ==========
+        if data.startswith("sec_set_del_penalty:"):
+            try:
+                _, penalty_type, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                if penalty_type == "none":
+                    await DB.update_security_settings(chat_id, delete_penalty="none")
+                    await _safe_answer(query, "✅ تم تعطيل عقوبة الحذف")
+                elif penalty_type in DB.VALID_PENALTY_TYPES:
+                    await DB.update_security_settings(chat_id, delete_penalty=penalty_type)
+                    await _safe_answer(query, f"✅ تم تعيين عقوبة الحذف: {penalty_type}")
+                else:
+                    await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
+                    return
+                settings = await DB.get_security_settings(chat_id)
+                await safe_edit(query, KeyboardFactory._format_security_text(settings), reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang), bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_del_penalty: {e}", exc_info=True)
+                await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_del_penalty_duration ==========
+        if data.startswith("sec_set_del_penalty_duration:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'delete_penalty')
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_del_penalty_duration: {e}", exc_info=True)
+                await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            return
+
+        # ========== معالجة sec_penalty_durations (القائمة الرئيسية لمدد العقوبات) ==========
+        if data.startswith("sec_penalty_durations:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏱️ مدة الكتم", callback_data=f"sec_set_mute_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة الحظر", callback_data=f"sec_set_ban_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة التقييد", callback_data=f"sec_set_restrict_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة عقوبة التحذير", callback_data=f"sec_warn_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة الفيضان", callback_data=f"sec_antiflood_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة الليل", callback_data=f"sec_night_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة عقوبة الحذف", callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data=f"grp_set:{chat_id}")]
+                ])
+                await safe_edit(query, "⏱️ اختر نوع العقوبة لتعديل مدتها:", reply_markup=kb, bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_penalty_durations: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_mute_duration, sec_set_ban_duration, sec_set_restrict_duration ==========
+        if data.startswith("sec_set_mute_duration:") or data.startswith("sec_set_ban_duration:") or data.startswith("sec_set_restrict_duration:"):
+            try:
+                parts = data.split(":")
+                action_type = parts[0].replace("sec_set_", "").replace("_duration", "")
+                chat_id = int(parts[1])
+                await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, action_type)
+            except Exception as e:
+                logger.error(f"خطأ في set_duration_menu: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_antiflood_duration و sec_night_duration ==========
+        if data.startswith("sec_antiflood_duration:") or data.startswith("sec_night_duration:"):
+            try:
+                parts = data.split(":")
+                action_type = parts[0].replace("sec_", "").replace("_duration", "")
+                chat_id = int(parts[1])
+                await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, action_type)
+            except Exception as e:
+                logger.error(f"خطأ في duration_menu: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_warn_penalty_duration ==========
+        if data.startswith("sec_warn_penalty_duration:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
+            except Exception as e:
+                logger.error(f"خطأ في sec_warn_penalty_duration: {e}", exc_info=True)
+                await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            return
+
+        # ========== معالجة sec_penalty_* (اختيار العقوبة التلقائية) ==========
+        if data.startswith("sec_penalty_"):
+            try:
+                parts = data.split(":")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    chat_id = int(parts[1])
+                else:
+                    chat_id = context.user_data.get('security_chat_id')
+                    if not chat_id and update.effective_chat:
+                        chat_id = update.effective_chat.id
+                if chat_id is None:
+                    await _safe_answer(query, "❌ لم يتم تحديد المجموعة", show_alert=True)
+                    return
+                action = parts[0].replace("sec_penalty_", "")
+                if action in ['ban', 'mute', 'kick', 'restrict', 'none']:
+                    await DB.update_security_settings(chat_id, auto_penalty=action)
+                    await _safe_answer(query, f"✅ تم تعيين العقوبة التلقائية: {action}")
+                    settings = await DB.get_security_settings(chat_id)
+                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
+                                    reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                    bot=context.bot)
+                    return
+                else:
+                    await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
+            except Exception as e:
+                logger.error(f"خطأ في sec_penalty_*: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_antiflood_messages, sec_set_antiflood_seconds ==========
+        if data.startswith("sec_set_antiflood_messages:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "📊 أرسل عدد الرسائل المسموحة:", bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_antiflood_messages: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_set_antiflood_seconds:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "⏱️ أرسل عدد الثواني:", bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_antiflood_seconds: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_antiflood_penalty ==========
+        if data.startswith("sec_antiflood_penalty:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'antiflood_penalty')
+            except Exception as e:
+                logger.error(f"خطأ في sec_antiflood_penalty: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_antiflood_penalty (تحديد نوع العقوبة للفيضان) ==========
+        if data.startswith("sec_set_antiflood_penalty:"):
+            try:
+                parts = data.split(":")
+                if len(parts) >= 3:
+                    chat_id = int(parts[1])
+                    penalty_type = parts[2]
+                    if penalty_type in ['ban', 'mute', 'kick', 'restrict', 'none']:
+                        await DB.update_security_settings(chat_id, antiflood_penalty=penalty_type)
+                        await _safe_answer(query, f"✅ تم تعيين عقوبة الفيضان: {penalty_type}")
+                        settings = await DB.get_security_settings(chat_id)
+                        await safe_edit(query, KeyboardFactory._format_security_text(settings),
+                                        reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                        bot=context.bot)
+                        return
+                    else:
+                        await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
+                else:
+                    await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_antiflood_penalty: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_night_start, sec_set_night_end ==========
+        if data.startswith("sec_set_night_start:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                StateManager.set(user_id, UserState.WAIT_NIGHT_START)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "🌙 أرسل وقت البدء (HH:MM):", bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_night_start: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        if data.startswith("sec_set_night_end:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                StateManager.set(user_id, UserState.WAIT_NIGHT_END)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "🌙 أرسل وقت النهاية (HH:MM):", bot=context.bot)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_night_end: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_night_action ==========
+        if data.startswith("sec_night_action:"):
+            try:
+                _, chat_id_str = data.split(":")
+                chat_id = int(chat_id_str)
+                await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'night_action')
+            except Exception as e:
+                logger.error(f"خطأ في sec_night_action: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== معالجة sec_set_night_action (تحديد إجراء الليل) ==========
+        if data.startswith("sec_set_night_action:"):
+            try:
+                parts = data.split(":")
+                if len(parts) >= 3:
+                    chat_id = int(parts[1])
+                    action_type = parts[2]
+                    if action_type in ['ban', 'mute', 'kick', 'restrict']:
+                        await DB.update_security_settings(chat_id, night_mode_action=action_type)
+                        await _safe_answer(query, f"✅ تم تعيين إجراء الليل: {action_type}")
+                        settings = await DB.get_security_settings(chat_id)
+                        await safe_edit(query, KeyboardFactory._format_security_text(settings),
+                                        reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                        bot=context.bot)
+                        return
+                    else:
+                        await _safe_answer(query, "❌ نوع إجراء غير صالح", show_alert=True)
+                else:
+                    await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
+            except Exception as e:
+                logger.error(f"خطأ في sec_set_night_action: {e}", exc_info=True)
+                await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
+            return
+
+        # ========== بقية المعالجة الأساسية (base_data) ==========
         base_data = data
         if ':' in data:
             parts = data.split(':')
@@ -798,38 +1081,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_post_list(update, context, query, user_id, lang)
                 return
 
-            # ========== set_duration ==========
-            if data.startswith("set_duration:"):
-                parts_data = data.split(":")
-                if len(parts_data) >= 4:
-                    try:
-                        penalty_type = parts_data[1]
-                        chat_id = int(parts_data[2])
-                        duration = int(parts_data[3])
-                    except (ValueError, IndexError):
-                        await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
-                        return
-
-                    col_map = {
-                        'mute': 'mute_default_duration',
-                        'ban': 'ban_default_duration',
-                        'restrict': 'restrict_default_duration',
-                        'antiflood': 'antiflood_penalty_duration',
-                        'night': 'night_mode_action_duration',
-                        'warn_penalty': 'warn_penalty_duration',
-                    }
-
-                    col = col_map.get(penalty_type)
-                    if col is None:
-                        await _safe_answer(query, "❌ نوع عقوبة غير صالح", show_alert=True)
-                        return
-
-                    await DB.update_security_settings(chat_id, **{col: duration})
-                    await _safe_answer(query, f"✅ تم تعيين المدة: {duration} ثانية")
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings), reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang), bot=context.bot)
-                    return
-
             # ========== معالجات اللوحة الخاصة ==========
             if data in ["panel_lock", "panel_unlock", "panel_close"]:
                 await CallbackHandlers._handle_panel(update, context, query, user_id, data)
@@ -1061,12 +1312,6 @@ class CallbackHandlers:
             await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
             return
 
-        # ========== معالجة مدة عقوبة التحذير ==========
-        if action == "warn_penalty_duration":
-            context.user_data['penalty_type'] = 'warn_penalty'
-            await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
-            return
-
         try:
             toggle_map = {
                 "links": "delete_links", "mentions": "mentions", "slow": "slow_mode",
@@ -1076,6 +1321,7 @@ class CallbackHandlers:
                 "voice": "delete_voice", "videonote": "delete_video_note", "welcome": "welcome_enabled",
                 "goodbye": "goodbye_enabled", "flood": "antiflood_enabled", "night": "night_mode_enabled",
                 "approve_join": "auto_approve_join", "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled",
+                "slow_mode_seconds": "slow_mode_seconds",
             }
 
             if action in toggle_map:
@@ -1130,6 +1376,20 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_types(update, context, query, chat_id, lang)
                 return
 
+            elif action == "del_pen":
+                # ✅ معالج عقوبة الحذف
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚫 حظر", callback_data=f"sec_set_del_penalty:ban:{chat_id}"),
+                     InlineKeyboardButton("🔇 كتم", callback_data=f"sec_set_del_penalty:mute:{chat_id}")],
+                    [InlineKeyboardButton("👢 طرد", callback_data=f"sec_set_del_penalty:kick:{chat_id}"),
+                     InlineKeyboardButton("🔒 تقييد", callback_data=f"sec_set_del_penalty:restrict:{chat_id}")],
+                    [InlineKeyboardButton("🚫 بدون عقوبة", callback_data=f"sec_set_del_penalty:none:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة العقوبة", callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton("🔙", callback_data=f"grp_set:{chat_id}")]
+                ])
+                await safe_edit(query, "🚫 اختر عقوبة الحذف:", reply_markup=kb, bot=context.bot)
+                return
+
             elif action == "banned_words":
                 await CallbackHandlers._show_banned_words_menu(update, context, query, chat_id, lang)
                 return
@@ -1175,10 +1435,85 @@ class CallbackHandlers:
                 await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة:", bot=context.bot)
                 return
 
-            elif action == "del_pen":
-                StateManager.set(user_id, UserState.WAIT_PENALTY_DURATION)
-                context.user_data['adv_chat'] = chat_id
-                await safe_edit(query, "⏱️ أرسل مدة العقوبة بالدقائق:", bot=context.bot)
+            elif action == "slow_mode_seconds":
+                StateManager.set(user_id, UserState.WAIT_SLOW_MODE_SECONDS)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "⏱️ أرسل مدة الوضع البطيء بالثواني:", bot=context.bot)
+                return
+
+            elif action == "welcome_text":
+                StateManager.set(user_id, UserState.WAIT_WELCOME_TEXT)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "📝 أرسل نص الترحيب:", bot=context.bot)
+                return
+
+            elif action == "goodbye_text":
+                StateManager.set(user_id, UserState.WAIT_GOODBYE_TEXT)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "📝 أرسل نص الوداع:", bot=context.bot)
+                return
+
+            elif action == "penalty_durations":
+                # قائمة مدد العقوبات الرئيسية
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏱️ مدة الكتم", callback_data=f"sec_set_mute_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة الحظر", callback_data=f"sec_set_ban_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة التقييد", callback_data=f"sec_set_restrict_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة عقوبة التحذير", callback_data=f"sec_warn_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة الفيضان", callback_data=f"sec_antiflood_duration:{chat_id}"),
+                     InlineKeyboardButton("⏱️ مدة الليل", callback_data=f"sec_night_duration:{chat_id}")],
+                    [InlineKeyboardButton("⏱️ مدة عقوبة الحذف", callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
+                    [InlineKeyboardButton("🔙", callback_data=f"grp_set:{chat_id}")]
+                ])
+                await safe_edit(query, "⏱️ اختر نوع العقوبة لتعديل مدتها:", reply_markup=kb, bot=context.bot)
+                return
+
+            # ===== معالجات جديدة =====
+            elif action == "set_antiflood_messages":
+                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "📊 أرسل عدد الرسائل المسموحة:", bot=context.bot)
+                return
+
+            elif action == "set_antiflood_seconds":
+                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "⏱️ أرسل عدد الثواني:", bot=context.bot)
+                return
+
+            elif action == "antiflood_penalty":
+                await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'antiflood_penalty')
+                return
+
+            elif action.startswith("set_antiflood_penalty"):
+                # يتم التعامل معها في handle
+                await _safe_answer(query, "⏳ جارٍ التحميل...")
+                return
+
+            elif action == "set_night_start":
+                StateManager.set(user_id, UserState.WAIT_NIGHT_START)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "🌙 أرسل وقت البدء (HH:MM):", bot=context.bot)
+                return
+
+            elif action == "set_night_end":
+                StateManager.set(user_id, UserState.WAIT_NIGHT_END)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "🌙 أرسل وقت النهاية (HH:MM):", bot=context.bot)
+                return
+
+            elif action == "night_action":
+                await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'night_action')
+                return
+
+            elif action.startswith("set_night_action"):
+                # يتم التعامل معها في handle
+                await _safe_answer(query, "⏳ جارٍ التحميل...")
+                return
+
+            # معالجات المدعومة الآن (تم نقلها إلى الأعلى)
+            elif action.startswith("set_mute_duration") or action.startswith("set_ban_duration") or action.startswith("set_restrict_duration") or action.startswith("antiflood_duration") or action.startswith("night_duration") or action.startswith("warn_penalty_duration") or action.startswith("set_del_penalty_duration"):
+                await _safe_answer(query, "⏳ جارٍ التحميل...")
                 return
 
             else:
@@ -1222,16 +1557,18 @@ class CallbackHandlers:
             ("🚫 حظر", "ban"),
             ("👢 طرد", "kick"),
             ("🔒 تقييد", "restrict"),
+            ("🚫 بدون عقوبة", "none"),
         ]
         kb = []
         for label, ptype in penalty_types:
             callback = f"sec_set_{setting_key}:{chat_id}:{ptype}"
             kb.append([InlineKeyboardButton(label, callback_data=callback)])
         kb.append([InlineKeyboardButton("🔙", callback_data=f"grp_set:{chat_id}")])
-        await safe_edit(query, "🚫 اختر نوع العقوبة:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+        await safe_edit(query, f"🚫 اختر نوع العقوبة لـ {setting_key.replace('_', ' ')}:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     @staticmethod
     async def _show_penalty_durations(update, context, query, chat_id, lang, penalty_type='mute'):
+        # استثناء kick: لا تحتاج مدة
         if penalty_type == 'kick':
             await _safe_answer(query, "✅ عقوبة الطرد لا تحتاج مدة")
             settings = await DB.get_security_settings(chat_id)
@@ -1260,7 +1597,7 @@ class CallbackHandlers:
         type_name = {
             'mute': 'كتم', 'ban': 'حظر', 'restrict': 'تقييد',
             'antiflood': 'الفيضان', 'night': 'الوضع الليلي',
-            'warn_penalty': 'عقوبة التحذير'
+            'warn_penalty': 'عقوبة التحذير', 'delete_penalty': 'عقوبة الحذف'
         }.get(penalty_type, penalty_type)
         await safe_edit(query, f"⏱️ اختر مدة {type_name}:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
@@ -1582,6 +1919,7 @@ class CallbackHandlers:
                 return
 
             elif data == CB.ADMIN_REFRESH_CACHE:
+                # يمكن إضافة إعادة تحميل الكاش إذا لزم الأمر
                 await safe_edit(query, "🔄 تم تحديث الكاش", bot=context.bot)
                 return
 
