@@ -248,6 +248,7 @@
         ["admin_uptime"],
         ["admin_metrics"],
         ["admin_backup", "admin_restore"],
+        ["admin_upload_backup", "admin_show_backups"],
         ["admin_send_update", "admin_set_update_ch"],
         ["admin_show_update"],
         ["admin_force_sub", "admin_set_force"],
