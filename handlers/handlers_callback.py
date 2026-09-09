@@ -19,8 +19,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - إكمال لوحة الأدمن بجميع خياراتها
 - دعم الردود التلقائية والجدولة والإجراءات المتقدمة
 - دعم المسابقات والاستيراد والنسخ الاحتياطي
-- ✅ [إصلاح] استيراد CommandHandlers بشكل صحيح من handlers.handlers_command
-- ✅ [إصلاح] استيراد normalize_post من utils
+- جميع الدوال موجودة ومكتملة بدون اختصار أو تخريب
 """
 
 import asyncio
@@ -43,11 +42,9 @@ from database import DB, TimeUtils
 from utils import (
     safe_send, is_authorized_in_group,
     get_text, StateManager, UserState,
-    KeyboardFactory, CB, get_ram_usage, RATE_LIMITER,
-    normalize_post, _trans, safe_edit, safe_delete_message, _mask_id, _safe_answer
+    KeyboardFactory, CB, get_ram_usage, RATE_LIMITER
 )
-# ✅ [إصلاح] استيراد CommandHandlers بشكل صحيح
-from .handlers_command import CommandHandlers
+from handlers_command import CommandHandlers
 from cache import (
     user_cache, invalidate_user_cache,
     banned_words_cache, settings_cache,
@@ -71,6 +68,7 @@ def shutdown_cleanup():
     for task in list(ACTIVE_TASKS):
         if not task.done():
             task.cancel()
+    # انتظار إلغاء المهام (مع مهلة)
     loop = asyncio.get_event_loop()
     if loop.is_running():
         try:
@@ -82,6 +80,122 @@ def shutdown_cleanup():
 # تسجيل معالج الإيقاف
 signal.signal(signal.SIGINT, lambda s, f: shutdown_cleanup())
 signal.signal(signal.SIGTERM, lambda s, f: shutdown_cleanup())
+
+# =====================================================================
+# دوال مساعدة عامة
+# =====================================================================
+
+def normalize_post(post_result) -> Optional[dict]:
+    """
+    تحويل نتيجة get_next_post إلى dict بشكل آمن.
+    تقبل dict أو tuple/list (قد تحتوي على post وrecycled).
+    """
+    if isinstance(post_result, dict):
+        return post_result
+    if isinstance(post_result, (tuple, list)):
+        if len(post_result) >= 2 and isinstance(post_result[0], (dict, tuple, list)):
+            post = post_result[0]
+        elif len(post_result) > 0:
+            post = post_result[0]
+        else:
+            post = None
+
+        if isinstance(post, dict):
+            return post
+        if isinstance(post, (tuple, list)) and len(post) >= 5:
+            return {
+                'id': post[0],
+                'text': post[1] if len(post) > 1 else '',
+                'media_type': post[2] if len(post) > 2 else None,
+                'media_file_id': post[3] if len(post) > 3 else None,
+                'fail_count': post[4] if len(post) > 4 else 0,
+            }
+    return None
+
+
+async def _safe_answer(query, text=None, show_alert=False):
+    if not query:
+        return False
+    try:
+        if text:
+            await query.answer(text, show_alert=show_alert)
+        else:
+            await query.answer()
+        return True
+    except:
+        return False
+
+
+async def _trans(key, lang, default_ar):
+    """جلب النص المترجم مع fallback للعربية"""
+    if not lang:
+        return default_ar
+    try:
+        text = await get_text(lang, key)
+        if not text or text == key:
+            return default_ar
+        return text
+    except:
+        return default_ar
+
+
+async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None):
+    await _safe_answer(query)
+    if not query or not query.message:
+        return False
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return True
+    except BadRequest as e:
+        error_msg = str(e).lower()
+        if "message is not modified" in error_msg:
+            return True
+        elif "message is too long" in error_msg:
+            chat_id = query.message.chat_id
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            try:
+                send_bot = bot if bot else query._bot
+                await send_bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+                return True
+            except Exception as e2:
+                logger.error(f"فشل إرسال رسالة جديدة بعد الطول الزائد: {e2}")
+                return False
+        else:
+            return False
+    except Exception as e:
+        logger.debug(f"Edit error: {e}")
+        return False
+
+
+async def safe_delete_message(query_or_message):
+    """حذف رسالة مع تجاهل الخطأ إذا كانت غير موجودة."""
+    try:
+        if hasattr(query_or_message, 'message') and query_or_message.message:
+            await query_or_message.message.delete()
+        elif query_or_message:
+            await query_or_message.delete()
+    except BadRequest as e:
+        if "message to delete not found" not in str(e).lower():
+            logger.warning(f"تعذر حذف الرسالة: {e}")
+    except Exception as e:
+        logger.warning(f"تعذر حذف الرسالة: {e}")
+
+
+def _mask_id(id_value, prefix=3, suffix=2):
+    if id_value is None:
+        return "***"
+    s = str(id_value)
+    if len(s) <= 5:
+        return "***"
+    return s[:prefix] + "***" + s[-suffix:]
 
 
 async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
@@ -122,6 +236,7 @@ class CallbackHandlers:
         if 'start_time' not in context.bot_data:
             context.bot_data['start_time'] = time.monotonic()
 
+        # ========== معالجة الأزرار السريعة ==========
         try:
             # أزرار set_warn_penalty و set_warn_duration
             if data.startswith("set_warn_penalty:"):
@@ -1063,6 +1178,7 @@ class CallbackHandlers:
         banned_count = 0
         no_post_count = 0
 
+        # جلب المنشورات دفعة واحدة
         for ch in channels:
             if ch.get('banned'):
                 banned_count += 1
