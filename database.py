@@ -17,6 +17,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إضافة كاش للكلمات المحظورة لتجنب جلبها من قاعدة البيانات في كل رسالة
 - تحسين get_user لجعل include_stats=False افتراضياً لتقليل الحمل
 - إضافة كاش عام للاستعلامات المتكررة لتسريع الأزرار
+- تحسين سرعة /start باستخدام كاش متقدم واستعلامات محسنة
 """
 
 import os
@@ -125,7 +126,7 @@ UTC = timezone.utc
 # =====================================================================
 
 class QueryCache:
-    """كاش عام للاستعلامات المتكررة لتسريع الأزرار"""
+    """كاش عام للاستعلامات المتكررة لتسريع الأزرار و /start"""
     def __init__(self, ttl: int = 60):
         self._cache = {}
         self._ttl = ttl
@@ -138,6 +139,15 @@ class QueryCache:
         self._settings_cache = {}
         self._settings_cache_time = {}
         self._settings_cache_ttl = 60
+        self._user_cache = {}
+        self._user_cache_time = {}
+        self._user_cache_ttl = 120
+        self._stats_cache = {}
+        self._stats_cache_time = {}
+        self._stats_cache_ttl = 30
+        self._channel_cache = {}
+        self._channel_cache_time = {}
+        self._channel_cache_ttl = 60
     
     async def get(self, key: str):
         """جلب بيانات من الكاش"""
@@ -195,6 +205,93 @@ class QueryCache:
         self._settings_cache_time[cache_key] = time.time()
         return result
     
+    async def get_user_fast(self, db, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+        """جلب بيانات المستخدم بسرعة مع كاش محسّن"""
+        cache_key = f"user_{user_id}_{include_stats}"
+        if cache_key in self._user_cache:
+            if time.time() - self._user_cache_time.get(cache_key, 0) < self._user_cache_ttl:
+                return self._user_cache[cache_key]
+        
+        # استعلام محسّن - جلب البيانات الأساسية فقط
+        query = """
+            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
+                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
+            FROM users u
+            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            WHERE u.user_id = ?
+        """
+        row = await db.fetchone(query, (user_id,))
+        if not row:
+            return None
+        
+        result = dict(row)
+        
+        if include_stats:
+            # جلب الإحصائيات في استعلام واحد
+            stats = await db.fetchone("""
+                SELECT 
+                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
+                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
+                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
+                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
+            """, (user_id, user_id, TimeUtils.utc_now(), user_id, user_id))
+            
+            if stats:
+                result['unpublished_posts'] = stats.get('unpublished_posts', 0)
+                result['has_subscription'] = bool(stats.get('has_subscription', 0))
+                result['channels_count'] = stats.get('channels_count', 0)
+                result['groups_count'] = stats.get('groups_count', 0)
+        else:
+            result['has_subscription'] = False
+            result['unpublished_posts'] = 0
+            result['channels_count'] = 0
+            result['groups_count'] = 0
+        
+        result['channel_info'] = None
+        if result.get('channel_id'):
+            result['channel_info'] = {
+                'id': result['channel_id'],
+                'channel_name': result.get('channel_name', ''),
+                'banned': result.get('channel_banned', 0),
+            }
+        
+        # تخزين في الكاش
+        self._user_cache[cache_key] = result
+        self._user_cache_time[cache_key] = time.time()
+        
+        # تنظيف الكاش
+        if len(self._user_cache) > 500:
+            self._user_cache.clear()
+            self._user_cache_time.clear()
+        
+        return result
+    
+    async def get_stats_fast(self, db) -> Dict:
+        """جلب الإحصائيات بسرعة مع كاش"""
+        cache_key = "stats"
+        if cache_key in self._stats_cache:
+            if time.time() - self._stats_cache_time.get(cache_key, 0) < self._stats_cache_ttl:
+                return self._stats_cache[cache_key]
+        
+        stats = await db.get_bot_stats()
+        self._stats_cache[cache_key] = stats
+        self._stats_cache_time[cache_key] = time.time()
+        return stats
+    
+    async def get_channel_info_fast(self, db, user_id: int, channel_db_id: int) -> Optional[Dict]:
+        """جلب معلومات القناة بسرعة مع كاش"""
+        cache_key = f"channel_{user_id}_{channel_db_id}"
+        if cache_key in self._channel_cache:
+            if time.time() - self._channel_cache_time.get(cache_key, 0) < self._channel_cache_ttl:
+                return self._channel_cache[cache_key]
+        
+        result = await db.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
+        if result:
+            self._channel_cache[cache_key] = result
+            self._channel_cache_time[cache_key] = time.time()
+        return result
+    
     async def invalidate_admin_cache(self):
         """مسح كاش المشرفين"""
         self._admin_cache = None
@@ -218,6 +315,36 @@ class QueryCache:
         else:
             self._settings_cache.clear()
             self._settings_cache_time.clear()
+    
+    async def invalidate_user_cache(self, user_id: int = None):
+        """مسح كاش المستخدم"""
+        if user_id:
+            keys_to_remove = [k for k in self._user_cache.keys() if f"user_{user_id}" in k]
+            for key in keys_to_remove:
+                self._user_cache.pop(key, None)
+                self._user_cache_time.pop(key, None)
+        else:
+            self._user_cache.clear()
+            self._user_cache_time.clear()
+    
+    async def invalidate_stats_cache(self):
+        """مسح كاش الإحصائيات"""
+        self._stats_cache.clear()
+        self._stats_cache_time.clear()
+    
+    async def invalidate_channel_cache(self, user_id: int = None, channel_db_id: int = None):
+        """مسح كاش القنوات"""
+        if user_id and channel_db_id:
+            self._channel_cache.pop(f"channel_{user_id}_{channel_db_id}", None)
+            self._channel_cache_time.pop(f"channel_{user_id}_{channel_db_id}", None)
+        elif user_id:
+            keys_to_remove = [k for k in self._channel_cache.keys() if f"channel_{user_id}" in k]
+            for key in keys_to_remove:
+                self._channel_cache.pop(key, None)
+                self._channel_cache_time.pop(key, None)
+        else:
+            self._channel_cache.clear()
+            self._channel_cache_time.clear()
 
 # إنشاء كائن الكاش العام
 query_cache = QueryCache(ttl=60)
@@ -1828,6 +1955,9 @@ class Database:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
+        # فهارس إضافية لتسريع get_user
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
 
     # =====================================================================
@@ -2354,6 +2484,9 @@ class Database:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
+        # فهارس إضافية لتسريع get_user
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
 
     # =====================================================================
@@ -2879,6 +3012,9 @@ class Database:
         await conn.execute("CREATE INDEX idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)")
         await conn.execute("CREATE INDEX idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)")
         await conn.execute("CREATE INDEX idx_users_auto_publish_banned ON users(auto_publish, banned)")
+        # فهارس إضافية لتسريع get_user
+        await conn.execute("CREATE INDEX idx_users_language ON users(language)")
+        await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
         logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
 
     async def _create_tables(self):
@@ -3138,6 +3274,33 @@ class Database:
                     except Exception as e:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_auto_publish_banned: {e}")
+                
+                # فهارس إضافية لتسريع get_user
+                if not await self._index_exists(conn, "users", "idx_users_language"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_users_language ON users(language)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_users_language ON users(language)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_users_language ON users(language)")
+                        logger.info("✅ تم إنشاء فهرس idx_users_language")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_language: {e}")
+                
+                if not await self._index_exists(conn, "users", "idx_users_subscription_end"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
+                        logger.info("✅ تم إنشاء فهرس idx_users_subscription_end")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_subscription_end: {e}")
         finally:
             if USE_MYSQL:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -3231,7 +3394,7 @@ class Database:
 
         secondary_indexes = [
             ("users", "idx_users_language", "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)"),
-            ("users", "idx_users_subscription", "CREATE INDEX IF NOT EXISTS idx_users_subscription ON users(subscription_end)"),
+            ("users", "idx_users_subscription_end", "CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)"),
             ("users", "idx_users_updated", "CREATE INDEX IF NOT EXISTS idx_users_updated ON users(updated_at)"),
             ("users", "idx_users_referral", "CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code)"),
             ("user_channels", "idx_uc_active", "CREATE INDEX IF NOT EXISTS idx_uc_active ON user_channels(banned)"),
@@ -3292,6 +3455,8 @@ class Database:
             ("user_penalties", "idx_penalties_user_chat_status_end", "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)"),
             ("posts", "idx_posts_channel_pub_fail_created_optimized", "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)"),
             ("users", "idx_users_auto_publish_banned", "CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)"),
+            ("users", "idx_users_language", "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)"),
+            ("users", "idx_users_subscription_end", "CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)"),
         ]
         for table, idx_name, create_sql in additional_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
@@ -3845,6 +4010,18 @@ class Database:
         """جلب إعداد بسرعة باستخدام الكاش العام"""
         return await query_cache.get_setting_fast(self, key, default)
 
+    async def get_user_fast(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+        """جلب بيانات المستخدم بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_user_fast(self, user_id, include_stats)
+
+    async def get_stats_fast(self) -> Dict:
+        """جلب الإحصائيات بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_stats_fast(self)
+
+    async def get_channel_info_fast(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
+        """جلب معلومات القناة بسرعة باستخدام الكاش العام"""
+        return await query_cache.get_channel_info_fast(self, user_id, channel_db_id)
+
     async def invalidate_admin_cache(self):
         """مسح كاش المشرفين"""
         await query_cache.invalidate_admin_cache()
@@ -3856,6 +4033,18 @@ class Database:
     async def invalidate_settings_cache(self, key: str = None):
         """مسح كاش الإعدادات"""
         await query_cache.invalidate_settings_cache(key)
+
+    async def invalidate_user_cache(self, user_id: int = None):
+        """مسح كاش المستخدم"""
+        await query_cache.invalidate_user_cache(user_id)
+
+    async def invalidate_stats_cache(self):
+        """مسح كاش الإحصائيات"""
+        await query_cache.invalidate_stats_cache()
+
+    async def invalidate_channel_cache(self, user_id: int = None, channel_db_id: int = None):
+        """مسح كاش القنوات"""
+        await query_cache.invalidate_channel_cache(user_id, channel_db_id)
 
     # =====================================================================
     # دوال المستخدمين (محسّنة مع الكاش)
@@ -3982,6 +4171,10 @@ class Database:
                             "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
                             user_id
                         )
+            
+            # مسح كاش المستخدم بعد التسجيل
+            await self.invalidate_user_cache(user_id)
+            await user_cache.invalidate(user_id)
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_user: {e}", exc_info=True)
@@ -4044,12 +4237,21 @@ class Database:
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
         """جلب بيانات المستخدم مع إمكانية تضمين الإحصائيات (افتراضياً false لتوفير الأداء)"""
         try:
-            cached = await user_cache.get(user_id)
+            # استخدام الكاش السريع أولاً
+            cached = await query_cache.get(f"user_{user_id}_{include_stats}")
             if cached:
                 return cached
+            
+            # محاولة من كاش المستخدم القديم
+            cached_old = await user_cache.get(user_id)
+            if cached_old and not include_stats:
+                return cached_old
+            
             data = await self.get_user_full_data(user_id, include_stats)
             if data:
-                await user_cache.set(user_id, data)
+                await query_cache.set(f"user_{user_id}_{include_stats}", data)
+                if not include_stats:
+                    await user_cache.set(user_id, data)
                 return data
             return None
         except Exception as e:
@@ -4075,6 +4277,7 @@ class Database:
         if result:
             await user_cache.invalidate(user_id)
             await self.invalidate_lang_cache(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
@@ -4085,6 +4288,7 @@ class Database:
         result = await self.execute("UPDATE users SET auto_publish = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def get_auto_recycle_status(self, user_id: int) -> bool:
@@ -4095,6 +4299,7 @@ class Database:
         result = await self.execute("UPDATE users SET auto_recycle = ? WHERE user_id = ?", (1 if status else 0, user_id)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def is_user_banned(self, user_id: int) -> bool:
@@ -4105,12 +4310,14 @@ class Database:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def unban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def get_all_users(self) -> List[Dict]:
@@ -4213,6 +4420,7 @@ class Database:
                             )
 
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
                     return days_granted
         except Exception as e:
             logger.error(f"❌ Error in activate_trial: {e}", exc_info=True)
@@ -4408,6 +4616,8 @@ class Database:
                     )
 
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
+                    await self.invalidate_channel_cache(user_id, ch_db_id)
 
                     return {
                         'id': ch_db_id,
@@ -4434,13 +4644,21 @@ class Database:
         result = await self.execute("UPDATE users SET active_channel = ? WHERE user_id = ?", (channel_db_id, user_id)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
         return await self.fetchall("SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
 
     async def get_channel_info(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
+        # استخدام الكاش السريع
+        cached = await self.get_channel_info_fast(user_id, channel_db_id)
+        if cached:
+            return cached
+        result = await self.fetchone("SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
+        if result:
+            await query_cache.set(f"channel_{user_id}_{channel_db_id}", result)
+        return result
 
     async def get_channel_stats(self, user_id: int, channel_db_id: int) -> Dict:
         exists = await self.fetchval("SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id))
@@ -4475,6 +4693,8 @@ class Database:
                 if deleted > 0:
                     await self._execute_with_conn(conn, "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?", user_id, channel_db_id)
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
+                    await self.invalidate_channel_cache(user_id, channel_db_id)
                     return True
                 return False
         except Exception as e:
@@ -4610,6 +4830,7 @@ class Database:
 
                     if total > 0:
                         await user_cache.invalidate(user_id)
+                        await self.invalidate_user_cache(user_id)
                     return total
         except Exception as e:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
@@ -4687,6 +4908,7 @@ class Database:
         result = await self.execute("DELETE FROM posts WHERE id = ? AND channel_db_id = ?", (post_id, channel_db_id)) > 0
         if result:
             await user_cache.invalidate(user_id)
+            await self.invalidate_user_cache(user_id)
         return result
 
     async def reset_posts(self, user_id: int, channel_db_id: int) -> int:
@@ -4698,6 +4920,7 @@ class Database:
                 await self._execute_with_conn(conn, "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?", channel_db_id)
                 count = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0", channel_db_id, default=0)
                 await user_cache.invalidate(user_id)
+                await self.invalidate_user_cache(user_id)
                 return count
         except Exception as e:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
@@ -5345,7 +5568,8 @@ class Database:
                 INNER JOIN (
                     SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
                     FROM subscriptions s
-                    JOIN plans p ON s.plan_id = p.id                    WHERE s.status = 'active' AND s.end_date > %s
+                    JOIN plans p ON s.plan_id = p.id
+                    WHERE s.status = 'active' AND s.end_date > %s
                     GROUP BY s.user_id
                 ) a ON uc.user_id = a.user_id
                 LEFT JOIN (
@@ -5585,6 +5809,7 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'referral', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
                     return available
         except Exception as e:
             logger.error(f"❌ Error in claim_referral_reward: {e}", exc_info=True)
@@ -5746,7 +5971,10 @@ class Database:
         return result if result is not None else default
 
     async def set_setting(self, key: str, value: str) -> bool:
-        return await self.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)) > 0
+        result = await self.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)) > 0
+        if result:
+            await self.invalidate_settings_cache(key)
+        return result
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
         return await self.get_setting_fast('force_subscribe_channel')
@@ -5820,6 +6048,7 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, gift_code['plan_id'], 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 'gift', TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
                     return True, plan['days']
         except Exception as e:
             logger.error(f"❌ Error in redeem_gift_code: {e}", exc_info=True)
@@ -5866,6 +6095,7 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), provider, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in grant_subscription_days: {e}", exc_info=True)
@@ -5894,6 +6124,7 @@ class Database:
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = $1 WHERE user_id = $2", TimeUtils.utc_now(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
                         await user_cache.invalidate(user_id)
+                        await self.invalidate_user_cache(user_id)
                         return sub_id
                     elif USE_MYSQL:
                         cursor = await conn.cursor()
@@ -5902,6 +6133,7 @@ class Database:
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = %s WHERE user_id = %s", TimeUtils.sql_iso(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
                         await user_cache.invalidate(user_id)
+                        await self.invalidate_user_cache(user_id)
                         return sub_id
                     else:
                         cursor = await conn.execute("INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, provider, provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()))
@@ -5909,6 +6141,7 @@ class Database:
                         await self._execute_with_conn(conn, "UPDATE users SET updated_at = ? WHERE user_id = ?", TimeUtils.sql_iso(), user_id)
                         await self._refresh_user_subscription_end(conn, user_id)
                         await user_cache.invalidate(user_id)
+                        await self.invalidate_user_cache(user_id)
                         return sub_id
         except Exception as e:
             logger.error(f"❌ Error in create_subscription: {e}", exc_info=True)
@@ -5927,6 +6160,7 @@ class Database:
                 for user in users:
                     await self._refresh_user_subscription_end(conn, user['user_id'])
                     await user_cache.invalidate(user['user_id'])
+                    await self.invalidate_user_cache(user['user_id'])
         except Exception as e:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
@@ -5995,6 +6229,7 @@ class Database:
                         await self._execute_with_conn(conn, "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", user_id, plan_id, 'active', TimeUtils.sql_iso(), new_end.strftime('%Y-%m-%d %H:%M:%S'), 0, 'xtr', payment_id, TimeUtils.sql_iso(), TimeUtils.sql_iso())
                     await self._refresh_user_subscription_end(conn, user_id)
                     await user_cache.invalidate(user_id)
+                    await self.invalidate_user_cache(user_id)
                     return True
         except Exception as e:
             logger.error(f"❌ Error in activate_subscription_with_payment: {e}", exc_info=True)
@@ -6405,6 +6640,7 @@ class Database:
                 for uid in user_ids:
                     await self._execute_with_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
                     await user_cache.invalidate(uid)
+                    await self.invalidate_user_cache(uid)
             return len(user_ids)
         except Exception as e:
             logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
