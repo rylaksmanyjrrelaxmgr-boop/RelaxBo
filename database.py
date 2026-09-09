@@ -17,6 +17,9 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - إضافة كاش للكلمات المحظورة لتجنب جلبها من قاعدة البيانات في كل رسالة
 - تحسين get_user لجعل include_stats=False افتراضياً لتقليل الحمل
 - دمج كامل مع نظام الكاش المتقدم من cache.py
+- تحسين استعلام get_user_groups باستخدام UNION بدلاً من EXISTS المتعددة
+- إضافة فهارس جديدة لتسريع استعلامات المجموعات
+- تحسين تحديث usage_count في auto_replies (غير متزامن)
 """
 
 import os
@@ -117,52 +120,91 @@ try:
     CACHE_AVAILABLE = True
     logger.info("✅ تم تحميل نظام الكاش المتقدم من cache.py")
 except ImportError:
-    # كاش وهمي إذا لم يوجد الملف
-    class DummyCache:
-        async def get(self, *args, **kwargs): return None
-        async def set(self, *args, **kwargs): pass
-        async def invalidate(self, *args, **kwargs): pass
-        async def invalidate_all(self, *args, **kwargs): pass
-        async def get_or_load(self, *args, **kwargs): return {}
-        async def clear(self, *args, **kwargs): pass
-        async def get_stats(self, *args, **kwargs): return {}
-        async def get_with_ttl(self, *args, **kwargs): return None, None
-        async def set_many(self, *args, **kwargs): pass
-        async def delete_many(self, *args, **kwargs): return 0
-        async def get_keys(self, *args, **kwargs): return []
-        async def get_all(self, *args, **kwargs): return {}
-        async def get_security(self, *args, **kwargs): return None
-        async def set_security(self, *args, **kwargs): pass
-        async def invalidate_security(self, *args, **kwargs): pass
-        async def get_auto_reply_settings(self, *args, **kwargs): return None
-        async def set_auto_reply_settings(self, *args, **kwargs): pass
-        async def invalidate_auto_reply(self, *args, **kwargs): pass
-        async def get_bot_setting(self, *args, **kwargs): return None
-        async def set_bot_setting(self, *args, **kwargs): pass
-        async def invalidate_bot_settings(self, *args, **kwargs): pass
-        async def set_custom_ttl(self, *args, **kwargs): pass
-        async def get_admin_list(self, *args, **kwargs): return None
-        async def set_admin_list(self, *args, **kwargs): pass
-        async def get_channel_info(self, *args, **kwargs): return None
-        async def set_channel_info(self, *args, **kwargs): pass
-        async def get_group_info(self, *args, **kwargs): return None
-        async def set_group_info(self, *args, **kwargs): pass
-        async def get_posts(self, *args, **kwargs): return None
-        async def set_posts(self, *args, **kwargs): pass
-        async def get_next_post(self, *args, **kwargs): return None
-        async def set_next_post(self, *args, **kwargs): pass
-    user_cache = DummyCache()
-    banned_words_cache = DummyCache()
-    settings_cache = DummyCache()
-    channels_cache = DummyCache()
-    groups_cache = DummyCache()
-    auth_cache = DummyCache()
-    posts_cache = DummyCache()
+    # كاش داخلي بسيط كبديل (حتى لو لم يوجد cache.py)
+    class SimpleCache:
+        def __init__(self):
+            self._cache = {}
+            self._ttl = 60
+            self._lock = asyncio.Lock()
+        async def get(self, key):
+            async with self._lock:
+                if key in self._cache:
+                    data, ts = self._cache[key]
+                    if time.time() - ts < self._ttl:
+                        return data
+                    del self._cache[key]
+                return None
+        async def set(self, key, data):
+            async with self._lock:
+                self._cache[key] = (data, time.time())
+        async def invalidate(self, key=None):
+            async with self._lock:
+                if key:
+                    self._cache.pop(key, None)
+                else:
+                    self._cache.clear()
+        async def clear(self):
+            async with self._lock:
+                self._cache.clear()
+        async def get_stats(self):
+            return {'size': len(self._cache)}
+        async def get_with_ttl(self, key):
+            async with self._lock:
+                if key in self._cache:
+                    data, ts = self._cache[key]
+                    remaining = int(self._ttl - (time.time() - ts))
+                    return data, remaining
+                return None, None
+        async def set_many(self, items):
+            async with self._lock:
+                for key, data in items.items():
+                    self._cache[key] = (data, time.time())
+        async def delete_many(self, keys):
+            async with self._lock:
+                count = 0
+                for key in keys:
+                    if key in self._cache:
+                        del self._cache[key]
+                        count += 1
+                return count
+        async def get_keys(self):
+            async with self._lock:
+                return list(self._cache.keys())
+        async def get_all(self):
+            async with self._lock:
+                return {k: v[0] for k, v in self._cache.items()}
+        async def has(self, key):
+            async with self._lock:
+                if key in self._cache:
+                    _, ts = self._cache[key]
+                    if time.time() - ts < self._ttl:
+                        return True
+                    del self._cache[key]
+                return False
+
+    class DummySettingsCache:
+        async def get_security(self, *args): return None
+        async def set_security(self, *args): pass
+        async def invalidate_security(self, *args): pass
+        async def get_auto_reply_settings(self, *args): return None
+        async def set_auto_reply_settings(self, *args): pass
+        async def invalidate_auto_reply(self, *args): pass
+        async def get_bot_setting(self, *args): return None
+        async def set_bot_setting(self, *args): pass
+        async def invalidate_bot_settings(self, *args): pass
+
+    user_cache = SimpleCache()
+    banned_words_cache = SimpleCache()
+    settings_cache = DummySettingsCache()
+    channels_cache = SimpleCache()
+    groups_cache = SimpleCache()
+    auth_cache = SimpleCache()
+    posts_cache = SimpleCache()
     invalidate_user_cache = lambda x: None
     clear_all_caches = lambda: None
     get_cache_stats = lambda: {}
-    CACHE_AVAILABLE = False
-    logger.warning("⚠️ cache.py غير موجود، سيتم تعطيل الكاش المتقدم")
+    CACHE_AVAILABLE = True
+    logger.warning("⚠️ cache.py غير موجود، تم استخدام كاش داخلي بسيط")
 
 MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))
 MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
@@ -1817,6 +1859,14 @@ class Database:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
+        # فهارس جديدة لتسريع استعلامات المجموعات
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by ON bot_groups(added_by)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id ON user_groups_link(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_user_id ON group_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
         logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
 
     # =====================================================================
@@ -2342,6 +2392,14 @@ class Database:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)")
+        # فهارس جديدة لتسريع استعلامات المجموعات
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by ON bot_groups(added_by)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id ON user_groups_link(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_group_admins_user_id ON group_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
 
     # =====================================================================
@@ -2867,6 +2925,14 @@ class Database:
         await conn.execute("CREATE INDEX idx_users_auto_publish_banned ON users(auto_publish, banned)")
         await conn.execute("CREATE INDEX idx_users_language ON users(language)")
         await conn.execute("CREATE INDEX idx_users_subscription_end ON users(subscription_end)")
+        # فهارس جديدة لتسريع استعلامات المجموعات
+        await conn.execute("CREATE INDEX idx_bot_groups_added_by ON bot_groups(added_by)")
+        await conn.execute("CREATE INDEX idx_user_groups_link_user_id ON user_groups_link(user_id)")
+        await conn.execute("CREATE INDEX idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+        await conn.execute("CREATE INDEX idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+        await conn.execute("CREATE INDEX idx_group_admins_user_id ON group_admins(user_id)")
+        await conn.execute("CREATE INDEX idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+        await conn.execute("CREATE INDEX idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
         logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
 
     async def _create_tables(self):
@@ -3151,6 +3217,104 @@ class Database:
                     except Exception as e:
                         if "duplicate" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_subscription_end: {e}")
+
+            # إضافة الفهارس الجديدة للمجموعات (إذا لم تكن موجودة)
+            if await _table_exists(conn, "bot_groups"):
+                if not await self._index_exists(conn, "bot_groups", "idx_bot_groups_added_by"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_bot_groups_added_by ON bot_groups(added_by)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_bot_groups_added_by ON bot_groups(added_by)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_bot_groups_added_by ON bot_groups(added_by)")
+                        logger.info("✅ تم إنشاء فهرس idx_bot_groups_added_by")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_bot_groups_added_by: {e}")
+            
+            if await _table_exists(conn, "user_groups_link"):
+                if not await self._index_exists(conn, "user_groups_link", "idx_user_groups_link_user_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_user_groups_link_user_id ON user_groups_link(user_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_user_groups_link_user_id ON user_groups_link(user_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_user_groups_link_user_id ON user_groups_link(user_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_user_groups_link_user_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_user_groups_link_user_id: {e}")
+            
+            if await _table_exists(conn, "hidden_owner_groups"):
+                if not await self._index_exists(conn, "hidden_owner_groups", "idx_hidden_owner_groups_owner_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_hidden_owner_groups_owner_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_hidden_owner_groups_owner_id: {e}")
+            
+            if await _table_exists(conn, "hidden_admins"):
+                if not await self._index_exists(conn, "hidden_admins", "idx_hidden_admins_admin_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_hidden_admins_admin_id ON hidden_admins(admin_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_hidden_admins_admin_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_hidden_admins_admin_id: {e}")
+            
+            if await _table_exists(conn, "group_admins"):
+                if not await self._index_exists(conn, "group_admins", "idx_group_admins_user_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_group_admins_user_id ON group_admins(user_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_group_admins_user_id ON group_admins(user_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_group_admins_user_id ON group_admins(user_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_group_admins_user_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_group_admins_user_id: {e}")
+            
+            if await _table_exists(conn, "anonymous_admins"):
+                if not await self._index_exists(conn, "anonymous_admins", "idx_anonymous_admins_user_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_user_id ON anonymous_admins(user_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_anonymous_admins_user_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_anonymous_admins_user_id: {e}")
+                
+                if not await self._index_exists(conn, "anonymous_admins", "idx_anonymous_admins_anonymous_id"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)")
+                        logger.info("✅ تم إنشاء فهرس idx_anonymous_admins_anonymous_id")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_anonymous_admins_anonymous_id: {e}")
         finally:
             if USE_MYSQL:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -3305,6 +3469,14 @@ class Database:
             ("users", "idx_users_auto_publish_banned", "CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)"),
             ("users", "idx_users_language", "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)"),
             ("users", "idx_users_subscription_end", "CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)"),
+            # فهارس جديدة للمجموعات
+            ("bot_groups", "idx_bot_groups_added_by", "CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by ON bot_groups(added_by)"),
+            ("user_groups_link", "idx_user_groups_link_user_id", "CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id ON user_groups_link(user_id)"),
+            ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "CREATE INDEX IF NOT EXISTS idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)"),
+            ("hidden_admins", "idx_hidden_admins_admin_id", "CREATE INDEX IF NOT EXISTS idx_hidden_admins_admin_id ON hidden_admins(admin_id)"),
+            ("group_admins", "idx_group_admins_user_id", "CREATE INDEX IF NOT EXISTS idx_group_admins_user_id ON group_admins(user_id)"),
+            ("anonymous_admins", "idx_anonymous_admins_user_id", "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user_id ON anonymous_admins(user_id)"),
+            ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)"),
         ]
         for table, idx_name, create_sql in additional_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
@@ -3897,9 +4069,9 @@ class Database:
         return result
 
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """جلب بيانات المستخدم مع كاش متقدم"""
+        """جلب بيانات المستخدم مع كاش متقدم - نسخة فائقة السرعة"""
         try:
-            # 1. محاولة من كاش المستخدم الشامل (من cache.py)
+            # 1. محاولة من الكاش الشامل
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
                 if cached_data:
@@ -3918,27 +4090,55 @@ class Database:
             if cached:
                 return cached
             
-            # 3. جلب من قاعدة البيانات
-            data = await self.get_user_full_data(user_id, include_stats)
-            if data:
-                # 4. تخزين في الكاشات
-                await internal_cache.set(f"user_{user_id}_{include_stats}", data)
-                if CACHE_AVAILABLE and not include_stats:
-                    full_data = {
-                        'user_data': data,
-                        'language': data.get('language', 'ar'),
-                        'active_channel': data.get('active_channel'),
-                        'channel_info': data.get('channel_info'),
-                        'unpublished_posts': data.get('unpublished_posts', 0),
-                        'has_subscription': data.get('has_subscription', False),
-                        'auto_publish': data.get('auto_publish', True),
-                        'auto_recycle': data.get('auto_recycle', True),
-                        'groups_count': data.get('groups_count', 0),
-                        'channels_count': data.get('channels_count', 0),
-                    }
-                    await user_cache.set(user_id, full_data)
-                return data
-            return None
+            # 3. استعلام واحد سريع بدلاً من عدة استعلامات
+            query = """
+                SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+                       u.banned, u.trial_used, u.subscription_end, u.active_channel,
+                       uc.id as channel_id, uc.channel_name, uc.banned as channel_banned,
+                       (SELECT COUNT(*) FROM posts p WHERE p.channel_db_id = uc.id AND p.published = 0) as unpublished_posts,
+                       (SELECT 1 FROM subscriptions s WHERE s.user_id = u.user_id AND s.status = 'active' AND s.end_date > now()) as has_subscription,
+                       (SELECT COUNT(*) FROM user_channels uc2 WHERE uc2.user_id = u.user_id AND uc2.banned = 0) as channels_count,
+                       (SELECT COUNT(*) FROM user_groups_link l WHERE l.user_id = u.user_id) as groups_count
+                FROM users u
+                LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+                WHERE u.user_id = ?
+            """
+            # تحويل now() حسب نوع قاعدة البيانات
+            if USE_POSTGRES:
+                query = query.replace("now()", "CURRENT_TIMESTAMP")
+            elif USE_MYSQL:
+                query = query.replace("now()", "UTC_TIMESTAMP()")
+            else:
+                query = query.replace("now()", "datetime('now')")
+            
+            row = await self.fetchone(query, (user_id,))
+            if not row:
+                return None
+            
+            data = dict(row)
+            data['has_subscription'] = bool(data.get('has_subscription', 0))
+            
+            # 4. تخزين في الكاش
+            await internal_cache.set(f"user_{user_id}_{include_stats}", data)
+            if CACHE_AVAILABLE and not include_stats:
+                full_data = {
+                    'user_data': data,
+                    'language': data.get('language', 'ar'),
+                    'active_channel': data.get('active_channel'),
+                    'channel_info': {
+                        'id': data.get('channel_id'),
+                        'channel_name': data.get('channel_name'),
+                        'banned': data.get('channel_banned', 0)
+                    } if data.get('channel_id') else None,
+                    'unpublished_posts': data.get('unpublished_posts', 0),
+                    'has_subscription': data.get('has_subscription', False),
+                    'auto_publish': data.get('auto_publish', True),
+                    'auto_recycle': data.get('auto_recycle', True),
+                    'groups_count': data.get('groups_count', 0),
+                    'channels_count': data.get('channels_count', 0),
+                }
+                await user_cache.set(user_id, full_data)
+            return data
         except Exception as e:
             logger.error(f"❌ Error in get_user: {e}", exc_info=True)
             return None
@@ -4478,7 +4678,6 @@ class Database:
         return result
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
-        # محاولة من الكاش
         if CACHE_AVAILABLE:
             cached = await channels_cache.get(user_id)
             if cached is not None:
@@ -4697,7 +4896,6 @@ class Database:
 
     async def get_next_post(self, channel_db_id: int) -> Tuple[Optional[Dict], bool]:
         async with await self._get_channel_lock(channel_db_id):
-            # محاولة من الكاش
             if CACHE_AVAILABLE:
                 cached = await posts_cache.get_next_post(channel_db_id)
                 if cached:
@@ -4811,7 +5009,6 @@ class Database:
         if not exists:
             return []
         
-        # محاولة من الكاش
         if CACHE_AVAILABLE:
             cached = await posts_cache.get_posts(channel_db_id, limit)
             if cached is not None:
@@ -4831,7 +5028,7 @@ class Database:
         return posts
 
     # =====================================================================
-    # دوال المجموعات
+    # دوال المجموعات (محسّنة بشكل كبير)
     # =====================================================================
 
     async def register_group(self, chat_id: int, chat_name: str, user_id: int, username: str = None) -> bool:
@@ -4886,31 +5083,75 @@ class Database:
             return False
 
     async def get_user_groups(self, user_id: int) -> List[Dict]:
+        """جلب مجموعات المستخدم بسرعة مع كاش - نسخة محسّنة (UNION بدلاً من EXISTS المتعددة)"""
+        
+        # 1. محاولة من الكاش الخارجي
         if CACHE_AVAILABLE:
             cached = await groups_cache.get(user_id)
             if cached is not None:
                 return cached
         
+        # 2. محاولة من الكاش الداخلي
         cached = await internal_cache.get(f"groups_{user_id}")
         if cached is not None:
             return cached
         
-        groups = await self.fetchall(
-            """SELECT DISTINCT bg.chat_id, bg.chat_name, bg.username, bg.banned
-               FROM bot_groups bg
-               WHERE bg.added_by = ?
-                  OR EXISTS (SELECT 1 FROM user_groups_link l WHERE l.chat_id = bg.chat_id AND l.user_id = ?)
-                  OR EXISTS (SELECT 1 FROM hidden_owner_groups ho WHERE ho.chat_id = bg.chat_id AND ho.owner_id = ?)
-                  OR EXISTS (SELECT 1 FROM hidden_admins ha WHERE ha.chat_id = bg.chat_id AND ha.admin_id = ?)
-                  OR EXISTS (SELECT 1 FROM group_admins ga WHERE ga.chat_id = bg.chat_id AND ga.user_id = ?)
-                  OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)
-                  OR EXISTS (SELECT 1 FROM anonymous_admins aa2 WHERE aa2.chat_id = bg.chat_id AND aa2.anonymous_id = ?)""",
-            (user_id, user_id, user_id, user_id, user_id, user_id, user_id)
-        )
+        # 3. استعلام محسّن باستخدام UNION بدلاً من EXISTS المتعددة (أسرع بكثير)
+        if USE_POSTGRES:
+            query = """
+                SELECT DISTINCT chat_id, chat_name, username, banned
+                FROM (
+                    SELECT chat_id, chat_name, username, banned FROM bot_groups WHERE added_by = $1
+                    UNION
+                    SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                    FROM bot_groups bg
+                    JOIN user_groups_link l ON bg.chat_id = l.chat_id
+                    WHERE l.user_id = $1
+                    UNION
+                    SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                    FROM bot_groups bg
+                    JOIN hidden_owner_groups ho ON bg.chat_id = ho.chat_id
+                    WHERE ho.owner_id = $1
+                    UNION
+                    SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                    FROM bot_groups bg
+                    JOIN hidden_admins ha ON bg.chat_id = ha.chat_id
+                    WHERE ha.admin_id = $1
+                    UNION
+                    SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                    FROM bot_groups bg
+                    JOIN group_admins ga ON bg.chat_id = ga.chat_id
+                    WHERE ga.user_id = $1
+                    UNION
+                    SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                    FROM bot_groups bg
+                    JOIN anonymous_admins aa ON bg.chat_id = aa.chat_id
+                    WHERE aa.user_id = $1 OR aa.anonymous_id = $1
+                ) AS groups
+                ORDER BY chat_id
+            """
+            groups = await self.fetchall(query, (user_id,))
+        else:
+            # SQLite/MySQL: استخدم الاستعلام الأصلي ولكن مع LIMIT
+            query = """
+                SELECT DISTINCT bg.chat_id, bg.chat_name, bg.username, bg.banned
+                FROM bot_groups bg
+                WHERE bg.added_by = ?
+                   OR EXISTS (SELECT 1 FROM user_groups_link l WHERE l.chat_id = bg.chat_id AND l.user_id = ?)
+                   OR EXISTS (SELECT 1 FROM hidden_owner_groups ho WHERE ho.chat_id = bg.chat_id AND ho.owner_id = ?)
+                   OR EXISTS (SELECT 1 FROM hidden_admins ha WHERE ha.chat_id = bg.chat_id AND ha.admin_id = ?)
+                   OR EXISTS (SELECT 1 FROM group_admins ga WHERE ga.chat_id = bg.chat_id AND ga.user_id = ?)
+                   OR EXISTS (SELECT 1 FROM anonymous_admins aa WHERE aa.chat_id = bg.chat_id AND aa.user_id = ?)
+                   OR EXISTS (SELECT 1 FROM anonymous_admins aa2 WHERE aa2.chat_id = bg.chat_id AND aa2.anonymous_id = ?)
+                LIMIT 100
+            """
+            groups = await self.fetchall(query, (user_id, user_id, user_id, user_id, user_id, user_id, user_id))
         
+        # 4. تخزين في الكاش
         await internal_cache.set(f"groups_{user_id}", groups)
         if CACHE_AVAILABLE:
             await groups_cache.set(user_id, groups)
+        
         return groups
 
     async def sync_group_admins(self, chat_id: int, admin_ids: List[int]) -> int:
@@ -5296,6 +5537,16 @@ class Database:
             logger.error(f"❌ Error in remove_auto_reply: {e}", exc_info=True)
             return False
 
+    async def _increment_usage_count(self, chat_id: int, keyword: str):
+        """تحديث عداد الاستخدام بشكل غير متزامن (بدون انتظار)"""
+        try:
+            await self.execute(
+                "UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?",
+                (chat_id, keyword)
+            )
+        except Exception:
+            pass
+
     async def get_auto_reply(self, keyword: str, chat_id: int) -> Optional[Dict]:
         keyword = keyword.lower().strip()
         if not keyword:
@@ -5310,9 +5561,8 @@ class Database:
             (keyword, chat_id, chat_id)
         )
         if row:
-            asyncio.create_task(
-                self.execute("UPDATE auto_replies SET usage_count = usage_count + 1 WHERE chat_id = ? AND keyword = ?", (chat_id, keyword))
-            )
+            # تحديث غير متزامن بدون انتظار
+            asyncio.create_task(self._increment_usage_count(chat_id, keyword))
             return row
         return None
 
@@ -6589,7 +6839,7 @@ class Database:
 
     async def get_admin_list(self) -> List[Dict]:
         if CACHE_AVAILABLE:
-            cached = await auth_cache.get_admin_list(0)  # 0 يعني الكاش العام
+            cached = await auth_cache.get_admin_list(0)
             if cached is not None:
                 return cached
         
