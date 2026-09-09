@@ -6,39 +6,12 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 ================================================================================
 - دعم SQLite (افتراضي) و PostgreSQL و MySQL عبر DATABASE_URL
 - جميع الدوال (أكثر من 150) تعمل بكلا النظامين
-- تجمع اتصالات متقدم (asyncio.Queue لـ SQLite، asyncpg/asyncmy للأنظمة الأخرى)
-- أقفال دقيقة مع LRU لإدارة الذاكرة ومنع التعارض (قابل للتكوين)
-- معاملات ذرية وإعادة محاولة ذكية مع backoff
+- تجمع اتصالات متقدم مع أقفال دقيقة وإعادة محاولة ذكية
 - نسخ احتياطي واستعادة متكامل مع دعم الضغط
-- تحسين الأداء: فهارس محسّنة، استعلامات مجمّعة، تتبع الاستعلامات البطيئة
-- إصلاح شامل للتواريخ والمناطق الزمنية (جميع التواريخ naive)
-- إدارة العقوبات والمخالفات والنقاط والإحالات والمسابقات والاشتراكات
-- جميع دوال الأمان والمجموعات والمشرفين المخفيين والمجهولين
-- تحسين استعلام get_channels_to_publish لتجنب WITH في MySQL القديم
-- دمج كاش المستخدم (user_cache) لتسريع /start من 8 استعلامات إلى 1
-- إبطال كاش المستخدم تلقائياً عند تغيير أي بيانات
-- تحسين دالة add_channel لإرجاع معلومات القناة فوراً
-- تحسين دالة get_next_post بإرجاع recycled flag وضمان إرجاع dict
-- إصلاح MySQL: استخدام INNER JOIN مع الاشتراكات النشطة لمنع النشر بدون اشتراك
-- إضافة published_count في استعلام MySQL لإشعارات النشر الذكية
-- إضافة دالة reload_banned_words() لتحديث الكلمات المحظورة ديناميكياً
-- تحسين _get_unique_columns لجلب PRIMARY KEY أولاً ثم المفاتيح الفريدة مع التحقق من وجود الأعمدة
-- جعل حجم الدفعة في add_posts قابلاً للتكوين عبر POSTS_BATCH_SIZE
-- تحسين إدارة اتصالات SQLite: منع فتح اتصالات غير محدودة
-- جميع الجداول مكتوبة بالكامل لجميع الأنظمة (SQLite, PostgreSQL, MySQL)
-- استخدام user_cache.get_or_load في get_user
-- إضافة معامل set_active اختياري في add_channel
-- فحص وجود الأدوات الخارجية (pg_dump, mysqldump) قبل النسخ الاحتياطي
-- ✅ [إصلاح] استخدام dict عادي بدلاً من WeakValueDictionary للأقفال مع تنظيف LRU
-- ✅ [إصلاح] _get_user_lock: التحقق من وجود المفتاح وإنشائه إذا لم يكن موجوداً
-- ✅ [إصلاح] _add_column_safe: التحقق المباشر من وجود العمود ثم ALTER TABLE بسيط في PostgreSQL
-- ✅ [إصلاح] _migrate_schema: تحسين إضافة عمود text_hash
-- ✅ [إصلاح] جميع الإصلاحات السابقة محفوظة
-- ✅ [إصلاح] إضافة دالة _column_exists للتحقق من وجود العمود
-- ✅ [إصلاح] إضافة دالة _ensure_text_hash_column لضمان وجود العمود text_hash في جميع البيئات
-- ✅ [إصلاح] تعديل add_posts للتحقق من وجود text_hash والتكيف معه
-- ✅ [إصلاح] تحسين pre_initialize و initialize_db لاستدعاء _ensure_text_hash_column بعد الترحيل
-- لا يوجد اختصار أو تبسيط أو حذف لأي دالة أو ميزة
+- فهارس محسّنة لتسريع الاستعلامات البطيئة
+- تحسين أداء `/start` باستخدام كاش المستخدم وتقليل عدد الاستعلامات
+- جميع الدوال مكتملة بدون حذف أي ميزة
+- تحسين استعلام active_channel بإضافة فهارس وتحسين الاستعلامات الفرعية
 """
 
 import os
@@ -193,24 +166,17 @@ KNOWN_UNIQUE_FALLBACK = {
 _UNIQUE_CACHE = {}
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
-    """
-    جلب المفاتيح الفريدة (بما في ذلك المفتاح الأساسي) للجدول.
-    نفضل المفتاح الأساسي إن وجد، وإلا أول مفتاح فريد.
-    ✅ [إصلاح] التحقق من وجود الأعمدة قبل إرجاعها
-    """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
 
     columns = []
     existing_columns = set()
 
-    # جلب أسماء الأعمدة الموجودة أولاً
     try:
         if USE_POSTGRES:
             rows = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name = $1", table)
             existing_columns = {row['column_name'] for row in rows}
         elif USE_MYSQL:
-            # التحقق من وجود الجدول أولاً
             if not await _table_exists(conn, table):
                 return KNOWN_UNIQUE_FALLBACK.get(table, ['id'])
             cursor = await conn.cursor()
@@ -495,7 +461,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             else:
                 new_query = new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
             return new_query
-        # التحقق من وجود الأعمدة قبل استخدام EXCLUDED
         existing_columns = set()
         try:
             if USE_POSTGRES:
@@ -512,7 +477,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                 existing_columns = {row[1] for row in rows}
         except Exception:
             pass
-        # تصفية الأعمدة غير الموجودة
         set_columns = [col for col in set_columns if col in existing_columns]
         if not set_columns:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
@@ -536,10 +500,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         return query
 
 def _convert_upsert(query: str) -> str:
-    """
-    تحويل ON CONFLICT ... DO UPDATE إلى ON DUPLICATE KEY UPDATE لـ MySQL.
-    ✅ [إصلاح] معالجة PostgreSQL أيضاً
-    """
     if DB_TYPE == "sqlite":
         return query
     if not USE_MYSQL and not USE_POSTGRES:
@@ -558,7 +518,6 @@ def _convert_upsert(query: str) -> str:
         new_query = re.sub(pattern, '', query, flags=re.IGNORECASE).rstrip()
         return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
     else:
-        # PostgreSQL: الإبقاء على ON CONFLICT كما هو (يُترك للـ asyncpg)
         return query
 
 def _adapt_params(params: tuple) -> tuple:
@@ -569,7 +528,6 @@ def _adapt_params(params: tuple) -> tuple:
         if isinstance(p, datetime):
             if p.tzinfo is not None:
                 p = p.replace(tzinfo=None)
-            # ✅ [إصلاح] تحويل datetime إلى نص لـ MySQL و SQLite
             if USE_POSTGRES:
                 new_params.append(p)
             else:
@@ -596,7 +554,7 @@ async def _table_exists(conn, table: str) -> bool:
         return False
 
 # =====================================================================
-# 2. فئة TimeUtils (محسّنة)
+# 2. فئة TimeUtils
 # =====================================================================
 
 class TimeUtils:
@@ -646,7 +604,6 @@ class TimeUtils:
             return date_str
         if not isinstance(date_str, str):
             return None
-        # إزالة +00:00 إذا وجدت
         if date_str.endswith('+00:00'):
             date_str = date_str[:-6]
         try:
@@ -677,8 +634,7 @@ class TimeUtils:
 class Database:
     _instance = None
     _lock = asyncio.Lock()
-    # ✅ [إصلاح] استخدام dict عادي بدلاً من WeakValueDictionary
-    _user_locks = {}  # user_id -> asyncio.Lock
+    _user_locks = {}
     _channel_locks = defaultdict(lambda: asyncio.Lock())
     _user_locks_last_access = {}
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
@@ -714,7 +670,6 @@ class Database:
         self._secondary_index_task = None
         self._sqlite_creation_lock = asyncio.Lock()
         self._sqlite_semaphore = asyncio.Semaphore(SQLITE_POOL_SIZE)
-        # أقفال جديدة للحماية
         self._user_locks_lock = asyncio.Lock()
         self._channel_locks_lock = asyncio.Lock()
         self._channel_locks_last_access = {}
@@ -765,7 +720,6 @@ class Database:
                 )
                 logger.info(f"✅ Pool MySQL جاهز (max={self._max_connections})")
             else:
-                # ✅ [إصلاح] إنشاء الاتصال أولاً ثم إنشاء الطابور
                 conn = await self._create_sqlite_connection()
                 if conn is None:
                     raise RuntimeError("فشل إنشاء اتصال SQLite الأولي")
@@ -776,7 +730,6 @@ class Database:
             if self._cleanup_task is None:
                 self._cleanup_task = asyncio.create_task(self._auto_cleanup_locks())
         except Exception as e:
-            # إغلاق الموارد المفتوحة جزئياً
             if self._pool is not None:
                 if USE_POSTGRES:
                     await self._pool.close()
@@ -810,7 +763,6 @@ class Database:
             return None
 
     async def close(self):
-        # إلغاء المهام الخلفية بشكل صحيح
         tasks = []
         if self._cleanup_task:
             self._cleanup_task.cancel()
@@ -921,7 +873,7 @@ class Database:
             await self._return_connection(conn)
 
     # =====================================================================
-    # 4. دوال الاستعلام (محسّنة مع تتبع وقت التنفيذ وإعادة محاولة متقدمة)
+    # 4. دوال الاستعلام (محسّنة)
     # =====================================================================
 
     async def _execute_with_logging(self, query: str, params: tuple, conn, executor):
@@ -962,7 +914,6 @@ class Database:
                 return await executor(query, params)
             except Exception as e:
                 last_exception = e
-                # ✅ [إصلاح] إضافة المزيد من الأخطاء القابلة لإعادة المحاولة
                 retryable = False
                 if DB_TYPE == "sqlite" and isinstance(e, sqlite3.OperationalError):
                     error_msg = str(e).lower()
@@ -1056,7 +1007,6 @@ class Database:
             cursor = await conn.cursor()
             await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
             row = await cursor.fetchone()
-            # ✅ [إصلاح] التحقق من cursor.description
             if row and cursor.description:
                 columns = [desc[0] for desc in cursor.description]
                 return dict(zip(columns, row))
@@ -1078,7 +1028,6 @@ class Database:
             cursor = await conn.cursor()
             await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
             rows = await cursor.fetchall()
-            # ✅ [إصلاح] التحقق من cursor.description
             if rows and cursor.description:
                 columns = [desc[0] for desc in cursor.description]
                 return [dict(zip(columns, row)) for row in rows]
@@ -1139,13 +1088,11 @@ class Database:
         return await self._execute_with_retry(q, params_list, _exec)
 
     # =====================================================================
-    # 5. دوال الأقفال (محسّنة مع LRU باستخدام dict عادي)
+    # 5. دوال الأقفال
     # =====================================================================
 
-    # ✅ [إصلاح] استخدام dict عادي مع فحص الوجود وإنشاء القفل إذا لم يكن موجوداً
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         async with self._user_locks_lock:
-            # تنظيف إذا تجاوز الحد
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
                 sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
                 to_remove = sorted_items[:len(sorted_items)//2]
@@ -1153,7 +1100,6 @@ class Database:
                     self._user_locks.pop(uid, None)
                     self._user_locks_last_access.pop(uid, None)
                 logger.warning(f"🧹 تم تنظيف {len(to_remove)} قفل مستخدم")
-            # إنشاء القفل إذا لم يكن موجوداً
             if user_id not in self._user_locks:
                 self._user_locks[user_id] = asyncio.Lock()
             self._user_locks_last_access[user_id] = time.monotonic()
@@ -1216,16 +1162,17 @@ class Database:
                 logger.error(f"❌ Error in _auto_cleanup_locks: {e}")
 
     # =====================================================================
-    # 6. إنشاء الجداول (كاملة) - مع تحسينات
+    # 6. إنشاء الجداول (كاملة)
     # =====================================================================
 
-    # دالة مساعدة لحساب هاش النص
     def _compute_text_hash(self, text: Optional[str]) -> str:
         if text is None:
             return hashlib.sha256(b'').hexdigest()
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
+    # =====================================================================
     # 6.1 جداول SQLite (كاملة)
+    # =====================================================================
     async def _create_tables_sqlite(self, conn):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1731,11 +1678,14 @@ class Database:
                 archived_at TEXT
             )
         """)
-        # إضافة فهرس على text_hash
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
         logger.info("✅ تم إنشاء جميع جداول SQLite")
 
+    # =====================================================================
     # 6.2 جداول PostgreSQL (كاملة)
+    # =====================================================================
     async def _create_tables_postgres(self, conn):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1784,6 +1734,7 @@ class Database:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique ON posts(channel_db_id, text_hash, media_type, media_file_id)
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS schedule (
                 channel_db_id INTEGER PRIMARY KEY,
@@ -2245,9 +2196,12 @@ class Database:
                 archived_at TIMESTAMP
             )
         """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL")
 
+    # =====================================================================
     # 6.3 جداول MySQL (كاملة)
+    # =====================================================================
     async def _create_tables_mysql(self, conn):
         await conn.execute("SET FOREIGN_KEY_CHECKS=0")
         await conn.execute("""
@@ -2267,6 +2221,7 @@ class Database:
                 active_channel INT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
+        await conn.execute("CREATE INDEX idx_users_active_channel ON users(active_channel)")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_channels (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2669,6 +2624,7 @@ class Database:
                 FOREIGN KEY (plan_id) REFERENCES plans(id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
+        await conn.execute("CREATE INDEX idx_subscriptions_active ON subscriptions(user_id, status, end_date)")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2771,16 +2727,14 @@ class Database:
                 await self._create_tables_sqlite(conn)
 
     # =====================================================================
-    # 6.4 ترحيل المخطط (مُحسَّن)
+    # 6.4 ترحيل المخطط
     # =====================================================================
 
-    # ✅ [إصلاح] طريقة مباشرة وآمنة لإضافة الأعمدة في PostgreSQL
     async def _add_column_safe(self, conn, table: str, col_name: str, col_def: str):
         if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table) or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col_name):
             return
         try:
             if USE_POSTGRES:
-                # تحقق من وجود العمود
                 exists = await conn.fetchval(
                     "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
                     table, col_name
@@ -2788,8 +2742,6 @@ class Database:
                 if not exists:
                     await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}')
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
-                else:
-                    logger.debug(f"ℹ️ العمود {col_name} موجود بالفعل في جدول {table}")
             elif USE_MYSQL:
                 await conn.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{col_name}` {col_def}")
             else:
@@ -2802,9 +2754,7 @@ class Database:
             if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                 logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
-    # دالة للتحقق من وجود عمود
     async def _column_exists(self, conn, table: str, column: str) -> bool:
-        """التحقق من وجود عمود في جدول مع التعامل مع الأخطاء"""
         try:
             if USE_POSTGRES:
                 row = await conn.fetchval(
@@ -2825,12 +2775,7 @@ class Database:
             logger.warning(f"⚠️ فشل التحقق من وجود العمود {column} في {table}: {e}")
             return False
 
-    # دالة ضمان وجود text_hash (✅ إضافة جديدة)
     async def _ensure_text_hash_column(self, conn) -> bool:
-        """
-        التأكد من وجود عمود text_hash في جدول posts.
-        تعيد True إذا كان العمود موجوداً (أو تم إضافته)، False في حالة الفشل.
-        """
         try:
             if not await _table_exists(conn, "posts"):
                 logger.warning("⚠️ جدول posts غير موجود، لا يمكن إضافة text_hash")
@@ -2839,11 +2784,9 @@ class Database:
             if await self._column_exists(conn, "posts", "text_hash"):
                 return True
 
-            # محاولة إضافة العمود
             try:
                 if USE_POSTGRES:
                     await conn.execute('ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT \'\'')
-                    # تأكيد التغيير (PostgreSQL تلقائي لكن للتأكد)
                     await conn.execute('COMMIT')
                     logger.info("✅ تم إضافة عمود text_hash إلى posts (PostgreSQL)")
                 elif USE_MYSQL:
@@ -2853,7 +2796,6 @@ class Database:
                     await conn.execute('ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT \'\'')
                     logger.info("✅ تم إضافة عمود text_hash إلى posts (SQLite)")
 
-                # إنشاء فهرس إذا لم يكن موجوداً
                 if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
                     try:
                         if USE_POSTGRES:
@@ -2878,7 +2820,6 @@ class Database:
             return False
 
     async def _migrate_schema(self, conn):
-        # تعطيل foreign_keys مؤقتاً في MySQL
         if USE_MYSQL:
             await conn.execute("SET FOREIGN_KEY_CHECKS=0")
         try:
@@ -2916,8 +2857,22 @@ class Database:
                     if col_name not in existing:
                         await self._add_column_safe(conn, table, col_name, col_def)
 
-            # ✅ التأكد من وجود text_hash (بعد الترحيل)
             await self._ensure_text_hash_column(conn)
+
+            # إضافة فهارس جديدة لتسريع الاستعلامات البطيئة
+            if await _table_exists(conn, "users"):
+                if not await self._index_exists(conn, "users", "idx_users_active_channel"):
+                    try:
+                        if USE_POSTGRES:
+                            await conn.execute("CREATE INDEX idx_users_active_channel ON users(active_channel)")
+                        elif USE_MYSQL:
+                            await conn.execute("CREATE INDEX idx_users_active_channel ON users(active_channel)")
+                        else:
+                            await conn.execute("CREATE INDEX idx_users_active_channel ON users(active_channel)")
+                        logger.info("✅ تم إنشاء فهرس idx_users_active_channel")
+                    except Exception as e:
+                        if "duplicate" not in str(e).lower():
+                            logger.warning(f"⚠️ فشل إنشاء فهرس idx_users_active_channel: {e}")
 
         finally:
             if USE_MYSQL:
@@ -2943,7 +2898,7 @@ class Database:
             return set()
 
     # =====================================================================
-    # 6.5 إنشاء الفهارس (محسَّن)
+    # 6.5 إنشاء الفهارس
     # =====================================================================
 
     async def _index_exists(self, conn, table: str, idx_name: str) -> bool:
@@ -2992,6 +2947,7 @@ class Database:
             ("subscriptions", "idx_sub_status", "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)"),
             ("subscriptions", "idx_sub_end", "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)"),
             ("subscriptions", "idx_sub_user_status_end", "CREATE INDEX IF NOT EXISTS idx_sub_user_status_end ON subscriptions(user_id, status, end_date)"),
+            ("subscriptions", "idx_subscriptions_active", "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)"),
             ("invoices", "idx_inv_user", "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)"),
             ("referrals", "idx_referrals_referrer", "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)"),
             ("contests", "idx_contests_status", "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)"),
@@ -3003,6 +2959,7 @@ class Database:
             ("user_penalties", "idx_penalties_expiry", "CREATE INDEX IF NOT EXISTS idx_penalties_expiry ON user_penalties(status, end_time)"),
             ("user_points", "idx_points_user", "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)"),
             ("posts", "idx_posts_text_hash", "CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)"),
+            ("users", "idx_users_active_channel", "CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)"),
         ]
 
         for table, idx_name, create_sql in essential_indexes:
@@ -3054,17 +3011,13 @@ class Database:
             ("user_channels", "idx_user_channels_user_created", "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at)"),
             ("user_channels", "idx_user_channels_id_user", "CREATE INDEX IF NOT EXISTS idx_user_channels_id_user ON user_channels(id, user_id, banned)"),
             ("posts", "idx_posts_next", "CREATE INDEX IF NOT EXISTS idx_posts_next ON posts(channel_db_id, published, fail_count, created_at)"),
-            ("subscriptions", "idx_subscriptions_active", "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)"),
-            ("subscriptions", "idx_subscriptions_user_status", "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status, end_date)"),
             ("posts", "idx_posts_channel_pub_fail_count", "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_count ON posts(channel_db_id, published, fail_count)"),
             ("user_channels", "idx_user_channels_user_banned_id", "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned_id ON user_channels(user_id, banned, id)"),
         ]
 
-        # إنشاء الفهارس الأساسية فوراً
         for table, idx_name, create_sql in essential_indexes:
             await self._create_index_if_not_exists(conn, table, create_sql, idx_name)
 
-        # جدولة الفهارس الثانوية في الخلفية
         if self._secondary_index_task is None:
             self._secondary_index_task = asyncio.create_task(self._create_secondary_indexes(secondary_indexes))
 
@@ -3289,7 +3242,6 @@ class Database:
                 await self._init_default_data(conn)
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
-                # ✅ التأكد من وجود text_hash بعد كل شيء
                 await self._ensure_text_hash_column(conn)
             logger.info("✅ تم تهيئة قاعدة البيانات بنجاح")
             return True
@@ -3303,7 +3255,6 @@ class Database:
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
-                # ✅ التأكد من وجود text_hash بعد الترحيل (قبل الفهارس)
                 await self._ensure_text_hash_column(conn)
                 await self._create_indexes(conn)
                 await self._init_default_data(conn)
@@ -3316,7 +3267,7 @@ class Database:
             return False
 
     # =====================================================================
-    # 7. النسخ الاحتياطي والاستعادة والصيانة (مكتمل مع ضغط)
+    # 7. النسخ الاحتياطي والاستعادة والصيانة
     # =====================================================================
 
     async def _compress_backup(self, file_path: Path) -> Optional[Path]:
@@ -3730,78 +3681,58 @@ class Database:
             return False
 
     # =====================================================================
-    # دوال المستخدمين المُحسَّنة
+    # دوال المستخدمين المُحسَّنة (تحسين استعلام active_channel)
     # =====================================================================
 
     async def get_user_full_data(self, user_id: int, include_stats: bool = True) -> Optional[Dict]:
+        """
+        جلب بيانات المستخدم الكاملة مع تحسين الأداء.
+        استخدم هذا بدلاً من get_user للحصول على جميع البيانات دفعة واحدة.
+        """
+        query = """
+            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
+                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
+            FROM users u
+            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            WHERE u.user_id = ?
+        """
+        row = await self.fetchone(query, (user_id,))
+        if not row:
+            return None
+        
+        result = dict(row)
+        
         if include_stats:
-            query = """
-                SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
-                       u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                       uc.id as channel_id, uc.channel_name, uc.banned as channel_banned,
-                       COALESCE(pc.unpublished_count, 0) as unpublished_posts,
-                       CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as has_subscription,
-                       COALESCE(cc.channels_count, 0) as channels_count,
-                       COALESCE(gc.groups_count, 0) as groups_count
-                FROM users u
-                LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
-                LEFT JOIN (
-                    SELECT user_id, COUNT(*) as unpublished_count
-                    FROM posts p
-                    JOIN user_channels uc2 ON p.channel_db_id = uc2.id
-                    WHERE p.published = 0
-                    GROUP BY uc2.user_id
-                ) pc ON u.user_id = pc.user_id
-                LEFT JOIN (
-                    SELECT user_id, 1 as user_id_exists
-                    FROM subscriptions
-                    WHERE status = 'active' AND end_date > ?
-                    GROUP BY user_id
-                ) s ON u.user_id = s.user_id
-                LEFT JOIN (
-                    SELECT user_id, COUNT(*) as channels_count
-                    FROM user_channels
-                    WHERE banned = 0
-                    GROUP BY user_id
-                ) cc ON u.user_id = cc.user_id
-                LEFT JOIN (
-                    SELECT user_id, COUNT(*) as groups_count
-                    FROM user_groups_link
-                    GROUP BY user_id
-                ) gc ON u.user_id = gc.user_id
-                WHERE u.user_id = ?
-            """
-            row = await self.fetchone(query, (TimeUtils.utc_now(), user_id))
+            # جلب الإحصائيات في استعلام واحد
+            stats = await self.fetchone("""
+                SELECT 
+                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
+                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
+                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
+                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
+            """, (user_id, user_id, TimeUtils.utc_now(), user_id, user_id))
+            
+            if stats:
+                result['unpublished_posts'] = stats.get('unpublished_posts', 0)
+                result['has_subscription'] = bool(stats.get('has_subscription', 0))
+                result['channels_count'] = stats.get('channels_count', 0)
+                result['groups_count'] = stats.get('groups_count', 0)
         else:
-            query = """
-                SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
-                       u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                       uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
-                FROM users u
-                LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
-                WHERE u.user_id = ?
-            """
-            row = await self.fetchone(query, (user_id,))
-
-        if row:
-            result = dict(row)
-            if include_stats:
-                result['has_subscription'] = bool(result.get('has_subscription', 0))
-            else:
-                result['has_subscription'] = False
-                result['unpublished_posts'] = 0
-                result['channels_count'] = 0
-                result['groups_count'] = 0
-
-            result['channel_info'] = None
-            if result.get('channel_id'):
-                result['channel_info'] = {
-                    'id': result['channel_id'],
-                    'channel_name': result.get('channel_name', ''),
-                    'banned': result.get('channel_banned', 0),
-                }
-            return result
-        return None
+            result['has_subscription'] = False
+            result['unpublished_posts'] = 0
+            result['channels_count'] = 0
+            result['groups_count'] = 0
+        
+        result['channel_info'] = None
+        if result.get('channel_id'):
+            result['channel_info'] = {
+                'id': result['channel_id'],
+                'channel_name': result.get('channel_name', ''),
+                'banned': result.get('channel_banned', 0),
+            }
+        
+        return result
 
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
         try:
@@ -3997,7 +3928,7 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات
+    # دوال القنوات (محسّنة)
     # =====================================================================
 
     async def add_channel(self, user_id: int, channel_id: int, channel_name: str, set_active: bool = True) -> Optional[Dict]:
@@ -4239,7 +4170,7 @@ class Database:
         return await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
 
     # =====================================================================
-    # دوال المنشورات (محسّنة للتعامل مع text_hash)
+    # دوال المنشورات (محسّنة)
     # =====================================================================
 
     async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
@@ -4248,12 +4179,10 @@ class Database:
                 return 0
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # التحقق من وجود القناة
                     row = await self._fetchone_with_conn(conn, "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0", channel_db_id, user_id)
                     if not row:
                         return 0
 
-                    # جلب الحد الأقصى للمنشورات
                     if USE_POSTGRES:
                         plan_row = await self._fetchone_with_conn(
                             conn,
@@ -4286,10 +4215,8 @@ class Database:
                     max_posts = plan_row['max_posts'] or 0
                     current_count = plan_row['cnt'] or 0
 
-                    # ✅ التأكد من وجود عمود text_hash
                     has_text_hash = await self._ensure_text_hash_column(conn)
 
-                    # إزالة التكرار داخل الدفعة
                     unique_posts = []
                     seen_local = set()
                     for t, m, f in posts:
@@ -4301,7 +4228,6 @@ class Database:
                             seen_local.add(key)
                             unique_posts.append((text, m, f))
 
-                    # التحقق من التكرار مع قاعدة البيانات
                     final_posts = []
                     for t, m, f in unique_posts:
                         text_clean = (t or "")[:4096] if self._max_post_text_length == 0 else (t or "")[:self._max_post_text_length]
@@ -4316,7 +4242,6 @@ class Database:
                                 channel_db_id, text_hash, media_type, media_file_id
                             )
                         else:
-                            # استخدم النص مباشرة (أقل دقة لكن يعمل)
                             exists = await self._fetchone_with_conn(
                                 conn,
                                 "SELECT 1 FROM posts WHERE channel_db_id = ? AND text = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
@@ -4329,14 +4254,12 @@ class Database:
                     if not final_posts:
                         return 0
 
-                    # تطبيق الحد الأقصى
                     if current_count + len(final_posts) > max_posts:
                         allowed = max(0, max_posts - current_count)
                         if allowed == 0:
                             return 0
                         final_posts = final_posts[:allowed]
 
-                    # إدراج المنشورات
                     total = 0
                     batch_size = self._posts_batch_size
                     for i in range(0, len(final_posts), batch_size):
@@ -6070,7 +5993,7 @@ class Database:
         )
 
     # =====================================================================
-    # دوال الإحصائيات (مع التصحيح النهائي)
+    # دوال الإحصائيات
     # =====================================================================
 
     async def get_bot_stats(self) -> Dict:
