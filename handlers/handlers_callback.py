@@ -12,6 +12,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - بدون تبسيط أو حذف أو تخريب
 - جميع الثوابت معرفة بشكل صحيح
 - دعم كامل لجميع أزرار لوحة الأدمن
+- ✅ [v7.5.0] إبطال كاش الاشتراك الإجباري عند زر "تحقق"
 """
 
 import asyncio
@@ -39,7 +40,7 @@ from utils import (
     fetch_json_from_url
 )
 from cache import user_cache, invalidate_user_cache
-from .handlers_command import CommandHandlers
+from .handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
 logger = logging.getLogger(__name__)
 
@@ -621,8 +622,14 @@ class CallbackHandlers:
                 await CommandHandlers.language(update, context)
                 return
 
+            # ✅ v7.5.0: إبطال كاش الاشتراك الإجباري عند زر "تحقق"
             if base_data == CB.CHECK_SUB:
                 await _safe_answer(query)
+                # إبطال الكاش ليُعاد الفحص فوراً
+                try:
+                    _invalidate_force_sub_cache(user_id)
+                except Exception as e:
+                    logger.debug(f"فشل إبطال كاش الاشتراك الإجباري: {e}")
                 StateManager.clear(user_id)
                 await CommandHandlers.start(update, context)
                 return
@@ -2096,6 +2103,11 @@ class CallbackHandlers:
             # ===== معالج تعطيل الاشتراك الإجباري =====
             elif data == "admin_disable_force":
                 await DB.execute("UPDATE settings SET value = '' WHERE key = 'force_subscribe_channel'")
+                # ✅ إبطال الكاش في handlers_command
+                try:
+                    _invalidate_force_sub_cache()
+                except Exception as e:
+                    logger.debug(f"فشل إبطال كاش الاشتراك الإجباري: {e}")
                 await safe_edit(query, "✅ تم تعطيل الاشتراك الإجباري", bot=context.bot)
                 return
 
