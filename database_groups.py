@@ -1,17 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.3.2)
+database_groups.py - دوال المجموعات (v7.4.1)
 ================================================================================
 GroupsMixin:
-  - تسجيل المجموعات وإدارتها
-  - المشرفون المخفيون والمجهولون
-  - إعدادات الأمان
-  - التحذيرات
-  - سجلات المشرفين
-  - الردود التلقائية
-  - الكلمات المحظورة
-  - إعدادات العقوبات والمخالفات
+  1.  كاش الكلمات المحظورة المحلي
+  2.  تسجيل المجموعات وإدارتها
+  3.  مشرفو المجموعات (Group Admins)
+  4.  المشرفون المخفيون (Hidden Admins)
+  5.  المشرفون المجهولون (Anonymous Admins)
+  6.  إعدادات الأمان (Security)
+  7.  التحذيرات (Warnings)
+  8.  سجلات المشرفين (Admin Logs)
+  9.  الردود التلقائية (Auto Replies)
+  10. الكلمات المحظورة (Banned Words)
+  11. إعدادات العقوبات (Penalty Settings)
+  12. المخالفات (Violations)
+
+📌 مطابق 100% للسلوك الأصلي في database.py (بما في ذلك رسائل log)
+
+📌 يفترض أن الـ Database يوفّر:
+  - self.fetchone / self.fetchall / self.fetchval / self.execute
+  - self.transaction() / self.connection()
+  - self._fetchone_with_conn / self._fetchall_with_conn /
+    self._fetchval_with_conn / self._execute_with_conn /
+    self._executemany_with_conn
+  - self._get_group_lock
+  - self.TimeUtils
+  - self.internal_cache
+  - self.CACHE_AVAILABLE
+  - self.banned_words_cache / self.settings_cache /
+    self.groups_cache / self.auth_cache
+  - self.CONFIG / self.PATHS
+  - self.COLUMN_ALIASES
+  - self.VALID_VIOLATION_TYPES / self.VALID_PENALTY_TYPES /
+    self.VALID_REPLY_TYPES / self.MAX_PENALTY_DURATION
+  - self._group_security_columns_cache
+  - self._banned_words_local_cache / self._banned_words_cache_ttl /
+    self._global_banned_words_cache / self._global_banned_words_loaded /
+    self._global_words_lock
+  - self.USE_POSTGRES / self.USE_MYSQL / self.DB_TYPE
+  - self._lock
 ================================================================================
 """
 
@@ -26,29 +55,7 @@ logger = logging.getLogger(__name__)
 
 
 class GroupsMixin:
-    """
-    Mixin يحتوي كل دوال المجموعات.
-    يفترض أن الـ Database يوفّر:
-      - self.fetchone / self.fetchall / self.fetchval / self.execute
-      - self.transaction / self.connection
-      - self._fetchone_with_conn / self._fetchall_with_conn /
-        self._fetchval_with_conn / self._execute_with_conn /
-        self._executemany_with_conn
-      - self._get_group_lock
-      - self.TimeUtils
-      - self.internal_cache
-      - self.CACHE_AVAILABLE / self.banned_words_cache /
-        self.settings_cache / self.groups_cache / self.auth_cache
-      - self.CONFIG / self.PATHS
-      - self.COLUMN_ALIASES
-      - self.VALID_VIOLATION_TYPES / self.VALID_PENALTY_TYPES /
-        self.VALID_REPLY_TYPES / self.MAX_PENALTY_DURATION
-      - self._group_security_columns_cache
-      - self._banned_words_local_cache / self._banned_words_cache_ttl /
-        self._global_banned_words_cache / self._global_banned_words_loaded /
-        self._global_words_lock
-      - self.USE_POSTGRES / self.USE_MYSQL / self.DB_TYPE
-    """
+    """Mixin يحتوي كل دوال المجموعات"""
 
     # =====================================================================
     # 1) كاش الكلمات المحظورة (داخلي)
@@ -64,6 +71,7 @@ class GroupsMixin:
         self._banned_words_local_cache[chat_id] = {"words": words, "time": time.time()}
 
     async def _invalidate_banned_words_local_cache(self, chat_id: int = None):
+        """إبطال الكاش العالمي عند chat_id=-1"""
         if chat_id is not None:
             self._banned_words_local_cache.pop(chat_id, None)
             if chat_id == -1:
@@ -407,6 +415,7 @@ class GroupsMixin:
         return settings if settings else {}
 
     async def _get_group_security_columns(self) -> set:
+        """جلب أعمدة group_security الفعلية (مع كاش)"""
         if self._group_security_columns_cache is not None:
             return self._group_security_columns_cache
 
@@ -438,13 +447,22 @@ class GroupsMixin:
             return set()
 
     async def get_group_security_columns(self) -> set:
+        """دالة عامة لجلب أعمدة group_security"""
         return await self._get_group_security_columns()
 
     def invalidate_group_security_columns_cache(self):
+        """إبطال كاش أعمدة group_security"""
         self._group_security_columns_cache = None
         logger.info("🔄 group_security columns cache invalidated")
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
+        """
+        نسخة محصّنة:
+        - معالجة مرادفات شاملة
+        - التحقق من الأعمدة الفعلية في الجدول (runtime check)
+        - إزالة الأعمدة غير الموجودة بدل الفشل الكامل
+        - إبطال الكاش بقوة
+        """
         if not kwargs:
             return False
 
@@ -452,7 +470,7 @@ class GroupsMixin:
         logger.info(f"🔧 update_security_settings called for chat_id={chat_id}")
         logger.info(f"   📥 Original keys ({len(original_keys)}): {sorted(original_keys)}")
 
-        # 1) معالجة المرادفات
+        # ─── 1) معالجة المرادفات ───
         aliased_keys = []
         for alias, real_col in self.COLUMN_ALIASES.items():
             if alias in kwargs:
@@ -466,13 +484,13 @@ class GroupsMixin:
         if aliased_keys:
             logger.info(f"   🔄 Aliases resolved: {aliased_keys}")
 
-        # 2) ضمان وجود صف
+        # ─── 2) ضمان وجود صف ───
         await self.execute(
             "INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)",
             (chat_id,)
         )
 
-        # 3) جلب الأعمدة الفعلية
+        # ─── 3) جلب الأعمدة الفعلية ───
         actual_columns = await self._get_group_security_columns()
         if not actual_columns:
             logger.error(f"   ❌ لم يتمكن من جلب أعمدة group_security")
@@ -480,7 +498,7 @@ class GroupsMixin:
 
         logger.info(f"   📋 Actual columns in group_security ({len(actual_columns)}): {sorted(actual_columns)}")
 
-        # 4) فلترة kwargs
+        # ─── 4) فلترة kwargs ───
         valid_kwargs = {}
         skipped_keys = []
         for key, value in kwargs.items():
@@ -491,7 +509,9 @@ class GroupsMixin:
 
         if skipped_keys:
             logger.warning(
-                f"   ⚠️ Skipped {len(skipped_keys)} non-existent columns: {skipped_keys}"
+                f"   ⚠️ Skipped {len(skipped_keys)} non-existent columns: {skipped_keys}\n"
+                f"   💡 هذه الأعمدة غير موجودة في جدول group_security — "
+                f"أضفها إلى database_tables.py أو _migrate_schema"
             )
 
         if not valid_kwargs:
@@ -500,21 +520,26 @@ class GroupsMixin:
 
         logger.info(f"   ✅ Will update {len(valid_kwargs)} columns: {sorted(valid_kwargs.keys())}")
 
-        # 5) تنفيذ UPDATE
+        # ─── 5) تنفيذ UPDATE ───
         try:
             updates = [f"{key} = ?" for key in valid_kwargs]
             values = list(valid_kwargs.values()) + [chat_id]
             query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
 
+            logger.debug(f"   🚀 Query: {query}")
+            logger.debug(f"   📦 Values: {values}")
+
             result = await self.execute(query, tuple(values))
             success = result >= 0
 
             if success:
+                # ─── 6) إبطال الكاش ───
                 try:
                     if self.CACHE_AVAILABLE:
                         await self.settings_cache.invalidate_security(chat_id)
                     await self.internal_cache.invalidate(f"security_{chat_id}")
                     await self.internal_cache.invalidate(f"group_security_{chat_id}")
+                    logger.info(f"   🔄 Cache invalidated for chat_id={chat_id}")
                 except Exception as cache_err:
                     logger.warning(f"   ⚠️ Cache invalidation error: {cache_err}")
 
@@ -526,7 +551,9 @@ class GroupsMixin:
 
         except Exception as e:
             logger.error(
-                f"   ❌ UPDATE failed for chat_id={chat_id}: {e}",
+                f"   ❌ UPDATE failed for chat_id={chat_id}: {e}\n"
+                f"   Query: {query if 'query' in locals() else 'N/A'}\n"
+                f"   Valid columns: {list(valid_kwargs.keys())}",
                 exc_info=True
             )
             return False
@@ -761,6 +788,7 @@ class GroupsMixin:
     # =====================================================================
 
     async def _load_global_banned_words(self) -> List[str]:
+        """قفل لمنع cache stampede"""
         if self._global_banned_words_loaded:
             return self._global_banned_words_cache
         async with self._global_words_lock:
