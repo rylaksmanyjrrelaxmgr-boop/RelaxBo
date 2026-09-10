@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.6)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.7)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -14,6 +14,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - دوال الإعدادات العامة في database_settings.py (Mixin)
 - دوال النقاط والمستويات في database_points.py (Mixin)
 - دوال النسخ الاحتياطي في database_backup.py (Mixin)
+- دوال التذكيرات في database_reminders.py (Mixin)
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
@@ -24,6 +25,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.4: فصل دوال الإعدادات العامة إلى database_settings.py
 🆕 v7.4.5: فصل دوال النقاط إلى database_points.py
 🆕 v7.4.6: فصل دوال النسخ الاحتياطي إلى database_backup.py
+🆕 v7.4.7: فصل دوال التذكيرات إلى database_reminders.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -35,6 +37,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   - database_settings.py
   - database_points.py
   - database_backup.py
+  - database_reminders.py
   - database_tables.py
 """
 
@@ -249,6 +252,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_backup.py غير موجود: {e}")
     BackupMixin = object
     BACKUP_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.10 استيراد RemindersMixin (التذكيرات)
+# =====================================================================
+
+try:
+    from database_reminders import RemindersMixin
+    REMINDERS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_reminders.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_reminders.py غير موجود: {e}")
+    RemindersMixin = object
+    REMINDERS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1218,6 +1234,7 @@ class Database(
     SettingsMixin,
     PointsMixin,
     BackupMixin,
+    RemindersMixin,
 ):
     _instance = None
     _lock = asyncio.Lock()
@@ -1444,7 +1461,7 @@ class Database(
         self.auth_cache = auth_cache
         self.CONFIG = CONFIG
         self.PATHS = PATHS
-        self.DATABASE_URL = DATABASE_URL  # ← يستخدمه BackupMixin
+        self.DATABASE_URL = DATABASE_URL
         # ✅ كاش محلي للكلمات المحظورة
         self._banned_words_local_cache = {}
         self._banned_words_cache_ttl = 300
@@ -2546,10 +2563,15 @@ class Database(
             return False
 
     # ═══════════════════════════════════════════════════════════════════
-    # 📌 دوال النسخ الاحتياطي انتقلت إلى database_backup.py (BackupMixin)
-    #    متاحة عبر الوراثة: backup_database, restore_database,
-    #    vacuum_database, backup_auto_replies,
-    #    _compress_backup, _check_tool_exists
+    # 📌 الدوال المنقولة إلى Mixins (متاحة عبر الوراثة):
+    #   → database_groups.py (GroupsMixin)        : 48 دالة
+    #   → database_tickets.py (TicketsMixin)      : 4 دوال
+    #   → database_contests.py (ContestsMixin)    : 8 دوال
+    #   → database_stats.py (StatsMixin)          : 6 دوال
+    #   → database_settings.py (SettingsMixin)    : 7 دوال
+    #   → database_points.py (PointsMixin)        : 4 دوال
+    #   → database_backup.py (BackupMixin)        : 6 دوال
+    #   → database_reminders.py (RemindersMixin)  : 9 دوال
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -2902,17 +2924,6 @@ class Database(
             logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
             return 0
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 📌 الدوال المنقولة إلى Mixins (متاحة عبر الوراثة):
-    #   → database_groups.py (GroupsMixin)        : 48 دالة
-    #   → database_tickets.py (TicketsMixin)      : 4 دوال
-    #   → database_contests.py (ContestsMixin)    : 8 دوال
-    #   → database_stats.py (StatsMixin)          : 6 دوال
-    #   → database_settings.py (SettingsMixin)    : 7 دوال
-    #   → database_points.py (PointsMixin)        : 4 دوال
-    #   → database_backup.py (BackupMixin)        : 6 دوال
-    # ═══════════════════════════════════════════════════════════════════
-
     # =====================================================================
     # دوال الجدولة
     # =====================================================================
@@ -3073,218 +3084,6 @@ class Database(
             return await self.fetchall(query, (now, now, limit))
 
     # =====================================================================
-    # دوال التذكيرات
-    # =====================================================================
-
-    async def get_users_for_reminder(self) -> List[Dict]:
-        now = TimeUtils.utc_now()
-        if USE_POSTGRES:
-            return await self.fetchall(
-                """SELECT u.user_id, u.language, r.reminder_days_before,
-                          EXTRACT(EPOCH FROM (MAX(s.end_date) - $1)) / 86400 as days_left,
-                          r.last_reminder_sent
-                   FROM users u
-                   JOIN user_reminder_settings r ON u.user_id = r.user_id
-                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > $2
-                   WHERE r.subscription_reminder = 1
-                   GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL
-                           OR EXTRACT(EPOCH FROM ($3 - r.last_reminder_sent)) / 86400 >= 1)""",
-                (now, now, now),
-            )
-        elif USE_MYSQL:
-            return await self.fetchall(
-                """SELECT u.user_id, u.language, r.reminder_days_before,
-                          TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) as days_left,
-                          r.last_reminder_sent
-                   FROM users u
-                   JOIN user_reminder_settings r ON u.user_id = r.user_id
-                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > %s
-                   WHERE r.subscription_reminder = 1
-                   GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL OR TIMESTAMPDIFF(DAY, r.last_reminder_sent, %s) >= 1)""",
-                (now.strftime("%Y-%m-%d %H:%M:%S"),
-                 now.strftime("%Y-%m-%d %H:%M:%S"),
-                 now.strftime("%Y-%m-%d %H:%M:%S")),
-            )
-        else:
-            return await self.fetchall(
-                """SELECT u.user_id, u.language, r.reminder_days_before,
-                          CAST(julianday(MAX(s.end_date)) - julianday(?) AS INTEGER) as days_left,
-                          r.last_reminder_sent
-                   FROM users u
-                   JOIN user_reminder_settings r ON u.user_id = r.user_id
-                   JOIN subscriptions s ON u.user_id = s.user_id AND s.status = 'active' AND s.end_date > ?
-                   WHERE r.subscription_reminder = 1
-                   GROUP BY u.user_id, u.language, r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
-                      AND (r.last_reminder_sent IS NULL OR julianday(?) - julianday(r.last_reminder_sent) >= 1)""",
-                (now.strftime("%Y-%m-%d %H:%M:%S"),
-                 now.strftime("%Y-%m-%d %H:%M:%S"),
-                 now.strftime("%Y-%m-%d %H:%M:%S")),
-            )
-
-    async def get_reminder_settings(self, user_id: int) -> Optional[Dict]:
-        try:
-            cached = await internal_cache.get(f"reminder_settings_{user_id}")
-            if cached is not None:
-                return cached
-            async with self.transaction() as conn:
-                settings = await self._fetchone_with_conn(
-                    conn, "SELECT * FROM user_reminder_settings WHERE user_id = ?", user_id
-                )
-                if not settings:
-                    await self._execute_with_conn(
-                        conn,
-                        """INSERT OR IGNORE INTO user_reminder_settings
-                           (user_id, subscription_reminder, daily_stats_reminder,
-                            weekly_report, reminder_days_before, notification_lang)
-                           VALUES (?, 1, 0, 1, 3, 'ar')""",
-                        user_id,
-                    )
-                    settings = await self._fetchone_with_conn(
-                        conn, "SELECT * FROM user_reminder_settings WHERE user_id = ?", user_id
-                    )
-            if settings:
-                await internal_cache.set(f"reminder_settings_{user_id}", settings, ttl=60)
-                return settings
-            return {
-                "user_id": user_id,
-                "subscription_reminder": 1,
-                "daily_stats_reminder": 0,
-                "weekly_report": 1,
-                "reminder_days_before": 3,
-                "last_reminder_sent": None,
-                "notification_lang": "ar",
-            }
-        except Exception as e:
-            logger.error(f"❌ Error in get_reminder_settings: {e}", exc_info=True)
-            return None
-
-    async def update_reminder_settings(self, user_id: int, **kwargs) -> bool:
-        if not kwargs:
-            return False
-        allowed = {
-            "subscription_reminder", "daily_stats_reminder", "weekly_report",
-            "reminder_days_before", "last_reminder_sent", "notification_lang",
-        }
-        for key in kwargs:
-            if key not in allowed:
-                logger.error(f"❌ Invalid column: {key}")
-                return False
-        try:
-            async with self.transaction() as conn:
-                await self._execute_with_conn(
-                    conn,
-                    """INSERT OR IGNORE INTO user_reminder_settings
-                       (user_id, subscription_reminder, daily_stats_reminder,
-                        weekly_report, reminder_days_before, notification_lang)
-                       VALUES (?, 1, 0, 1, 3, 'ar')""",
-                    user_id,
-                )
-                updates = [f"{key} = ?" for key in kwargs]
-                values = list(kwargs.values()) + [user_id]
-                query = f"UPDATE user_reminder_settings SET {', '.join(updates)} WHERE user_id = ?"
-                result = await self._execute_with_conn(conn, query, *values)
-                success = result > 0
-            if success:
-                await internal_cache.invalidate(f"reminder_settings_{user_id}")
-            return success
-        except Exception as e:
-            logger.error(f"❌ Error in update_reminder_settings: {e}", exc_info=True)
-            return False
-
-    async def get_users_with_reminder_enabled(self, reminder_type: str) -> List[Dict]:
-        column_map = {
-            "subscription": "subscription_reminder",
-            "daily_stats": "daily_stats_reminder",
-            "weekly_report": "weekly_report",
-        }
-        column = column_map.get(reminder_type)
-        if not column:
-            logger.warning(f"⚠️ reminder_type غير معروف: {reminder_type}")
-            return []
-        return await self.fetchall(
-            f"""SELECT u.user_id, u.language, r.*
-                FROM users u
-                JOIN user_reminder_settings r ON u.user_id = r.user_id
-                WHERE r.{column} = 1 AND u.banned = 0""",
-            (),
-        )
-
-    async def get_reminder_stats(self, user_id: int) -> Dict:
-        settings = await self.get_reminder_settings(user_id)
-        if not settings:
-            return {}
-        return {
-            "subscription_reminder": bool(settings.get("subscription_reminder", 1)),
-            "daily_stats_reminder": bool(settings.get("daily_stats_reminder", 0)),
-            "weekly_report": bool(settings.get("weekly_report", 1)),
-            "reminder_days_before": settings.get("reminder_days_before", 3),
-            "last_reminder_sent": settings.get("last_reminder_sent"),
-            "notification_lang": settings.get("notification_lang", "ar"),
-        }
-
-    async def reset_reminder_settings(self, user_id: int) -> bool:
-        try:
-            result = await self.execute(
-                """UPDATE user_reminder_settings
-                   SET subscription_reminder = 1, daily_stats_reminder = 0,
-                       weekly_report = 1, reminder_days_before = 3,
-                       notification_lang = 'ar'
-                   WHERE user_id = ?""",
-                (user_id,),
-            ) > 0
-            if result:
-                await internal_cache.invalidate(f"reminder_settings_{user_id}")
-            return result
-        except Exception as e:
-            logger.error(f"❌ Error in reset_reminder_settings: {e}", exc_info=True)
-            return False
-
-    async def bulk_update_reminder_sent(self, user_ids: List[int]) -> int:
-        if not user_ids:
-            return 0
-        now = TimeUtils.utc_now()
-        try:
-            params = [(now, uid) for uid in user_ids]
-            count = await self.executemany(
-                "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?", params
-            )
-            for uid in user_ids:
-                await internal_cache.invalidate(f"reminder_settings_{uid}")
-            return count
-        except Exception as e:
-            logger.error(f"❌ Error in bulk_update_reminder_sent: {e}", exc_info=True)
-            return 0
-
-    async def is_user_reminder_enabled(self, user_id: int, reminder_type: str) -> bool:
-        settings = await self.get_reminder_settings(user_id)
-        if not settings:
-            return False
-        column_map = {
-            "subscription": "subscription_reminder",
-            "daily_stats": "daily_stats_reminder",
-            "weekly_report": "weekly_report",
-        }
-        col = column_map.get(reminder_type)
-        if not col:
-            logger.warning(f"⚠️ reminder_type غير معروف: {reminder_type}")
-            return False
-        return bool(settings.get(col, 0))
-
-    async def update_reminder_sent(self, user_id: int) -> bool:
-        return await self.execute(
-            "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?",
-            (TimeUtils.utc_now(), user_id),
-        ) > 0
-
-    # =====================================================================
     # دوال العقوبات (User Penalties)
     # =====================================================================
 
@@ -3440,10 +3239,6 @@ class Database(
 
     async def get_all_active_penalties(self) -> List[Dict]:
         return await self.fetchall("SELECT * FROM user_penalties WHERE status = 'active'")
-
-    # ═══════════════════════════════════════════════════════════════════
-    # 📌 دوال النقاط انتقلت إلى database_points.py (PointsMixin)
-    # ═══════════════════════════════════════════════════════════════════
 
 
 # =====================================================================
