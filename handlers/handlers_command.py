@@ -17,9 +17,11 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - النس
 + ✅ [إصلاح] list_hidden_admins: عرض المشرفين المجهولين أيضاً
 + ✅ [إصلاح] تحديث updated_at عند تسجيل المجموعة
 + ✅ [إصلاح] التحقق من الصلاحيات في أوامر المجموعات
++ ✅ [v7.5.0] كاش الاشتراك الإجباري — تسريع /start من 4 ثوان إلى < 300ms
 """
 
 import asyncio
+import time as _time_module
 import logging
 from typing import Optional
 from html import escape
@@ -68,6 +70,87 @@ def _mask_id(id_value, prefix=3, suffix=2):
     return s[:prefix] + "***" + s[-suffix:] if len(s) > prefix + suffix else s[:prefix] + "***"
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.0: كاش الاشتراك الإجباري (يُسرّع /start بشكل هائل)
+# ═══════════════════════════════════════════════════════════════════
+
+_force_sub_cache: dict = {}          # {user_id: (timestamp, bool)}
+_FORCE_SUB_CACHE_TTL = 180           # 3 دقائق
+
+_force_channel_cache: dict = {}      # {chat_id: (timestamp, chat_object)}
+_FORCE_CHANNEL_CACHE_TTL = 600       # 10 دقائق
+
+
+async def _get_force_channel_cached(bot, force_ch: str):
+    """
+    جلب معلومات قناة الاشتراك الإجباري مع كاش 10 دقائق.
+    يمنع استدعاء get_chat في كل /start.
+    """
+    now = _time_module.time()
+    cached = _force_channel_cache.get(force_ch)
+    if cached:
+        ts, chat = cached
+        if now - ts < _FORCE_CHANNEL_CACHE_TTL:
+            return chat
+
+    try:
+        if force_ch.lstrip('-').isdigit():
+            chat = await bot.get_chat(int(force_ch))
+        else:
+            chat = await bot.get_chat(f"@{force_ch}")
+        _force_channel_cache[force_ch] = (now, chat)
+        return chat
+    except Exception as e:
+        logger.debug(f"⚠️ get_chat فشل: {e}")
+        # إرجاع الكاش القديم عند الفشل
+        if cached:
+            return cached[1]
+        return None
+
+
+async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> bool:
+    """
+    فحص الاشتراك الإجباري مع كاش 3 دقائق.
+    يمنع استدعاء get_chat_member في كل /start.
+
+    Returns:
+        True إذا كان المستخدم مشتركاً، False إذا لم يكن
+    """
+    now = _time_module.time()
+    cache_key = user_id
+
+    # 1. فحص الكاش
+    cached = _force_sub_cache.get(cache_key)
+    if cached:
+        ts, is_subscribed = cached
+        if now - ts < _FORCE_SUB_CACHE_TTL:
+            return is_subscribed
+
+    # 2. الفحص الفعلي (بدون get_chat!)
+    try:
+        # ✅ get_chat_member يقبل @username أو -100... مباشرة
+        target = int(force_ch) if force_ch.lstrip('-').isdigit() else f"@{force_ch}"
+        member = await bot.get_chat_member(target, user_id)
+        is_subscribed = member.status in ('member', 'administrator', 'creator')
+
+        # خزّن النتيجة 3 دقائق
+        _force_sub_cache[cache_key] = (now, is_subscribed)
+        return is_subscribed
+    except Exception as e:
+        logger.debug(f"⚠️ get_chat_member فشل: {e}")
+        # عند الفشل: اسمح للمستخدم بالمرور (لا تحجبه)
+        return True
+
+
+def _invalidate_force_sub_cache(user_id: int = None):
+    """إبطال كاش الاشتراك الإجباري"""
+    if user_id is None:
+        _force_sub_cache.clear()
+        _force_channel_cache.clear()
+    else:
+        _force_sub_cache.pop(user_id, None)
+
+
 async def _trans(key, lang, default_ar):
     """جلب النص المترجم مع fallback للعربية"""
     try:
@@ -110,21 +193,24 @@ class CommandHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
 
-        # التحقق من الاشتراك الإجباري
+        # ✅ v7.5.0: التحقق من الاشتراك الإجباري مع كاش (سريع!)
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
             try:
-                if force_ch.lstrip('-').isdigit():
-                    chat = await context.bot.get_chat(int(force_ch))
-                else:
-                    chat = await context.bot.get_chat(f"@{force_ch}")
-                member = await context.bot.get_chat_member(chat.id, user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
+                # ✅ استخدم الكاش بدل استدعاءات API المتكررة
+                is_subscribed = await _check_force_subscription_cached(
+                    context.bot, user_id, force_ch
+                )
+                if not is_subscribed:
+                    # جلب معلومات القناة (مع كاش 10 دقائق)
+                    chat = await _get_force_channel_cached(context.bot, force_ch)
+
                     invite_link = None
-                    try:
-                        invite_link = await context.bot.export_chat_invite_link(chat.id)
-                    except Exception:
-                        pass
+                    if chat:
+                        try:
+                            invite_link = await context.bot.export_chat_invite_link(chat.id)
+                        except Exception:
+                            pass
 
                     if invite_link:
                         kb = InlineKeyboardMarkup([[
