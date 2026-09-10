@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية النهائية)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية المُصحَّحة)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - كل دوال الأعمال + الكاش + المهام الخلفية
@@ -14,6 +14,11 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   5. معالجة $N الموجودة مسبقاً في _convert_placeholders
   6. قفل على _load_global_banned_words (منع cache stampede)
   7. إعادة محاولة توليد referral_code عند التصادم
+  8. قفل مستقل لأقفال المجموعات (_group_locks_lock)
+  9. إبطال مفاتيح user_{id}_True / user_{id}_False في invalidate_user_cache
+  10. إبطال channel_info_{ch_db_id} في add_channel/delete_channel/set_active_channel
+  11. mark_users_as_blocked بدفعة واحدة
+  12. expire_expired_subscriptions بدفعة واحدة (بدون N+1)
 """
 
 import os
@@ -268,6 +273,20 @@ class SimpleCache:
     async def set_channel_info(self, channel_db_id: int, data, ttl: int = None):
         await self.set(f"channel_info:{channel_db_id}", data, ttl)
 
+    # ✅ إضافة جديدة: إبطال channel_info
+    async def invalidate_channel_info(self, channel_db_id: int):
+        await self.invalidate(f"channel_info:{channel_db_id}")
+
+    # ✅ إضافة جديدة: معلومات المجموعة
+    async def get_group_info(self, chat_id: int):
+        return await self.get(f"group_info:{chat_id}")
+
+    async def set_group_info(self, chat_id: int, data, ttl: int = None):
+        await self.set(f"group_info:{chat_id}", data, ttl)
+
+    async def invalidate_group_info(self, chat_id: int):
+        await self.invalidate(f"group_info:{chat_id}")
+
     async def get_next_post(self, channel_db_id: int):
         return await self.get(f"next_post:{channel_db_id}")
 
@@ -352,13 +371,18 @@ except ImportError:
     posts_cache = SimpleCache(default_ttl=30)
 
     async def invalidate_user_cache(user_id: int):
+        """
+        ✅ إصلاح: يشمل مفاتيح include_stats (_True / _False)
+        ✅ إزالة channel_info_{user_id} الخاطئ (المفتاح الصحيح channel_info_{channel_db_id})
+        """
         try:
             await user_cache.invalidate(user_id)
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"user_{user_id}_True")
+            await internal_cache.invalidate(f"user_{user_id}_False")
             await internal_cache.invalidate(f"lang_{user_id}")
             await internal_cache.invalidate(f"channels_{user_id}")
             await internal_cache.invalidate(f"groups_{user_id}")
-            await internal_cache.invalidate(f"channel_info_{user_id}")
             await internal_cache.invalidate(f"reminder_settings_{user_id}")
         except Exception as e:
             logger.debug(f"invalidate_user_cache: {e}")
@@ -583,7 +607,6 @@ def _convert_placeholders(query: str) -> str:
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
-        # ✅ اكتشاف أعلى $N موجودة مسبقاً
         existing_params = re.findall(r"\$(\d+)", query)
         param_count = max((int(n) for n in existing_params), default=0)
 
@@ -651,9 +674,7 @@ def _convert_placeholders(query: str) -> str:
             i += 1
         return "".join(result)
     elif USE_MYSQL:
-        # ✅ نفس المبدأ — نتتبع عدد %s الموجودة مسبقاً
-        existing = re.findall(r"%s", query)
-        # لا حاجة لأن MySQL يستخدم %s فقط — لا يوجد تعارض مع $N
+        # MySQL يستخدم %s فقط — لا حاجة لتتبّع معرّفات مسبقة
         result = []
         in_single = False
         in_double = False
@@ -1005,14 +1026,12 @@ class Database:
         self._secondary_index_task = None
         self._cache_cleanup_task = None
         self._sqlite_creation_lock = asyncio.Lock()
-        # ✅ الإصلاح #4: عدّاد اتصالات بدلاً من السيمفور
-        self._sqlite_open_count = 0  # سيُحدَّث في initialize
+        self._sqlite_open_count = 0
         self._sqlite_count_lock = asyncio.Lock()
         self._user_locks_lock = asyncio.Lock()
         self._channel_locks_lock = asyncio.Lock()
         self._channel_locks_last_access = {}
         self._group_locks = defaultdict(lambda: asyncio.Lock())
-        # ✅ جديد: تتبّع الوصول لأقفال المجموعات
         self._group_locks_last_access = {}
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
@@ -1024,8 +1043,9 @@ class Database:
         self._banned_words_cache_ttl = 300
         self._global_banned_words_cache: List[str] = []
         self._global_banned_words_loaded = False
-        # ✅ الإصلاح #6: قفل لتحميل الكلمات العامة
         self._global_words_lock = asyncio.Lock()
+        # ✅ إصلاح: قفل مستقل لأقفال المجموعات
+        self._group_locks_lock = asyncio.Lock()
 
     # =====================================================================
     # دوال الكاش المحلي
@@ -1095,7 +1115,6 @@ class Database:
                     raise RuntimeError("فشل إنشاء اتصال SQLite الأولي")
                 self._sqlite_queue = asyncio.Queue(maxsize=self._sqlite_pool_size)
                 await self._sqlite_queue.put(conn)
-                # ✅ الإصلاح #4: تهيئة العدّاد
                 self._sqlite_open_count = 1
                 logger.info(f"✅ Pool SQLite جاهز (size={self._sqlite_pool_size}, initial=1)")
             self._initialized = True
@@ -1173,9 +1192,7 @@ class Database:
         self._initialized = False
 
     async def _get_connection(self):
-        """
-        ✅ الإصلاح #4: استخدام عدّاد اتصالات بدلاً من السيمفور
-        """
+        """✅ الإصلاح #4: عدّاد اتصالات بدلاً من السيمفور"""
         if not self._initialized:
             await self.initialize()
         if USE_POSTGRES or USE_MYSQL:
@@ -1190,15 +1207,12 @@ class Database:
                         if conn is not None:
                             self._sqlite_open_count += 1
                             return conn
-                # لم نتمكن من إنشاء اتصال، انتظر الطابور
                 return await asyncio.wait_for(
                     self._sqlite_queue.get(), timeout=self._connection_timeout
                 )
 
     async def _return_connection(self, conn):
-        """
-        ✅ الإصلاح #4: تحرير العدّاد عند إغلاق اتصال زائد
-        """
+        """✅ الإصلاح #4: تحرير العدّاد عند إغلاق اتصال زائد"""
         if USE_POSTGRES or USE_MYSQL:
             await self._pool.release(conn)
         else:
@@ -1497,9 +1511,7 @@ class Database:
     # =====================================================================
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
-        """
-        ✅ الإصلاح #2: تجنّب حذف الأقفال المُقيَّدة حالياً
-        """
+        """✅ الإصلاح #2: تجنّب حذف الأقفال المُقيَّدة حالياً"""
         async with self._user_locks_lock:
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
                 sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
@@ -1509,7 +1521,6 @@ class Database:
                     if len(to_remove) >= max_to_remove:
                         break
                     lock = self._user_locks.get(uid)
-                    # تجاهل الأقفال المُقيَّدة أو التي تنتظر
                     if lock and not lock.locked() and not getattr(lock, "_waiters", None):
                         to_remove.append(uid)
                 for uid in to_remove:
@@ -1528,8 +1539,8 @@ class Database:
             return self._channel_locks[channel_db_id]
 
     async def _get_group_lock(self, chat_id: int) -> asyncio.Lock:
-        """✅ جديد: تتبّع الوصول لأقفال المجموعات"""
-        async with self._channel_locks_lock:  # إعادة استخدام نفس القفل
+        """✅ إصلاح: قفل مستقل لأقفال المجموعات (لا تنافس مع أقفال القنوات)"""
+        async with self._group_locks_lock:
             self._group_locks_last_access[chat_id] = time.monotonic()
             return self._group_locks[chat_id]
 
@@ -1574,9 +1585,9 @@ class Database:
             return 0
 
     async def cleanup_group_locks(self, max_idle_seconds: int = 3600) -> int:
-        """✅ جديد: تنظيف أقفال المجموعات"""
+        """✅ إصلاح: يستخدم _group_locks_lock المستقل"""
         try:
-            async with self._channel_locks_lock:
+            async with self._group_locks_lock:
                 now = time.monotonic()
                 to_remove = []
                 for ch, ts in list(self._group_locks_last_access.items()):
@@ -1600,7 +1611,7 @@ class Database:
                 await asyncio.sleep(3600)
                 await self.cleanup_user_locks()
                 await self.cleanup_channel_locks()
-                await self.cleanup_group_locks()  # ✅ جديد
+                await self.cleanup_group_locks()
             except asyncio.CancelledError:
                 logger.info("🛑 مهمة تنظيف الأقفال تم إلغاؤها")
                 break
@@ -2384,13 +2395,10 @@ class Database:
             return None
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
-        """
-        ✅ الإصلاح #7: إعادة محاولة توليد referral_code عند التصادم
-        """
+        """✅ الإصلاح #7: إعادة محاولة توليد referral_code عند التصادم"""
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
-                    # حلقة إعادة محاولة لتوليد referral_code فريد
                     user_inserted = False
                     for attempt in range(5):
                         code = secrets.token_urlsafe(9)
@@ -2437,11 +2445,9 @@ class Database:
                             break
                         except Exception as e:
                             err = str(e).lower()
-                            # تصادم على referral_code → أعد المحاولة
                             if "referral_code" in err:
                                 logger.warning(f"⚠️ تصادم referral_code للمستخدم {user_id}، محاولة {attempt + 1}/5")
                                 continue
-                            # تصادم على user_id → المستخدم موجود، لا مشكلة
                             if "unique" in err or "duplicate" in err:
                                 user_inserted = True
                                 break
@@ -2451,7 +2457,6 @@ class Database:
                         logger.error(f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات")
                         return False
 
-                    # user_points
                     if USE_POSTGRES:
                         await self._execute_with_conn(
                             conn,
@@ -2564,6 +2569,8 @@ class Database:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"user_{user_id}_True")
+            await internal_cache.invalidate(f"user_{user_id}_False")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -2572,6 +2579,8 @@ class Database:
         result = await self.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)) > 0
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"user_{user_id}_True")
+            await internal_cache.invalidate(f"user_{user_id}_False")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -2878,9 +2887,12 @@ class Database:
                         ch_db_id, default=0,
                     )
                     await internal_cache.invalidate(f"user_{user_id}")
+                    await internal_cache.invalidate(f"channel_info_{ch_db_id}")
                     if CACHE_AVAILABLE:
                         await invalidate_user_cache(user_id)
                         await channels_cache.invalidate(user_id)
+                        if hasattr(channels_cache, "invalidate_channel_info"):
+                            await channels_cache.invalidate_channel_info(ch_db_id)
                     return {
                         "id": ch_db_id,
                         "channel_id": channel_id,
@@ -2917,6 +2929,7 @@ class Database:
         ) > 0
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"channel_info_{channel_db_id}")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -3002,6 +3015,7 @@ class Database:
                     )
                     await internal_cache.invalidate(f"user_{user_id}")
                     await internal_cache.invalidate(f"channels_{user_id}")
+                    await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                     if CACHE_AVAILABLE:
                         await invalidate_user_cache(user_id)
                         await channels_cache.invalidate(user_id)
@@ -3148,6 +3162,7 @@ class Database:
 
                     if total > 0:
                         await internal_cache.invalidate(f"user_{user_id}")
+                        await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                         if CACHE_AVAILABLE:
                             await invalidate_user_cache(user_id)
                             await posts_cache.invalidate(channel_db_id)
@@ -3230,6 +3245,7 @@ class Database:
         ) > 0
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"channel_info_{channel_db_id}")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
                 await posts_cache.invalidate(channel_db_id)
@@ -3253,6 +3269,7 @@ class Database:
                     channel_db_id, default=0,
                 )
                 await internal_cache.invalidate(f"user_{user_id}")
+                await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                 if CACHE_AVAILABLE:
                     await invalidate_user_cache(user_id)
                     await posts_cache.invalidate(channel_db_id)
@@ -3635,13 +3652,10 @@ class Database:
         return result
 
     async def _load_global_banned_words(self) -> List[str]:
-        """
-        ✅ الإصلاح #6: قفل لمنع cache stampede
-        """
+        """✅ الإصلاح #6: قفل لمنع cache stampede"""
         if self._global_banned_words_loaded:
             return self._global_banned_words_cache
         async with self._global_words_lock:
-            # double-check بعد الحصول على القفل
             if self._global_banned_words_loaded:
                 return self._global_banned_words_cache
             rows = await self.fetchall(
@@ -4503,9 +4517,7 @@ class Database:
             return 0
 
     async def is_user_reminder_enabled(self, user_id: int, reminder_type: str) -> bool:
-        """
-        ✅ الإصلاح #3: مفتاح weekly_report الصحيح
-        """
+        """✅ الإصلاح #3: مفتاح weekly_report الصحيح"""
         settings = await self.get_reminder_settings(user_id)
         if not settings:
             return False
@@ -4878,6 +4890,9 @@ class Database:
             return 0
 
     async def expire_expired_subscriptions(self) -> None:
+        """
+        ✅ إصلاح #5: تحديث subscription_end دفعة واحدة (بدون N+1)
+        """
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
@@ -4908,11 +4923,72 @@ class Database:
                         """SELECT DISTINCT user_id FROM subscriptions
                            WHERE status = 'expired' AND end_date > datetime('now', '-1 day')""",
                     )
-                for user in users:
-                    await self._refresh_user_subscription_end(conn, user["user_id"])
-                    await internal_cache.invalidate(f"user_{user['user_id']}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user["user_id"])
+
+                if not users:
+                    return
+
+                user_ids = [u["user_id"] for u in users]
+                BATCH = 500
+
+                for i in range(0, len(user_ids), BATCH):
+                    batch = user_ids[i : i + BATCH]
+
+                    if USE_POSTGRES:
+                        placeholders = ",".join(f"${j+2}" for j in range(len(batch)))
+                        await self._execute_with_conn(
+                            conn,
+                            f"""UPDATE users
+                                SET subscription_end = (
+                                    SELECT MAX(s.end_date) FROM subscriptions s
+                                    WHERE s.user_id = users.user_id
+                                      AND s.status = 'active'
+                                      AND s.end_date > CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+                                ),
+                                updated_at = $1
+                                WHERE user_id IN ({placeholders})""",
+                            TimeUtils.utc_now(),
+                            *batch,
+                        )
+                    elif USE_MYSQL:
+                        placeholders = ",".join(["%s"] * len(batch))
+                        await self._execute_with_conn(
+                            conn,
+                            f"""UPDATE users u
+                                LEFT JOIN (
+                                    SELECT user_id, MAX(end_date) AS max_end
+                                    FROM subscriptions
+                                    WHERE status = 'active' AND end_date > UTC_TIMESTAMP()
+                                    GROUP BY user_id
+                                ) s ON s.user_id = u.user_id
+                                SET u.subscription_end = s.max_end, u.updated_at = %s
+                                WHERE u.user_id IN ({placeholders})""",
+                            TimeUtils.sql_iso(),
+                            *batch,
+                        )
+                    else:
+                        placeholders = ",".join(["?"] * len(batch))
+                        await self._execute_with_conn(
+                            conn,
+                            f"""UPDATE users
+                                SET subscription_end = (
+                                    SELECT MAX(s.end_date) FROM subscriptions s
+                                    WHERE s.user_id = users.user_id
+                                      AND s.status = 'active'
+                                      AND s.end_date > datetime('now')
+                                ),
+                                updated_at = ?
+                                WHERE user_id IN ({placeholders})""",
+                            TimeUtils.sql_iso(),
+                            *batch,
+                        )
+
+                    for uid in batch:
+                        await internal_cache.invalidate(f"user_{uid}")
+                        await internal_cache.invalidate(f"user_{uid}_True")
+                        await internal_cache.invalidate(f"user_{uid}_False")
+                        if CACHE_AVAILABLE:
+                            await invalidate_user_cache(uid)
+
         except Exception as e:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
@@ -5465,16 +5541,30 @@ class Database:
         return admins
 
     async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
+        """✅ إصلاح: دفعة واحدة بدلاً من استعلام لكل مستخدم"""
         if not user_ids:
             return 0
         try:
             async with self.transaction() as conn:
-                for uid in user_ids:
-                    await self._execute_with_conn(conn, "UPDATE users SET banned = 1 WHERE user_id = ?", uid)
-                    await internal_cache.invalidate(f"user_{uid}")
-                    if CACHE_AVAILABLE:
+                BATCH = 500
+                total_updated = 0
+                for i in range(0, len(user_ids), BATCH):
+                    batch = user_ids[i : i + BATCH]
+                    placeholders = ",".join(["?"] * len(batch))
+                    updated = await self._execute_with_conn(
+                        conn,
+                        f"UPDATE users SET banned = 1 WHERE user_id IN ({placeholders})",
+                        *batch,
+                    )
+                    total_updated += updated
+                    for uid in batch:
+                        await internal_cache.invalidate(f"user_{uid}")
+                        await internal_cache.invalidate(f"user_{uid}_True")
+                        await internal_cache.invalidate(f"user_{uid}_False")
+                if CACHE_AVAILABLE:
+                    for uid in user_ids:
                         await invalidate_user_cache(uid)
-            return len(user_ids)
+            return total_updated
         except Exception as e:
             logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
             return 0
