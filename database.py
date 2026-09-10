@@ -2,17 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.3)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.3.1)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
 - دوال الاشتراكات والباقات والإحالات في database_subscriptions.py (Mixin)
 - كل دوال الأعمال الأخرى + الكاش + المهام الخلفية
 
-🆕 إصلاحات v7.3:
-  - فصل دوال الاشتراكات والباقات والإحالات إلى database_subscriptions.py
-  - استخدام SubscriptionsMixin لضمان نفس السلوك والأداء
-  - إضافة self.DB_TYPE, self.TimeUtils, self.internal_cache للـ Mixins
+🆕 إصلاحات v7.3.1:
+  - إصلاح SyntaxError في دالة set_violation_penalty (سطر مدموج بالخطأ)
 
 📌 ملاحظة: يجب أن يكون بجانب هذا الملف:
   - database_channels_posts.py
@@ -986,7 +984,6 @@ def _convert_upsert(query: str) -> str:
 
 def _adapt_params(params: tuple) -> tuple:
     """
-    إصلاح #16:
     - جميع الأعمدة من نوع TIMESTAMP/DATETIME بدون timezone
     - نحذف tzinfo لجميع قواعد البيانات
     """
@@ -3377,7 +3374,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin):
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
         """
-        ✅ v7.1: نسخة محصّنة:
+        نسخة محصّنة:
         - معالجة مرادفات شاملة
         - التحقق من الأعمدة الفعلية في الجدول (runtime check)
         - إزالة الأعمدة غير الموجودة بدل الفشل الكامل
@@ -4608,12 +4605,14 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin):
 
     async def set_violation_penalty(self, chat_id: int, violation_type: str,
                                      penalty_type: str, duration_seconds: int) -> bool:
+        # ✅ تم إصلاح الخطأ: السطر التالي كان مدموجاً بالخطأ
         if violation_type not in self.VALID_VIOLATION_TYPES:
             logger.error(f"❌ Invalid violation_type: {violation_type}")
             return False
         if penalty_type not in self.VALID_PENALTY_TYPES:
             logger.error(f"❌ Invalid penalty_type: {penalty_type}")
-            return False        if duration_seconds < 0:
+            return False
+        if duration_seconds < 0:
             duration_seconds = 0
         if duration_seconds > self.MAX_PENALTY_DURATION:
             duration_seconds = self.MAX_PENALTY_DURATION
