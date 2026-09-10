@@ -32,6 +32,7 @@ handlers_message.py - معالجات الرسائل - النسخة النهائ�
 - إزالة المتغيرات غير المستخدمة
 - ربط جميع النصوص الثابتة بنظام الترجمة _trans بنسبة 100%
 - ✅ إضافة معالج WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي من زر admin_upload_backup
+- ✅ دعم كل المتغيرات في رسائل الترحيب والوداع ({user}, {name}, {username}, {mention}, {chat}, {user_id}, ...)
 """
 
 import asyncio
@@ -46,7 +47,7 @@ from html import escape
 from typing import Optional
 from datetime import datetime
 
-from telegram import Update
+from telegram import Update, User, Chat
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, TimedOut
 
@@ -88,6 +89,74 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
         return text
     except Exception:
         return default
+
+
+# =====================================================================
+# ✅ دالة استبدال المتغيرات (نفس الموجودة في handlers/chat_member.py)
+# =====================================================================
+
+def _apply_template_variables(template: str, user: Optional[User], chat: Optional[Chat]) -> str:
+    """
+    استبدال كل المتغيرات في القالب.
+
+    المتغيرات المدعومة:
+      {user}        → الاسم الكامل (أحمد علي)
+      {name}        → الاسم الأول (أحمد)
+      {first_name}  → الاسم الأول (أحمد)
+      {last_name}   → الاسم الأخير (علي)
+      {full_name}   → الاسم الكامل (أحمد علي)
+      {username}    → @username
+      {mention}     → منشن HTML
+      {user_id}     → معرف المستخدم
+      {id}          → معرف المستخدم
+      {chat}        → اسم المجموعة
+      {chat_name}   → اسم المجموعة
+    """
+    if not template:
+        return template
+
+    # اسم المستخدم
+    if user:
+        first_name = user.first_name or "عضو"
+        last_name = user.last_name or ""
+        full_name = f"{first_name} {last_name}".strip() or "عضو"
+        username_str = f"@{user.username}" if user.username else ""
+        try:
+            mention_html = user.mention_html()
+        except Exception:
+            mention_html = full_name
+        user_id_str = str(user.id)
+    else:
+        first_name = "عضو"
+        last_name = ""
+        full_name = "عضو"
+        username_str = ""
+        mention_html = "عضو"
+        user_id_str = ""
+
+    # اسم المجموعة
+    chat_title = (chat.title if chat and chat.title else "المجموعة")
+
+    # الترتيب مهم: {user} أولاً قبل {username} (لمنع التداخل)
+    replacements = [
+        ("{full_name}", full_name),
+        ("{first_name}", first_name),
+        ("{last_name}", last_name),
+        ("{username}", username_str),
+        ("{user_id}", user_id_str),
+        ("{chat_name}", chat_title),
+        ("{mention}", mention_html),
+        ("{name}", first_name),
+        ("{user}", full_name),
+        ("{id}", user_id_str),
+        ("{chat}", chat_title),
+    ]
+
+    result = template
+    for placeholder, value in replacements:
+        result = result.replace(placeholder, value)
+
+    return result
 
 
 # =====================================================================
@@ -2025,12 +2094,13 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """معالجة رسائل الخدمة (انضمام/مغادرة) مع دعم الحذف"""
+        """معالجة رسائل الخدمة (انضمام/مغادرة) مع دعم كل المتغيرات"""
         if not update.effective_chat or not update.effective_message:
             return
         chat_id = update.effective_chat.id
         settings = await get_security_settings_cached(chat_id)
         message = update.effective_message
+        chat = update.effective_chat
 
         # ✅ حذف رسائل الانضمام والمغادرة إذا كان delete_service مفعلاً
         if settings.get('delete_service'):
@@ -2042,18 +2112,24 @@ class MessageHandlers:
                     logger.debug(f"تعذر حذف رسالة الخدمة: {e}")
                 return
 
+        # ✅ رسالة الترحيب مع كل المتغيرات
         if message.new_chat_members and settings.get('welcome_enabled'):
             for member in message.new_chat_members:
+                if member.is_bot:
+                    continue
                 welcome_text = settings.get('welcome_text', 'مرحباً {user} 🤍')
-                welcome_text = welcome_text.replace('{user}', escape(member.first_name or "عضو"))
-                welcome_text = welcome_text.replace('{chat}', escape(update.effective_chat.title or "المجموعة"))
+                # ✅ استبدال كل المتغيرات
+                welcome_text = _apply_template_variables(welcome_text, member, chat)
                 await safe_send(context.bot, chat_id, welcome_text, parse_mode='HTML')
 
+        # ✅ رسالة الوداع مع كل المتغيرات
         if message.left_chat_member and settings.get('goodbye_enabled'):
             member = message.left_chat_member
+            if member.is_bot:
+                return
             goodbye_text = settings.get('goodbye_text', 'وداعاً {user} 👋')
-            goodbye_text = goodbye_text.replace('{user}', escape(member.first_name or "عضو"))
-            goodbye_text = goodbye_text.replace('{chat}', escape(update.effective_chat.title or "المجموعة"))
+            # ✅ استبدال كل المتغيرات
+            goodbye_text = _apply_template_variables(goodbye_text, member, chat)
             await safe_send(context.bot, chat_id, goodbye_text, parse_mode='HTML')
 
 
