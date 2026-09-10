@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.5)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.6)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -13,6 +13,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - دوال الإحصائيات والمشرفين في database_stats.py (Mixin)
 - دوال الإعدادات العامة في database_settings.py (Mixin)
 - دوال النقاط والمستويات في database_points.py (Mixin)
+- دوال النسخ الاحتياطي في database_backup.py (Mixin)
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
@@ -22,6 +23,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.3: فصل دوال الإحصائيات والمشرفين إلى database_stats.py
 🆕 v7.4.4: فصل دوال الإعدادات العامة إلى database_settings.py
 🆕 v7.4.5: فصل دوال النقاط إلى database_points.py
+🆕 v7.4.6: فصل دوال النسخ الاحتياطي إلى database_backup.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -32,6 +34,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   - database_stats.py
   - database_settings.py
   - database_points.py
+  - database_backup.py
   - database_tables.py
 """
 
@@ -233,6 +236,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_points.py غير موجود: {e}")
     PointsMixin = object
     POINTS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.9 استيراد BackupMixin (النسخ الاحتياطي)
+# =====================================================================
+
+try:
+    from database_backup import BackupMixin
+    BACKUP_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_backup.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_backup.py غير موجود: {e}")
+    BackupMixin = object
+    BACKUP_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1201,6 +1217,7 @@ class Database(
     StatsMixin,
     SettingsMixin,
     PointsMixin,
+    BackupMixin,
 ):
     _instance = None
     _lock = asyncio.Lock()
@@ -1427,6 +1444,7 @@ class Database(
         self.auth_cache = auth_cache
         self.CONFIG = CONFIG
         self.PATHS = PATHS
+        self.DATABASE_URL = DATABASE_URL  # ← يستخدمه BackupMixin
         # ✅ كاش محلي للكلمات المحظورة
         self._banned_words_local_cache = {}
         self._banned_words_cache_ttl = 300
@@ -2527,208 +2545,12 @@ class Database(
             logger.error(f"❌ فشل التهيئة المبكرة: {e}")
             return False
 
-    # =====================================================================
-    # النسخ الاحتياطي والاستعادة
-    # =====================================================================
-
-    async def _compress_backup(self, file_path: Path) -> Optional[Path]:
-        try:
-            compressed_path = file_path.with_suffix(file_path.suffix + ".gz")
-            with open(file_path, "rb") as f_in:
-                with gzip.open(compressed_path, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out, length=65536)
-            if compressed_path.exists() and compressed_path.stat().st_size > 0:
-                try:
-                    with gzip.open(compressed_path, "rb") as f:
-                        f.read(1)
-                except Exception:
-                    logger.error("❌ الملف المضغوط تالف")
-                    return None
-                return compressed_path
-            logger.error("❌ فشل الضغط: الملف الناتج فارغ")
-            return None
-        except Exception as e:
-            logger.error(f"❌ فشل ضغط النسخ الاحتياطي: {e}")
-            return None
-
-    async def _check_tool_exists(self, tool_name: str) -> bool:
-        return shutil.which(tool_name) is not None
-
-    async def backup_database(self, backup_path: Optional[Path] = None, compress: bool = True) -> bool:
-        try:
-            if USE_POSTGRES:
-                if not await self._check_tool_exists("pg_dump"):
-                    logger.error("❌ pg_dump غير موجود")
-                    return False
-                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.dump"
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                cmd = ["pg_dump", "--clean", "--if-exists", "--no-owner", "--no-privileges",
-                       "--file", str(backup_file), DATABASE_URL]
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-                if process.returncode != 0:
-                    logger.error(f"❌ pg_dump فشل: {stderr.decode()}")
-                    return False
-                if compress:
-                    compressed = await self._compress_backup(backup_file)
-                    if compressed:
-                        backup_file = compressed
-                return True
-            elif USE_MYSQL:
-                if not await self._check_tool_exists("mysqldump"):
-                    logger.error("❌ mysqldump غير موجود")
-                    return False
-                pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
-                match = re.match(pattern, DATABASE_URL)
-                if not match:
-                    return False
-                user, password, host, port, database = match.groups()
-                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.sql"
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-                    f.write(f"[client]\nuser={user}\npassword={password}\n")
-                    f.flush()
-                    temp_pass_file = f.name
-                try:
-                    cmd = ["mysqldump", f"--defaults-extra-file={temp_pass_file}",
-                           f"--host={host}", f"--port={port}", "--single-transaction",
-                           "--routines", "--triggers", database,
-                           "--result-file", str(backup_file)]
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await process.communicate()
-                    if process.returncode != 0:
-                        logger.error(f"❌ mysqldump فشل: {stderr.decode()}")
-                        return False
-                    if compress:
-                        compressed = await self._compress_backup(backup_file)
-                        if compressed:
-                            backup_file = compressed
-                    return True
-                finally:
-                    os.unlink(temp_pass_file)
-            else:
-                backup_file = backup_path or PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                if backup_file.exists():
-                    backup_file.unlink()
-                try:
-                    async with self.connection() as conn:
-                        await conn.execute(f"VACUUM INTO '{backup_file}'")
-                    logger.info(f"✅ نسخ احتياطي SQLite (VACUUM INTO): {backup_file.name}")
-                except Exception as e:
-                    logger.warning(f"⚠️ VACUUM INTO فشل ({e})، سيتم النسخ المباشر")
-                    async with self.connection() as conn:
-                        await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    shutil.copy2(str(PATHS.DB), str(backup_file))
-                if compress:
-                    compressed = await self._compress_backup(backup_file)
-                    if compressed:
-                        backup_file = compressed
-                return True
-        except Exception as e:
-            logger.error(f"❌ فشل النسخ الاحتياطي: {e}", exc_info=True)
-            return False
-
-    async def restore_database(self, backup_path: Path, decompress: bool = True) -> bool:
-        try:
-            if not backup_path.exists():
-                gz_path = backup_path.with_suffix(backup_path.suffix + ".gz")
-                if gz_path.exists():
-                    backup_path = gz_path
-                else:
-                    parent = backup_path.parent
-                    base = backup_path.stem
-                    possible = list(parent.glob(f"{base}*"))
-                    if possible:
-                        backup_path = possible[0]
-                    else:
-                        logger.error(f"❌ ملف النسخ الاحتياطي غير موجود: {backup_path}")
-                        return False
-
-            if backup_path.suffix == ".gz" and decompress:
-                decompressed_path = backup_path.with_suffix("")
-                if not decompressed_path.exists():
-                    with gzip.open(backup_path, "rb") as f_in:
-                        with open(decompressed_path, "wb") as f_out:
-                            f_out.write(f_in.read())
-                backup_path = decompressed_path
-
-            if USE_POSTGRES:
-                if not await self._check_tool_exists("pg_restore"):
-                    return False
-                cmd = ["pg_restore", "--clean", "--if-exists", "--no-owner",
-                       "--no-privileges", "--dbname", DATABASE_URL, str(backup_path)]
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                await process.communicate()
-                return process.returncode == 0
-            elif USE_MYSQL:
-                if not await self._check_tool_exists("mysql"):
-                    return False
-                pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
-                match = re.match(pattern, DATABASE_URL)
-                if not match:
-                    return False
-                user, password, host, port, database = match.groups()
-                with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-                    f.write(f"[client]\nuser={user}\npassword={password}\n")
-                    f.flush()
-                    temp_pass_file = f.name
-                try:
-                    cmd = ["mysql", f"--defaults-extra-file={temp_pass_file}",
-                           f"--host={host}", f"--port={port}", database,
-                           "-e", f"source {backup_path}"]
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await process.communicate()
-                    return process.returncode == 0
-                finally:
-                    os.unlink(temp_pass_file)
-            else:
-                await self.close()
-                shutil.copy2(backup_path, PATHS.DB)
-                await self.initialize()
-                if self._secondary_index_task is None or self._secondary_index_task.done():
-                    self._secondary_index_task = asyncio.create_task(self._create_secondary_indexes([]))
-                if CACHE_AVAILABLE and (
-                    self._cache_cleanup_task is None or self._cache_cleanup_task.done()
-                ):
-                    self._cache_cleanup_task = asyncio.create_task(cache_cleanup_task())
-                logger.info("✅ استعادة SQLite تمت بنجاح")
-                return True
-        except Exception as e:
-            logger.error(f"❌ فشل الاستعادة: {e}", exc_info=True)
-            return False
-
-    async def vacuum_database(self, analyze: bool = False) -> bool:
-        try:
-            if USE_POSTGRES:
-                async with self.connection() as conn:
-                    await conn.execute("VACUUM ANALYZE" if analyze else "VACUUM")
-            elif USE_MYSQL:
-                async with self.connection() as conn:
-                    await conn.execute("OPTIMIZE TABLE users, user_channels, posts, subscriptions, user_penalties, banned_words, auto_replies")
-            else:
-                async with self.connection() as conn:
-                    await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    if analyze:
-                        await conn.execute("ANALYZE")
-                def _vacuum():
-                    conn = sqlite3.connect(str(PATHS.DB))
-                    conn.execute("VACUUM")
-                    conn.close()
-                await asyncio.to_thread(_vacuum)
-            logger.info(f"✅ VACUUM{' ANALYZE' if analyze else ''} تم")
-            return True
-        except Exception as e:
-            logger.error(f"❌ فشل VACUUM/OPTIMIZE: {e}")
-            return False
+    # ═══════════════════════════════════════════════════════════════════
+    # 📌 دوال النسخ الاحتياطي انتقلت إلى database_backup.py (BackupMixin)
+    #    متاحة عبر الوراثة: backup_database, restore_database,
+    #    vacuum_database, backup_auto_replies,
+    #    _compress_backup, _check_tool_exists
+    # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
     # دوال المستخدمين
@@ -3088,6 +2910,7 @@ class Database(
     #   → database_stats.py (StatsMixin)          : 6 دوال
     #   → database_settings.py (SettingsMixin)    : 7 دوال
     #   → database_points.py (PointsMixin)        : 4 دوال
+    #   → database_backup.py (BackupMixin)        : 6 دوال
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -3620,8 +3443,6 @@ class Database(
 
     # ═══════════════════════════════════════════════════════════════════
     # 📌 دوال النقاط انتقلت إلى database_points.py (PointsMixin)
-    #    متاحة عبر الوراثة: add_points, get_user_points,
-    #    get_user_level, get_top_users
     # ═══════════════════════════════════════════════════════════════════
 
 
