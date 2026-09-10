@@ -2,22 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.0)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.1)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
 - دوال الاشتراكات والباقات والإحالات في database_subscriptions.py (Mixin)
-- دوال المجموعات في database_groups.py (Mixin)  ← جديد v7.4.0
+- دوال المجموعات في database_groups.py (Mixin)
+- دوال التذاكر في database_tickets.py (Mixin)
 - كل دوال الأعمال الأخرى + الكاش + المهام الخلفية
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
 🆕 v7.4.0: فصل دوال المجموعات إلى database_groups.py
+🆕 v7.4.1: فصل دوال التذاكر إلى database_tickets.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
   - database_subscriptions.py
   - database_groups.py
+  - database_tickets.py
   - database_tables.py
 """
 
@@ -143,7 +146,7 @@ except ImportError as e:
     SUBSCRIPTIONS_MIXIN_AVAILABLE = False
 
 # =====================================================================
-# 0.2.3 استيراد GroupsMixin (دوال المجموعات) ← جديد v7.4.0
+# 0.2.3 استيراد GroupsMixin (دوال المجموعات)
 # =====================================================================
 
 try:
@@ -154,6 +157,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_groups.py غير موجود: {e}")
     GroupsMixin = object
     GROUPS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.4 استيراد TicketsMixin (دوال التذاكر)
+# =====================================================================
+
+try:
+    from database_tickets import TicketsMixin
+    TICKETS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_tickets.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_tickets.py غير موجود: {e}")
+    TicketsMixin = object
+    TICKETS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1127,7 +1143,7 @@ class TimeUtils:
 # 3. فئة Database (ترث من كل الـ Mixins)
 # =====================================================================
 
-class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
+class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin):
     _instance = None
     _lock = asyncio.Lock()
     _user_locks = {}
@@ -1348,7 +1364,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
         self.USE_MYSQL = USE_MYSQL
         self.TimeUtils = TimeUtils
         self.internal_cache = internal_cache
-        # ✅ خصائص مطلوبة لـ GroupsMixin (وباقي الـ Mixins)
+        # ✅ خصائص مطلوبة لـ GroupsMixin وبقية الـ Mixins
         self.CACHE_AVAILABLE = CACHE_AVAILABLE
         self.banned_words_cache = banned_words_cache
         self.settings_cache = settings_cache
@@ -2313,7 +2329,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
                         batch,
                     )
                 logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة")
-                # استدعاء دالة من GroupsMixin عبر self
+                # استدعاء دالة من GroupsMixin عبر self (إن وُجدت)
                 if hasattr(self, "_invalidate_banned_words_local_cache"):
                     await self._invalidate_banned_words_local_cache()
                 if CACHE_AVAILABLE:
@@ -3029,7 +3045,11 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
     #    متاحة عبر الوراثة: register_group, get_user_groups,
     #    get_security_settings, update_security_settings,
     #    add_banned_word, get_banned_words, add_auto_reply,
-    #    add_hidden_admin, add_anonymous_admin, ... إلخ
+    #    add_hidden_admin, add_anonymous_admin, ...
+    # ═══════════════════════════════════════════════════════════════════
+    # 📌 دوال التذاكر انتقلت إلى database_tickets.py (TicketsMixin)
+    #    متاحة عبر الوراثة: create_ticket, get_tickets,
+    #    close_ticket, delete_all_tickets
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -3190,45 +3210,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
                 LIMIT ?
             """
             return await self.fetchall(query, (now, now, limit))
-
-    # =====================================================================
-    # دوال التذاكر
-    # =====================================================================
-
-    async def create_ticket(self, user_id: int, username: str, content: str,
-                            media_type: str = None, media_file_id: str = None) -> int:
-        try:
-            async with self._lock:
-                async with self.transaction() as conn:
-                    next_num = await self._fetchval_with_conn(
-                        conn, "SELECT value FROM settings WHERE key = 'last_ticket_number'", default="0"
-                    )
-                    next_num = int(next_num) + 1
-                    await self._execute_with_conn(
-                        conn, "UPDATE settings SET value = ? WHERE key = 'last_ticket_number'", str(next_num)
-                    )
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO support_tickets (user_id, username, message, media_type, media_file_id, ticket_number, created_at) VALUES (?,?,?,?,?,?,?)",
-                        user_id, username, content, media_type, media_file_id, next_num, TimeUtils.utc_now(),
-                    )
-                return next_num
-        except Exception as e:
-            logger.error(f"❌ Error in create_ticket: {e}", exc_info=True)
-            return 0
-
-    async def get_tickets(self) -> List[Dict]:
-        return await self.fetchall(
-            "SELECT id, user_id, username, ticket_number, message, status, created_at FROM support_tickets WHERE status = 'pending' ORDER BY created_at DESC"
-        )
-
-    async def close_ticket(self, ticket_id: int) -> bool:
-        return await self.execute(
-            "UPDATE support_tickets SET status = 'closed' WHERE id = ?", (ticket_id,)
-        ) > 0
-
-    async def delete_all_tickets(self) -> bool:
-        return await self.execute("DELETE FROM support_tickets") > 0
 
     # =====================================================================
     # دوال التذكيرات
@@ -3622,10 +3603,8 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin):
         return value in ("1", "true", "True", "yes", "on")
 
     # =====================================================================
-    # دوال العقوبات (User Penalties — تبقى في Database)
+    # دوال العقوبات (User Penalties)
     # =====================================================================
-    # 📌 ملاحظة: get_penalty_settings / update_penalty_settings /
-    #    كل دوال violations انتقلت إلى database_groups.py (GroupsMixin)
 
     async def add_penalty(self, user_id: int, chat_id: int, penalty_type: str,
                           duration: int = 0, reason: str = "", issued_by: int = None) -> Optional[int]:
