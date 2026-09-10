@@ -2,18 +2,131 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (نسخة كاملة)
 ================================================================================
-هذا الملف مستقل تماماً عن database.py:
-- لا يستورد من database.py (لتفادي circular imports)
-- لا يستخدم أي شيء من الفئة Database
+- مستقل تماماً عن database.py (لتفادي circular imports)
 - يستقبل (conn, logger, TimeUtils) كمعاملات
-
-يحتوي على:
-    - create_tables_sqlite(conn, logger, TimeUtils)
-    - create_tables_postgres(conn, logger, TimeUtils)
-    - create_tables_mysql(conn, logger, TimeUtils)
+- جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
+- يحتوي على جدول schema_version لتتبع الإصدارات
 """
+
+# =====================================================================
+# 0. ثوابت مشتركة
+# =====================================================================
+
+CURRENT_SCHEMA_VERSION = 1
+
+DEFAULT_SETTINGS = (
+    ("publish_interval", "12"),
+    ("auto_backup", "1"),
+    ("last_ticket_number", "0"),
+    ("last_backup", ""),
+)
+
+# الفهارس المُوحَّدة — تُستخدم في كل قواعد البيانات
+# (اسم الجدول، اسم الفهرس، الأعمدة)
+COMMON_INDEXES = [
+    # USERS
+    ("users", "idx_users_banned", "users(banned)"),
+    ("users", "idx_users_active_channel", "users(active_channel)"),
+    ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
+    ("users", "idx_users_language", "users(language)"),
+    ("users", "idx_users_subscription_end", "users(subscription_end)"),
+    ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
+
+    # USER_CHANNELS
+    ("user_channels", "idx_uc_user", "user_channels(user_id)"),
+    ("user_channels", "idx_user_channels_user_created", "user_channels(user_id, created_at DESC)"),
+    ("user_channels", "idx_user_channels_user_banned", "user_channels(user_id, banned)"),
+
+    # POSTS
+    ("posts", "idx_posts_text_hash", "posts(text_hash)"),
+    ("posts", "idx_posts_channel", "posts(channel_db_id)"),
+    ("posts", "idx_posts_published", "posts(published)"),
+    ("posts", "idx_posts_channel_published", "posts(channel_db_id, published)"),
+    ("posts", "idx_posts_channel_pub_fail_created", "posts(channel_db_id, published, fail_count, created_at)"),
+
+    # BOT_GROUPS
+    ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
+    ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
+
+    # USER_GROUPS_LINK
+    ("user_groups_link", "idx_user_groups_link_user_id", "user_groups_link(user_id)"),
+
+    # GROUP_ADMINS
+    ("group_admins", "idx_group_admins_user_id", "group_admins(user_id)"),
+
+    # HIDDEN_OWNER_GROUPS
+    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "hidden_owner_groups(owner_id)"),
+
+    # HIDDEN_ADMINS
+    ("hidden_admins", "idx_hidden_admins_admin_id", "hidden_admins(admin_id)"),
+
+    # ANONYMOUS_ADMINS
+    ("anonymous_admins", "idx_anonymous_admins_user_id", "anonymous_admins(user_id)"),
+    ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "anonymous_admins(anonymous_id)"),
+
+    # BANNED_WORDS
+    ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
+    ("banned_words", "idx_banned_words_chat_word", "banned_words(chat_id, word)"),
+
+    # AUTO_REPLIES
+    ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
+    ("auto_replies", "idx_auto_replies_lookup", "auto_replies(chat_id, keyword, is_active)"),
+
+    # SCHEDULE
+    ("schedule", "idx_schedule_next_publish", "schedule(next_publish_date)"),
+    ("schedule", "idx_schedule_channel_next", "schedule(channel_db_id, next_publish_date)"),
+
+    # SUBSCRIPTIONS
+    ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
+    ("subscriptions", "idx_sub_status", "subscriptions(status)"),
+    ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
+    ("subscriptions", "idx_subscriptions_user_status", "subscriptions(user_id, status)"),
+    ("subscriptions", "idx_subscriptions_user_status_end", "subscriptions(user_id, status, end_date)"),
+
+    # INVOICES
+    ("invoices", "idx_inv_user", "invoices(user_id)"),
+
+    # REFERRALS
+    ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
+
+    # CONTESTS
+    ("contests", "idx_contests_status", "contests(status)"),
+
+    # USER_PENALTIES
+    ("user_penalties", "idx_penalties_user", "user_penalties(user_id)"),
+    ("user_penalties", "idx_penalties_chat", "user_penalties(chat_id)"),
+    ("user_penalties", "idx_penalties_status", "user_penalties(status)"),
+    ("user_penalties", "idx_penalties_user_chat_status_end", "user_penalties(user_id, chat_id, status, end_time)"),
+
+    # USER_POINTS
+    ("user_points", "idx_points_user", "user_points(user_id)"),
+
+    # SUPPORT_TICKETS
+    ("support_tickets", "idx_tickets_status", "support_tickets(status)"),
+
+    # PAYMENT_LOGS
+    ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
+
+    # ADMIN_LOGS
+    ("admin_logs", "idx_admin_logs_chat", "admin_logs(chat_id, id DESC)"),
+
+    # PENALTY_ARCHIVE
+    ("penalty_archive", "idx_penalty_archive_archived", "penalty_archive(archived_at)"),
+
+    # SENTIMENT_HISTORY
+    ("sentiment_history", "idx_sentiment_user_chat", "sentiment_history(user_id, chat_id)"),
+
+    # USER_MESSAGES
+    ("user_messages", "idx_user_messages_chat", "user_messages(chat_id)"),
+
+    # SCHEDULED_POSTS
+    ("scheduled_posts", "idx_scheduled_posts_time", "scheduled_posts(publish_time)"),
+
+    # USER_REMINDER_SETTINGS
+    ("user_reminder_settings", "idx_reminder_subscription", "user_reminder_settings(subscription_reminder)"),
+]
 
 
 # =====================================================================
@@ -22,6 +135,16 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 
 async def create_tables_sqlite(conn, logger, TimeUtils):
     """إنشاء جميع جداول SQLite + الفهارس"""
+
+    # ---------- schema_version ----------
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            description TEXT
+        )
+    """)
+
     # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -40,6 +163,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             active_channel INTEGER
         )
     """)
+
     # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
@@ -52,6 +176,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             UNIQUE(user_id, channel_id)
         )
     """)
+
     # ---------- POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
@@ -69,6 +194,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             UNIQUE(channel_db_id, text_hash, media_type, media_file_id)
         )
     """)
+
     # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
@@ -85,6 +211,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
+
     # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
@@ -93,6 +220,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
+
     # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
@@ -105,6 +233,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             banned INTEGER DEFAULT 0
         )
     """)
+
     # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
@@ -113,6 +242,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
+
     # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
@@ -121,6 +251,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, user_id)
         )
     """)
+
     # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
@@ -130,6 +261,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, owner_id)
         )
     """)
+
     # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
@@ -140,6 +272,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, admin_id)
         )
     """)
+
     # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
@@ -151,6 +284,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, anonymous_id)
         )
     """)
+
     # ---------- GROUP_SECURITY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
@@ -211,6 +345,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             violation_duration INTEGER DEFAULT 60
         )
     """)
+
     # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
@@ -220,6 +355,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             locked_by INTEGER
         )
     """)
+
     # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
@@ -231,6 +367,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             UNIQUE(word, chat_id)
         )
     """)
+
     # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
@@ -246,6 +383,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, keyword)
         )
     """)
+
     # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
@@ -256,6 +394,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             updated_at TEXT
         )
     """)
+
     # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
@@ -271,6 +410,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             replied INTEGER DEFAULT 0
         )
     """)
+
     # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
@@ -279,6 +419,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             added_at TEXT
         )
     """)
+
     # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
@@ -286,17 +427,12 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             value TEXT
         )
     """)
-    default_settings = [
-        ("publish_interval", "12"),
-        ("auto_backup", "1"),
-        ("last_ticket_number", "0"),
-        ("last_backup", ""),
-    ]
-    for key, value in default_settings:
+    for key, value in DEFAULT_SETTINGS:
         await conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
             (key, value),
         )
+
     # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
@@ -307,6 +443,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             UNIQUE(referrer_id, referred_id)
         )
     """)
+
     # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
@@ -317,6 +454,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             last_referral_date TEXT
         )
     """)
+
     # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
@@ -329,6 +467,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             notification_lang TEXT DEFAULT 'ar'
         )
     """)
+
     # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
@@ -336,6 +475,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             lang TEXT DEFAULT 'off'
         )
     """)
+
     # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
@@ -369,6 +509,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             announced_at TEXT
         )
     """)
+
     # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
@@ -381,6 +522,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT
         )
     """)
+
     # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
@@ -390,6 +532,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
+
     # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
@@ -400,6 +543,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
+
     # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
@@ -409,6 +553,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             updated_at TEXT
         )
     """)
+
     # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
@@ -418,6 +563,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
+
     # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
@@ -428,6 +574,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             fail_count INTEGER DEFAULT 0
         )
     """)
+
     # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
@@ -440,6 +587,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT
         )
     """)
+
     # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
@@ -457,6 +605,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT
         )
     """)
+
     # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
@@ -475,6 +624,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
+
     # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
@@ -493,6 +643,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
+
     # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
@@ -504,6 +655,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT
         )
     """)
+
     # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
@@ -520,6 +672,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT
         )
     """)
+
     # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
@@ -530,6 +683,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, violation_type)
         )
     """)
+
     # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
@@ -543,6 +697,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
+
     # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
@@ -552,6 +707,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
         )
     """)
+
     # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
@@ -570,54 +726,28 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ الفهارس ============
-    indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)",
-        "CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
-        "CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)",
-        "CREATE INDEX IF NOT EXISTS idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status)",
-        "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)",
-        "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)",
-        "CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)",
-        "CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by ON bot_groups(added_by)",
-        "CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id ON user_groups_link(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)",
-        "CREATE INDEX IF NOT EXISTS idx_hidden_admins_admin_id ON hidden_admins(admin_id)",
-        "CREATE INDEX IF NOT EXISTS idx_group_admins_user_id ON group_admins(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user_id ON anonymous_admins(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)",
-        "CREATE INDEX IF NOT EXISTS idx_users_auto_recycle ON users(auto_recycle)",
-        "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
-        "CREATE INDEX IF NOT EXISTS idx_schedule_next_publish ON schedule(next_publish_date)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status_end ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_users_banned ON users(banned)",
-        "CREATE INDEX IF NOT EXISTS idx_uc_user ON user_channels(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts(channel_db_id)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published)",
-        "CREATE INDEX IF NOT EXISTS idx_groups_banned ON bot_groups(banned)",
-        "CREATE INDEX IF NOT EXISTS idx_banned_words_chat ON banned_words(chat_id)",
-        "CREATE INDEX IF NOT EXISTS idx_ar_chat ON auto_replies(chat_id)",
-        "CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_sub_status ON subscriptions(status)",
-        "CREATE INDEX IF NOT EXISTS idx_sub_end ON subscriptions(end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)",
-        "CREATE INDEX IF NOT EXISTS idx_contests_status ON contests(status)",
-        "CREATE INDEX IF NOT EXISTS idx_penalties_user ON user_penalties(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_penalties_chat ON user_penalties(chat_id)",
-        "CREATE INDEX IF NOT EXISTS idx_penalties_status ON user_penalties(status)",
-        "CREATE INDEX IF NOT EXISTS idx_points_user ON user_points(user_id)",
-    ]
-    for idx_sql in indexes:
-        await conn.execute(idx_sql)
+    # ============ الفهارس الموحّدة ============
+    for _table, idx_name, cols in COMMON_INDEXES:
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
+
+    # تسجيل إصدار المخطط
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+            (
+                CURRENT_SCHEMA_VERSION,
+                TimeUtils.sql_iso() if TimeUtils else "",
+                "initial schema",
+            ),
+        )
+    except Exception:
+        pass
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
@@ -629,7 +759,17 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 
 async def create_tables_postgres(conn, logger, TimeUtils):
     """إنشاء جميع جداول PostgreSQL + الفهارس"""
-    # USERS
+
+    # ---------- schema_version ----------
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL,
+            description TEXT
+        )
+    """)
+
+    # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -647,7 +787,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             active_channel INTEGER
         )
     """)
-    # USER_CHANNELS
+
+    # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id SERIAL PRIMARY KEY,
@@ -659,7 +800,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             UNIQUE(user_id, channel_id)
         )
     """)
-    # POSTS
+
+    # ---------- POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
@@ -679,7 +821,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
         ON posts(channel_db_id, text_hash, media_type, media_file_id)
     """)
-    # SCHEDULE
+
+    # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
             channel_db_id INTEGER PRIMARY KEY,
@@ -695,7 +838,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
-    # LAST_PUBLISH
+
+    # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INTEGER PRIMARY KEY,
@@ -703,7 +847,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
-    # BOT_GROUPS
+
+    # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -715,7 +860,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             banned INTEGER DEFAULT 0
         )
     """)
-    # USER_GROUPS_LINK
+
+    # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id BIGINT,
@@ -723,7 +869,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
-    # GROUP_ADMINS
+
+    # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
             chat_id BIGINT,
@@ -731,7 +878,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, user_id)
         )
     """)
-    # HIDDEN_OWNER_GROUPS
+
+    # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
             chat_id BIGINT,
@@ -740,7 +888,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, owner_id)
         )
     """)
-    # HIDDEN_ADMINS
+
+    # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
             chat_id BIGINT,
@@ -750,7 +899,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, admin_id)
         )
     """)
-    # ANONYMOUS_ADMINS
+
+    # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
             chat_id BIGINT NOT NULL,
@@ -761,7 +911,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, anonymous_id)
         )
     """)
-    # GROUP_SECURITY
+
+    # ---------- GROUP_SECURITY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -821,7 +972,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             violation_duration INTEGER DEFAULT 60
         )
     """)
-    # CHAT_LOCKS
+
+    # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id BIGINT PRIMARY KEY,
@@ -830,7 +982,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             locked_by BIGINT
         )
     """)
-    # BANNED_WORDS
+
+    # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id SERIAL PRIMARY KEY,
@@ -841,7 +994,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             UNIQUE(word, chat_id)
         )
     """)
-    # AUTO_REPLIES
+
+    # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -856,7 +1010,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, keyword)
         )
     """)
-    # AUTO_REPLY_SETTINGS
+
+    # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
             chat_id BIGINT PRIMARY KEY,
@@ -866,7 +1021,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             updated_at TIMESTAMP
         )
     """)
-    # SUPPORT_TICKETS
+
+    # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
             id SERIAL PRIMARY KEY,
@@ -881,7 +1037,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             replied INTEGER DEFAULT 0
         )
     """)
-    # BOT_ADMINS
+
+    # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
             user_id BIGINT PRIMARY KEY,
@@ -889,26 +1046,22 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             added_at TIMESTAMP
         )
     """)
-    # SETTINGS
+
+    # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         )
     """)
-    default_settings = [
-        ("publish_interval", "12"),
-        ("auto_backup", "1"),
-        ("last_ticket_number", "0"),
-        ("last_backup", ""),
-    ]
-    for key, value in default_settings:
+    for key, value in DEFAULT_SETTINGS:
         await conn.execute(
             "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
             key,
             value,
         )
-    # REFERRALS
+
+    # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id SERIAL PRIMARY KEY,
@@ -918,7 +1071,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             UNIQUE(referrer_id, referred_id)
         )
     """)
-    # REFERRAL_REWARDS
+
+    # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
             user_id BIGINT PRIMARY KEY,
@@ -928,7 +1082,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             last_referral_date TIMESTAMP
         )
     """)
-    # USER_REMINDER_SETTINGS
+
+    # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id BIGINT PRIMARY KEY,
@@ -940,14 +1095,16 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             notification_lang TEXT DEFAULT 'ar'
         )
     """)
-    # USER_TRANSLATION
+
+    # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
             user_id BIGINT PRIMARY KEY,
             lang TEXT DEFAULT 'off'
         )
     """)
-    # CONTESTS
+
+    # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id SERIAL PRIMARY KEY,
@@ -980,7 +1137,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             announced_at TIMESTAMP
         )
     """)
-    # ADMIN_LOGS
+
+    # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
             id SERIAL PRIMARY KEY,
@@ -992,7 +1150,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP
         )
     """)
-    # USER_WARNINGS
+
+    # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
             user_id BIGINT,
@@ -1001,7 +1160,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
-    # USER_VIOLATIONS
+
+    # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
             user_id BIGINT,
@@ -1011,7 +1171,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
-    # GROUP_RULES
+
+    # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
             chat_id BIGINT PRIMARY KEY,
@@ -1020,7 +1181,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             updated_at TIMESTAMP
         )
     """)
-    # USER_MESSAGES
+
+    # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
             user_id BIGINT,
@@ -1029,7 +1191,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         )
     """)
-    # SCHEDULED_POSTS
+
+    # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id SERIAL PRIMARY KEY,
@@ -1039,7 +1202,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             fail_count INTEGER DEFAULT 0
         )
     """)
-    # SENTIMENT_HISTORY
+
+    # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
             id SERIAL PRIMARY KEY,
@@ -1051,7 +1215,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP
         )
     """)
-    # PLANS
+
+    # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id SERIAL PRIMARY KEY,
@@ -1068,7 +1233,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP
         )
     """)
-    # SUBSCRIPTIONS
+
+    # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id SERIAL PRIMARY KEY,
@@ -1086,7 +1252,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
-    # INVOICES
+
+    # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id SERIAL PRIMARY KEY,
@@ -1104,7 +1271,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
-    # PAYMENT_LOGS
+
+    # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
             id SERIAL PRIMARY KEY,
@@ -1115,7 +1283,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP
         )
     """)
-    # USER_PENALTIES
+
+    # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
             id SERIAL PRIMARY KEY,
@@ -1131,7 +1300,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP
         )
     """)
-    # VIOLATION_PENALTIES
+
+    # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
             chat_id BIGINT NOT NULL,
@@ -1141,7 +1311,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, violation_type)
         )
     """)
-    # GIFT_CODES
+
+    # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id SERIAL PRIMARY KEY,
@@ -1154,7 +1325,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         )
     """)
-    # USER_POINTS
+
+    # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
             user_id BIGINT PRIMARY KEY,
@@ -1163,7 +1335,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
         )
     """)
-    # PENALTY_ARCHIVE
+
+    # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
             id SERIAL PRIMARY KEY,
@@ -1181,37 +1354,26 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ الفهارس ============
-    indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)",
-        "CREATE INDEX IF NOT EXISTS idx_users_active_channel ON users(active_channel)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
-        "CREATE INDEX IF NOT EXISTS idx_banned_words_chat_word ON banned_words(chat_id, word)",
-        "CREATE INDEX IF NOT EXISTS idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status)",
-        "CREATE INDEX IF NOT EXISTS idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_users_auto_publish_banned ON users(auto_publish, banned)",
-        "CREATE INDEX IF NOT EXISTS idx_users_language ON users(language)",
-        "CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users(subscription_end)",
-        "CREATE INDEX IF NOT EXISTS idx_bot_groups_added_by ON bot_groups(added_by)",
-        "CREATE INDEX IF NOT EXISTS idx_user_groups_link_user_id ON user_groups_link(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)",
-        "CREATE INDEX IF NOT EXISTS idx_hidden_admins_admin_id ON hidden_admins(admin_id)",
-        "CREATE INDEX IF NOT EXISTS idx_group_admins_user_id ON group_admins(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_user_id ON anonymous_admins(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)",
-        "CREATE INDEX IF NOT EXISTS idx_users_auto_recycle ON users(auto_recycle)",
-        "CREATE INDEX IF NOT EXISTS idx_user_channels_user_created ON user_channels(user_id, created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_user_channels_user_banned ON user_channels(user_id, banned)",
-        "CREATE INDEX IF NOT EXISTS idx_schedule_next_publish ON schedule(next_publish_date)",
-        "CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status_end ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_published ON posts(channel_db_id, published)",
-        "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
-    ]
-    for idx_sql in indexes:
-        await conn.execute(idx_sql)
+    # ============ الفهارس الموحّدة ============
+    for _table, idx_name, cols in COMMON_INDEXES:
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
+
+    # تسجيل إصدار المخطط
+    try:
+        await conn.execute(
+            "INSERT INTO schema_version (version, applied_at, description) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+            CURRENT_SCHEMA_VERSION,
+            TimeUtils.utc_now() if TimeUtils else None,
+            "initial schema",
+        )
+    except Exception:
+        pass
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
@@ -1223,8 +1385,19 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 
 async def create_tables_mysql(conn, logger, TimeUtils):
     """إنشاء جميع جداول MySQL + الفهارس"""
+
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
-    # USERS
+
+    # ---------- schema_version ----------
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INT PRIMARY KEY,
+            applied_at DATETIME NOT NULL,
+            description TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+
+    # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -1242,7 +1415,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             active_channel INT
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_CHANNELS
+
+    # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1254,7 +1428,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             UNIQUE KEY (user_id, channel_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # POSTS
+
+    # ---------- POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1271,7 +1446,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             UNIQUE KEY idx_posts_unique (channel_db_id, text_hash, media_type, media_file_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SCHEDULE
+
+    # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
             channel_db_id INT PRIMARY KEY,
@@ -1287,7 +1463,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # LAST_PUBLISH
+
+    # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INT PRIMARY KEY,
@@ -1295,7 +1472,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # BOT_GROUPS
+
+    # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -1307,7 +1485,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             banned TINYINT(1) DEFAULT 0
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_GROUPS_LINK
+
+    # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id BIGINT,
@@ -1315,7 +1494,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # GROUP_ADMINS
+
+    # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
             chat_id BIGINT,
@@ -1323,7 +1503,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, user_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # HIDDEN_OWNER_GROUPS
+
+    # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
             chat_id BIGINT,
@@ -1332,7 +1513,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, owner_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # HIDDEN_ADMINS
+
+    # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
             chat_id BIGINT,
@@ -1342,7 +1524,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, admin_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # ANONYMOUS_ADMINS
+
+    # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
             chat_id BIGINT NOT NULL,
@@ -1353,7 +1536,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, anonymous_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # GROUP_SECURITY
+
+    # ---------- GROUP_SECURITY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -1413,7 +1597,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             violation_duration INT DEFAULT 60
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # CHAT_LOCKS
+
+    # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id BIGINT PRIMARY KEY,
@@ -1422,7 +1607,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             locked_by BIGINT
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # BANNED_WORDS
+
+    # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1433,7 +1619,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             UNIQUE KEY (word, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # AUTO_REPLIES
+
+    # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -1448,7 +1635,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, keyword)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # AUTO_REPLY_SETTINGS
+
+    # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
             chat_id BIGINT PRIMARY KEY,
@@ -1458,7 +1646,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             updated_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SUPPORT_TICKETS
+
+    # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1473,7 +1662,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             replied TINYINT(1) DEFAULT 0
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # BOT_ADMINS
+
+    # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
             user_id BIGINT PRIMARY KEY,
@@ -1481,25 +1671,21 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             added_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SETTINGS
+
+    # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             `key` VARCHAR(255) PRIMARY KEY,
             `value` TEXT
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    default_settings = [
-        ("publish_interval", "12"),
-        ("auto_backup", "1"),
-        ("last_ticket_number", "0"),
-        ("last_backup", ""),
-    ]
-    for key, value in default_settings:
+    for key, value in DEFAULT_SETTINGS:
         await conn.execute(
             "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
             (key, value),
         )
-    # REFERRALS
+
+    # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1509,7 +1695,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             UNIQUE KEY (referrer_id, referred_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # REFERRAL_REWARDS
+
+    # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
             user_id BIGINT PRIMARY KEY,
@@ -1519,7 +1706,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             last_referral_date DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_REMINDER_SETTINGS
+
+    # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id BIGINT PRIMARY KEY,
@@ -1531,14 +1719,16 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             notification_lang VARCHAR(10) DEFAULT 'ar'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_TRANSLATION
+
+    # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
             user_id BIGINT PRIMARY KEY,
             lang VARCHAR(10) DEFAULT 'off'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # CONTESTS
+
+    # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1571,7 +1761,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             announced_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # ADMIN_LOGS
+
+    # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1583,7 +1774,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             created_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_WARNINGS
+
+    # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
             user_id BIGINT,
@@ -1592,7 +1784,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_VIOLATIONS
+
+    # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
             user_id BIGINT,
@@ -1602,7 +1795,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # GROUP_RULES
+
+    # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
             chat_id BIGINT PRIMARY KEY,
@@ -1611,7 +1805,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             updated_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_MESSAGES
+
+    # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
             user_id BIGINT,
@@ -1620,7 +1815,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (user_id, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SCHEDULED_POSTS
+
+    # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1630,7 +1826,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             fail_count INT DEFAULT 0
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SENTIMENT_HISTORY
+
+    # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1642,7 +1839,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             created_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # PLANS
+
+    # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1659,7 +1857,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             created_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # SUBSCRIPTIONS
+
+    # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1677,7 +1876,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # INVOICES
+
+    # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1695,7 +1895,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # PAYMENT_LOGS
+
+    # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1706,7 +1907,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             created_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_PENALTIES
+
+    # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1722,7 +1924,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             created_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # VIOLATION_PENALTIES
+
+    # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
             chat_id BIGINT NOT NULL,
@@ -1732,7 +1935,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             PRIMARY KEY (chat_id, violation_type)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # GIFT_CODES
+
+    # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1745,7 +1949,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (plan_id) REFERENCES plans(id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # USER_POINTS
+
+    # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
             user_id BIGINT PRIMARY KEY,
@@ -1754,7 +1959,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-    # PENALTY_ARCHIVE
+
+    # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1771,44 +1977,34 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             archived_at DATETIME
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
+
     await conn.execute("SET FOREIGN_KEY_CHECKS=1")
 
-    # ============ الفهارس ============
-    indexes = [
-        "CREATE INDEX idx_posts_text_hash ON posts(text_hash)",
-        "CREATE INDEX idx_users_active_channel ON users(active_channel)",
-        "CREATE INDEX idx_subscriptions_active ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX idx_auto_replies_lookup ON auto_replies(chat_id, keyword, is_active)",
-        "CREATE INDEX idx_banned_words_chat_word ON banned_words(chat_id, word)",
-        "CREATE INDEX idx_schedule_channel_next ON schedule(channel_db_id, next_publish_date)",
-        "CREATE INDEX idx_subscriptions_user_status ON subscriptions(user_id, status)",
-        "CREATE INDEX idx_penalties_user_chat_status_end ON user_penalties(user_id, chat_id, status, end_time)",
-        "CREATE INDEX idx_posts_channel_pub_fail_created_optimized ON posts(channel_db_id, published, fail_count, created_at)",
-        "CREATE INDEX idx_users_auto_publish_banned ON users(auto_publish, banned)",
-        "CREATE INDEX idx_users_language ON users(language)",
-        "CREATE INDEX idx_users_subscription_end ON users(subscription_end)",
-        "CREATE INDEX idx_bot_groups_added_by ON bot_groups(added_by)",
-        "CREATE INDEX idx_user_groups_link_user_id ON user_groups_link(user_id)",
-        "CREATE INDEX idx_hidden_owner_groups_owner_id ON hidden_owner_groups(owner_id)",
-        "CREATE INDEX idx_hidden_admins_admin_id ON hidden_admins(admin_id)",
-        "CREATE INDEX idx_group_admins_user_id ON group_admins(user_id)",
-        "CREATE INDEX idx_anonymous_admins_user_id ON anonymous_admins(user_id)",
-        "CREATE INDEX idx_anonymous_admins_anonymous_id ON anonymous_admins(anonymous_id)",
-        "CREATE INDEX idx_users_auto_recycle ON users(auto_recycle)",
-        "CREATE INDEX idx_user_channels_user_created ON user_channels(user_id, created_at DESC)",
-        "CREATE INDEX idx_user_channels_user_banned ON user_channels(user_id, banned)",
-        "CREATE INDEX idx_schedule_next_publish ON schedule(next_publish_date)",
-        "CREATE INDEX idx_subscriptions_user_status_end ON subscriptions(user_id, status, end_date)",
-        "CREATE INDEX idx_posts_channel_published ON posts(channel_db_id, published)",
-        "CREATE INDEX idx_posts_channel_pub_fail_created ON posts(channel_db_id, published, fail_count, created_at)",
-    ]
-    for idx_sql in indexes:
+    # ============ الفهارس الموحّدة ============
+    # MySQL لا يدعم IF NOT EXISTS في CREATE INDEX قبل الإصدار 8.0.29
+    # لذا نستخدم try/except
+    for _table, idx_name, cols in COMMON_INDEXES:
         try:
-            await conn.execute(idx_sql)
+            await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
         except Exception as e:
-            if "Duplicate key name" not in str(e) and "already exists" not in str(e).lower():
-                if logger:
-                    logger.debug(f"index already exists or error: {e}")
+            error_msg = str(e).lower()
+            if "duplicate key name" in error_msg or "already exists" in error_msg:
+                continue
+            if logger:
+                logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
+
+    # تسجيل إصدار المخطط
+    try:
+        await conn.execute(
+            "INSERT IGNORE INTO schema_version (version, applied_at, description) VALUES (%s, %s, %s)",
+            (
+                CURRENT_SCHEMA_VERSION,
+                TimeUtils.sql_iso() if TimeUtils else "",
+                "initial schema",
+            ),
+        )
+    except Exception:
+        pass
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
