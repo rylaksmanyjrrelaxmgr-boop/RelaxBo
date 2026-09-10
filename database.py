@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.4)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.5)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -12,6 +12,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - دوال المسابقات في database_contests.py (Mixin)
 - دوال الإحصائيات والمشرفين في database_stats.py (Mixin)
 - دوال الإعدادات العامة في database_settings.py (Mixin)
+- دوال النقاط والمستويات في database_points.py (Mixin)
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
@@ -20,6 +21,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.2: فصل دوال المسابقات إلى database_contests.py
 🆕 v7.4.3: فصل دوال الإحصائيات والمشرفين إلى database_stats.py
 🆕 v7.4.4: فصل دوال الإعدادات العامة إلى database_settings.py
+🆕 v7.4.5: فصل دوال النقاط إلى database_points.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -29,6 +31,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   - database_contests.py
   - database_stats.py
   - database_settings.py
+  - database_points.py
   - database_tables.py
 """
 
@@ -217,6 +220,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_settings.py غير موجود: {e}")
     SettingsMixin = object
     SETTINGS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.8 استيراد PointsMixin (النقاط والمستويات)
+# =====================================================================
+
+try:
+    from database_points import PointsMixin
+    POINTS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_points.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_points.py غير موجود: {e}")
+    PointsMixin = object
+    POINTS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1184,6 +1200,7 @@ class Database(
     ContestsMixin,
     StatsMixin,
     SettingsMixin,
+    PointsMixin,
 ):
     _instance = None
     _lock = asyncio.Lock()
@@ -3070,6 +3087,7 @@ class Database(
     #   → database_contests.py (ContestsMixin)    : 8 دوال
     #   → database_stats.py (StatsMixin)          : 6 دوال
     #   → database_settings.py (SettingsMixin)    : 7 دوال
+    #   → database_points.py (PointsMixin)        : 4 دوال
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -3600,34 +3618,11 @@ class Database(
     async def get_all_active_penalties(self) -> List[Dict]:
         return await self.fetchall("SELECT * FROM user_penalties WHERE status = 'active'")
 
-    # =====================================================================
-    # دوال النقاط
-    # =====================================================================
-
-    async def add_points(self, user_id: int, points: int) -> int:
-        await self.execute(
-            """INSERT INTO user_points (user_id, points, last_updated)
-               VALUES (?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET points = points + ?, last_updated = ?""",
-            (user_id, points, TimeUtils.utc_now(), points, TimeUtils.utc_now()),
-        )
-        return await self.get_user_points(user_id)
-
-    async def get_user_points(self, user_id: int) -> int:
-        return await self.fetchval("SELECT points FROM user_points WHERE user_id = ?", (user_id,), default=0)
-
-    async def get_user_level(self, user_id: int) -> int:
-        points = await self.get_user_points(user_id)
-        return (points // 100) + 1
-
-    async def get_top_users(self, limit: int = 10) -> List[Dict]:
-        return await self.fetchall(
-            """SELECT u.user_id, u.username, u.first_name, COALESCE(up.points, 0) as points
-               FROM users u
-               LEFT JOIN user_points up ON u.user_id = up.user_id
-               ORDER BY points DESC LIMIT ?""",
-            (limit,),
-        )
+    # ═══════════════════════════════════════════════════════════════════
+    # 📌 دوال النقاط انتقلت إلى database_points.py (PointsMixin)
+    #    متاحة عبر الوراثة: add_points, get_user_points,
+    #    get_user_level, get_top_users
+    # ═══════════════════════════════════════════════════════════════════
 
 
 # =====================================================================
