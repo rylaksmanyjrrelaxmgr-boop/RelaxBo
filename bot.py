@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v2)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v3)
 ================================================================================
 - دمج نظام الكاش (cache.py) بالكامل
 - استخدام user_cache.get_or_load() في المعالجات (يُعدَّل في handlers.py)
@@ -16,6 +16,10 @@
 - ✅ ChatMemberHandler لتحديث المشرفين فورياً (بدل الاستطلاع الدوري)
 - ✅ تسريع /start من 5 ثوان إلى < 300ms
 - ✅ تقليل الحمل على Telegram API بنسبة 95%
+
+🆕 v3:
+- ✅ keep_alive() لمنع cold start على Render Free tier
+- ✅ تحسين استقرار البوت على Render
 """
 
 import asyncio
@@ -39,7 +43,7 @@ from handlers import (
     CommandHandlers,
     CallbackHandlers,
     MessageHandlers,
-    chat_member,  # ✅ جديد: معالج تحديثات المشرفين
+    chat_member,  # ✅ معالج تحديثات المشرفين
 )
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
@@ -62,8 +66,8 @@ ALLOWED_UPDATES = [
     "callback_query",
     "chat_join_request",
     "pre_checkout_query",
-    "chat_member",           # ✅ جديد: استقبال تحديثات المشرفين
-    "my_chat_member",        # ✅ جديد: استقبال تغييرات عضوية البوت
+    "chat_member",           # ✅ تحديثات المشرفين
+    "my_chat_member",        # ✅ تغييرات عضوية البوت
 ]
 
 # =====================================================================
@@ -197,6 +201,51 @@ async def successful_payment(update, context):
 async def health_check(request):
     """نقطة نهاية للتحقق من صحة البوت"""
     return web.Response(text="OK", status=200)
+
+# =====================================================================
+# 🆕 keep-alive لمنع cold start على Render Free tier
+# =====================================================================
+
+async def keep_alive():
+    """
+    يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة.
+
+    - Render Free tier يوقف الخدمة بعد 15 دقيقة خمول
+    - هذا الـ ping يمنع الإيقاف
+    - يستخدم /health endpoint
+    """
+    await asyncio.sleep(60)  # انتظار أولي 60 ثانية بعد الإقلاع
+
+    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
+
+    if not url:
+        logger.info("ℹ️ keep_alive: RENDER_EXTERNAL_URL غير موجود، سيتم تعطيله")
+        return
+
+    # إزالة / في النهاية إن وجدت
+    url = url.rstrip('/')
+    health_url = f"{url}/health"
+
+    logger.info(f"💓 keep_alive مُفعّل — Ping كل 5 دقائق: {health_url}")
+
+    import aiohttp
+
+    while True:
+        try:
+            await asyncio.sleep(300)  # كل 5 دقائق
+
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(health_url) as response:
+                    if response.status == 200:
+                        logger.debug(f"💓 Keep-alive: {response.status}")
+                    else:
+                        logger.debug(f"💓 Keep-alive: {response.status}")
+        except asyncio.CancelledError:
+            logger.info("🛑 keep_alive تم إلغاؤه")
+            raise
+        except Exception as e:
+            logger.debug(f"💓 keep-alive: {e}")
 
 # =====================================================================
 # المهمة الرئيسية
@@ -401,7 +450,7 @@ async def main():
     app.add_error_handler(ErrorHandler.handle_error)
 
     # ═══════════════════════════════════════════════════════════════════
-    # ✅ جديد: تسجيل معالج تحديثات المشرفين (ChatMemberHandler)
+    # ✅ v2: تسجيل معالج تحديثات المشرفين (ChatMemberHandler)
     #    يستقبل إشعارات Telegram عند:
     #    - تعيين/إزالة مشرف
     #    - تغيير صلاحيات مشرف
@@ -436,15 +485,20 @@ async def main():
                 await asyncio.sleep(60)
 
     tasks = [
+        # 🆕 v3: keep-alive لمنع cold start
+        asyncio.create_task(run_task_with_retry(keep_alive, task_name="keep_alive")),
+
         asyncio.create_task(run_task_with_retry(BackgroundTasks.auto_publish, app.bot, task_name="auto_publish")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.auto_backup, task_name="auto_backup")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.reminders, app.bot, task_name="reminders")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.heartbeat, app.bot, task_name="heartbeat")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.flush_usage_periodically, task_name="flush_usage")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_subscriptions, task_name="expire_subscriptions")),
+
         # ⚠️ sync_admins_periodically أصبحت طبقة احتياطية فقط (بعد ChatMemberHandler)
-        #    تعمل كل 6 ساعات بدل ساعة (تم تعديل المدة في utils.py)
+        #    تعمل كل ساعتين بدل ساعة (تم تعديل المدة في utils.py)
         asyncio.create_task(run_task_with_retry(BackgroundTasks.sync_admins_periodically, app.bot, task_name="sync_admins")),
+
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_penalties_periodically, task_name="expire_penalties")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.cleanup_old_data, task_name="cleanup_old_data")),
         asyncio.create_task(run_task_with_retry(cache_cleanup_task, task_name="cache_cleanup")),
