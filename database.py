@@ -2,17 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.2)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.3)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
+- دوال الاشتراكات والباقات والإحالات في database_subscriptions.py (Mixin)
 - كل دوال الأعمال الأخرى + الكاش + المهام الخلفية
 
-🆕 إصلاحات v7.2:
-  - فصل دوال القنوات والمنشورات إلى database_channels_posts.py
-  - استخدام Mixin لضمان نفس السلوك والأداء
+🆕 إصلاحات v7.3:
+  - فصل دوال الاشتراكات والباقات والإحالات إلى database_subscriptions.py
+  - استخدام SubscriptionsMixin لضمان نفس السلوك والأداء
+  - إضافة self.DB_TYPE, self.TimeUtils, self.internal_cache للـ Mixins
 
-📌 ملاحظة: يجب أن يكون database_channels_posts.py بجانب هذا الملف
+📌 ملاحظة: يجب أن يكون بجانب هذا الملف:
+  - database_channels_posts.py
+  - database_subscriptions.py
+  - database_tables.py
 """
 
 import os
@@ -122,6 +127,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_channels_posts.py غير موجود: {e}")
     ChannelsPostsMixin = object
     CHANNELS_POSTS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.2 استيراد SubscriptionsMixin (الاشتراكات والباقات والإحالات)
+# =====================================================================
+
+try:
+    from database_subscriptions import SubscriptionsMixin
+    SUBSCRIPTIONS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_subscriptions.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_subscriptions.py غير موجود: {e}")
+    SubscriptionsMixin = object
+    SUBSCRIPTIONS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1093,10 +1111,10 @@ class TimeUtils:
         return None
 
 # =====================================================================
-# 3. فئة Database (ترث من ChannelsPostsMixin)
+# 3. فئة Database (ترث من كل الـ Mixins)
 # =====================================================================
 
-class Database(ChannelsPostsMixin):
+class Database(ChannelsPostsMixin, SubscriptionsMixin):
     _instance = None
     _lock = asyncio.Lock()
     _user_locks = {}
@@ -1310,6 +1328,13 @@ class Database(ChannelsPostsMixin):
         self._global_words_lock = asyncio.Lock()
         # ✅ كاش أعمدة group_security
         self._group_security_columns_cache: Optional[set] = None
+
+        # ✅ خصائص مشتركة لكل الـ Mixins
+        self.DB_TYPE = DB_TYPE
+        self.USE_POSTGRES = USE_POSTGRES
+        self.USE_MYSQL = USE_MYSQL
+        self.TimeUtils = TimeUtils
+        self.internal_cache = internal_cache
 
     # =====================================================================
     # دوال الكاش المحلي
@@ -2821,7 +2846,7 @@ class Database(ChannelsPostsMixin):
                         )
                         await self._execute_with_conn(
                             conn,
-                            "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT(user_id) DO NOTHING",
+                            "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING",
                             user_id,
                         )
                     elif USE_MYSQL:
@@ -2964,115 +2989,34 @@ class Database(ChannelsPostsMixin):
         banned = await self.fetchval("SELECT COUNT(*) FROM users WHERE banned = 1", default=0)
         return {"users": total, "banned": banned}
 
-    async def has_active_subscription(self, user_id: int) -> bool:
-        result = await self.fetchval(
-            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ? LIMIT 1",
-            (user_id, TimeUtils.utc_now()),
-        )
-        return result is not None
-
-    async def has_used_trial(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT trial_used FROM users WHERE user_id = ?", (user_id,), default=0)
-        return result == 1
-
-    async def activate_trial(self, user_id: int) -> int:
-        try:
-            async with await self._get_user_lock(user_id):
-                now = TimeUtils.utc_now()
-                trial_end = now + timedelta(days=30)
-                async with self.transaction() as conn:
-                    trial_plan_id = await self._fetchval_with_conn(
-                        conn, "SELECT id FROM plans WHERE name = 'تجربة' AND is_active = 1 LIMIT 1", default=1,
-                    )
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.utc_now(),
-                    )
-                    current_end_dt = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    if current_end_dt and current_end_dt > trial_end:
-                        days_granted = 0
-                        new_end = current_end_dt
-                    else:
-                        days_granted = 30
-                        new_end = trial_end
-
-                    if USE_POSTGRES:
-                        await self._execute_with_conn(
-                            conn, "UPDATE users SET trial_used = 1, updated_at = $1 WHERE user_id = $2",
-                            TimeUtils.utc_now(), user_id,
-                        )
-                    else:
-                        await self._execute_with_conn(
-                            conn, "UPDATE users SET trial_used = 1, updated_at = ? WHERE user_id = ?",
-                            TimeUtils.sql_iso(), user_id,
-                        )
-
-                    if days_granted > 0:
-                        if USE_POSTGRES:
-                            await self._execute_with_conn(
-                                conn, "UPDATE users SET subscription_end = $1 WHERE user_id = $2",
-                                new_end, user_id,
-                            )
-                            await self._execute_with_conn(
-                                conn,
-                                """INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                                   VALUES ($1, $2, 'active', $3, $4, 'trial', $5, $6)""",
-                                user_id, trial_plan_id, TimeUtils.utc_now(), new_end, TimeUtils.utc_now(), TimeUtils.utc_now(),
-                            )
-                        else:
-                            await self._execute_with_conn(
-                                conn, "UPDATE users SET subscription_end = ? WHERE user_id = ?",
-                                new_end.strftime("%Y-%m-%d %H:%M:%S"), user_id,
-                            )
-                            await self._execute_with_conn(
-                                conn,
-                                """INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at)
-                                   VALUES (?,?,?,?,?,?,?,?)""",
-                                user_id, trial_plan_id, "active", TimeUtils.sql_iso(),
-                                new_end.strftime("%Y-%m-%d %H:%M:%S"), "trial",
-                                TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                            )
-                        await self._refresh_user_subscription_end(conn, user_id)
-
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return days_granted
-        except Exception as e:
-            logger.error(f"❌ Error in activate_trial: {e}", exc_info=True)
+    async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
+        """دفعة واحدة بدلاً من استعلام لكل مستخدم"""
+        if not user_ids:
             return 0
-
-    async def get_referral_code(self, user_id: int) -> str:
-        result = await self.fetchval(
-            "SELECT referral_code FROM users WHERE user_id = ?",
-            (user_id,), default=f"ref_{user_id}",
-        )
-        return result if result else f"ref_{user_id}"
-
-    async def get_user_by_referral_code(self, code: str) -> Optional[int]:
-        return await self.fetchval("SELECT user_id FROM users WHERE referral_code = ?", (code,))
-
-    async def get_active_subscription(self, user_id: int) -> Optional[Dict]:
-        return await self.fetchone(
-            """SELECT s.*, p.name, p.duration_days, p.max_channels, p.max_posts, p.features
-               FROM subscriptions s
-               JOIN plans p ON s.plan_id = p.id AND p.is_active = 1
-               WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-               ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC
-               LIMIT 1""",
-            (user_id, TimeUtils.utc_now()),
-        )
-
-    async def get_active_plan(self, user_id: int) -> Optional[Dict]:
-        sub = await self.get_active_subscription(user_id)
-        if sub:
-            return await self.get_plan(sub["plan_id"])
-        return None
-
-    async def get_subscription_end(self, user_id: int) -> Optional[datetime]:
-        result = await self.fetchval("SELECT subscription_end FROM users WHERE user_id = ?", (user_id,))
-        return TimeUtils.safe_parse_iso(result) if result else None
+        try:
+            async with self.transaction() as conn:
+                BATCH = 500
+                total_updated = 0
+                for i in range(0, len(user_ids), BATCH):
+                    batch = user_ids[i : i + BATCH]
+                    placeholders = ",".join(["?"] * len(batch))
+                    updated = await self._execute_with_conn(
+                        conn,
+                        f"UPDATE users SET banned = 1 WHERE user_id IN ({placeholders})",
+                        *batch,
+                    )
+                    total_updated += updated
+                    for uid in batch:
+                        await internal_cache.invalidate(f"user_{uid}")
+                        await internal_cache.invalidate(f"user_{uid}_True")
+                        await internal_cache.invalidate(f"user_{uid}_False")
+                if CACHE_AVAILABLE:
+                    for uid in user_ids:
+                        await invalidate_user_cache(uid)
+            return total_updated
+        except Exception as e:
+            logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
+            return 0
 
     # =====================================================================
     # دوال المجموعات
@@ -4072,146 +4016,6 @@ class Database(ChannelsPostsMixin):
         return await self.execute("DELETE FROM support_tickets") > 0
 
     # =====================================================================
-    # دوال الإحالات
-    # =====================================================================
-
-    async def add_referral(self, referrer_id: int, referred_id: int) -> bool:
-        if referrer_id == referred_id:
-            return False
-        try:
-            async with await self._get_user_lock(referrer_id):
-                async with self.transaction() as conn:
-                    today = TimeUtils.utc_now().strftime("%Y-%m-%d")
-                    count = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT COUNT(*) FROM referrals WHERE referrer_id = ? AND date(created_at) = ?",
-                        referrer_id, today, default=0,
-                    )
-                    if count >= getattr(CONFIG, "MAX_DAILY_REFERRALS", 10):
-                        logger.warning(f"⚠️ User {referrer_id} reached daily referral limit")
-                        return False
-                    inserted = await self._execute_with_conn(
-                        conn,
-                        "INSERT OR IGNORE INTO referrals (referrer_id, referred_id, created_at) VALUES (?,?,?)",
-                        referrer_id, referred_id, TimeUtils.sql_iso(),
-                    )
-                    if inserted > 0:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?,1,3,0,?) ON CONFLICT(user_id) DO UPDATE SET referral_count = referral_count + 1, total_reward_days = total_reward_days + 3, last_referral_date = ?",
-                            referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now(),
-                        )
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,5,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 5, last_updated = ?",
-                            referrer_id, TimeUtils.utc_now(), TimeUtils.utc_now(),
-                        )
-                        await internal_cache.invalidate(f"user_{referrer_id}")
-                        if CACHE_AVAILABLE:
-                            await invalidate_user_cache(referrer_id)
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(f"❌ Error in add_referral: {e}", exc_info=True)
-            return False
-
-    async def get_referral_stats(self, user_id: int) -> Dict:
-        try:
-            async with self.connection() as conn:
-                await self._execute_with_conn(
-                    conn,
-                    "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
-                    user_id,
-                )
-                total = await self._fetchval_with_conn(
-                    conn, "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", user_id, default=0
-                )
-                reward = await self._fetchone_with_conn(
-                    conn,
-                    "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?",
-                    user_id,
-                )
-                total_reward = reward["total_reward"] if reward else 0
-                claimed = reward["claimed"] if reward else 0
-            return {"total": total, "claimed": claimed, "available": max(0, total_reward - claimed)}
-        except Exception as e:
-            logger.error(f"❌ Error in get_referral_stats: {e}", exc_info=True)
-            return {"total": 0, "claimed": 0, "available": 0}
-
-    async def claim_referral_reward(self, user_id: int) -> int:
-        try:
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
-                        user_id,
-                    )
-                    reward = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT COALESCE(total_reward_days, 0) as total_reward, COALESCE(claimed_reward_days, 0) as claimed FROM referral_rewards WHERE user_id = ?",
-                        user_id,
-                    )
-                    if not reward:
-                        return 0
-                    total_reward = reward["total_reward"] or 0
-                    claimed = reward["claimed"] or 0
-                    available = max(0, total_reward - claimed)
-                    if available <= 0:
-                        return 0
-                    plan_id = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT s.plan_id FROM subscriptions s JOIN plans p ON s.plan_id = p.id WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ? ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    if not plan_id:
-                        plan_id = await self._fetchval_with_conn(
-                            conn,
-                            "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1",
-                        )
-                        if not plan_id:
-                            plan_id = await self._fetchval_with_conn(
-                                conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1"
-                            )
-                            if not plan_id:
-                                return 0
-                    await self._execute_with_conn(
-                        conn,
-                        "UPDATE referral_rewards SET claimed_reward_days = claimed_reward_days + ? WHERE user_id = ?",
-                        available, user_id,
-                    )
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    now = TimeUtils.utc_now()
-                    base = current_end if current_end and current_end > now else now
-                    new_end = base + timedelta(days=available)
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                        user_id, plan_id, "active", TimeUtils.sql_iso(),
-                        new_end.strftime("%Y-%m-%d %H:%M:%S"), "referral",
-                        TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                    )
-                    await self._refresh_user_subscription_end(conn, user_id)
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return available
-        except Exception as e:
-            logger.error(f"❌ Error in claim_referral_reward: {e}", exc_info=True)
-            return 0
-
-    async def get_referrals_list(self, user_id: int) -> List[int]:
-        referrals = await self.fetchall(
-            "SELECT referred_id FROM referrals WHERE referrer_id = ? ORDER BY created_at DESC", (user_id,)
-        )
-        return [ref["referred_id"] for ref in referrals]
-
-    # =====================================================================
     # دوال التذكيرات
     # =====================================================================
 
@@ -4603,439 +4407,6 @@ class Database(ChannelsPostsMixin):
         return value in ("1", "true", "True", "yes", "on")
 
     # =====================================================================
-    # دوال الباقات والاشتراكات
-    # =====================================================================
-
-    async def get_plan(self, plan_id: int) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM plans WHERE id = ? AND is_active = 1", (plan_id,))
-
-    async def get_plan_by_name(self, name: str) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM plans WHERE name = ? AND is_active = 1 LIMIT 1", (name,))
-
-    async def get_all_plans(self) -> List[Dict]:
-        return await self.fetchall("SELECT * FROM plans WHERE is_active = 1 AND is_gift = 0 ORDER BY price")
-
-    async def get_gift_plans(self) -> List[Dict]:
-        return await self.fetchall(
-            "SELECT id, name, description, price, duration_days AS days FROM plans WHERE is_active = 1 AND is_gift = 1 ORDER BY price"
-        )
-
-    async def get_gift_plan(self, plan_id: int) -> Optional[Dict]:
-        return await self.fetchone(
-            "SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = ? AND is_gift = 1 AND is_active = 1",
-            (plan_id,),
-        )
-
-    async def redeem_gift_code(self, user_id: int, code: str) -> tuple:
-        try:
-            code = code.strip()
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    gift_code = await self._fetchone_with_conn(
-                        conn, "SELECT * FROM gift_codes WHERE code = ?", code
-                    )
-                    if not gift_code:
-                        return False, 0
-                    if gift_code["used_by"]:
-                        return False, 0
-                    if gift_code["creator_id"] == user_id:
-                        return False, -1
-                    plan = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT id, name, description, price, duration_days AS days FROM plans WHERE id = ? AND is_gift = 1 AND is_active = 1",
-                        gift_code["plan_id"],
-                    )
-                    if not plan:
-                        return False, 0
-                    await self._execute_with_conn(
-                        conn, "UPDATE gift_codes SET used_by = ?, used_at = ? WHERE id = ?",
-                        user_id, TimeUtils.utc_now(), gift_code["id"],
-                    )
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    now = TimeUtils.utc_now()
-                    base = current_end if current_end and current_end > now else now
-                    new_end = base + timedelta(days=plan["days"])
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                        user_id, gift_code["plan_id"], "active", TimeUtils.sql_iso(),
-                        new_end.strftime("%Y-%m-%d %H:%M:%S"), "gift",
-                        TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                    )
-                    await self._refresh_user_subscription_end(conn, user_id)
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return True, plan["days"]
-        except Exception as e:
-            logger.error(f"❌ Error in redeem_gift_code: {e}", exc_info=True)
-            return False, 0
-
-    async def grant_subscription_days(self, user_id: int, days: int,
-                                      plan_id: int = None, provider: str = "manual") -> bool:
-        try:
-            if days <= 0:
-                return False
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    exists = await self._fetchval_with_conn(
-                        conn, "SELECT 1 FROM users WHERE user_id = ?", user_id
-                    )
-                    if not exists:
-                        return False
-                    if not plan_id:
-                        plan_id = await self._fetchval_with_conn(
-                            conn,
-                            "SELECT id FROM plans WHERE is_gift = 1 AND is_active = 1 ORDER BY max_channels DESC LIMIT 1",
-                        )
-                        if not plan_id:
-                            plan_id = await self._fetchval_with_conn(
-                                conn, "SELECT id FROM plans WHERE name = 'شهر' AND is_active = 1 LIMIT 1"
-                            )
-                            if not plan_id:
-                                return False
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    now = TimeUtils.utc_now()
-                    base = current_end if current_end and current_end > now else now
-                    new_end = base + timedelta(days=days)
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, provider, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                        user_id, plan_id, "active", TimeUtils.sql_iso(),
-                        new_end.strftime("%Y-%m-%d %H:%M:%S"), provider,
-                        TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                    )
-                    await self._refresh_user_subscription_end(conn, user_id)
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return True
-        except Exception as e:
-            logger.error(f"❌ Error in grant_subscription_days: {e}", exc_info=True)
-            return False
-
-    async def create_subscription(self, user_id: int, plan_id: int,
-                                   provider: str = "xtr", provider_sub_id: str = None) -> int:
-        try:
-            plan = await self.get_plan(plan_id)
-            if not plan:
-                return 0
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    now = TimeUtils.utc_now()
-                    base = current_end if current_end and current_end > now else now
-                    new_end = base + timedelta(days=plan["duration_days"])
-                    if USE_POSTGRES:
-                        row = await self._fetchone_with_conn(
-                            conn,
-                            "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES ($1, $2, 'active', $3, $4, 0, $5, $6, $7, $7) RETURNING id",
-                            user_id, plan_id, TimeUtils.utc_now(), new_end, provider, provider_sub_id, TimeUtils.utc_now(),
-                        )
-                        sub_id = row["id"] if row else 0
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        await cursor.execute(
-                            "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (%s, %s, 'active', %s, %s, 0, %s, %s, %s, %s)",
-                            (user_id, plan_id, TimeUtils.sql_iso(),
-                             new_end.strftime("%Y-%m-%d %H:%M:%S"), provider,
-                             provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()),
-                        )
-                        sub_id = cursor.lastrowid
-                        await cursor.close()
-                    else:
-                        cursor = await conn.execute(
-                            "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (user_id, plan_id, "active", TimeUtils.sql_iso(),
-                             new_end.strftime("%Y-%m-%d %H:%M:%S"), 0, provider,
-                             provider_sub_id, TimeUtils.sql_iso(), TimeUtils.sql_iso()),
-                        )
-                        sub_id = cursor.lastrowid if cursor.lastrowid else 0
-                    await self._execute_with_conn(
-                        conn, "UPDATE users SET updated_at = ? WHERE user_id = ?",
-                        TimeUtils.sql_iso(), user_id,
-                    )
-                    await self._refresh_user_subscription_end(conn, user_id)
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return sub_id
-        except Exception as e:
-            logger.error(f"❌ Error in create_subscription: {e}", exc_info=True)
-            return 0
-
-    async def expire_expired_subscriptions(self) -> None:
-        """NOW() بدل CURRENT_TIMESTAMP AT TIME ZONE"""
-        try:
-            async with self.transaction() as conn:
-                if USE_POSTGRES:
-                    await conn.execute(
-                        "UPDATE subscriptions SET status = 'expired' "
-                        "WHERE status = 'active' AND end_date <= NOW()"
-                    )
-                    users = await self._fetchall_with_conn(
-                        conn,
-                        """SELECT DISTINCT user_id FROM subscriptions
-                           WHERE status = 'expired'
-                             AND end_date > NOW() - INTERVAL '1 day'""",
-                    )
-                elif USE_MYSQL:
-                    await conn.execute(
-                        "UPDATE subscriptions SET status = 'expired' "
-                        "WHERE status = 'active' AND end_date <= UTC_TIMESTAMP()"
-                    )
-                    users = await self._fetchall_with_conn(
-                        conn,
-                        """SELECT DISTINCT user_id FROM subscriptions
-                           WHERE status = 'expired'
-                             AND end_date > UTC_TIMESTAMP() - INTERVAL 1 DAY""",
-                    )
-                else:
-                    await conn.execute(
-                        "UPDATE subscriptions SET status = 'expired' "
-                        "WHERE status = 'active' AND end_date <= datetime('now')"
-                    )
-                    users = await self._fetchall_with_conn(
-                        conn,
-                        """SELECT DISTINCT user_id FROM subscriptions
-                           WHERE status = 'expired'
-                             AND end_date > datetime('now', '-1 day')""",
-                    )
-
-                if not users:
-                    return
-
-                user_ids = [u["user_id"] for u in users]
-                BATCH = 500
-
-                for i in range(0, len(user_ids), BATCH):
-                    batch = user_ids[i : i + BATCH]
-
-                    if USE_POSTGRES:
-                        placeholders = ",".join(f"${j+2}" for j in range(len(batch)))
-                        await self._execute_with_conn(
-                            conn,
-                            f"""UPDATE users
-                                SET subscription_end = (
-                                    SELECT MAX(s.end_date) FROM subscriptions s
-                                    WHERE s.user_id = users.user_id
-                                      AND s.status = 'active'
-                                      AND s.end_date > NOW()
-                                ),
-                                updated_at = $1
-                                WHERE user_id IN ({placeholders})""",
-                            TimeUtils.utc_now(),
-                            *batch,
-                        )
-                    elif USE_MYSQL:
-                        placeholders = ",".join(["%s"] * len(batch))
-                        await self._execute_with_conn(
-                            conn,
-                            f"""UPDATE users u
-                                LEFT JOIN (
-                                    SELECT user_id, MAX(end_date) AS max_end
-                                    FROM subscriptions
-                                    WHERE status = 'active' AND end_date > UTC_TIMESTAMP()
-                                    GROUP BY user_id
-                                ) s ON s.user_id = u.user_id
-                                SET u.subscription_end = s.max_end, u.updated_at = %s
-                                WHERE u.user_id IN ({placeholders})""",
-                            TimeUtils.sql_iso(),
-                            *batch,
-                        )
-                    else:
-                        placeholders = ",".join(["?"] * len(batch))
-                        await self._execute_with_conn(
-                            conn,
-                            f"""UPDATE users
-                                SET subscription_end = (
-                                    SELECT MAX(s.end_date) FROM subscriptions s
-                                    WHERE s.user_id = users.user_id
-                                      AND s.status = 'active'
-                                      AND s.end_date > datetime('now')
-                                ),
-                                updated_at = ?
-                                WHERE user_id IN ({placeholders})""",
-                            TimeUtils.sql_iso(),
-                            *batch,
-                        )
-
-                    for uid in batch:
-                        await internal_cache.invalidate(f"user_{uid}")
-                        await internal_cache.invalidate(f"user_{uid}_True")
-                        await internal_cache.invalidate(f"user_{uid}_False")
-                        if CACHE_AVAILABLE:
-                            await invalidate_user_cache(uid)
-
-        except Exception as e:
-            logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
-
-    async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
-        """NOW() في PostgreSQL"""
-        if USE_POSTGRES:
-            end = await self._fetchval_with_conn(
-                conn,
-                "SELECT MAX(end_date) FROM subscriptions WHERE user_id = $1 AND status = 'active' AND end_date > NOW()",
-                user_id,
-            )
-            await self._execute_with_conn(
-                conn, "UPDATE users SET subscription_end = $1, updated_at = $2 WHERE user_id = $3",
-                end, TimeUtils.utc_now(), user_id,
-            )
-        elif USE_MYSQL:
-            end = await self._fetchval_with_conn(
-                conn,
-                "SELECT MAX(end_date) FROM subscriptions WHERE user_id = %s AND status = 'active' AND end_date > UTC_TIMESTAMP()",
-                user_id,
-            )
-            await self._execute_with_conn(
-                conn, "UPDATE users SET subscription_end = %s, updated_at = %s WHERE user_id = %s",
-                end, TimeUtils.sql_iso(), user_id,
-            )
-        else:
-            end = await self._fetchval_with_conn(
-                conn,
-                "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')",
-                user_id,
-            )
-            await self._execute_with_conn(
-                conn, "UPDATE users SET subscription_end = ?, updated_at = ? WHERE user_id = ?",
-                end, TimeUtils.sql_iso(), user_id,
-            )
-
-    # =====================================================================
-    # دوال الفواتير والدفع
-    # =====================================================================
-
-    async def create_invoice(self, user_id: int, plan_id: int, amount: int,
-                             currency: str = "XTR", provider: str = "xtr") -> str:
-        number = f"INV-{TimeUtils.utc_now().strftime('%Y%m')}-{secrets.token_urlsafe(12).upper()}"
-        result = await self.execute(
-            "INSERT INTO invoices (number, user_id, plan_id, amount, currency, status, provider, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (number, user_id, plan_id, amount, currency, "pending", provider, TimeUtils.utc_now()),
-        ) > 0
-        return number if result else ""
-
-    async def mark_invoice_paid(self, invoice_number: str, payment_id: str) -> bool:
-        return await self.execute(
-            "UPDATE invoices SET status = 'paid', provider_payment_id = ?, paid_at = ? WHERE number = ?",
-            (payment_id, TimeUtils.utc_now(), invoice_number),
-        ) > 0
-
-    async def get_invoice(self, number: str) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM invoices WHERE number = ?", (number,))
-
-    async def get_user_invoices(self, user_id: int, limit: int = 20) -> List[Dict]:
-        return await self.fetchall(
-            "SELECT * FROM invoices WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit)
-        )
-
-    async def add_payment_log(self, user_id: int, provider: str, event_type: str, data: dict) -> bool:
-        return await self.execute(
-            "INSERT INTO payment_logs (user_id, provider, event_type, data, created_at) VALUES (?,?,?,?,?)",
-            (user_id, provider, event_type, json.dumps(data), TimeUtils.utc_now()),
-        ) > 0
-
-    async def activate_subscription_with_payment(self, user_id: int, invoice_number: str,
-                                                  payment_id: str, plan_id: int) -> bool:
-        try:
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    plan = await self._fetchone_with_conn(
-                        conn, "SELECT * FROM plans WHERE id = ? AND is_active = 1", plan_id
-                    )
-                    if not plan:
-                        logger.error(f"❌ الخطة {plan_id} غير موجودة")
-                        return False
-                    invoice = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT * FROM invoices WHERE number = ? AND user_id = ? AND status = 'pending'",
-                        invoice_number, user_id,
-                    )
-                    if not invoice:
-                        return False
-                    if invoice["plan_id"] != plan_id:
-                        return False
-                    await self._execute_with_conn(
-                        conn,
-                        "UPDATE invoices SET status = 'paid', provider_payment_id = ?, paid_at = ? WHERE number = ?",
-                        payment_id, TimeUtils.utc_now(), invoice_number,
-                    )
-                    current_end = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT MAX(end_date) FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?",
-                        user_id, TimeUtils.sql_iso(),
-                    )
-                    current_end = TimeUtils.safe_parse_iso(current_end) if current_end else None
-                    now = TimeUtils.utc_now()
-                    base = current_end if current_end and current_end > now else now
-                    new_end = base + timedelta(days=plan["duration_days"])
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO subscriptions (user_id, plan_id, status, start_date, end_date, auto_renew, provider, provider_subscription_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        user_id, plan_id, "active", TimeUtils.sql_iso(),
-                        new_end.strftime("%Y-%m-%d %H:%M:%S"), 0, "xtr", payment_id,
-                        TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                    )
-                    await self._refresh_user_subscription_end(conn, user_id)
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                    return True
-        except Exception as e:
-            logger.error(f"❌ Error in activate_subscription_with_payment: {e}", exc_info=True)
-            return False
-
-    async def create_gift_code(self, plan_id: int, creator_id: int) -> Optional[str]:
-        try:
-            async with self.connection() as conn:
-                for _ in range(5):
-                    code = secrets.token_urlsafe(12)
-                    try:
-                        if USE_POSTGRES:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES ($1, $2, $3, $4)",
-                                code, plan_id, creator_id, TimeUtils.utc_now(),
-                            )
-                        elif USE_MYSQL:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (%s, %s, %s, %s)",
-                                code, plan_id, creator_id, TimeUtils.sql_iso(),
-                            )
-                        else:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO gift_codes (code, plan_id, creator_id, created_at) VALUES (?,?,?,?)",
-                                code, plan_id, creator_id, TimeUtils.sql_iso(),
-                            )
-                        return code
-                    except Exception as e:
-                        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                            continue
-                        raise
-                return None
-        except Exception as e:
-            logger.error(f"❌ Error in create_gift_code: {e}", exc_info=True)
-            return None
-
-    # =====================================================================
     # دوال العقوبات
     # =====================================================================
 
@@ -5242,8 +4613,7 @@ class Database(ChannelsPostsMixin):
             return False
         if penalty_type not in self.VALID_PENALTY_TYPES:
             logger.error(f"❌ Invalid penalty_type: {penalty_type}")
-            return False
-        if duration_seconds < 0:
+            return False        if duration_seconds < 0:
             duration_seconds = 0
         if duration_seconds > self.MAX_PENALTY_DURATION:
             duration_seconds = self.MAX_PENALTY_DURATION
@@ -5346,6 +4716,10 @@ class Database(ChannelsPostsMixin):
             (limit,),
         )
 
+    # =====================================================================
+    # دوال الإحصائيات والمشرفين
+    # =====================================================================
+
     async def get_bot_stats(self) -> Dict:
         async with self.connection() as conn:
             users = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM users", default=0)
@@ -5436,34 +4810,6 @@ class Database(ChannelsPostsMixin):
             await auth_cache.set_admin_list(0, [a["user_id"] for a in admins])
         return admins
 
-    async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
-        """دفعة واحدة بدلاً من استعلام لكل مستخدم"""
-        if not user_ids:
-            return 0
-        try:
-            async with self.transaction() as conn:
-                BATCH = 500
-                total_updated = 0
-                for i in range(0, len(user_ids), BATCH):
-                    batch = user_ids[i : i + BATCH]
-                    placeholders = ",".join(["?"] * len(batch))
-                    updated = await self._execute_with_conn(
-                        conn,
-                        f"UPDATE users SET banned = 1 WHERE user_id IN ({placeholders})",
-                        *batch,
-                    )
-                    total_updated += updated
-                    for uid in batch:
-                        await internal_cache.invalidate(f"user_{uid}")
-                        await internal_cache.invalidate(f"user_{uid}_True")
-                        await internal_cache.invalidate(f"user_{uid}_False")
-                if CACHE_AVAILABLE:
-                    for uid in user_ids:
-                        await invalidate_user_cache(uid)
-            return total_updated
-        except Exception as e:
-            logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
-            return 0
 
 # =====================================================================
 # كائن عالمي + دوال مساعدة
