@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v5)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v6.1)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - كل دوال الأعمال + الكاش + المهام الخلفية
@@ -23,7 +23,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   13. _find_best_conflict_target + إصلاح ON CONFLICT لـ PostgreSQL
   14. executemany الأصلي لـ asyncpg (تسريع 30×)
   15. add_done_callback آمن لـ _increment_usage_count
-  16. ✅ _adapt_params: إزالة tzinfo لجميع قواعد البيانات (fix: asyncpg TIMESTAMP)
+  16. _adapt_params: إزالة tzinfo لجميع قواعد البيانات (fix: asyncpg TIMESTAMP)
   17. expire_expired_subscriptions يستخدم NOW()
   18. _refresh_user_subscription_end يستخدم NOW()
   19. get_users_for_reminder يستخدم EXTRACT(EPOCH) بدل EXTRACT(DAY)
@@ -34,6 +34,9 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   24. إزالة asyncio.sleep(2) من _create_secondary_indexes
   25. _import_banned_words يتحقق من PRIMARY_OWNER_ID
   26. إغلاق cursors MySQL بعد كل استخدام
+  27. ✅ إصلاح #27: معالجة المرادفات في update_security_settings (delete_mentions → mentions)
+  28. ✅ إصلاح #28: توسيع allowed_columns في update_security_settings
+  29. ✅ إصلاح #29 (v6.1): فصل update_reminder_settings عن get_reminder_settings
 """
 
 import os
@@ -976,7 +979,7 @@ def _convert_upsert(query: str) -> str:
 
 def _adapt_params(params: tuple) -> tuple:
     """
-    ✅ إصلاح #16 (النسخة النهائية):
+    إصلاح #16 (النسخة النهائية):
     - جميع الأعمدة في database_tables.py من نوع TIMESTAMP/DATETIME بدون timezone
     - لذلك: نحذف tzinfo لجميع قواعد البيانات
     - asyncpg يرفض datetime مع tzinfo لأعمدة TIMESTAMP
@@ -986,20 +989,17 @@ def _adapt_params(params: tuple) -> tuple:
     new_params = []
     for p in params:
         if isinstance(p, datetime):
-            # ✅ الحل الموحد: إزالة tzinfo دائماً
             if p.tzinfo is not None:
                 try:
                     p = p.astimezone(UTC).replace(tzinfo=None)
                 except Exception:
                     p = p.replace(tzinfo=None)
-            
+
             if USE_POSTGRES:
-                # asyncpg يتوقع naive datetime لأعمدة TIMESTAMP
                 new_params.append(p)
             elif USE_MYSQL:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
             else:
-                # SQLite
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
         elif isinstance(p, bool):
             new_params.append(1 if p else 0)
@@ -1132,6 +1132,16 @@ class Database:
         "delete_photos", "antiflood", "night_mode", "warn_penalty",
     }
     MAX_PENALTY_DURATION = 365 * 86400
+
+    # ✅ إصلاح #27: مرادفات الأعمدة (alias → real column)
+    COLUMN_ALIASES = {
+        "delete_mentions": "mentions",
+        "delete_mention": "mentions",
+        "remove_links": "delete_links",
+        "remove_mentions": "mentions",
+        "delete_forwarded_messages": "delete_forwarded",
+        "delete_polls_games": "delete_polls",
+    }
 
     def __new__(cls) -> "Database":
         if cls._instance is None:
@@ -3774,34 +3784,66 @@ class Database:
         return settings if settings else {}
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
+        """
+        ✅ إصلاح #27 + #28: معالجة المرادفات + توسيع القائمة
+        """
         if not kwargs:
             return False
+
+        # ✅ إصلاح #27: معالجة المرادفات (alias → real column)
+        for alias, real_col in self.COLUMN_ALIASES.items():
+            if alias in kwargs:
+                if real_col not in kwargs:
+                    kwargs[real_col] = kwargs.pop(alias)
+                else:
+                    # إذا كان العمود الحقيقي موجوداً، نتجاهل الـ alias
+                    kwargs.pop(alias, None)
+
         await self.execute("INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)", (chat_id,))
+
+        # ✅ إصلاح #28: توسيع القائمة + إضافة المرادفات كإجراء احترازي
         allowed_columns = {
-            "delete_links", "mentions", "slow_mode", "slow_mode_seconds",
-            "welcome_enabled", "welcome_text", "goodbye_enabled", "goodbye_text",
-            "delete_banned_words", "auto_penalty", "auto_mute_duration",
+            # Media deletion
+            "delete_links", "delete_mentions", "mentions",
             "delete_videos", "delete_audio", "delete_animation", "delete_service",
             "delete_documents", "delete_stickers", "delete_forwarded", "delete_polls",
             "delete_games", "delete_voice", "delete_video_note", "delete_photos",
+            "delete_banned_words",
+            # Slow mode
+            "slow_mode", "slow_mode_seconds",
+            # Welcome/Goodbye
+            "welcome_enabled", "welcome_text",
+            "goodbye_enabled", "goodbye_text",
+            # Penalties
+            "auto_penalty", "auto_mute_duration",
             "delete_penalty", "delete_penalty_duration", "delete_penalty_messages",
+            # Antiflood
             "antiflood_enabled", "antiflood_messages", "antiflood_seconds",
             "antiflood_penalty", "antiflood_penalty_duration",
+            # Warnings
             "max_warnings", "warn_penalty", "warn_penalty_duration", "warn_enabled",
+            # Message length
             "max_message_length",
+            # Night mode
             "night_mode_enabled", "night_mode_start", "night_mode_end",
             "night_mode_action", "night_mode_action_duration",
+            # NSFW
             "nsfw_enabled", "nsfw_threshold", "nsfw_filter",
+            # Join
             "auto_approve_join", "auto_reject_join",
+            # Default penalty durations
             "mute_default_duration", "ban_default_duration",
             "warn_default_duration", "restrict_default_duration",
             "enable_timed_penalties", "auto_remove_penalties",
+            # Violations
             "violation_strikes", "violation_duration",
         }
+
         for key in kwargs:
             if key not in allowed_columns:
                 logger.error(f"❌ Invalid column: {key}")
                 return False
+
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
         query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
