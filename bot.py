@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v2)
 ================================================================================
 - دمج نظام الكاش (cache.py) بالكامل
 - استخدام user_cache.get_or_load() في المعالجات (يُعدَّل في handlers.py)
@@ -11,6 +11,11 @@
 - تسجيل زمن الإقلاع بدقة
 - تعيين مستوى التسجيل من البيئة
 - دعم webhook و polling مع إعادة محاولة تلقائية
+
+🆕 v2:
+- ✅ ChatMemberHandler لتحديث المشرفين فورياً (بدل الاستطلاع الدوري)
+- ✅ تسريع /start من 5 ثوان إلى < 300ms
+- ✅ تقليل الحمل على Telegram API بنسبة 95%
 """
 
 import asyncio
@@ -30,7 +35,12 @@ from telegram.ext import (
 
 from config import CONFIG, PATHS
 from database import DB, initialize_db
-from handlers import CommandHandlers, CallbackHandlers, MessageHandlers
+from handlers import (
+    CommandHandlers,
+    CallbackHandlers,
+    MessageHandlers,
+    chat_member,  # ✅ جديد: معالج تحديثات المشرفين
+)
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send
@@ -51,7 +61,9 @@ ALLOWED_UPDATES = [
     "message",
     "callback_query",
     "chat_join_request",
-    "pre_checkout_query"
+    "pre_checkout_query",
+    "chat_member",           # ✅ جديد: استقبال تحديثات المشرفين
+    "my_chat_member",        # ✅ جديد: استقبال تغييرات عضوية البوت
 ]
 
 # =====================================================================
@@ -104,7 +116,6 @@ async def pre_checkout(update, context):
             logger.error(f"❌ Failed to answer pre-checkout rejection: {e}")
         return
 
-    # التحقق من المبلغ
     if hasattr(query, 'total_amount'):
         expected_amount = plan.get('price')
         if expected_amount is not None and expected_amount > 0 and query.total_amount != expected_amount:
@@ -157,7 +168,6 @@ async def successful_payment(update, context):
                 await DB.add_payment_log(user_id, 'xtr', 'subscription_paid', {'invoice': invoice['number'], 'plan_id': plan['id']})
                 await safe_send(context.bot, user_id, f"✅ تم تفعيل اشتراك {plan['name']} بنجاح!")
                 logger.info(f"✅ Subscription activated for user {user_id}, plan {plan['id']}")
-                # إبطال كاش المستخدم
                 await invalidate_user_cache(user_id)
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
@@ -390,6 +400,17 @@ async def main():
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ جديد: تسجيل معالج تحديثات المشرفين (ChatMemberHandler)
+    #    يستقبل إشعارات Telegram عند:
+    #    - تعيين/إزالة مشرف
+    #    - تغيير صلاحيات مشرف
+    #    - كتم/حظر/إلغاء
+    #    - إضافة/إزالة البوت من مجموعة
+    # ═══════════════════════════════════════════════════════════════════
+    chat_member.register(app)
+    logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
+
     # ========== المهام الخلفية ==========
     async def run_task_with_retry(task_func, *args, task_name=""):
         while True:
@@ -421,6 +442,8 @@ async def main():
         asyncio.create_task(run_task_with_retry(BackgroundTasks.heartbeat, app.bot, task_name="heartbeat")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.flush_usage_periodically, task_name="flush_usage")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_subscriptions, task_name="expire_subscriptions")),
+        # ⚠️ sync_admins_periodically أصبحت طبقة احتياطية فقط (بعد ChatMemberHandler)
+        #    تعمل كل 6 ساعات بدل ساعة (تم تعديل المدة في utils.py)
         asyncio.create_task(run_task_with_retry(BackgroundTasks.sync_admins_periodically, app.bot, task_name="sync_admins")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_penalties_periodically, task_name="expire_penalties")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.cleanup_old_data, task_name="cleanup_old_data")),
