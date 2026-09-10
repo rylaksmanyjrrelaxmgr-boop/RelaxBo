@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v6.1)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v7.1)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - كل دوال الأعمال + الكاش + المهام الخلفية
@@ -36,7 +36,20 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   26. إغلاق cursors MySQL بعد كل استخدام
   27. ✅ إصلاح #27: معالجة المرادفات في update_security_settings (delete_mentions → mentions)
   28. ✅ إصلاح #28: توسيع allowed_columns في update_security_settings
-  29. ✅ إصلاح #29 (v6.1): فصل update_reminder_settings عن get_reminder_settings
+  29. ✅ إصلاح #29: فصل update_reminder_settings عن get_reminder_settings
+  30. ✅ إصلاح #30: COLUMN_ALIASES موسّعة (60+ مرادفاً)
+  31. ✅ إصلاح #31: allowed_columns موسّعة (90+ عموداً)
+  32. ✅ إصلاح #32: دعم delete_service_messages ومترادفاتها
+  33. ✅ إصلاح #33: دعم group_security بجميع الأعمدة الفعلية
+  34. ✅ إصلاح #34: تسجيل تشخيصي أفضل للأعمدة غير الصالحة
+  35. ✅ إصلاح #35: إصلاح فصل الدوال
+  36. ✅ إصلاح #36 (v7.1): update_security_settings محصّنة ضد الأعمدة غير الموجودة
+  37. ✅ إصلاح #37 (v7.1): _get_group_security_columns — جلب الأعمدة الفعلية
+  38. ✅ إصلاح #38 (v7.1): تخطي الأعمدة غير الموجودة بدل فشل UPDATE بالكامل
+  39. ✅ إصلاح #39 (v7.1): سجل تفصيلي لكل خطوة
+  40. ✅ إصلاح #40 (v7.1): إبطال الكاش متعدد المستويات
+  41. ✅ إصلاح #41 (v7.1): _migrate_schema موسّعة (30+ عمود جديد)
+  42. ✅ إصلاح #42 (v7.1): get_group_security_columns دالة عامة
 """
 
 import os
@@ -979,10 +992,9 @@ def _convert_upsert(query: str) -> str:
 
 def _adapt_params(params: tuple) -> tuple:
     """
-    إصلاح #16 (النسخة النهائية):
-    - جميع الأعمدة في database_tables.py من نوع TIMESTAMP/DATETIME بدون timezone
-    - لذلك: نحذف tzinfo لجميع قواعد البيانات
-    - asyncpg يرفض datetime مع tzinfo لأعمدة TIMESTAMP
+    إصلاح #16:
+    - جميع الأعمدة من نوع TIMESTAMP/DATETIME بدون timezone
+    - نحذف tzinfo لجميع قواعد البيانات
     """
     if params is None:
         return ()
@@ -1133,14 +1145,155 @@ class Database:
     }
     MAX_PENALTY_DURATION = 365 * 86400
 
-    # ✅ إصلاح #27: مرادفات الأعمدة (alias → real column)
+    # ✅ COLUMN_ALIASES موسّعة (60+ مرادفاً)
     COLUMN_ALIASES = {
+        # ==================== Mentions ====================
         "delete_mentions": "mentions",
         "delete_mention": "mentions",
-        "remove_links": "delete_links",
         "remove_mentions": "mentions",
+        "mention": "mentions",
+        "mentions_filter": "mentions",
+        "delete_mention_messages": "mentions",
+        # ==================== Links ====================
+        "remove_links": "delete_links",
+        "links": "delete_links",
+        "delete_link": "delete_links",
+        "remove_link": "delete_links",
+        "links_filter": "delete_links",
+        # ==================== Forward ====================
         "delete_forwarded_messages": "delete_forwarded",
+        "remove_forwards": "delete_forwarded",
+        "forward": "delete_forwarded",
+        "forwarded": "delete_forwarded",
+        "delete_forward": "delete_forwarded",
+        "remove_forward": "delete_forwarded",
+        "forwards": "delete_forwarded",
+        # ==================== Polls ====================
         "delete_polls_games": "delete_polls",
+        "polls": "delete_polls",
+        "remove_polls": "delete_polls",
+        "delete_poll": "delete_polls",
+        "poll": "delete_polls",
+        # ==================== Games ====================
+        "games": "delete_games",
+        "remove_games": "delete_games",
+        "delete_game": "delete_games",
+        "game": "delete_games",
+        # ==================== Service messages ====================
+        "delete_service_messages": "delete_service",
+        "service_messages": "delete_service",
+        "remove_service": "delete_service",
+        "delete_service_msg": "delete_service",
+        "delete_services": "delete_service",
+        "service_msg": "delete_service",
+        "service_message": "delete_service",
+        "delete_service_message": "delete_service",
+        # ==================== Voice ====================
+        "voice": "delete_voice",
+        "remove_voice": "delete_voice",
+        "delete_voices": "delete_voice",
+        "delete_voice_messages": "delete_voice",
+        "voice_messages": "delete_voice",
+        "delete_voice_msg": "delete_voice",
+        # ==================== Video note ====================
+        "video_note": "delete_video_note",
+        "delete_video_notes": "delete_video_note",
+        "remove_video_note": "delete_video_note",
+        "delete_videonote": "delete_video_note",
+        "video_notes": "delete_video_note",
+        "videonote": "delete_video_note",
+        # ==================== Photos ====================
+        "delete_photo": "delete_photos",
+        "photos": "delete_photos",
+        "remove_photos": "delete_photos",
+        "delete_photo_msg": "delete_photos",
+        "photo": "delete_photos",
+        "delete_photo_messages": "delete_photos",
+        # ==================== Videos ====================
+        "delete_video": "delete_videos",
+        "videos": "delete_videos",
+        "remove_videos": "delete_videos",
+        "video": "delete_videos",
+        "delete_video_messages": "delete_videos",
+        # ==================== Audio ====================
+        "delete_audios": "delete_audio",
+        "audios": "delete_audio",
+        "remove_audio": "delete_audio",
+        "audio": "delete_audio",
+        "delete_audio_messages": "delete_audio",
+        # ==================== Animation / GIF ====================
+        "delete_gifs": "delete_animation",
+        "gifs": "delete_animation",
+        "gif": "delete_animation",
+        "remove_gif": "delete_animation",
+        "animation": "delete_animation",
+        "animations": "delete_animation",
+        # ==================== Documents ====================
+        "delete_document": "delete_documents",
+        "documents": "delete_documents",
+        "remove_documents": "delete_documents",
+        "document": "delete_documents",
+        "delete_document_messages": "delete_documents",
+        # ==================== Stickers ====================
+        "delete_sticker": "delete_stickers",
+        "stickers": "delete_stickers",
+        "remove_stickers": "delete_stickers",
+        "sticker": "delete_stickers",
+        "delete_sticker_messages": "delete_stickers",
+        # ==================== Antiflood ====================
+        "anti_flood": "antiflood_enabled",
+        "flood": "antiflood_enabled",
+        "antiflood": "antiflood_enabled",
+        "flood_protection": "antiflood_enabled",
+        "anti_flood_enabled": "antiflood_enabled",
+        # ==================== Night mode ====================
+        "nightmode": "night_mode_enabled",
+        "night_mode": "night_mode_enabled",
+        "night": "night_mode_enabled",
+        "night_mode_active": "night_mode_enabled",
+        # ==================== Warnings ====================
+        "warnings": "warn_enabled",
+        "warn_system": "warn_enabled",
+        "warning": "warn_enabled",
+        "warnings_enabled": "warn_enabled",
+        "warn": "warn_enabled",
+        # ==================== Welcome/Goodbye ====================
+        "welcome": "welcome_enabled",
+        "welcome_message": "welcome_text",
+        "welcome_msg": "welcome_text",
+        "goodbye": "goodbye_enabled",
+        "goodbye_message": "goodbye_text",
+        "goodbye_msg": "goodbye_text",
+        # ==================== Join requests ====================
+        "auto_approve": "auto_approve_join",
+        "auto_reject": "auto_reject_join",
+        "approve_join": "auto_approve_join",
+        "reject_join": "auto_reject_join",
+        "auto_approve_enabled": "auto_approve_join",
+        "auto_reject_enabled": "auto_reject_join",
+        # ==================== Slow mode ====================
+        "slowmode": "slow_mode",
+        "slow_mode_sec": "slow_mode_seconds",
+        "slowmode_seconds": "slow_mode_seconds",
+        # ==================== NSFW ====================
+        "nsfw": "nsfw_enabled",
+        "nsfw_protection": "nsfw_enabled",
+        "nsfw_filter_enabled": "nsfw_enabled",
+        # ==================== Antiflood variants ====================
+        "antiflood_messages_count": "antiflood_messages",
+        "antiflood_seconds_window": "antiflood_seconds",
+        "antiflood_window": "antiflood_seconds",
+        # ==================== Max message length ====================
+        "message_length": "max_message_length",
+        "max_length": "max_message_length",
+        "message_max_length": "max_message_length",
+        # ==================== Penalty variants ====================
+        "auto_penalty_enabled": "auto_penalty",
+        "delete_penalty_enabled": "delete_penalty",
+        "delete_message_enabled": "delete_penalty",
+        # ==================== Violations ====================
+        "violation_action": "violation_strikes",
+        "violations_enabled": "violation_strikes",
     }
 
     def __new__(cls) -> "Database":
@@ -1179,6 +1332,8 @@ class Database:
         self._global_banned_words_cache: List[str] = []
         self._global_banned_words_loaded = False
         self._global_words_lock = asyncio.Lock()
+        # ✅ كاش أعمدة group_security
+        self._group_security_columns_cache: Optional[set] = None
 
     # =====================================================================
     # دوال الكاش المحلي
@@ -1819,14 +1974,28 @@ class Database:
                 if not exists:
                     await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}')
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
+                    # إبطال كاش أعمدة group_security إذا لزم
+                    if table == "group_security":
+                        self._group_security_columns_cache = None
             elif USE_MYSQL:
-                await conn.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{col_name}` {col_def}")
+                cursor = await conn.cursor()
+                await cursor.execute(f"SHOW COLUMNS FROM `{table}` LIKE %s", (col_name,))
+                exists = await cursor.fetchone()
+                await cursor.close()
+                if not exists:
+                    await conn.execute(f"ALTER TABLE `{table}` ADD COLUMN `{col_name}` {col_def}")
+                    logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
+                    if table == "group_security":
+                        self._group_security_columns_cache = None
             else:
-                try:
+                cursor = await conn.execute(f"PRAGMA table_info({table})")
+                rows = await cursor.fetchall()
+                exists = any(row[1] == col_name for row in rows)
+                if not exists:
                     await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
-                except Exception as e:
-                    if "duplicate column" not in str(e).lower():
-                        raise
+                    logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
+                    if table == "group_security":
+                        self._group_security_columns_cache = None
         except Exception as e:
             if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                 logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
@@ -1890,6 +2059,7 @@ class Database:
         try:
             migrations = {
                 "group_security": [
+                    # ==================== Penalties ====================
                     ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
                     ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -1901,6 +2071,56 @@ class Database:
                     ("auto_remove_penalties", "INTEGER DEFAULT 1"),
                     ("violation_strikes", "INTEGER DEFAULT 3"),
                     ("violation_duration", "INTEGER DEFAULT 60"),
+                    # ==================== Media deletion ====================
+                    ("delete_links", "INTEGER DEFAULT 0"),
+                    ("mentions", "INTEGER DEFAULT 0"),
+                    ("delete_videos", "INTEGER DEFAULT 0"),
+                    ("delete_audio", "INTEGER DEFAULT 0"),
+                    ("delete_animation", "INTEGER DEFAULT 0"),
+                    ("delete_service", "INTEGER DEFAULT 0"),
+                    ("delete_documents", "INTEGER DEFAULT 0"),
+                    ("delete_stickers", "INTEGER DEFAULT 0"),
+                    ("delete_forwarded", "INTEGER DEFAULT 0"),
+                    ("delete_polls", "INTEGER DEFAULT 0"),
+                    ("delete_games", "INTEGER DEFAULT 0"),
+                    ("delete_voice", "INTEGER DEFAULT 0"),
+                    ("delete_video_note", "INTEGER DEFAULT 0"),
+                    ("delete_photos", "INTEGER DEFAULT 0"),
+                    ("delete_banned_words", "INTEGER DEFAULT 0"),
+                    # ==================== Antiflood ====================
+                    ("antiflood_enabled", "INTEGER DEFAULT 0"),
+                    ("antiflood_messages", "INTEGER DEFAULT 5"),
+                    ("antiflood_seconds", "INTEGER DEFAULT 10"),
+                    ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
+                    # ==================== Night mode ====================
+                    ("night_mode_enabled", "INTEGER DEFAULT 0"),
+                    ("night_mode_start", "TEXT DEFAULT '23:00'"),
+                    ("night_mode_end", "TEXT DEFAULT '07:00'"),
+                    ("night_mode_action", "TEXT DEFAULT 'mute'"),
+                    # ==================== Warnings ====================
+                    ("warn_enabled", "INTEGER DEFAULT 0"),
+                    ("max_warnings", "INTEGER DEFAULT 3"),
+                    ("warn_penalty", "TEXT DEFAULT 'mute'"),
+                    # ==================== Welcome/Goodbye ====================
+                    ("welcome_enabled", "INTEGER DEFAULT 0"),
+                    ("welcome_text", "TEXT DEFAULT ''"),
+                    ("goodbye_enabled", "INTEGER DEFAULT 0"),
+                    ("goodbye_text", "TEXT DEFAULT ''"),
+                    # ==================== Join ====================
+                    ("auto_approve_join", "INTEGER DEFAULT 0"),
+                    ("auto_reject_join", "INTEGER DEFAULT 0"),
+                    # ==================== Other ====================
+                    ("slow_mode", "INTEGER DEFAULT 0"),
+                    ("slow_mode_seconds", "INTEGER DEFAULT 0"),
+                    ("max_message_length", "INTEGER DEFAULT 0"),
+                    ("nsfw_enabled", "INTEGER DEFAULT 0"),
+                    ("nsfw_threshold", "REAL DEFAULT 0.8"),
+                    ("nsfw_filter", "INTEGER DEFAULT 0"),
+                    ("auto_penalty", "TEXT DEFAULT 'mute'"),
+                    ("auto_mute_duration", "INTEGER DEFAULT 3600"),
+                    ("delete_penalty", "INTEGER DEFAULT 0"),
+                    ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("delete_penalty_messages", "INTEGER DEFAULT 0"),
                 ],
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL"),
@@ -1934,6 +2154,8 @@ class Database:
                     if col_name not in existing:
                         await self._add_column_safe(conn, table, col_name, col_def)
             await self._ensure_text_hash_column(conn)
+            # إبطال كاش أعمدة group_security بعد الترحيل
+            self._group_security_columns_cache = None
         finally:
             if USE_MYSQL:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -3783,74 +4005,164 @@ class Database:
             await settings_cache.set_security(chat_id, settings)
         return settings if settings else {}
 
+    # ✅ v7.1: دالة جديدة لجلب أعمدة group_security الفعلية
+    async def _get_group_security_columns(self) -> set:
+        """
+        جلب أعمدة group_security الفعلية من قاعدة البيانات (مع كاش)
+        """
+        if self._group_security_columns_cache is not None:
+            return self._group_security_columns_cache
+
+        try:
+            async with self.connection() as conn:
+                if USE_POSTGRES:
+                    rows = await conn.fetch(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'group_security' "
+                        "ORDER BY ordinal_position"
+                    )
+                    cols = {row["column_name"] for row in rows}
+                elif USE_MYSQL:
+                    cursor = await conn.cursor()
+                    await cursor.execute("SHOW COLUMNS FROM `group_security`")
+                    rows = await cursor.fetchall()
+                    await cursor.close()
+                    cols = {row[0] for row in rows}
+                else:
+                    cursor = await conn.execute("PRAGMA table_info(group_security)")
+                    rows = await cursor.fetchall()
+                    cols = {row[1] for row in rows}
+
+            self._group_security_columns_cache = cols
+            logger.info(f"📋 Loaded group_security columns: {len(cols)} columns")
+            return cols
+        except Exception as e:
+            logger.error(f"❌ Failed to load group_security columns: {e}", exc_info=True)
+            return set()
+
+    async def get_group_security_columns(self) -> set:
+        """دالة عامة لجلب أعمدة group_security"""
+        return await self._get_group_security_columns()
+
+    def invalidate_group_security_columns_cache(self):
+        """إبطال كاش أعمدة group_security"""
+        self._group_security_columns_cache = None
+        logger.info("🔄 group_security columns cache invalidated")
+
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
         """
-        ✅ إصلاح #27 + #28: معالجة المرادفات + توسيع القائمة
+        ✅ v7.1: نسخة محصّنة:
+        - معالجة مرادفات شاملة
+        - التحقق من الأعمدة الفعلية في الجدول (runtime check)
+        - إزالة الأعمدة غير الموجودة بدل الفشل الكامل
+        - إبطال الكاش بقوة
         """
         if not kwargs:
             return False
 
-        # ✅ إصلاح #27: معالجة المرادفات (alias → real column)
+        original_keys = set(kwargs.keys())
+        logger.info(f"🔧 update_security_settings called for chat_id={chat_id}")
+        logger.info(f"   📥 Original keys ({len(original_keys)}): {sorted(original_keys)}")
+
+        # ─────────────────────────────────────────────────
+        # 1) معالجة المرادفات (alias → real column)
+        # ─────────────────────────────────────────────────
+        aliased_keys = []
         for alias, real_col in self.COLUMN_ALIASES.items():
             if alias in kwargs:
                 if real_col not in kwargs:
                     kwargs[real_col] = kwargs.pop(alias)
+                    aliased_keys.append((alias, real_col))
                 else:
-                    # إذا كان العمود الحقيقي موجوداً، نتجاهل الـ alias
                     kwargs.pop(alias, None)
+                    aliased_keys.append((alias, f"{real_col} (already present)"))
 
-        await self.execute("INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)", (chat_id,))
+        if aliased_keys:
+            logger.info(f"   🔄 Aliases resolved: {aliased_keys}")
 
-        # ✅ إصلاح #28: توسيع القائمة + إضافة المرادفات كإجراء احترازي
-        allowed_columns = {
-            # Media deletion
-            "delete_links", "delete_mentions", "mentions",
-            "delete_videos", "delete_audio", "delete_animation", "delete_service",
-            "delete_documents", "delete_stickers", "delete_forwarded", "delete_polls",
-            "delete_games", "delete_voice", "delete_video_note", "delete_photos",
-            "delete_banned_words",
-            # Slow mode
-            "slow_mode", "slow_mode_seconds",
-            # Welcome/Goodbye
-            "welcome_enabled", "welcome_text",
-            "goodbye_enabled", "goodbye_text",
-            # Penalties
-            "auto_penalty", "auto_mute_duration",
-            "delete_penalty", "delete_penalty_duration", "delete_penalty_messages",
-            # Antiflood
-            "antiflood_enabled", "antiflood_messages", "antiflood_seconds",
-            "antiflood_penalty", "antiflood_penalty_duration",
-            # Warnings
-            "max_warnings", "warn_penalty", "warn_penalty_duration", "warn_enabled",
-            # Message length
-            "max_message_length",
-            # Night mode
-            "night_mode_enabled", "night_mode_start", "night_mode_end",
-            "night_mode_action", "night_mode_action_duration",
-            # NSFW
-            "nsfw_enabled", "nsfw_threshold", "nsfw_filter",
-            # Join
-            "auto_approve_join", "auto_reject_join",
-            # Default penalty durations
-            "mute_default_duration", "ban_default_duration",
-            "warn_default_duration", "restrict_default_duration",
-            "enable_timed_penalties", "auto_remove_penalties",
-            # Violations
-            "violation_strikes", "violation_duration",
-        }
+        # ─────────────────────────────────────────────────
+        # 2) ضمان وجود صف في group_security
+        # ─────────────────────────────────────────────────
+        await self.execute(
+            "INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)",
+            (chat_id,)
+        )
 
-        for key in kwargs:
-            if key not in allowed_columns:
-                logger.error(f"❌ Invalid column: {key}")
+        # ─────────────────────────────────────────────────
+        # 3) جلب الأعمدة الفعلية من الجدول (runtime introspection)
+        # ─────────────────────────────────────────────────
+        actual_columns = await self._get_group_security_columns()
+        if not actual_columns:
+            logger.error(f"   ❌ لم يتمكن من جلب أعمدة group_security")
+            return False
+
+        logger.info(f"   📋 Actual columns in group_security ({len(actual_columns)}): {sorted(actual_columns)}")
+
+        # ─────────────────────────────────────────────────
+        # 4) فلترة kwargs: احتفظ فقط بالأعمدة الموجودة فعلاً
+        # ─────────────────────────────────────────────────
+        valid_kwargs = {}
+        skipped_keys = []
+        for key, value in kwargs.items():
+            if key in actual_columns:
+                valid_kwargs[key] = value
+            else:
+                skipped_keys.append(key)
+
+        if skipped_keys:
+            logger.warning(
+                f"   ⚠️ Skipped {len(skipped_keys)} non-existent columns: {skipped_keys}\n"
+                f"   💡 هذه الأعمدة غير موجودة في جدول group_security — "
+                f"أضفها إلى database_tables.py أو _migrate_schema"
+            )
+
+        if not valid_kwargs:
+            logger.error(f"   ❌ لا يوجد أي عمود صالح للتحديث!")
+            return False
+
+        logger.info(f"   ✅ Will update {len(valid_kwargs)} columns: {sorted(valid_kwargs.keys())}")
+
+        # ─────────────────────────────────────────────────
+        # 5) تنفيذ UPDATE
+        # ─────────────────────────────────────────────────
+        try:
+            updates = [f"{key} = ?" for key in valid_kwargs]
+            values = list(valid_kwargs.values()) + [chat_id]
+            query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
+
+            logger.debug(f"   🚀 Query: {query}")
+            logger.debug(f"   📦 Values: {values}")
+
+            result = await self.execute(query, tuple(values))
+            success = result >= 0
+
+            if success:
+                # ─────────────────────────────────────────────
+                # 6) إبطال الكاش بقوة (عدة مستويات)
+                # ─────────────────────────────────────────────
+                try:
+                    if CACHE_AVAILABLE:
+                        await settings_cache.invalidate_security(chat_id)
+                    await internal_cache.invalidate(f"security_{chat_id}")
+                    await internal_cache.invalidate(f"group_security_{chat_id}")
+                    logger.info(f"   🔄 Cache invalidated for chat_id={chat_id}")
+                except Exception as cache_err:
+                    logger.warning(f"   ⚠️ Cache invalidation error: {cache_err}")
+
+                logger.info(f"   ✅ Successfully updated group_security for chat_id={chat_id}")
+                return True
+            else:
+                logger.error(f"   ❌ UPDATE returned negative: {result}")
                 return False
 
-        updates = [f"{key} = ?" for key in kwargs]
-        values = list(kwargs.values()) + [chat_id]
-        query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
-        result = await self.execute(query, tuple(values)) > 0
-        if result and CACHE_AVAILABLE:
-            await settings_cache.invalidate_security(chat_id)
-        return result
+        except Exception as e:
+            logger.error(
+                f"   ❌ UPDATE failed for chat_id={chat_id}: {e}\n"
+                f"   Query: {query if 'query' in locals() else 'N/A'}\n"
+                f"   Valid columns: {list(valid_kwargs.keys())}",
+                exc_info=True
+            )
+            return False
 
     async def _load_global_banned_words(self) -> List[str]:
         """قفل لمنع cache stampede"""
