@@ -2,54 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v7.1)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.2)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
-- كل دوال الأعمال + الكاش + المهام الخلفية
+- دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
+- كل دوال الأعمال الأخرى + الكاش + المهام الخلفية
 
-🆕 الإصلاحات الحرجة المُطبَّقة:
-  1.  إبطال الكاش العالمي للكلمات المحظورة عند chat_id=-1
-  2.  إخلاء آمن للأقفال (تجاهل المُقيَّدة) + تنظيف المجموعات
-  3.  تصحيح مفتاح weekly_report في is_user_reminder_enabled
-  4.  عدّاد اتصالات SQLite بدلاً من السيمفور
-  5.  معالجة $N الموجودة مسبقاً في _convert_placeholders
-  6.  قفل على _load_global_banned_words (منع cache stampede)
-  7.  إعادة محاولة توليد referral_code عند التصادم
-  8.  قفل مستقل لأقفال المجموعات (_group_locks_lock)
-  9.  إبطال مفاتيح user_{id}_True / user_{id}_False في invalidate_user_cache
-  10. إبطال channel_info_{ch_db_id} في add_channel/delete_channel/set_active_channel
-  11. mark_users_as_blocked بدفعة واحدة
-  12. expire_expired_subscriptions بدفعة واحدة (بدون N+1)
-  13. _find_best_conflict_target + إصلاح ON CONFLICT لـ PostgreSQL
-  14. executemany الأصلي لـ asyncpg (تسريع 30×)
-  15. add_done_callback آمن لـ _increment_usage_count
-  16. _adapt_params: إزالة tzinfo لجميع قواعد البيانات (fix: asyncpg TIMESTAMP)
-  17. expire_expired_subscriptions يستخدم NOW()
-  18. _refresh_user_subscription_end يستخدم NOW()
-  19. get_users_for_reminder يستخدم EXTRACT(EPOCH) بدل EXTRACT(DAY)
-  20. _migrate_schema يشمل published_at + fail_count
-  21. _convert_insert_or_replace آمن عند غياب UNIQUE constraint
-  22. get_user يستخدم EXISTS بدل SELECT 1
-  23. connection() يضمن commit/rollback لـ SQLite
-  24. إزالة asyncio.sleep(2) من _create_secondary_indexes
-  25. _import_banned_words يتحقق من PRIMARY_OWNER_ID
-  26. إغلاق cursors MySQL بعد كل استخدام
-  27. ✅ إصلاح #27: معالجة المرادفات في update_security_settings (delete_mentions → mentions)
-  28. ✅ إصلاح #28: توسيع allowed_columns في update_security_settings
-  29. ✅ إصلاح #29: فصل update_reminder_settings عن get_reminder_settings
-  30. ✅ إصلاح #30: COLUMN_ALIASES موسّعة (60+ مرادفاً)
-  31. ✅ إصلاح #31: allowed_columns موسّعة (90+ عموداً)
-  32. ✅ إصلاح #32: دعم delete_service_messages ومترادفاتها
-  33. ✅ إصلاح #33: دعم group_security بجميع الأعمدة الفعلية
-  34. ✅ إصلاح #34: تسجيل تشخيصي أفضل للأعمدة غير الصالحة
-  35. ✅ إصلاح #35: إصلاح فصل الدوال
-  36. ✅ إصلاح #36 (v7.1): update_security_settings محصّنة ضد الأعمدة غير الموجودة
-  37. ✅ إصلاح #37 (v7.1): _get_group_security_columns — جلب الأعمدة الفعلية
-  38. ✅ إصلاح #38 (v7.1): تخطي الأعمدة غير الموجودة بدل فشل UPDATE بالكامل
-  39. ✅ إصلاح #39 (v7.1): سجل تفصيلي لكل خطوة
-  40. ✅ إصلاح #40 (v7.1): إبطال الكاش متعدد المستويات
-  41. ✅ إصلاح #41 (v7.1): _migrate_schema موسّعة (30+ عمود جديد)
-  42. ✅ إصلاح #42 (v7.1): get_group_security_columns دالة عامة
+🆕 إصلاحات v7.2:
+  - فصل دوال القنوات والمنشورات إلى database_channels_posts.py
+  - استخدام Mixin لضمان نفس السلوك والأداء
+
+📌 ملاحظة: يجب أن يكون database_channels_posts.py بجانب هذا الملف
 """
 
 import os
@@ -146,6 +109,19 @@ except ImportError as e:
     create_tables_mysql = None
     CURRENT_SCHEMA_VERSION = 1
     TABLES_MODULE_AVAILABLE = False
+
+# =====================================================================
+# 0.2.1 استيراد ChannelsPostsMixin (دوال القنوات + المنشورات)
+# =====================================================================
+
+try:
+    from database_channels_posts import ChannelsPostsMixin
+    CHANNELS_POSTS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_channels_posts.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_channels_posts.py غير موجود: {e}")
+    ChannelsPostsMixin = object
+    CHANNELS_POSTS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1117,10 +1093,10 @@ class TimeUtils:
         return None
 
 # =====================================================================
-# 3. فئة Database
+# 3. فئة Database (ترث من ChannelsPostsMixin)
 # =====================================================================
 
-class Database:
+class Database(ChannelsPostsMixin):
     _instance = None
     _lock = asyncio.Lock()
     _user_locks = {}
@@ -1974,7 +1950,6 @@ class Database:
                 if not exists:
                     await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}')
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
-                    # إبطال كاش أعمدة group_security إذا لزم
                     if table == "group_security":
                         self._group_security_columns_cache = None
             elif USE_MYSQL:
@@ -2059,7 +2034,6 @@ class Database:
         try:
             migrations = {
                 "group_security": [
-                    # ==================== Penalties ====================
                     ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
                     ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -2071,7 +2045,6 @@ class Database:
                     ("auto_remove_penalties", "INTEGER DEFAULT 1"),
                     ("violation_strikes", "INTEGER DEFAULT 3"),
                     ("violation_duration", "INTEGER DEFAULT 60"),
-                    # ==================== Media deletion ====================
                     ("delete_links", "INTEGER DEFAULT 0"),
                     ("mentions", "INTEGER DEFAULT 0"),
                     ("delete_videos", "INTEGER DEFAULT 0"),
@@ -2087,29 +2060,23 @@ class Database:
                     ("delete_video_note", "INTEGER DEFAULT 0"),
                     ("delete_photos", "INTEGER DEFAULT 0"),
                     ("delete_banned_words", "INTEGER DEFAULT 0"),
-                    # ==================== Antiflood ====================
                     ("antiflood_enabled", "INTEGER DEFAULT 0"),
                     ("antiflood_messages", "INTEGER DEFAULT 5"),
                     ("antiflood_seconds", "INTEGER DEFAULT 10"),
                     ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
-                    # ==================== Night mode ====================
                     ("night_mode_enabled", "INTEGER DEFAULT 0"),
                     ("night_mode_start", "TEXT DEFAULT '23:00'"),
                     ("night_mode_end", "TEXT DEFAULT '07:00'"),
                     ("night_mode_action", "TEXT DEFAULT 'mute'"),
-                    # ==================== Warnings ====================
                     ("warn_enabled", "INTEGER DEFAULT 0"),
                     ("max_warnings", "INTEGER DEFAULT 3"),
                     ("warn_penalty", "TEXT DEFAULT 'mute'"),
-                    # ==================== Welcome/Goodbye ====================
                     ("welcome_enabled", "INTEGER DEFAULT 0"),
                     ("welcome_text", "TEXT DEFAULT ''"),
                     ("goodbye_enabled", "INTEGER DEFAULT 0"),
                     ("goodbye_text", "TEXT DEFAULT ''"),
-                    # ==================== Join ====================
                     ("auto_approve_join", "INTEGER DEFAULT 0"),
                     ("auto_reject_join", "INTEGER DEFAULT 0"),
-                    # ==================== Other ====================
                     ("slow_mode", "INTEGER DEFAULT 0"),
                     ("slow_mode_seconds", "INTEGER DEFAULT 0"),
                     ("max_message_length", "INTEGER DEFAULT 0"),
@@ -2154,7 +2121,6 @@ class Database:
                     if col_name not in existing:
                         await self._add_column_safe(conn, table, col_name, col_def)
             await self._ensure_text_hash_column(conn)
-            # إبطال كاش أعمدة group_security بعد الترحيل
             self._group_security_columns_cache = None
         finally:
             if USE_MYSQL:
@@ -3109,587 +3075,6 @@ class Database:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # =====================================================================
-    # دوال القنوات
-    # =====================================================================
-
-    async def add_channel(self, user_id: int, channel_id: int, channel_name: str, set_active: bool = True) -> Optional[Dict]:
-        try:
-            channel_id = int(channel_id)
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
-                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = $1 AND banned = 0) as cnt""",
-                            user_id, TimeUtils.utc_now(),
-                        )
-                    elif USE_MYSQL:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
-                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = %s AND banned = 0) as cnt""",
-                            user_id, TimeUtils.sql_iso(), user_id,
-                        )
-                    else:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_channels FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_channels,
-                                      (SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0) as cnt""",
-                            user_id, TimeUtils.sql_iso(), user_id,
-                        )
-                    if not plan_row:
-                        return None
-                    max_channels = plan_row["max_channels"] or 0
-                    current_count = plan_row["cnt"] or 0
-                    if current_count >= max_channels:
-                        logger.warning(f"⚠️ المستخدم {user_id} تجاوز الحد الأقصى للقنوات ({max_channels})")
-                        return None
-
-                    existing = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?",
-                        user_id, channel_id,
-                    )
-                    if existing:
-                        ch_db_id = existing["id"]
-                        await self._execute_with_conn(
-                            conn,
-                            "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?",
-                            channel_name, ch_db_id,
-                        )
-                        is_new = False
-                    else:
-                        if USE_POSTGRES:
-                            row = await self._fetchone_with_conn(
-                                conn,
-                                "INSERT INTO user_channels (user_id, channel_id, channel_name, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
-                                user_id, channel_id, channel_name, TimeUtils.utc_now(),
-                            )
-                            ch_db_id = row["id"]
-                        elif USE_MYSQL:
-                            cursor = await conn.cursor()
-                            await cursor.execute(
-                                "INSERT INTO user_channels (user_id, channel_id, channel_name, created_at) VALUES (%s, %s, %s, %s)",
-                                (user_id, channel_id, channel_name, TimeUtils.sql_iso()),
-                            )
-                            ch_db_id = cursor.lastrowid
-                            await cursor.close()
-                        else:
-                            cursor = await conn.execute(
-                                "INSERT INTO user_channels (user_id, channel_id, channel_name, created_at) VALUES (?,?,?,?)",
-                                (user_id, channel_id, channel_name, TimeUtils.sql_iso()),
-                            )
-                            ch_db_id = cursor.lastrowid
-                        is_new = True
-
-                    if set_active:
-                        await self._execute_with_conn(
-                            conn, "UPDATE users SET active_channel = ? WHERE user_id = ?",
-                            ch_db_id, user_id,
-                        )
-
-                    import random
-                    delay_seconds = random.randint(5, 30) + (user_id % 10)
-                    next_publish = TimeUtils.utc_now() + timedelta(seconds=delay_seconds)
-
-                    if USE_POSTGRES:
-                        await self._execute_with_conn(
-                            conn,
-                            """INSERT INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
-                               VALUES ($1, 'interval_minutes', 12, $2)
-                               ON CONFLICT (channel_db_id) DO UPDATE SET
-                                   schedule_type = EXCLUDED.schedule_type,
-                                   interval_minutes = EXCLUDED.interval_minutes,
-                                   next_publish_date = EXCLUDED.next_publish_date""",
-                            ch_db_id, next_publish,
-                        )
-                    elif USE_MYSQL:
-                        await self._execute_with_conn(
-                            conn,
-                            """INSERT INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
-                               VALUES (%s, 'interval_minutes', 12, %s)
-                               ON DUPLICATE KEY UPDATE
-                                   schedule_type = VALUES(schedule_type),
-                                   interval_minutes = VALUES(interval_minutes),
-                                   next_publish_date = VALUES(next_publish_date)""",
-                            ch_db_id, next_publish.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-                    else:
-                        await self._execute_with_conn(
-                            conn,
-                            """INSERT INTO schedule (channel_db_id, schedule_type, interval_minutes, next_publish_date)
-                               VALUES (?, 'interval_minutes', 12, ?)
-                               ON CONFLICT(channel_db_id) DO UPDATE SET
-                                   schedule_type = excluded.schedule_type,
-                                   interval_minutes = excluded.interval_minutes,
-                                   next_publish_date = excluded.next_publish_date""",
-                            ch_db_id, next_publish.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-
-                    if USE_POSTGRES:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO last_publish (channel_db_id, last_publish_time) VALUES ($1, $2) ON CONFLICT (channel_db_id) DO NOTHING",
-                            ch_db_id, next_publish,
-                        )
-                    elif USE_MYSQL:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT IGNORE INTO last_publish (channel_db_id, last_publish_time) VALUES (%s, %s)",
-                            ch_db_id, next_publish.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-                    else:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT OR IGNORE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)",
-                            ch_db_id, next_publish.strftime("%Y-%m-%d %H:%M:%S"),
-                        )
-
-                    if is_new:
-                        if USE_POSTGRES:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 10, $2) ON CONFLICT (user_id) DO UPDATE SET points = user_points.points + 10, last_updated = $2",
-                                user_id, TimeUtils.utc_now(),
-                            )
-                        elif USE_MYSQL:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 10, %s) ON DUPLICATE KEY UPDATE points = points + 10, last_updated = %s",
-                                user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                            )
-                        else:
-                            await self._execute_with_conn(
-                                conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (?,10,?) ON CONFLICT(user_id) DO UPDATE SET points = points + 10, last_updated = ?",
-                                user_id, TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                            )
-
-                    posts_count = await self._fetchval_with_conn(
-                        conn,
-                        "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0",
-                        ch_db_id, default=0,
-                    )
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    await internal_cache.invalidate(f"channel_info_{ch_db_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                        await channels_cache.invalidate(user_id)
-                        if hasattr(channels_cache, "invalidate_channel_info"):
-                            await channels_cache.invalidate_channel_info(ch_db_id)
-                    return {
-                        "id": ch_db_id,
-                        "channel_id": channel_id,
-                        "channel_name": channel_name,
-                        "posts_count": posts_count,
-                    }
-        except Exception as e:
-            logger.error(f"❌ Error in add_channel: {e}", exc_info=True)
-            return None
-
-    async def get_active_channel(self, user_id: int) -> Optional[int]:
-        result = await self.fetchval("SELECT active_channel FROM users WHERE user_id = ?", (user_id,))
-        if result:
-            banned = await self.fetchval(
-                "SELECT banned FROM user_channels WHERE id = ? AND user_id = ?",
-                (result, user_id), default=1,
-            )
-            if banned == 0:
-                return result
-        return await self.fetchval(
-            "SELECT id FROM user_channels WHERE user_id = ? AND banned = 0 ORDER BY id LIMIT 1",
-            (user_id,),
-        )
-
-    async def set_active_channel(self, user_id: int, channel_db_id: int) -> bool:
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
-            (channel_db_id, user_id),
-        )
-        if not exists:
-            return False
-        result = await self.execute(
-            "UPDATE users SET active_channel = ? WHERE user_id = ?", (channel_db_id, user_id)
-        ) > 0
-        if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-            if CACHE_AVAILABLE:
-                await invalidate_user_cache(user_id)
-        return result
-
-    async def get_user_channels(self, user_id: int) -> List[Dict]:
-        if CACHE_AVAILABLE:
-            cached = await channels_cache.get(user_id)
-            if cached is not None:
-                return cached
-        cached = await internal_cache.get(f"channels_{user_id}")
-        if cached is not None:
-            return cached
-        channels = await self.fetchall(
-            "SELECT id, channel_id, channel_name, banned, created_at FROM user_channels WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-        )
-        await internal_cache.set(f"channels_{user_id}", channels)
-        if CACHE_AVAILABLE:
-            await channels_cache.set(user_id, channels)
-        return channels
-
-    async def get_channel_info(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        if CACHE_AVAILABLE:
-            cached = await channels_cache.get_channel_info(channel_db_id)
-            if cached is not None:
-                return cached
-        cached = await internal_cache.get(f"channel_info_{channel_db_id}")
-        if cached is not None:
-            return cached
-        result = await self.fetchone(
-            "SELECT * FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id)
-        )
-        if result:
-            await internal_cache.set(f"channel_info_{channel_db_id}", result)
-            if CACHE_AVAILABLE:
-                await channels_cache.set_channel_info(channel_db_id, result)
-        return result
-
-    async def get_channel_stats(self, user_id: int, channel_db_id: int) -> Dict:
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id)
-        )
-        if not exists:
-            return {"total": 0, "published": 0, "unpublished": 0}
-        total = await self.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0)
-        published = await self.fetchval(
-            "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 1", (channel_db_id,), default=0
-        )
-        return {"total": total, "published": published, "unpublished": total - published}
-
-    async def get_unpublished_posts_count(self, user_id: int, channel_db_id: int) -> int:
-        owner = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id=? AND user_id=?", (channel_db_id, user_id), default=0
-        )
-        if not owner:
-            return 0
-        return await self.fetchval(
-            "SELECT COUNT(*) FROM posts WHERE channel_db_id=? AND published=0", (channel_db_id,), default=0
-        )
-
-    async def get_channel_by_user(self, user_id: int, channel_id: int) -> Optional[Dict]:
-        return await self.fetchone(
-            "SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id)
-        )
-
-    async def get_channel_by_id(self, user_id: int, channel_id: int) -> Optional[Dict]:
-        return await self.fetchone(
-            "SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id)
-        )
-
-    async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
-        try:
-            async with self.transaction() as conn:
-                deleted = await self._execute_with_conn(
-                    conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?",
-                    channel_db_id, user_id,
-                )
-                if deleted > 0:
-                    await self._execute_with_conn(
-                        conn,
-                        "UPDATE users SET active_channel = NULL WHERE user_id = ? AND active_channel = ?",
-                        user_id, channel_db_id,
-                    )
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    await internal_cache.invalidate(f"channels_{user_id}")
-                    await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                        await channels_cache.invalidate(user_id)
-                    return True
-                return False
-        except Exception as e:
-            logger.error(f"❌ Error in delete_channel: {e}", exc_info=True)
-            return False
-
-    async def is_channel_owner(self, user_id: int, channel_db_id: int) -> bool:
-        result = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id)
-        )
-        return result is not None
-
-    async def count_user_posts(self, user_id: int, channel_db_id: int) -> int:
-        return await self.fetchval(
-            "SELECT COUNT(*) FROM posts WHERE channel_db_id = ?", (channel_db_id,), default=0
-        )
-
-    # =====================================================================
-    # دوال المنشورات
-    # =====================================================================
-
-    async def add_posts(self, user_id: int, channel_db_id: int, posts: List[Tuple[str, str, str]]) -> int:
-        try:
-            if not posts:
-                return 0
-            async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    row = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
-                        channel_db_id, user_id,
-                    )
-                    if not row:
-                        return 0
-
-                    if USE_POSTGRES:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = $1 AND s.status = 'active' AND s.end_date > $2
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
-                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = $3 AND published = 0) as cnt""",
-                            user_id, TimeUtils.utc_now(), channel_db_id,
-                        )
-                    elif USE_MYSQL:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = %s AND s.status = 'active' AND s.end_date > %s
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
-                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = %s AND published = 0) as cnt""",
-                            user_id, TimeUtils.sql_iso(), channel_db_id,
-                        )
-                    else:
-                        plan_row = await self._fetchone_with_conn(
-                            conn,
-                            """SELECT (SELECT max_posts FROM subscriptions s JOIN plans p ON s.plan_id = p.id
-                                      WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > ?
-                                      ORDER BY p.max_channels DESC, p.max_posts DESC, s.end_date DESC LIMIT 1) as max_posts,
-                                      (SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0) as cnt""",
-                            user_id, TimeUtils.sql_iso(), channel_db_id,
-                        )
-                    if not plan_row:
-                        return 0
-                    max_posts = plan_row["max_posts"] or 0
-                    current_count = plan_row["cnt"] or 0
-                    has_text_hash = await self._ensure_text_hash_column(conn)
-
-                    unique_posts = []
-                    seen_local = set()
-                    for t, m, f in posts:
-                        text = t or ""
-                        if self._max_post_text_length > 0:
-                            text = text[: self._max_post_text_length]
-                        key = (text, m or "", f or "")
-                        if key not in seen_local:
-                            seen_local.add(key)
-                            unique_posts.append((text, m, f))
-
-                    final_posts = []
-                    for t, m, f in unique_posts:
-                        text_clean = (
-                            (t or "")[:4096] if self._max_post_text_length == 0
-                            else (t or "")[: self._max_post_text_length]
-                        )
-                        media_type = m or ""
-                        media_file_id = f or ""
-                        if has_text_hash:
-                            text_hash = self._compute_text_hash(text_clean)
-                            exists = await self._fetchone_with_conn(
-                                conn,
-                                "SELECT 1 FROM posts WHERE channel_db_id = ? AND text_hash = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
-                                channel_db_id, text_hash, media_type, media_file_id,
-                            )
-                        else:
-                            exists = await self._fetchone_with_conn(
-                                conn,
-                                "SELECT 1 FROM posts WHERE channel_db_id = ? AND text = ? AND media_type = ? AND media_file_id = ? LIMIT 1",
-                                channel_db_id, text_clean, media_type, media_file_id,
-                            )
-                        if not exists:
-                            final_posts.append((t, m, f))
-
-                    if not final_posts:
-                        return 0
-
-                    if current_count + len(final_posts) > max_posts:
-                        allowed = max(0, max_posts - current_count)
-                        if allowed == 0:
-                            return 0
-                        final_posts = final_posts[:allowed]
-
-                    total = 0
-                    batch_size = self._posts_batch_size
-                    for i in range(0, len(final_posts), batch_size):
-                        batch = final_posts[i : i + batch_size]
-                        vals = []
-                        for t, m, f in batch:
-                            text = t or ""
-                            if self._max_post_text_length > 0:
-                                text = text[: self._max_post_text_length]
-                            if has_text_hash:
-                                text_hash = self._compute_text_hash(text)
-                                vals.append((channel_db_id, text, text_hash, m, f, TimeUtils.utc_now()))
-                            else:
-                                vals.append((channel_db_id, text, m, f, TimeUtils.utc_now()))
-
-                        if has_text_hash:
-                            inserted = await self._executemany_with_conn(
-                                conn,
-                                "INSERT INTO posts (channel_db_id, text, text_hash, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                vals,
-                            )
-                        else:
-                            inserted = await self._executemany_with_conn(
-                                conn,
-                                "INSERT INTO posts (channel_db_id, text, media_type, media_file_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                                vals,
-                            )
-                        total += inserted
-
-                    if total > 0:
-                        await internal_cache.invalidate(f"user_{user_id}")
-                        await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-                        if CACHE_AVAILABLE:
-                            await invalidate_user_cache(user_id)
-                            await posts_cache.invalidate(channel_db_id)
-                    return total
-        except Exception as e:
-            logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
-            return 0
-
-    async def get_next_post(self, channel_db_id: int) -> Tuple[Optional[Dict], bool]:
-        async with await self._get_channel_lock(channel_db_id):
-            if CACHE_AVAILABLE:
-                cached = await posts_cache.get_next_post(channel_db_id)
-                if cached:
-                    return cached, False
-
-            post_row = await self.fetchone(
-                """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
-                   FROM posts p
-                   JOIN user_channels uc ON p.channel_db_id = uc.id
-                   WHERE p.channel_db_id = ? AND p.published = 0
-                     AND (p.fail_count IS NULL OR p.fail_count < 3)
-                     AND uc.banned = 0
-                   ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1""",
-                (channel_db_id,),
-            )
-            if post_row:
-                if CACHE_AVAILABLE:
-                    await posts_cache.set_next_post(channel_db_id, post_row)
-                return post_row, False
-
-            auto_recycle = await self.fetchval(
-                """SELECT u.auto_recycle FROM users u
-                   JOIN user_channels uc ON u.user_id = uc.user_id
-                   WHERE uc.id = ?""",
-                (channel_db_id,), default=1,
-            )
-            if auto_recycle != 1:
-                return None, False
-
-            await self.execute(
-                "UPDATE posts SET published = 0, published_at = NULL, fail_count = 0 WHERE channel_db_id = ? AND published = 1",
-                (channel_db_id,),
-            )
-
-            post_row = await self.fetchone(
-                """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
-                   FROM posts p
-                   WHERE p.channel_db_id = ? AND p.published = 0
-                   ORDER BY p.fail_count ASC, p.created_at ASC LIMIT 1""",
-                (channel_db_id,),
-            )
-            if post_row:
-                if CACHE_AVAILABLE:
-                    await posts_cache.set_next_post(channel_db_id, post_row)
-                return post_row, True
-            return None, False
-
-    async def mark_post_published(self, post_id: int) -> bool:
-        result = await self.execute(
-            "UPDATE posts SET published = 1, published_at = ?, fail_count = 0 WHERE id = ?",
-            (TimeUtils.utc_now(), post_id),
-        ) > 0
-        if result and CACHE_AVAILABLE:
-            await posts_cache.invalidate()
-        return result
-
-    async def increment_post_fail(self, post_id: int) -> bool:
-        return await self.execute(
-            "UPDATE posts SET fail_count = fail_count + 1 WHERE id = ?", (post_id,)
-        ) > 0
-
-    async def delete_post(self, user_id: int, post_id: int, channel_db_id: int) -> bool:
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id)
-        )
-        if not exists:
-            return False
-        result = await self.execute(
-            "DELETE FROM posts WHERE id = ? AND channel_db_id = ?", (post_id, channel_db_id)
-        ) > 0
-        if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-            if CACHE_AVAILABLE:
-                await invalidate_user_cache(user_id)
-                await posts_cache.invalidate(channel_db_id)
-        return result
-
-    async def reset_posts(self, user_id: int, channel_db_id: int) -> int:
-        try:
-            async with self.transaction() as conn:
-                cursor = await conn.execute(
-                    "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
-                    (channel_db_id, user_id),
-                )
-                if not await cursor.fetchone():
-                    return 0
-                await self._execute_with_conn(
-                    conn, "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?",
-                    channel_db_id,
-                )
-                count = await self._fetchval_with_conn(
-                    conn, "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0",
-                    channel_db_id, default=0,
-                )
-                await internal_cache.invalidate(f"user_{user_id}")
-                await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-                if CACHE_AVAILABLE:
-                    await invalidate_user_cache(user_id)
-                    await posts_cache.invalidate(channel_db_id)
-                return count
-        except Exception as e:
-            logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
-            return 0
-
-    async def get_user_posts(self, user_id: int, channel_db_id: int, limit: int = 10) -> List[Dict]:
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?", (channel_db_id, user_id)
-        )
-        if not exists:
-            return []
-        if CACHE_AVAILABLE:
-            cached = await posts_cache.get_posts(channel_db_id, limit)
-            if cached is not None:
-                return cached
-        posts = await self.fetchall(
-            """SELECT id, text, media_type, published, fail_count, created_at
-               FROM posts WHERE channel_db_id = ?
-               ORDER BY created_at DESC LIMIT ?""",
-            (channel_db_id, limit),
-        )
-        if CACHE_AVAILABLE:
-            await posts_cache.set_posts(channel_db_id, posts, limit)
-        return posts
-
-    # =====================================================================
     # دوال المجموعات
     # =====================================================================
 
@@ -4005,11 +3390,8 @@ class Database:
             await settings_cache.set_security(chat_id, settings)
         return settings if settings else {}
 
-    # ✅ v7.1: دالة جديدة لجلب أعمدة group_security الفعلية
     async def _get_group_security_columns(self) -> set:
-        """
-        جلب أعمدة group_security الفعلية من قاعدة البيانات (مع كاش)
-        """
+        """جلب أعمدة group_security الفعلية (مع كاش)"""
         if self._group_security_columns_cache is not None:
             return self._group_security_columns_cache
 
@@ -4064,9 +3446,7 @@ class Database:
         logger.info(f"🔧 update_security_settings called for chat_id={chat_id}")
         logger.info(f"   📥 Original keys ({len(original_keys)}): {sorted(original_keys)}")
 
-        # ─────────────────────────────────────────────────
-        # 1) معالجة المرادفات (alias → real column)
-        # ─────────────────────────────────────────────────
+        # ─── 1) معالجة المرادفات ───
         aliased_keys = []
         for alias, real_col in self.COLUMN_ALIASES.items():
             if alias in kwargs:
@@ -4080,17 +3460,13 @@ class Database:
         if aliased_keys:
             logger.info(f"   🔄 Aliases resolved: {aliased_keys}")
 
-        # ─────────────────────────────────────────────────
-        # 2) ضمان وجود صف في group_security
-        # ─────────────────────────────────────────────────
+        # ─── 2) ضمان وجود صف ───
         await self.execute(
             "INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)",
             (chat_id,)
         )
 
-        # ─────────────────────────────────────────────────
-        # 3) جلب الأعمدة الفعلية من الجدول (runtime introspection)
-        # ─────────────────────────────────────────────────
+        # ─── 3) جلب الأعمدة الفعلية ───
         actual_columns = await self._get_group_security_columns()
         if not actual_columns:
             logger.error(f"   ❌ لم يتمكن من جلب أعمدة group_security")
@@ -4098,9 +3474,7 @@ class Database:
 
         logger.info(f"   📋 Actual columns in group_security ({len(actual_columns)}): {sorted(actual_columns)}")
 
-        # ─────────────────────────────────────────────────
-        # 4) فلترة kwargs: احتفظ فقط بالأعمدة الموجودة فعلاً
-        # ─────────────────────────────────────────────────
+        # ─── 4) فلترة kwargs ───
         valid_kwargs = {}
         skipped_keys = []
         for key, value in kwargs.items():
@@ -4122,9 +3496,7 @@ class Database:
 
         logger.info(f"   ✅ Will update {len(valid_kwargs)} columns: {sorted(valid_kwargs.keys())}")
 
-        # ─────────────────────────────────────────────────
-        # 5) تنفيذ UPDATE
-        # ─────────────────────────────────────────────────
+        # ─── 5) تنفيذ UPDATE ───
         try:
             updates = [f"{key} = ?" for key in valid_kwargs]
             values = list(valid_kwargs.values()) + [chat_id]
@@ -4137,9 +3509,7 @@ class Database:
             success = result >= 0
 
             if success:
-                # ─────────────────────────────────────────────
-                # 6) إبطال الكاش بقوة (عدة مستويات)
-                # ─────────────────────────────────────────────
+                # ─── 6) إبطال الكاش ───
                 try:
                     if CACHE_AVAILABLE:
                         await settings_cache.invalidate_security(chat_id)
