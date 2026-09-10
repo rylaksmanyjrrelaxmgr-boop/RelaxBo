@@ -15,6 +15,7 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسّنة م�
 - ✅ إصلاح خطأ tuple في النشر التلقائي: تعديل _publish_single_channel لاستقبال (post, recycled)
 - ✅ إرسال إشعار النشر فقط عند أول منشور أو إعادة تدوير
 - ✅ إضافة حالة WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي
+- ✅ v7.4.7: تحسين sync_admins_periodically بكاش ذكي + توازي (يُسرّع /start)
 """
 
 import asyncio
@@ -1469,6 +1470,46 @@ def reload_replies_from_file() -> dict:
 # =====================================================================
 
 class BackgroundTasks:
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v7.4.7: كاش لمشرفي المجموعات (يمنع الاستدعاءات المتكررة)
+    # ═══════════════════════════════════════════════════════════════════
+    _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
+    _GROUP_ADMINS_CACHE_TTL = 600  # 10 دقائق
+
+    @staticmethod
+    async def _get_admin_ids_cached(bot, chat_id: int, force_refresh: bool = False) -> List[int]:
+        """
+        يجلب معرفات مشرفي المجموعة مع كاش 10 دقائق.
+        يمنع استدعاءات getChatAdministrators المتكررة.
+
+        - إذا كانت البيانات في الكاش → إرجاعها فوراً (بدون API call)
+        - إذا انتهت صلاحية الكاش → جلب جديد من Telegram
+        - إذا فشل الجلب → إرجاع الكاش القديم كطبقة أمان
+        """
+        now = time.time()
+
+        # 1. فحص الكاش
+        if not force_refresh and chat_id in BackgroundTasks._group_admins_cache:
+            cached_time, cached_ids = BackgroundTasks._group_admins_cache[chat_id]
+            if now - cached_time < BackgroundTasks._GROUP_ADMINS_CACHE_TTL:
+                return cached_ids
+
+        # 2. جلب جديد من Telegram
+        try:
+            admins = await bot.get_chat_administrators(chat_id)
+            admin_ids = [
+                a.user.id for a in admins
+                if a.user and not a.user.is_bot
+            ]
+            BackgroundTasks._group_admins_cache[chat_id] = (now, admin_ids)
+            return admin_ids
+        except Exception as e:
+            logger.debug(f"⚠️ فشل جلب مشرفي {chat_id}: {e}")
+            # إرجاع الكاش القديم عند الفشل (بدل لا شيء)
+            if chat_id in BackgroundTasks._group_admins_cache:
+                return BackgroundTasks._group_admins_cache[chat_id][1]
+            return []
+
     @staticmethod
     async def _publish_post(bot, channel_id: int, post: dict) -> bool:
         try:
@@ -1706,32 +1747,80 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ Expire subs: {e}")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v7.4.7: تم تحسين sync_admins_periodically
+    #    - كاش 10 دقائق لكل مجموعة
+    #    - توازي بحد 3 طلبات متزامنة (بدل تسلسلي)
+    #    - تأخير 1 ثانية بين كل طلب
+    #    - كل ساعتين بدل ساعة (ChatMemberHandler يقوم بالعمل الفوري)
+    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def sync_admins_periodically(bot) -> None:
-        await asyncio.sleep(60)
+        """
+        مزامنة مشرفي المجموعات (طبقة احتياطية بعد ChatMemberHandler).
+
+        - يعمل كل ساعتين (بدل ساعة).
+        - يحدّث 3 مجموعات بالتوازي كحد أقصى.
+        - تأخير 1 ثانية بين كل طلب.
+        - يستخدم الكاش لمنع الاستدعاءات المتكررة.
+        - إذا كان ChatMemberHandler يعمل، لن يُستدعى Telegram API غالباً.
+        """
+        await asyncio.sleep(180)  # تأخير أولي 3 دقائق (بدل دقيقة)
+
         while True:
             try:
                 groups = await asyncio.wait_for(
                     DB.fetchall("SELECT chat_id FROM bot_groups WHERE banned=0"),
                     timeout=15
                 )
-                for group in groups:
-                    chat_id = group['chat_id'] if isinstance(group, dict) else group[0]
-                    try:
-                        admins = await bot.get_chat_administrators(chat_id)
-                        admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
-                        await DB.sync_group_admins(chat_id, admin_ids)
-                        anonymous_ids = [a.user.id for a in admins if a.user and a.user.is_bot and a.status == 'administrator']
-                        if anonymous_ids:
-                            user_id_map = {}
-                            await DB.sync_anonymous_admins(chat_id, anonymous_ids, added_by=CONFIG.PRIMARY_OWNER_ID, user_id_map=user_id_map)
-                    except Exception:
-                        pass
+
+                if not groups:
+                    await asyncio.sleep(7200)
+                    continue
+
+                # ✅ الحد الأقصى 3 طلبات متزامنة (بدل تسلسلي)
+                semaphore = asyncio.Semaphore(3)
+                updated_count = 0
+
+                async def sync_one(group_row):
+                    nonlocal updated_count
+                    async with semaphore:
+                        try:
+                            chat_id = (
+                                group_row['chat_id']
+                                if isinstance(group_row, dict)
+                                else group_row[0]
+                            )
+
+                            # ✅ استخدام الكاش — لن يستدعي Telegram إذا كان محدثاً
+                            admin_ids = await BackgroundTasks._get_admin_ids_cached(bot, chat_id)
+                            if admin_ids:
+                                await DB.sync_group_admins(chat_id, admin_ids)
+                                updated_count += 1
+
+                            # ✅ تأخير 1 ثانية بين كل طلب
+                            await asyncio.sleep(1.0)
+
+                        except Exception as e:
+                            logger.debug(f"Sync admins {group_row}: {e}")
+
+                # ✅ تنفيذ كل المهام بالتوازي مع حد أقصى 3
+                await asyncio.gather(
+                    *[sync_one(g) for g in groups],
+                    return_exceptions=True
+                )
+
+                logger.info(
+                    f"✅ تم تحديث مشرفي {updated_count}/{len(groups)} مجموعة"
+                )
+
             except asyncio.TimeoutError:
                 logger.error("❌ استعلام المجموعات استغرق أكثر من 15 ثانية")
             except Exception as e:
                 logger.error(f"❌ Sync admins: {e}")
-            await asyncio.sleep(3600)
+
+            # ✅ كل ساعتين (بدل ساعة)
+            await asyncio.sleep(7200)
 
     @staticmethod
     async def expire_penalties_periodically() -> None:
@@ -1756,6 +1845,8 @@ class BackgroundTasks:
                 _banned_words_cache_time.clear()
                 _auto_reply_cache.clear()
                 _auth_cache.clear()
+                # ✅ تنظيف كاش المشرفين أيضاً
+                BackgroundTasks._group_admins_cache.clear()
                 now = time.time()
                 expired_users = [
                     uid for uid, ts in StateManager._timestamps.items()
