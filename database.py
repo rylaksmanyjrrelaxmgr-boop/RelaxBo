@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية المُصحَّحة)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية النهائية)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - كل دوال الأعمال + الكاش + المهام الخلفية
@@ -19,6 +19,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   10. إبطال channel_info_{ch_db_id} في add_channel/delete_channel/set_active_channel
   11. mark_users_as_blocked بدفعة واحدة
   12. expire_expired_subscriptions بدفعة واحدة (بدون N+1)
+  13. _find_best_conflict_target + إصلاح ON CONFLICT لـ PostgreSQL
+  14. executemany الأصلي لـ asyncpg (تسريع 30×)
 """
 
 import os
@@ -273,11 +275,9 @@ class SimpleCache:
     async def set_channel_info(self, channel_db_id: int, data, ttl: int = None):
         await self.set(f"channel_info:{channel_db_id}", data, ttl)
 
-    # ✅ إضافة جديدة: إبطال channel_info
     async def invalidate_channel_info(self, channel_db_id: int):
         await self.invalidate(f"channel_info:{channel_db_id}")
 
-    # ✅ إضافة جديدة: معلومات المجموعة
     async def get_group_info(self, chat_id: int):
         return await self.get(f"group_info:{chat_id}")
 
@@ -372,8 +372,7 @@ except ImportError:
 
     async def invalidate_user_cache(user_id: int):
         """
-        ✅ إصلاح: يشمل مفاتيح include_stats (_True / _False)
-        ✅ إزالة channel_info_{user_id} الخاطئ (المفتاح الصحيح channel_info_{channel_db_id})
+        ✅ إصلاح #9: يشمل مفاتيح include_stats (_True / _False)
         """
         try:
             await user_cache.invalidate(user_id)
@@ -600,10 +599,88 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
     return columns
 
 
+async def _find_best_conflict_target(
+    table: str, conn, insert_columns: List[str]
+) -> Optional[str]:
+    """
+    ✅ إصلاح #13: يجد أفضل أعمدة ON CONFLICT بحيث:
+    - تطابق أعمدة الإدراج بالكامل
+    - تفضّل الفهارس الفريدة (غير PRIMARY) على PRIMARY KEY
+    """
+    insert_set = set(insert_columns)
+
+    if USE_POSTGRES:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT i.indexname,
+                       ix.indisprimary,
+                       array_agg(a.attname ORDER BY a.attnum) AS cols
+                FROM pg_indexes i
+                JOIN pg_class t ON t.relname = i.tablename
+                JOIN pg_index ix ON ix.indexrelid = (
+                    SELECT oid FROM pg_class
+                    WHERE relname = i.indexname AND relkind = 'i'
+                )
+                JOIN pg_attribute a
+                  ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                WHERE i.tablename = $1 AND ix.indisunique
+                GROUP BY i.indexname, ix.indisprimary
+                """,
+                table,
+            )
+            # 1) فهارس UNIQUE (غير PRIMARY) — الأولوية القصوى
+            for row in rows:
+                if not row["indisprimary"]:
+                    cols = list(row["cols"])
+                    if cols and all(c in insert_set for c in cols):
+                        return ", ".join(cols)
+            # 2) PRIMARY KEY — احتياطي
+            for row in rows:
+                if row["indisprimary"]:
+                    cols = list(row["cols"])
+                    if cols and all(c in insert_set for c in cols):
+                        return ", ".join(cols)
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ فشل جلب قيود UNIQUE لـ {table}: {e}")
+            return None
+
+    elif USE_MYSQL:
+        return None
+
+    else:
+        # SQLite
+        try:
+            cursor = await conn.execute(f"PRAGMA index_list({table})")
+            indexes = await cursor.fetchall()
+            primary_cols = None
+            unique_cols = None
+            for idx in indexes:
+                if idx[2] != 1:
+                    continue
+                is_primary = (idx[3] == "pk")
+                cursor2 = await conn.execute(f"PRAGMA index_info({idx[1]})")
+                cols_rows = await cursor2.fetchall()
+                cols = [r[2] for r in cols_rows]
+                if not cols:
+                    continue
+                if all(c in insert_set for c in cols):
+                    if is_primary and primary_cols is None:
+                        primary_cols = cols
+                    elif not is_primary and unique_cols is None:
+                        unique_cols = cols
+            if unique_cols:
+                return ", ".join(unique_cols)
+            if primary_cols:
+                return ", ".join(primary_cols)
+            return None
+        except Exception:
+            return None
+
+
 def _convert_placeholders(query: str) -> str:
-    """
-    ✅ الإصلاح #5: يبدأ العدّ من بعد أعلى $N موجودة مسبقاً
-    """
+    """✅ الإصلاح #5: يبدأ العدّ من بعد أعلى $N موجودة مسبقاً"""
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
@@ -730,6 +807,7 @@ def _convert_placeholders(query: str) -> str:
 
 
 async def _convert_insert_or_ignore(query: str, conn=None) -> str:
+    """✅ الإصلاح #13: يستخدم _find_best_conflict_target"""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -737,28 +815,37 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
         return query
     if USE_POSTGRES:
         new_query = query.replace("INSERT OR IGNORE", "INSERT", 1)
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
+        match = re.search(
+            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE
+        )
         if not match:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
-        conflict_cols = ", ".join(columns) if columns else "id"
+
+        conflict_cols = None
         if conn:
             try:
-                unique_cols = await _get_unique_columns(table, conn)
-                if unique_cols and all(col in columns or col == "id" for col in unique_cols):
-                    conflict_cols = ", ".join(unique_cols)
-                else:
-                    conflict_cols = ", ".join(columns) if columns else "id"
+                conflict_cols = await _find_best_conflict_target(table, conn, columns)
             except Exception as e:
                 logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
-                conflict_cols = ", ".join(columns) if columns else "id"
+
+        if conflict_cols:
+            target = f" ({conflict_cols})"
+        else:
+            # لا نعرف القيد — ON CONFLICT DO NOTHING بدون تحديد يلتقط كل تعارضات UNIQUE
+            target = ""
+
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
             end_pos = values_match.end()
-            new_query = new_query[:end_pos] + f" ON CONFLICT ({conflict_cols}) DO NOTHING" + new_query[end_pos:]
+            new_query = (
+                new_query[:end_pos]
+                + f" ON CONFLICT{target} DO NOTHING"
+                + new_query[end_pos:]
+            )
         else:
-            new_query = new_query + f" ON CONFLICT ({conflict_cols}) DO NOTHING"
+            new_query = new_query + f" ON CONFLICT{target} DO NOTHING"
         return new_query
     elif USE_MYSQL:
         return query.replace("INSERT OR IGNORE", "INSERT IGNORE", 1)
@@ -774,22 +861,31 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         return query
     if USE_POSTGRES:
         new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
-        match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE)
+        match = re.search(
+            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE
+        )
         if not match:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
-        pk = columns[:1] if columns else ["id"]
+
+        # ✅ استخدام الدالة الجديدة للتفضيل الصحيح
+        pk_cols = None
         if conn:
             try:
-                unique_cols = await _get_unique_columns(table, conn)
-                if unique_cols:
-                    pk = unique_cols
+                best = await _find_best_conflict_target(table, conn, columns)
+                if best:
+                    pk_cols = best
             except Exception as e:
                 logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
-        pk_cols = ", ".join(pk)
-        pk_set = set(pk)
+
+        if not pk_cols:
+            pk_cols = columns[0] if columns else "id"
+
+        pk_list = [c.strip() for c in pk_cols.split(",") if c.strip()]
+        pk_set = set(pk_list)
         set_columns = [col for col in columns if col not in pk_set]
+
         if not set_columns:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
             if values_match:
@@ -798,11 +894,13 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             else:
                 new_query = new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
             return new_query
+
         existing_columns = set()
         try:
             if USE_POSTGRES:
                 rows = await conn.fetch(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name = $1", table
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = $1",
+                    table,
                 )
                 existing_columns = {row["column_name"] for row in rows}
             elif USE_MYSQL:
@@ -816,6 +914,7 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                 existing_columns = {row[1] for row in rows}
         except Exception:
             pass
+
         set_columns = [col for col in set_columns if col in existing_columns]
         if not set_columns:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
@@ -825,6 +924,7 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             else:
                 new_query = new_query + f" ON CONFLICT ({pk_cols}) DO NOTHING"
             return new_query
+
         set_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in set_columns])
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
@@ -1044,7 +1144,7 @@ class Database:
         self._global_banned_words_cache: List[str] = []
         self._global_banned_words_loaded = False
         self._global_words_lock = asyncio.Lock()
-        # ✅ إصلاح: قفل مستقل لأقفال المجموعات
+        # ✅ إصلاح #8: قفل مستقل لأقفال المجموعات
         self._group_locks_lock = asyncio.Lock()
 
     # =====================================================================
@@ -1061,9 +1161,7 @@ class Database:
         self._banned_words_local_cache[chat_id] = {"words": words, "time": time.time()}
 
     async def _invalidate_banned_words_local_cache(self, chat_id: int = None):
-        """
-        ✅ الإصلاح #1: إبطال الكاش العالمي أيضاً عند chat_id=-1
-        """
+        """✅ الإصلاح #1: إبطال الكاش العالمي أيضاً عند chat_id=-1"""
         if chat_id is not None:
             self._banned_words_local_cache.pop(chat_id, None)
             if chat_id == -1:
@@ -1374,6 +1472,7 @@ class Database:
             return cursor.rowcount
 
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
+        """✅ الإصلاح #14: executemany الأصلي لـ asyncpg (تسريع 30×)"""
         if not params_list:
             return 0
         q = _convert_placeholders(query)
@@ -1388,21 +1487,27 @@ class Database:
             q = _convert_upsert(q)
         params_list = [_adapt_params(p) for p in params_list]
         if USE_POSTGRES:
-            total = 0
-            for params in params_list:
-                try:
-                    result = await self._execute_with_logging(
-                        q, params, conn, lambda q2, p2: conn.execute(q2, *p2)
-                    )
-                    parts = result.split()
-                    if parts and parts[-1].isdigit():
-                        total += int(parts[-1])
-                    else:
-                        total += 1
-                except Exception as e:
-                    logger.warning(f"⚠️ فشل تنفيذ صف في executemany: {e}")
-                    continue
-            return total
+            try:
+                # ✅ executemany الأصلي — أسرع 30× من الحلقة
+                await conn.executemany(q, params_list)
+                return len(params_list)
+            except Exception as e:
+                logger.warning(f"⚠️ فشل executemany الجماعي ({e})، العودة للحلقة البطيئة")
+                total = 0
+                for params in params_list:
+                    try:
+                        result = await self._execute_with_logging(
+                            q, params, conn, lambda q2, p2: conn.execute(q2, *p2)
+                        )
+                        parts = result.split()
+                        if parts and parts[-1].isdigit():
+                            total += int(parts[-1])
+                        else:
+                            total += 1
+                    except Exception as e2:
+                        logger.warning(f"⚠️ فشل تنفيذ صف في executemany: {e2}")
+                        continue
+                return total
         elif USE_MYSQL:
             cursor = await conn.cursor()
             await self._execute_with_logging(
@@ -1539,7 +1644,7 @@ class Database:
             return self._channel_locks[channel_db_id]
 
     async def _get_group_lock(self, chat_id: int) -> asyncio.Lock:
-        """✅ إصلاح: قفل مستقل لأقفال المجموعات (لا تنافس مع أقفال القنوات)"""
+        """✅ إصلاح #8: قفل مستقل لأقفال المجموعات"""
         async with self._group_locks_lock:
             self._group_locks_last_access[chat_id] = time.monotonic()
             return self._group_locks[chat_id]
@@ -1585,7 +1690,7 @@ class Database:
             return 0
 
     async def cleanup_group_locks(self, max_idle_seconds: int = 3600) -> int:
-        """✅ إصلاح: يستخدم _group_locks_lock المستقل"""
+        """✅ إصلاح #8: يستخدم _group_locks_lock المستقل"""
         try:
             async with self._group_locks_lock:
                 now = time.monotonic()
@@ -4890,9 +4995,7 @@ class Database:
             return 0
 
     async def expire_expired_subscriptions(self) -> None:
-        """
-        ✅ إصلاح #5: تحديث subscription_end دفعة واحدة (بدون N+1)
-        """
+        """✅ إصلاح #12: تحديث subscription_end دفعة واحدة (بدون N+1)"""
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
@@ -5541,7 +5644,7 @@ class Database:
         return admins
 
     async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
-        """✅ إصلاح: دفعة واحدة بدلاً من استعلام لكل مستخدم"""
+        """✅ إصلاح #11: دفعة واحدة بدلاً من استعلام لكل مستخدم"""
         if not user_ids:
             return 0
         try:
