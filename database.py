@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.3)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.4)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -11,6 +11,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 - دوال التذاكر في database_tickets.py (Mixin)
 - دوال المسابقات في database_contests.py (Mixin)
 - دوال الإحصائيات والمشرفين في database_stats.py (Mixin)
+- دوال الإعدادات العامة في database_settings.py (Mixin)
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
@@ -18,6 +19,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.1: فصل دوال التذاكر إلى database_tickets.py
 🆕 v7.4.2: فصل دوال المسابقات إلى database_contests.py
 🆕 v7.4.3: فصل دوال الإحصائيات والمشرفين إلى database_stats.py
+🆕 v7.4.4: فصل دوال الإعدادات العامة إلى database_settings.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -26,6 +28,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   - database_tickets.py
   - database_contests.py
   - database_stats.py
+  - database_settings.py
   - database_tables.py
 """
 
@@ -201,6 +204,19 @@ except ImportError as e:
     logger.warning(f"⚠️ database_stats.py غير موجود: {e}")
     StatsMixin = object
     STATS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.7 استيراد SettingsMixin (الإعدادات العامة)
+# =====================================================================
+
+try:
+    from database_settings import SettingsMixin
+    SETTINGS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_settings.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_settings.py غير موجود: {e}")
+    SettingsMixin = object
+    SETTINGS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -451,7 +467,6 @@ except ImportError:
     posts_cache = SimpleCache(default_ttl=30)
 
     async def invalidate_user_cache(user_id: int):
-        """يشمل مفاتيح include_stats (_True / _False)"""
         try:
             await user_cache.invalidate(user_id)
             await internal_cache.invalidate(f"user_{user_id}")
@@ -683,11 +698,6 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
 async def _find_best_conflict_target(
     table: str, conn, insert_columns: List[str]
 ) -> Optional[str]:
-    """
-    يجد أفضل أعمدة ON CONFLICT بحيث:
-    - تطابق أعمدة الإدراج بالكامل
-    - تفضّل الفهارس الفريدة (غير PRIMARY) على PRIMARY KEY
-    """
     insert_set = set(insert_columns)
 
     if USE_POSTGRES:
@@ -758,7 +768,6 @@ async def _find_best_conflict_target(
 
 
 def _convert_placeholders(query: str) -> str:
-    """معالجة $N الموجودة مسبقاً"""
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
@@ -884,7 +893,6 @@ def _convert_placeholders(query: str) -> str:
 
 
 async def _convert_insert_or_ignore(query: str, conn=None) -> str:
-    """يستخدم _find_best_conflict_target"""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -930,7 +938,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
 
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
-    """آمن عند غياب UNIQUE constraint"""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -1019,7 +1026,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
 
 
 def _convert_upsert(query: str) -> str:
-    """تحويل ON CONFLICT ... DO UPDATE SET إلى MySQL ON DUPLICATE KEY UPDATE"""
     if DB_TYPE == "sqlite":
         return query
     if not USE_MYSQL and not USE_POSTGRES:
@@ -1046,10 +1052,6 @@ def _convert_upsert(query: str) -> str:
 
 
 def _adapt_params(params: tuple) -> tuple:
-    """
-    - جميع الأعمدة من نوع TIMESTAMP/DATETIME بدون timezone
-    - نحذف tzinfo لجميع قواعد البيانات
-    """
     if params is None:
         return ()
     new_params = []
@@ -1181,6 +1183,7 @@ class Database(
     TicketsMixin,
     ContestsMixin,
     StatsMixin,
+    SettingsMixin,
 ):
     _instance = None
     _lock = asyncio.Lock()
@@ -1206,7 +1209,6 @@ class Database(
     }
     MAX_PENALTY_DURATION = 365 * 86400
 
-    # ✅ COLUMN_ALIASES موسّعة (60+ مرادفاً)
     COLUMN_ALIASES = {
         # ==================== Mentions ====================
         "delete_mentions": "mentions",
@@ -1312,7 +1314,6 @@ class Database(
         "night_mode": "night_mode_enabled",
         "night": "night_mode_enabled",
         "night_mode_active": "night_mode_enabled",
-        # ✅ مرادفات وقت الليل
         "night_start": "night_mode_start",
         "night_end": "night_mode_end",
         "night_mode_begin": "night_mode_start",
@@ -1409,13 +1410,13 @@ class Database(
         self.auth_cache = auth_cache
         self.CONFIG = CONFIG
         self.PATHS = PATHS
-        # ✅ كاش محلي للكلمات المحظورة (يستخدمه GroupsMixin)
+        # ✅ كاش محلي للكلمات المحظورة
         self._banned_words_local_cache = {}
         self._banned_words_cache_ttl = 300
         self._global_banned_words_cache: List[str] = []
         self._global_banned_words_loaded = False
         self._global_words_lock = asyncio.Lock()
-        # ✅ كاش أعمدة group_security (يستخدمه GroupsMixin)
+        # ✅ كاش أعمدة group_security
         self._group_security_columns_cache: Optional[set] = None
 
     # =====================================================================
@@ -1536,7 +1537,6 @@ class Database(
         self._initialized = False
 
     async def _get_connection(self):
-        """عدّاد اتصالات بدلاً من السيمفور"""
         if not self._initialized:
             await self.initialize()
         if USE_POSTGRES or USE_MYSQL:
@@ -1556,7 +1556,6 @@ class Database(
                 )
 
     async def _return_connection(self, conn):
-        """تحرير العدّاد عند إغلاق اتصال زائد"""
         if USE_POSTGRES or USE_MYSQL:
             await self._pool.release(conn)
         else:
@@ -1584,7 +1583,6 @@ class Database(
 
     @asynccontextmanager
     async def connection(self):
-        """يضمن commit/rollback لـ SQLite"""
         conn = await self._get_connection()
         try:
             yield conn
@@ -3071,6 +3069,7 @@ class Database(
     #   → database_tickets.py (TicketsMixin)      : 4 دوال
     #   → database_contests.py (ContestsMixin)    : 8 دوال
     #   → database_stats.py (StatsMixin)          : 6 دوال
+    #   → database_settings.py (SettingsMixin)    : 7 دوال
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -3443,48 +3442,6 @@ class Database(
             "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?",
             (TimeUtils.utc_now(), user_id),
         ) > 0
-
-    # =====================================================================
-    # دوال الإعدادات العامة
-    # =====================================================================
-
-    async def get_setting(self, key: str, default: str = None) -> Optional[str]:
-        if CACHE_AVAILABLE:
-            cached = await settings_cache.get_bot_setting(key)
-            if cached is not None:
-                return cached
-        result = await self.fetchval("SELECT value FROM settings WHERE key = ?", (key,), default=default)
-        if result and CACHE_AVAILABLE:
-            await settings_cache.set_bot_setting(key, result)
-        return result
-
-    async def set_setting(self, key: str, value: str) -> bool:
-        result = await self.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value)
-        ) > 0
-        if result and CACHE_AVAILABLE:
-            await settings_cache.invalidate_bot_settings(key)
-        return result
-
-    async def get_force_subscribe_channel(self) -> Optional[str]:
-        return await self.get_setting("force_subscribe_channel")
-
-    async def get_updates_channel(self) -> Optional[str]:
-        return await self.get_setting("updates_channel")
-
-    async def get_log_channel(self) -> Optional[str]:
-        return await self.get_setting("log_channel_id")
-
-    async def get_publish_interval(self) -> int:
-        value = await self.get_setting("publish_interval", "12")
-        try:
-            return max(1, int(value))
-        except (ValueError, TypeError):
-            return 12
-
-    async def get_auto_backup(self) -> bool:
-        value = await self.get_setting("auto_backup", "1")
-        return value in ("1", "true", "True", "yes", "on")
 
     # =====================================================================
     # دوال العقوبات (User Penalties)
