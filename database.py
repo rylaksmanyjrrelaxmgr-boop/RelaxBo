@@ -2,25 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.1)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.3)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
 - دوال الاشتراكات والباقات والإحالات في database_subscriptions.py (Mixin)
 - دوال المجموعات في database_groups.py (Mixin)
 - دوال التذاكر في database_tickets.py (Mixin)
-- كل دوال الأعمال الأخرى + الكاش + المهام الخلفية
+- دوال المسابقات في database_contests.py (Mixin)
+- دوال الإحصائيات والمشرفين في database_stats.py (Mixin)
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
 🆕 v7.4.0: فصل دوال المجموعات إلى database_groups.py
 🆕 v7.4.1: فصل دوال التذاكر إلى database_tickets.py
+🆕 v7.4.2: فصل دوال المسابقات إلى database_contests.py
+🆕 v7.4.3: فصل دوال الإحصائيات والمشرفين إلى database_stats.py
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
   - database_subscriptions.py
   - database_groups.py
   - database_tickets.py
+  - database_contests.py
+  - database_stats.py
   - database_tables.py
 """
 
@@ -170,6 +175,32 @@ except ImportError as e:
     logger.warning(f"⚠️ database_tickets.py غير موجود: {e}")
     TicketsMixin = object
     TICKETS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.5 استيراد ContestsMixin (دوال المسابقات)
+# =====================================================================
+
+try:
+    from database_contests import ContestsMixin
+    CONTESTS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_contests.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_contests.py غير موجود: {e}")
+    ContestsMixin = object
+    CONTESTS_MIXIN_AVAILABLE = False
+
+# =====================================================================
+# 0.2.6 استيراد StatsMixin (الإحصائيات والمشرفين)
+# =====================================================================
+
+try:
+    from database_stats import StatsMixin
+    STATS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_stats.py")
+except ImportError as e:
+    logger.warning(f"⚠️ database_stats.py غير موجود: {e}")
+    StatsMixin = object
+    STATS_MIXIN_AVAILABLE = False
 
 # =====================================================================
 # 0.3 كاش داخلي
@@ -1143,7 +1174,14 @@ class TimeUtils:
 # 3. فئة Database (ترث من كل الـ Mixins)
 # =====================================================================
 
-class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin):
+class Database(
+    ChannelsPostsMixin,
+    SubscriptionsMixin,
+    GroupsMixin,
+    TicketsMixin,
+    ContestsMixin,
+    StatsMixin,
+):
     _instance = None
     _lock = asyncio.Lock()
     _user_locks = {}
@@ -1168,8 +1206,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
     }
     MAX_PENALTY_DURATION = 365 * 86400
 
-    # ✅ COLUMN_ALIASES موسّعة (60+ مرادفاً) + مرادفات وقت الليل
-    # يُستخدم من قِبَل GroupsMixin عبر self.COLUMN_ALIASES
+    # ✅ COLUMN_ALIASES موسّعة (60+ مرادفاً)
     COLUMN_ALIASES = {
         # ==================== Mentions ====================
         "delete_mentions": "mentions",
@@ -1275,7 +1312,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
         "night_mode": "night_mode_enabled",
         "night": "night_mode_enabled",
         "night_mode_active": "night_mode_enabled",
-        # ✅ مرادفات وقت الليل (v7.3.2)
+        # ✅ مرادفات وقت الليل
         "night_start": "night_mode_start",
         "night_end": "night_mode_end",
         "night_mode_begin": "night_mode_start",
@@ -1364,7 +1401,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
         self.USE_MYSQL = USE_MYSQL
         self.TimeUtils = TimeUtils
         self.internal_cache = internal_cache
-        # ✅ خصائص مطلوبة لـ GroupsMixin وبقية الـ Mixins
+        # ✅ خصائص مطلوبة لـ Mixins
         self.CACHE_AVAILABLE = CACHE_AVAILABLE
         self.banned_words_cache = banned_words_cache
         self.settings_cache = settings_cache
@@ -1698,7 +1735,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             return cursor.rowcount
 
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
-        """executemany الأصلي لـ asyncpg"""
         if not params_list:
             return 0
         q = _convert_placeholders(query)
@@ -2221,7 +2257,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             return False
 
     async def _create_secondary_indexes(self, indexes):
-        """إزالة asyncio.sleep(2)"""
         try:
             async with self.connection() as conn:
                 for table, idx_name, create_sql in indexes:
@@ -2304,7 +2339,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
                     )
 
     async def _import_banned_words(self, conn):
-        """التحقق من PRIMARY_OWNER_ID"""
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -2329,7 +2363,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
                         batch,
                     )
                 logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة")
-                # استدعاء دالة من GroupsMixin عبر self (إن وُجدت)
                 if hasattr(self, "_invalidate_banned_words_local_cache"):
                     await self._invalidate_banned_words_local_cache()
                 if CACHE_AVAILABLE:
@@ -2730,7 +2763,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
         return result
 
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """EXISTS بدل SELECT 1"""
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -2798,7 +2830,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             return None
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
-        """إعادة محاولة توليد referral_code عند التصادم"""
         try:
             async with await self._get_user_lock(user_id):
                 async with self.transaction() as conn:
@@ -3006,13 +3037,7 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             if len(batch) < batch_size:
                 break
 
-    async def get_user_stats(self) -> Dict:
-        total = await self.fetchval("SELECT COUNT(*) FROM users", default=0)
-        banned = await self.fetchval("SELECT COUNT(*) FROM users WHERE banned = 1", default=0)
-        return {"users": total, "banned": banned}
-
     async def mark_users_as_blocked(self, user_ids: List[int]) -> int:
-        """دفعة واحدة بدلاً من استعلام لكل مستخدم"""
         if not user_ids:
             return 0
         try:
@@ -3041,15 +3066,11 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             return 0
 
     # ═══════════════════════════════════════════════════════════════════
-    # 📌 دوال المجموعات انتقلت إلى database_groups.py (GroupsMixin)
-    #    متاحة عبر الوراثة: register_group, get_user_groups,
-    #    get_security_settings, update_security_settings,
-    #    add_banned_word, get_banned_words, add_auto_reply,
-    #    add_hidden_admin, add_anonymous_admin, ...
-    # ═══════════════════════════════════════════════════════════════════
-    # 📌 دوال التذاكر انتقلت إلى database_tickets.py (TicketsMixin)
-    #    متاحة عبر الوراثة: create_ticket, get_tickets,
-    #    close_ticket, delete_all_tickets
+    # 📌 الدوال المنقولة إلى Mixins (متاحة عبر الوراثة):
+    #   → database_groups.py (GroupsMixin)        : 48 دالة
+    #   → database_tickets.py (TicketsMixin)      : 4 دوال
+    #   → database_contests.py (ContestsMixin)    : 8 دوال
+    #   → database_stats.py (StatsMixin)          : 6 دوال
     # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
@@ -3216,7 +3237,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
     # =====================================================================
 
     async def get_users_for_reminder(self) -> List[Dict]:
-        """EXTRACT(EPOCH) بدل EXTRACT(DAY)"""
         now = TimeUtils.utc_now()
         if USE_POSTGRES:
             return await self.fetchall(
@@ -3404,7 +3424,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             return 0
 
     async def is_user_reminder_enabled(self, user_id: int, reminder_type: str) -> bool:
-        """مفتاح weekly_report الصحيح"""
         settings = await self.get_reminder_settings(user_id)
         if not settings:
             return False
@@ -3424,141 +3443,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
             "UPDATE user_reminder_settings SET last_reminder_sent = ? WHERE user_id = ?",
             (TimeUtils.utc_now(), user_id),
         ) > 0
-
-    # =====================================================================
-    # دوال المسابقات
-    # =====================================================================
-
-    async def create_contest(self, creator_id: int, title: str, description: str,
-                             prize: str, end_date: str) -> int:
-        try:
-            dt = TimeUtils.safe_parse_iso(end_date)
-            if dt is None:
-                logger.error(f"❌ Invalid end_date format: {end_date}")
-                return 0
-            async with self.connection() as conn:
-                if USE_POSTGRES:
-                    row = await self._fetchone_with_conn(
-                        conn,
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-                        creator_id, title, description, prize, dt, TimeUtils.utc_now(),
-                    )
-                    return row["id"] if row else 0
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute(
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
-                        (creator_id, title, description, prize,
-                         dt.strftime("%Y-%m-%d %H:%M:%S"), TimeUtils.sql_iso()),
-                    )
-                    cid = cursor.lastrowid
-                    await cursor.close()
-                    return cid
-                else:
-                    cursor = await conn.execute(
-                        "INSERT INTO contests (creator_id, title, description, prize, end_date, created_at) VALUES (?,?,?,?,?,?)",
-                        (creator_id, title, description, prize,
-                         dt.strftime("%Y-%m-%d %H:%M:%S"), TimeUtils.sql_iso()),
-                    )
-                    return cursor.lastrowid if cursor.lastrowid else 0
-        except Exception as e:
-            logger.error(f"❌ Error in create_contest: {e}", exc_info=True)
-            return 0
-
-    async def get_active_contests(self, limit: int = 10) -> List[Dict]:
-        return await self.fetchall(
-            """SELECT c.*, (SELECT COUNT(*) FROM contest_participants WHERE contest_id = c.id) as participants
-               FROM contests c
-               WHERE c.status = 'active' AND c.end_date > ?
-               ORDER BY c.end_date ASC LIMIT ?""",
-            (TimeUtils.utc_now(), limit),
-        )
-
-    async def join_contest(self, contest_id: int, user_id: int, answer: str = "") -> bool:
-        try:
-            async with self.transaction() as conn:
-                contest = await self._fetchone_with_conn(
-                    conn, "SELECT status, end_date FROM contests WHERE id = ?", contest_id
-                )
-                if not contest or contest["status"] != "active":
-                    return False
-                end_date = TimeUtils.safe_parse_iso(contest["end_date"])
-                if end_date and end_date < TimeUtils.utc_now():
-                    return False
-                await self._execute_with_conn(
-                    conn,
-                    "INSERT INTO contest_participants (contest_id, user_id, answer, joined_at) VALUES (?,?,?,?)",
-                    contest_id, user_id, answer, TimeUtils.utc_now(),
-                )
-                return True
-        except Exception as e:
-            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                return False
-            logger.error(f"❌ Error in join_contest: {e}", exc_info=True)
-            return False
-
-    async def declare_winner(self, contest_id: int, winner_id: int) -> bool:
-        try:
-            async with self.transaction() as conn:
-                cursor = await conn.execute(
-                    "SELECT 1 FROM contest_participants WHERE contest_id = ? AND user_id = ?",
-                    (contest_id, winner_id),
-                )
-                if not await cursor.fetchone():
-                    return False
-                contest = await self._fetchone_with_conn(
-                    conn, "SELECT status FROM contests WHERE id = ?", contest_id
-                )
-                if not contest or contest["status"] != "active":
-                    return False
-                await self._execute_with_conn(
-                    conn, "UPDATE contests SET status = 'closed', winner_id = ? WHERE id = ?",
-                    winner_id, contest_id,
-                )
-                await self._execute_with_conn(
-                    conn,
-                    "INSERT INTO contest_winners (contest_id, winner_id, announced_at) VALUES (?,?,?)",
-                    contest_id, winner_id, TimeUtils.utc_now(),
-                )
-                return True
-        except Exception as e:
-            logger.error(f"❌ Error in declare_winner: {e}", exc_info=True)
-            return False
-
-    async def get_contest_winners(self, limit: int = 10) -> List[Dict]:
-        return await self.fetchall(
-            """SELECT c.title, c.winner_id, u.username, cw.announced_at
-               FROM contest_winners cw
-               JOIN contests c ON cw.contest_id = c.id
-               JOIN users u ON cw.winner_id = u.user_id
-               ORDER BY cw.announced_at DESC LIMIT ?""",
-            (limit,),
-        )
-
-    async def delete_contest(self, contest_id: int, user_id: int) -> bool:
-        try:
-            async with self.transaction() as conn:
-                contest = await self._fetchone_with_conn(
-                    conn, "SELECT creator_id FROM contests WHERE id = ?", contest_id
-                )
-                if not contest or contest["creator_id"] != user_id:
-                    return False
-                await self._execute_with_conn(conn, "DELETE FROM contest_participants WHERE contest_id = ?", contest_id)
-                await self._execute_with_conn(conn, "DELETE FROM contest_winners WHERE contest_id = ?", contest_id)
-                await self._execute_with_conn(conn, "DELETE FROM contests WHERE id = ?", contest_id)
-                return True
-        except Exception as e:
-            logger.error(f"❌ Error in delete_contest: {e}", exc_info=True)
-            return False
-
-    async def check_contest_joined(self, contest_id: int, user_id: int) -> bool:
-        result = await self.fetchval(
-            "SELECT 1 FROM contest_participants WHERE contest_id = ? AND user_id = ?", (contest_id, user_id)
-        )
-        return result is not None
-
-    async def get_contest_by_id(self, contest_id: int) -> Optional[Dict]:
-        return await self.fetchone("SELECT * FROM contests WHERE id = ?", (contest_id,))
 
     # =====================================================================
     # دوال الإعدادات العامة
@@ -3787,100 +3671,6 @@ class Database(ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin, TicketsMixin
                ORDER BY points DESC LIMIT ?""",
             (limit,),
         )
-
-    # =====================================================================
-    # دوال الإحصائيات والمشرفين
-    # =====================================================================
-
-    async def get_bot_stats(self) -> Dict:
-        async with self.connection() as conn:
-            users = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM users", default=0)
-            channels = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
-            groups = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
-            posts = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
-            published = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_with_conn(
-                conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?",
-                TimeUtils.utc_now(), default=0,
-            )
-            tickets = await self._fetchval_with_conn(
-                conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0
-            )
-        return {
-            "users": users, "channels": channels, "groups": groups,
-            "posts": posts, "published": published,
-            "active_subs": active_subs, "tickets": tickets,
-        }
-
-    async def get_general_stats(self) -> Dict:
-        async with self.connection() as conn:
-            users = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM users", default=0)
-            channels = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM user_channels", default=0)
-            groups = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM bot_groups", default=0)
-            posts = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts", default=0)
-            published = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM posts WHERE published = 1", default=0)
-            active_subs = await self._fetchval_with_conn(
-                conn, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND end_date > ?",
-                TimeUtils.utc_now(), default=0,
-            )
-            tickets = await self._fetchval_with_conn(
-                conn, "SELECT COUNT(*) FROM support_tickets WHERE status = 'pending'", default=0
-            )
-            invoices = await self._fetchval_with_conn(conn, "SELECT COUNT(*) FROM invoices", default=0)
-            active_penalties = await self._fetchval_with_conn(
-                conn, "SELECT COUNT(*) FROM user_penalties WHERE status='active'", default=0
-            )
-        return {
-            "users": users, "channels": channels, "groups": groups,
-            "posts": posts, "published": published,
-            "active_subs": active_subs, "tickets": tickets,
-            "invoices": invoices, "active_penalties": active_penalties,
-        }
-
-    async def backup_auto_replies(self) -> int:
-        replies = await self.fetchall("SELECT * FROM auto_replies")
-        if not replies:
-            return 0
-        timestamp = TimeUtils.utc_now().strftime("%Y%m%d_%H%M%S")
-        backup_file = PATHS.BACKUPS / f"auto_replies_backup_{timestamp}.json"
-        backup_file.parent.mkdir(parents=True, exist_ok=True)
-
-        def _write_json():
-            with open(backup_file, "w", encoding="utf-8") as f:
-                json.dump(replies, f, ensure_ascii=False, indent=2)
-
-        await asyncio.to_thread(_write_json)
-        return len(replies)
-
-    async def add_admin(self, admin_id: int, added_by: int) -> bool:
-        result = await self.execute(
-            "INSERT OR IGNORE INTO bot_admins (user_id, added_by, added_at) VALUES (?,?,?)",
-            (admin_id, added_by, TimeUtils.utc_now()),
-        ) > 0
-        if result and CACHE_AVAILABLE:
-            await auth_cache.invalidate()
-        return result
-
-    async def remove_admin(self, admin_id: int) -> bool:
-        try:
-            async with self.connection() as conn:
-                deleted = await self._execute_with_conn(conn, "DELETE FROM bot_admins WHERE user_id = ?", admin_id)
-                if deleted > 0 and CACHE_AVAILABLE:
-                    await auth_cache.invalidate()
-                return deleted > 0
-        except Exception as e:
-            logger.error(f"❌ Error in remove_admin: {e}", exc_info=True)
-            return False
-
-    async def get_admin_list(self) -> List[Dict]:
-        if CACHE_AVAILABLE:
-            cached = await auth_cache.get_admin_list(0)
-            if cached is not None:
-                return cached
-        admins = await self.fetchall("SELECT user_id, added_by, added_at FROM bot_admins ORDER BY added_at DESC")
-        if CACHE_AVAILABLE:
-            await auth_cache.set_admin_list(0, [a["user_id"] for a in admins])
-        return admins
 
 
 # =====================================================================
