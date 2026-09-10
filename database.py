@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v4)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة النهائية v5)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - كل دوال الأعمال + الكاش + المهام الخلفية
 
-🆕 الإصلاحات الحرجة المُطبَّقة في v4:
+🆕 الإصلاحات الحرجة المُطبَّقة:
   1.  إبطال الكاش العالمي للكلمات المحظورة عند chat_id=-1
   2.  إخلاء آمن للأقفال (تجاهل المُقيَّدة) + تنظيف المجموعات
   3.  تصحيح مفتاح weekly_report في is_user_reminder_enabled
@@ -22,17 +22,18 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
   12. expire_expired_subscriptions بدفعة واحدة (بدون N+1)
   13. _find_best_conflict_target + إصلاح ON CONFLICT لـ PostgreSQL
   14. executemany الأصلي لـ asyncpg (تسريع 30×)
-  15. ✅ add_done_callback آمن لـ _increment_usage_count (بدون رفع استثناءات)
-  16. ✅ _adapt_params PostgreSQL يحفظ timezone (timestamptz صحيح)
-  17. ✅ expire_expired_subscriptions يستخدم NOW() بدل CURRENT_TIMESTAMP AT TIME ZONE
-  18. ✅ _refresh_user_subscription_end يستخدم NOW()
-  19. ✅ get_users_for_reminder يستخدم EXTRACT(EPOCH) بدل EXTRACT(DAY)
-  20. ✅ _migrate_schema يشمل published_at + fail_count
-  21. ✅ _convert_insert_or_replace آمن عند غياب UNIQUE constraint
-  22. ✅ get_user يستخدم EXISTS بدل SELECT 1
-  23. ✅ _refresh_user_subscription_end يدعم updated_at
-  24. ✅ إزالة asyncio.sleep(2) من _create_secondary_indexes
-  25. ✅ _import_banned_words يتحقق من PRIMARY_OWNER_ID
+  15. add_done_callback آمن لـ _increment_usage_count
+  16. ✅ _adapt_params: إزالة tzinfo لجميع قواعد البيانات (fix: asyncpg TIMESTAMP)
+  17. expire_expired_subscriptions يستخدم NOW()
+  18. _refresh_user_subscription_end يستخدم NOW()
+  19. get_users_for_reminder يستخدم EXTRACT(EPOCH) بدل EXTRACT(DAY)
+  20. _migrate_schema يشمل published_at + fail_count
+  21. _convert_insert_or_replace آمن عند غياب UNIQUE constraint
+  22. get_user يستخدم EXISTS بدل SELECT 1
+  23. connection() يضمن commit/rollback لـ SQLite
+  24. إزالة asyncio.sleep(2) من _create_secondary_indexes
+  25. _import_banned_words يتحقق من PRIMARY_OWNER_ID
+  26. إغلاق cursors MySQL بعد كل استخدام
 """
 
 import os
@@ -379,7 +380,7 @@ except ImportError:
     posts_cache = SimpleCache(default_ttl=30)
 
     async def invalidate_user_cache(user_id: int):
-        """✅ يشمل مفاتيح include_stats (_True / _False)"""
+        """يشمل مفاتيح include_stats (_True / _False)"""
         try:
             await user_cache.invalidate(user_id)
             await internal_cache.invalidate(f"user_{user_id}")
@@ -638,13 +639,11 @@ async def _find_best_conflict_target(
                 """,
                 table,
             )
-            # 1) فهارس UNIQUE (غير PRIMARY)
             for row in rows:
                 if not row["indisprimary"]:
                     cols = list(row["cols"])
                     if cols and all(c in insert_set for c in cols):
                         return ", ".join(cols)
-            # 2) PRIMARY KEY
             for row in rows:
                 if row["indisprimary"]:
                     cols = list(row["cols"])
@@ -688,7 +687,7 @@ async def _find_best_conflict_target(
 
 
 def _convert_placeholders(query: str) -> str:
-    """✅ معالجة $N الموجودة مسبقاً"""
+    """معالجة $N الموجودة مسبقاً"""
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
@@ -860,7 +859,7 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
 
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
-    """✅ إصلاح #21: آمن عند غياب UNIQUE constraint"""
+    """آمن عند غياب UNIQUE constraint"""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -883,7 +882,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             except Exception as e:
                 logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
 
-        # ✅ إذا لم نجد قيداً معروفاً → DO NOTHING بدون تحديد (آمن)
         if not best_cols:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
             if values_match:
@@ -977,25 +975,32 @@ def _convert_upsert(query: str) -> str:
 
 
 def _adapt_params(params: tuple) -> tuple:
-    """✅ إصلاح #16: PostgreSQL يحفظ timezone"""
+    """
+    ✅ إصلاح #16 (النسخة النهائية):
+    - جميع الأعمدة في database_tables.py من نوع TIMESTAMP/DATETIME بدون timezone
+    - لذلك: نحذف tzinfo لجميع قواعد البيانات
+    - asyncpg يرفض datetime مع tzinfo لأعمدة TIMESTAMP
+    """
     if params is None:
         return ()
     new_params = []
     for p in params:
         if isinstance(p, datetime):
-            if USE_POSTGRES:
-                # asyncpg يدعم timestamptz — لا نحذف tzinfo
-                if p.tzinfo is None:
-                    p = p.replace(tzinfo=UTC)
-                new_params.append(p)
-            else:
-                # SQLite / MySQL يفضلان naive
-                if p.tzinfo is not None:
+            # ✅ الحل الموحد: إزالة tzinfo دائماً
+            if p.tzinfo is not None:
+                try:
                     p = p.astimezone(UTC).replace(tzinfo=None)
-                if USE_MYSQL:
-                    new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
-                else:
-                    new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    p = p.replace(tzinfo=None)
+            
+            if USE_POSTGRES:
+                # asyncpg يتوقع naive datetime لأعمدة TIMESTAMP
+                new_params.append(p)
+            elif USE_MYSQL:
+                new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                # SQLite
+                new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
         elif isinstance(p, bool):
             new_params.append(1 if p else 0)
         else:
@@ -1179,7 +1184,7 @@ class Database:
         self._banned_words_local_cache[chat_id] = {"words": words, "time": time.time()}
 
     async def _invalidate_banned_words_local_cache(self, chat_id: int = None):
-        """✅ إبطال الكاش العالمي عند chat_id=-1"""
+        """إبطال الكاش العالمي عند chat_id=-1"""
         if chat_id is not None:
             self._banned_words_local_cache.pop(chat_id, None)
             if chat_id == -1:
@@ -1308,7 +1313,7 @@ class Database:
         self._initialized = False
 
     async def _get_connection(self):
-        """✅ عدّاد اتصالات بدلاً من السيمفور"""
+        """عدّاد اتصالات بدلاً من السيمفور"""
         if not self._initialized:
             await self.initialize()
         if USE_POSTGRES or USE_MYSQL:
@@ -1328,7 +1333,7 @@ class Database:
                 )
 
     async def _return_connection(self, conn):
-        """✅ تحرير العدّاد عند إغلاق اتصال زائد"""
+        """تحرير العدّاد عند إغلاق اتصال زائد"""
         if USE_POSTGRES or USE_MYSQL:
             await self._pool.release(conn)
         else:
@@ -1356,7 +1361,7 @@ class Database:
 
     @asynccontextmanager
     async def connection(self):
-        """✅ يضمن commit/rollback لـ SQLite"""
+        """يضمن commit/rollback لـ SQLite"""
         conn = await self._get_connection()
         try:
             yield conn
@@ -1507,7 +1512,7 @@ class Database:
             return cursor.rowcount
 
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
-        """✅ executemany الأصلي لـ asyncpg"""
+        """executemany الأصلي لـ asyncpg"""
         if not params_list:
             return 0
         q = _convert_placeholders(query)
@@ -1897,7 +1902,6 @@ class Database:
                     ("user_id", "INTEGER"),
                 ],
                 "posts": [
-                    # ✅ إصلاح #20: إضافة published_at + fail_count
                     ("text_hash", "TEXT DEFAULT ''"),
                     ("published_at", "TIMESTAMP"),
                     ("fail_count", "INTEGER DEFAULT 0"),
@@ -1974,7 +1978,7 @@ class Database:
             return False
 
     async def _create_secondary_indexes(self, indexes):
-        """✅ إصلاح #24: إزالة asyncio.sleep(2)"""
+        """إزالة asyncio.sleep(2)"""
         try:
             async with self.connection() as conn:
                 for table, idx_name, create_sql in indexes:
@@ -2057,7 +2061,7 @@ class Database:
                     )
 
     async def _import_banned_words(self, conn):
-        """✅ إصلاح #25: التحقق من PRIMARY_OWNER_ID"""
+        """التحقق من PRIMARY_OWNER_ID"""
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -2481,7 +2485,7 @@ class Database:
         return result
 
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
-        """✅ إصلاح #22: EXISTS بدل SELECT 1"""
+        """EXISTS بدل SELECT 1"""
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -2500,7 +2504,6 @@ class Database:
             if cached:
                 return cached
 
-            # ✅ EXISTS بدل SELECT 1 — أسرع في معظم محركات DB
             query = """
                 SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
                        u.banned, u.trial_used, u.subscription_end, u.active_channel,
@@ -4072,7 +4075,6 @@ class Database:
             (keyword, chat_id, chat_id),
         )
         if row:
-            # ✅ إصلاح #15: add_done_callback آمن
             def _log_task_exc(t: asyncio.Task):
                 if not t.cancelled() and t.exception():
                     logger.debug(f"increment_usage_count: {t.exception()}")
@@ -4490,7 +4492,7 @@ class Database:
     # =====================================================================
 
     async def get_users_for_reminder(self) -> List[Dict]:
-        """✅ إصلاح #19: EXTRACT(EPOCH) بدل EXTRACT(DAY)"""
+        """EXTRACT(EPOCH) بدل EXTRACT(DAY)"""
         now = TimeUtils.utc_now()
         if USE_POSTGRES:
             return await self.fetchall(
@@ -4678,7 +4680,7 @@ class Database:
             return 0
 
     async def is_user_reminder_enabled(self, user_id: int, reminder_type: str) -> bool:
-        """✅ إصلاح #3: مفتاح weekly_report الصحيح"""
+        """مفتاح weekly_report الصحيح"""
         settings = await self.get_reminder_settings(user_id)
         if not settings:
             return False
@@ -5054,7 +5056,7 @@ class Database:
             return 0
 
     async def expire_expired_subscriptions(self) -> None:
-        """✅ إصلاح #17: NOW() بدل CURRENT_TIMESTAMP AT TIME ZONE"""
+        """NOW() بدل CURRENT_TIMESTAMP AT TIME ZONE"""
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
@@ -5160,7 +5162,7 @@ class Database:
             logger.error(f"❌ Error in expire_expired_subscriptions: {e}", exc_info=True)
 
     async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
-        """✅ إصلاح #18: NOW() في PostgreSQL"""
+        """NOW() في PostgreSQL"""
         if USE_POSTGRES:
             end = await self._fetchval_with_conn(
                 conn,
