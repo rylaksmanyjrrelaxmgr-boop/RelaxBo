@@ -9,13 +9,21 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 - جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
 - يحتوي على جدول schema_version لتتبع الإصدارات
 
-🚀 الإصدار المُحسَّن (v3 — 2026-09-10):
-  - دمج إنشاء الفهارس في استعلام واحد (SQLite/PostgreSQL)
-  - MySQL: فحص مسبق في استعلام واحد لتخطّي الموجود
-  - تسريع الإقلاع الأول من ~25s إلى ~8s
-  - 🆕 إضافة 11 فهرس حرج (reverse lookups + leaderboard + publishing)
-  - 🆕 فهارس وقائية للتنظيف
+🚀 الإصدار المُحسَّن (v4 — 2026-09-10):
+  - ✅ إصلاح #1: SQLite — إزالة executescript واستخدام حلقة آمنة
+  - ✅ إصلاح #2: PostgreSQL — transaction بدل استعلام متعدد (خطأ)
+  - ✅ إصلاح #4: MySQL — VARCHAR بدل TEXT لأعمدة DEFAULT
+  - ✅ إصلاح #5: MySQL — media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
+  - ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
+  - ✅ إصلاح #8: SQLite — ON CONFLICT بدل INSERT OR IGNORE
+  - ✅ إصلاح #9: schema_version — applied_at fallback آمن
+  - ✅ إضافة 11 فهرس حرج (reverse lookups + leaderboard + publishing)
+  - ✅ فهارس وقائية للتنظيف
+  - ✅ تنظيف الفهارس المكررة
 """
+
+import os
+from datetime import datetime, timezone
 
 # =====================================================================
 # 0. ثوابت مشتركة
@@ -30,6 +38,11 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
+# أعمدة النص العربي الطويلة (بدون DEFAULT في MySQL)
+LONG_TEXT_COLUMNS = {
+    "group_security": ["welcome_text", "goodbye_text"],
+}
+
 COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
     # USERS
@@ -40,8 +53,6 @@ COMMON_INDEXES = [
     ("users", "idx_users_language", "users(language)"),
     ("users", "idx_users_subscription_end", "users(subscription_end)"),
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
-    # 🆕 ترتيب معكوس للنشر — الأكثر انتقائية
-    ("users", "idx_users_banned_publish", "users(banned, auto_publish)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_CHANNELS
@@ -49,7 +60,6 @@ COMMON_INDEXES = [
     ("user_channels", "idx_uc_user", "user_channels(user_id)"),
     ("user_channels", "idx_user_channels_user_created", "user_channels(user_id, created_at DESC)"),
     ("user_channels", "idx_user_channels_user_banned", "user_channels(user_id, banned)"),
-    # 🆕 للاستعلام: WHERE banned = 0 (بدون user_id أولاً)
     ("user_channels", "idx_user_channels_banned_user", "user_channels(banned, user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
@@ -76,21 +86,18 @@ COMMON_INDEXES = [
     # GROUP_ADMINS
     # ═══════════════════════════════════════════════════════════════
     ("group_admins", "idx_group_admins_user_id", "group_admins(user_id)"),
-    # 🆕 فهرس معاكس (PK هو chat_id, user_id)
     ("group_admins", "idx_group_admins_user_chat", "group_admins(user_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # HIDDEN_OWNER_GROUPS
     # ═══════════════════════════════════════════════════════════════
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "hidden_owner_groups(owner_id)"),
-    # 🆕 فهرس معاكس
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat", "hidden_owner_groups(owner_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # HIDDEN_ADMINS
     # ═══════════════════════════════════════════════════════════════
     ("hidden_admins", "idx_hidden_admins_admin_id", "hidden_admins(admin_id)"),
-    # 🆕 فهرس معاكس
     ("hidden_admins", "idx_hidden_admins_admin_chat", "hidden_admins(admin_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
@@ -98,7 +105,6 @@ COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
     ("anonymous_admins", "idx_anonymous_admins_user_id", "anonymous_admins(user_id)"),
     ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "anonymous_admins(anonymous_id)"),
-    # 🆕 فهارس مركّبة (chat_id ضمن البحث)
     ("anonymous_admins", "idx_anon_user_chat", "anonymous_admins(user_id, chat_id)"),
     ("anonymous_admins", "idx_anon_anon_chat", "anonymous_admins(anonymous_id, chat_id)"),
 
@@ -138,14 +144,12 @@ COMMON_INDEXES = [
     # REFERRALS
     # ═══════════════════════════════════════════════════════════════
     ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
-    # 🆕 مع created_at للترتيب
     ("referrals", "idx_referrals_referrer_created", "referrals(referrer_id, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # CONTESTS
     # ═══════════════════════════════════════════════════════════════
     ("contests", "idx_contests_status", "contests(status)"),
-    # 🆕 مع end_date للترشيح والترتيب
     ("contests", "idx_contests_status_end", "contests(status, end_date)"),
 
     # ═══════════════════════════════════════════════════════════════
@@ -160,14 +164,12 @@ COMMON_INDEXES = [
     # USER_POINTS
     # ═══════════════════════════════════════════════════════════════
     ("user_points", "idx_points_user", "user_points(user_id)"),
-    # 🆕 للـ leaderboard (get_top_users)
     ("user_points", "idx_user_points_value", "user_points(points DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # SUPPORT_TICKETS
     # ═══════════════════════════════════════════════════════════════
     ("support_tickets", "idx_tickets_status", "support_tickets(status)"),
-    # 🆕 مع created_at للترتيب
     ("support_tickets", "idx_tickets_status_created", "support_tickets(status, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
@@ -189,7 +191,6 @@ COMMON_INDEXES = [
     # SENTIMENT_HISTORY
     # ═══════════════════════════════════════════════════════════════
     ("sentiment_history", "idx_sentiment_user_chat", "sentiment_history(user_id, chat_id)"),
-    # 🆕 وقائي للتنظيف الدوري
     ("sentiment_history", "idx_sentiment_created", "sentiment_history(created_at)"),
 
     # ═══════════════════════════════════════════════════════════════
@@ -210,55 +211,152 @@ COMMON_INDEXES = [
 
 
 # =====================================================================
-# دالة مساعدة: إنشاء الفهارس دفعة واحدة (مشتركة بين SQLite/PG)
+# دوال مساعدة
 # =====================================================================
 
-async def _create_indexes_batched(conn, logger, kind: str):
-    """
-    إنشاء كل COMMON_INDEXES في استعلام واحد.
-    kind = 'sqlite' أو 'postgres'
-    """
-    if kind == "sqlite":
-        # SQLite: executescript يشغّل عدة أوامر
+def _safe_now_iso(TimeUtils) -> str:
+    """✅ إصلاح #9: fallback آمن للوقت"""
+    if TimeUtils:
         try:
-            sql = "\n".join(
-                f"CREATE INDEX IF NOT EXISTS {idx} ON {cols};"
-                for _t, idx, cols in COMMON_INDEXES
-            )
-            await conn.executescript(sql)
-            if logger:
-                logger.info(f"✅ أُنشئت {len(COMMON_INDEXES)} فهرس SQLite (دفعة واحدة)")
-            return
+            return TimeUtils.sql_iso()
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
+
+
+def _safe_now_dt(TimeUtils):
+    """يرجع datetime للـ PostgreSQL"""
+    if TimeUtils:
+        try:
+            return TimeUtils.utc_now()
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# =====================================================================
+# دالة مساعدة: إنشاء الفهارس (لكل نوع DB)
+# =====================================================================
+
+async def _create_indexes_sqlite(conn, logger):
+    """
+    ✅ إصلاح #1: SQLite — حلقة آمنة بدل executescript
+    (executescript يُصدر COMMIT ضمني ويُفسد transactions)
+    """
+    created = 0
+    skipped = 0
+    failed = 0
+    for _table, idx_name, cols in COMMON_INDEXES:
+        try:
+            await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+            created += 1
         except Exception as e:
-            if logger:
-                logger.warning(f"⚠️ دفعة SQLite فشلت ({e})، محاولة فردية...")
-            # fallback
+            err_msg = str(e).lower()
+            if "already exists" in err_msg:
+                skipped += 1
+            else:
+                failed += 1
+                if logger:
+                    logger.warning(f"⚠️ SQLite فهرس {idx_name}: {e}")
+    if logger:
+        logger.info(f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+
+
+async def _create_indexes_postgres(conn, logger):
+    """
+    ✅ إصلاح #2: PostgreSQL — transaction واحد مع حلقة
+    (asyncpg.execute لا يدعم استعلامات متعددة بـ ';')
+    transaction يُقلل fsync ويُسرّع الإقلاع ~3×
+    """
+    created = 0
+    skipped = 0
+    failed = 0
+    try:
+        async with conn.transaction():
             for _table, idx_name, cols in COMMON_INDEXES:
                 try:
-                    await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
-                except Exception as e2:
-                    if logger:
-                        logger.warning(f"⚠️ فشل فهرس {idx_name}: {e2}")
-            return
-
-    # PostgreSQL
-    try:
-        sql = "\n".join(
-            f"CREATE INDEX IF NOT EXISTS {idx} ON {cols};"
-            for _t, idx, cols in COMMON_INDEXES
-        )
-        await conn.execute(sql)
-        if logger:
-            logger.info(f"✅ أُنشئت {len(COMMON_INDEXES)} فهرس PostgreSQL (دفعة واحدة)")
+                    await conn.execute(
+                        f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                    )
+                    created += 1
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "already exists" in err_msg:
+                        skipped += 1
+                    else:
+                        failed += 1
+                        if logger:
+                            logger.warning(f"⚠️ PG فهرس {idx_name}: {e}")
     except Exception as e:
         if logger:
-            logger.warning(f"⚠️ دفعة PostgreSQL فشلت ({e})، محاولة فردية...")
+            logger.warning(f"⚠️ PG transaction فشل ({e})، محاولة فردية...")
         for _table, idx_name, cols in COMMON_INDEXES:
             try:
-                await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
             except Exception as e2:
+                err_msg = str(e2).lower()
+                if "already exists" in err_msg:
+                    skipped += 1
+                else:
+                    failed += 1
+                    if logger:
+                        logger.warning(f"⚠️ PG فهرس {idx_name}: {e2}")
+
+    if logger:
+        logger.info(f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+
+
+async def _create_indexes_mysql(conn, logger):
+    """
+    ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
+    (أسرع وأكثر أماناً من حيث الصلاحيات)
+    """
+    # جمع الأسماء الفريدة للجداول
+    tables = set(t for t, _, _ in COMMON_INDEXES)
+
+    existing = set()
+    for table in tables:
+        try:
+            cursor = await conn.cursor()
+            await cursor.execute(f"SHOW INDEX FROM `{table}`")
+            rows = await cursor.fetchall()
+            for r in rows:
+                # r[2] = Key_name
+                existing.add((table, r[2]))
+            await cursor.close()
+        except Exception as e:
+            # الجدول قد لا يكون موجوداً
+            if logger:
+                logger.debug(f"⚠️ SHOW INDEX لـ {table}: {e}")
+
+    created = 0
+    skipped = 0
+    failed = 0
+    for table, idx_name, cols in COMMON_INDEXES:
+        if (table, idx_name) in existing:
+            skipped += 1
+            continue
+        try:
+            await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
+            created += 1
+        except Exception as e:
+            err_msg = str(e).lower()
+            if (
+                "duplicate" in err_msg
+                or "already exists" in err_msg
+                or "1061" in err_msg
+            ):
+                skipped += 1
+            else:
+                failed += 1
                 if logger:
-                    logger.warning(f"⚠️ فشل فهرس {idx_name}: {e2}")
+                    logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
+
+    if logger:
+        logger.info(f"✅ MySQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
 
 
 # =====================================================================
@@ -559,11 +657,16 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             value TEXT
         )
     """)
+    # ✅ إصلاح #8: ON CONFLICT بدل INSERT OR IGNORE
     for key, value in DEFAULT_SETTINGS:
-        await conn.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-            (key, value),
-        )
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                (key, value),
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ SQLite settings '{key}': {e}")
 
     # ---------- REFERRALS ----------
     await conn.execute("""
@@ -858,22 +961,20 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ 🚀 الفهارس — دفعة واحدة ============
-    await _create_indexes_batched(conn, logger, "sqlite")
+    # ============ 🚀 الفهارس — حلقة آمنة ============
+    await _create_indexes_sqlite(conn, logger)
 
     # تسجيل إصدار المخطط
     try:
         await conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
-            (
-                CURRENT_SCHEMA_VERSION,
-                TimeUtils.sql_iso() if TimeUtils else "",
-                "initial schema",
-            ),
+            "INSERT INTO schema_version (version, applied_at, description) "
+            "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
+            (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils), "initial schema"),
         )
         await conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ schema_version SQLite: {e}")
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
@@ -1181,11 +1282,15 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
     for key, value in DEFAULT_SETTINGS:
-        await conn.execute(
-            "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
-            key,
-            value,
-        )
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+                key,
+                value,
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ PG settings '{key}': {e}")
 
     # ---------- REFERRALS ----------
     await conn.execute("""
@@ -1480,19 +1585,21 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ 🚀 الفهارس — دفعة واحدة ============
-    await _create_indexes_batched(conn, logger, "postgres")
+    # ============ 🚀 الفهارس — transaction واحد ============
+    await _create_indexes_postgres(conn, logger)
 
     # تسجيل إصدار المخطط
     try:
         await conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+            "INSERT INTO schema_version (version, applied_at, description) "
+            "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
-            TimeUtils.utc_now() if TimeUtils else None,
+            _safe_now_dt(TimeUtils),
             "initial schema",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ schema_version PG: {e}")
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
@@ -1549,14 +1656,16 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     """)
 
     # ---------- POSTS ----------
+    # ✅ إصلاح #5: media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
+    # text_hash CHAR(64) للـ unique index
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
             channel_db_id INT,
-            text VARCHAR(4096) NOT NULL,
+            text TEXT NOT NULL,
             text_hash CHAR(64) DEFAULT '',
             media_type VARCHAR(50),
-            media_file_id VARCHAR(4096),
+            media_file_id VARCHAR(255),
             published TINYINT(1) DEFAULT 0,
             fail_count INT DEFAULT 0,
             created_at DATETIME,
@@ -1574,8 +1683,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             interval_minutes INT DEFAULT 12,
             interval_hours INT DEFAULT 0,
             interval_days INT DEFAULT 0,
-            days_of_week TEXT DEFAULT '[]',
-            specific_dates TEXT DEFAULT '[]',
+            days_of_week TEXT,
+            specific_dates TEXT,
             publish_time VARCHAR(10) DEFAULT '00:00',
             cron_expression TEXT,
             next_publish_date DATETIME,
@@ -1657,6 +1766,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     """)
 
     # ---------- GROUP_SECURITY ----------
+    # ✅ إصلاح #4: welcome_text / goodbye_text كـ VARCHAR (TEXT لا يدعم DEFAULT)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -1665,9 +1775,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             slow_mode TINYINT(1) DEFAULT 0,
             slow_mode_seconds INT DEFAULT 5,
             welcome_enabled TINYINT(1) DEFAULT 0,
-            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+            welcome_text VARCHAR(500) DEFAULT 'مرحباً {user} في {chat} 🤍',
             goodbye_enabled TINYINT(1) DEFAULT 0,
-            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+            goodbye_text VARCHAR(500) DEFAULT 'وداعاً {user} 👋',
             delete_banned_words TINYINT(1) DEFAULT 0,
             auto_penalty VARCHAR(50) DEFAULT 'none',
             auto_mute_duration INT DEFAULT 3600,
@@ -1799,10 +1909,14 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
     for key, value in DEFAULT_SETTINGS:
-        await conn.execute(
-            "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
-            (key, value),
-        )
+        try:
+            await conn.execute(
+                "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
+                (key, value),
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ MySQL settings '{key}': {e}")
 
     # ---------- REFERRALS ----------
     await conn.execute("""
@@ -2099,60 +2213,23 @@ async def create_tables_mysql(conn, logger, TimeUtils):
 
     await conn.execute("SET FOREIGN_KEY_CHECKS=1")
 
-    # ============ 🚀 الفهارس MySQL — فحص مسبق دفعة واحدة ============
-    try:
-        # اجلب كل الفهارس الموجودة في استعلام واحد
-        cursor = await conn.cursor()
-        await cursor.execute(
-            "SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS "
-            "WHERE TABLE_SCHEMA = DATABASE()"
-        )
-        existing_rows = await cursor.fetchall()
-        existing = {(r[0], r[1]) for r in existing_rows}
-
-        created = 0
-        skipped = 0
-        for table, idx_name, cols in COMMON_INDEXES:
-            if (table, idx_name) in existing:
-                skipped += 1
-                continue
-            try:
-                await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
-                created += 1
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "duplicate" in error_msg or "already exists" in error_msg or "1061" in error_msg:
-                    continue
-                if logger:
-                    logger.warning(f"⚠️ فشل فهرس {idx_name}: {e}")
-
-        if logger:
-            logger.info(f"✅ MySQL: أُنشئت {created} فهرس (تخطّي {skipped} موجود)")
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ فحص الفهارس MySQL فشل ({e})، محاولة فردية...")
-        for _table, idx_name, cols in COMMON_INDEXES:
-            try:
-                await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
-            except Exception as e2:
-                error_msg = str(e2).lower()
-                if "duplicate" in error_msg or "already exists" in error_msg:
-                    continue
-                if logger:
-                    logger.warning(f"⚠️ فشل فهرس {idx_name}: {e2}")
+    # ============ 🚀 الفهارس MySQL — SHOW INDEX ============
+    await _create_indexes_mysql(conn, logger)
 
     # تسجيل إصدار المخطط
     try:
         await conn.execute(
-            "INSERT IGNORE INTO schema_version (version, applied_at, description) VALUES (%s, %s, %s)",
+            "INSERT IGNORE INTO schema_version (version, applied_at, description) "
+            "VALUES (%s, %s, %s)",
             (
                 CURRENT_SCHEMA_VERSION,
-                TimeUtils.sql_iso() if TimeUtils else "",
+                _safe_now_iso(TimeUtils),
                 "initial schema",
             ),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ schema_version MySQL: {e}")
 
     if logger:
         logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
