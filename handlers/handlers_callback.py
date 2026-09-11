@@ -20,6 +20,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - ✅ [v7.5.2] إضافة return بعد act_log في _handle_advanced_actions
 - ✅ [v7.5.2] تأخير 500ms بين الرسائل في _publish_all (حماية من 429)
 - ✅ [v7.5.5] إصلاح 'tuple' object has no attribute 'get' في _publish_single
+- ✅ [v7.5.6] جلب المنشور كاملاً من DB باستخدام post_id (حل مشكلة نشر ".")
 """
 
 import asyncio
@@ -177,7 +178,7 @@ class CallbackHandlers:
         user_id = query.from_user.id
         now_time = time.monotonic()
 
-        # ✅ [v7.5.2] FIX: debounce بمفتاح واحد لكل مستخدم (بدلاً من مفتاح لكل query.id)
+        # ✅ [v7.5.2] FIX: debounce بمفتاح واحد لكل مستخدم
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < 1.5:
@@ -1185,58 +1186,87 @@ class CallbackHandlers:
 
     # ============ دوال النشر ============
 
-    # ✅ [v7.5.5] دالة normalize post → dict
+    # ✅ [v7.5.6] استخراج post_id من أي نوع
     @staticmethod
-    def _normalize_post(post) -> Optional[Dict]:
+    def _extract_post_id(post) -> Optional[int]:
         """
-        ✅ v7.5.5: يضمن إرجاع dict من post أياً كان نوعه (dict / Row / tuple).
-        يحل مشكلة: 'tuple' object has no attribute 'get'
+        ✅ v7.5.6: يستخرج post_id فقط من أي نوع (dict / Row / tuple / list).
+        نستخدم هذا بدلاً من تخمين ترتيب كل الأعمدة.
         """
         if post is None:
             return None
-        # ✅ 1) dict جاهز
+        # dict
         if isinstance(post, dict):
-            return post
-        # ✅ 2) aiosqlite.Row / asyncpg.Record / sqlite3.Row
-        try:
-            d = dict(post)
-            if d:
-                logger.warning(
-                    f"⚠️ get_next_post أرجع {type(post).__name__} "
-                    f"(تم التحويل إلى dict) — يُنصح بإصلاح database_channels_posts.py"
-                )
-                return d
-        except (TypeError, ValueError):
-            pass
-        # ✅ 3) tuple / list — نحاول استنتاج الترتيب من الطول
-        if isinstance(post, (tuple, list)):
-            short_keys = ['id', 'text', 'media_type', 'media_file_id']
-            full_keys = [
-                'id', 'channel_db_id', 'text', 'text_hash',
-                'media_type', 'media_file_id', 'published',
-                'fail_count', 'created_at', 'published_at'
-            ]
-            keys = short_keys if len(post) == 4 else full_keys
-            result = {k: post[i] for i, k in enumerate(keys) if i < len(post)}
-            logger.warning(
-                f"⚠️ get_next_post أرجع tuple({len(post)}) → تم تحويله: "
-                f"{list(result.keys())} — يُنصح بإصلاح database_channels_posts.py"
-            )
-            return result if result else None
+            pid = post.get('id')
+            try:
+                return int(pid) if pid is not None else None
+            except (ValueError, TypeError):
+                return None
+        # sqlite3.Row / aiosqlite.Row / asyncpg.Record
+        if hasattr(post, 'keys'):
+            try:
+                pid = post['id']
+                return int(pid) if pid is not None else None
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
+        # tuple / list — نأخذ أول عنصر (id عادةً)
+        if isinstance(post, (tuple, list)) and post:
+            try:
+                return int(post[0])
+            except (ValueError, TypeError, IndexError):
+                pass
         return None
 
     @staticmethod
     async def _publish_single(bot, ch_db_id, ch_tele, post) -> bool:
-        # ✅ v7.5.5: normalize post to dict
-        post = CallbackHandlers._normalize_post(post)
-        if not post:
-            logger.error(f"❌ _publish_single: post غير صالح (None أو فشل التحويل)")
+        """
+        ✅ v7.5.6: نستخرج post_id فقط، ثم نجلب المنشور كاملاً من DB.
+        هذا الحل يضمن صحة text و media_type مهما كان شكل الـ tuple القادم.
+        """
+        # ─── 1) استخراج post_id ───
+        post_id = CallbackHandlers._extract_post_id(post)
+
+        # ─── 2) جلب المنشور كاملاً من DB ───
+        full_post = None
+        if post_id:
+            full_post = await DB.fetchone(
+                "SELECT id, text, media_type, media_file_id FROM posts WHERE id = ?",
+                (post_id,)
+            )
+
+        # ─── 3) استخدام النتيجة ───
+        if full_post:
+            post = full_post
+            logger.debug(
+                f"✅ _publish_single: تم جلب المنشور {post_id} كاملاً من DB "
+                f"(media_type={post.get('media_type')})"
+            )
+        elif isinstance(post, dict):
+            # dict جاهز بدون post_id — نستخدمه كما هو
+            logger.warning(
+                f"⚠️ _publish_single: لم نجد post_id في dict — سيُستخدم كما هو"
+            )
+        else:
+            logger.error(
+                f"❌ _publish_single: تعذر استخراج post_id من "
+                f"{type(post).__name__} — تخطي"
+            )
             return False
+
         try:
             post_id = post.get('id')
             text = post.get('text', '')
             media_type = post.get('media_type')
             media_file_id = post.get('media_file_id')
+
+            # ⚠️ تشخيص: لو text فارغ مع وجود media — هذا طبيعي
+            if not text and not media_type and not media_file_id:
+                logger.warning(
+                    f"⚠️ المنشور {post_id} فارغ تماماً "
+                    f"(text='', media_type=None, media_file_id=None)"
+                )
+                return False
+
             caption = text[:MAX_CAPTION_LENGTH] if text else None
 
             if media_type == 'photo' and media_file_id:
@@ -1293,7 +1323,7 @@ class CallbackHandlers:
                 await DB.increment_post_fail(post['id'])
             return False
         except Exception as e:
-            logger.error(f"❌ فشل النشر: {e}")
+            logger.error(f"❌ فشل النشر: {e}", exc_info=True)
             if post.get('id'):
                 await DB.increment_post_fail(post['id'])
             return False
@@ -1310,9 +1340,9 @@ class CallbackHandlers:
                 banned_count += 1
                 continue
             post = await DB.get_next_post(ch['id'])
-            # ✅ v7.5.5: normalize post قبل الإضافة
-            post = CallbackHandlers._normalize_post(post)
-            if post:
+            # ✅ v7.5.6: نتحقق فقط من وجود post_id
+            post_id = CallbackHandlers._extract_post_id(post)
+            if post_id:
                 ch_info = await DB.get_channel_info(user_id, ch['id'])
                 if ch_info:
                     tasks.append((ch['id'], ch_info['channel_id'], post))
@@ -1329,7 +1359,6 @@ class CallbackHandlers:
             return
         sem = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
-        # ✅ [v7.5.2] تأخير 500ms بين كل نشر
         async def run(task):
             async with sem:
                 result = await CallbackHandlers._publish_single(bot, task[0], task[1], task[2])
