@@ -209,7 +209,7 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
             return
 
-        # ========== معالجة set_duration (لجميع العقوبات) ==========
+        # ========== معالجة set_duration ==========
         if data.startswith("set_duration:"):
             parts = data.split(":")
             if len(parts) >= 4:
@@ -296,7 +296,7 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
             return
 
-        # ========== معالجة sec_set_mute_duration, sec_set_ban_duration, sec_set_restrict_duration ==========
+        # ========== معالجة sec_set_mute_duration / ban / restrict ==========
         if data.startswith("sec_set_mute_duration:") or data.startswith("sec_set_ban_duration:") or data.startswith("sec_set_restrict_duration:"):
             try:
                 parts = data.split(":")
@@ -360,7 +360,7 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
             return
 
-        # ========== معالجة sec_set_antiflood_messages, sec_set_antiflood_seconds ==========
+        # ========== معالجة sec_set_antiflood_messages ==========
         if data.startswith("sec_set_antiflood_messages:"):
             try:
                 _, chat_id_str = data.split(":")
@@ -420,7 +420,7 @@ class CallbackHandlers:
                 await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
             return
 
-        # ========== معالجة sec_set_night_start, sec_set_night_end ==========
+        # ========== معالجة sec_set_night_start ==========
         if data.startswith("sec_set_night_start:"):
             try:
                 _, chat_id_str = data.split(":")
@@ -2092,7 +2092,6 @@ class CallbackHandlers:
                 await safe_edit(query, "🔒 أرسل معرف قناة الاشتراك الإجباري:", bot=context.bot)
                 return
 
-            # ===== معالج تعطيل الاشتراك الإجباري =====
             elif data == "admin_disable_force":
                 await DB.execute("UPDATE settings SET value = '' WHERE key = 'force_subscribe_channel'")
                 try:
@@ -2102,7 +2101,6 @@ class CallbackHandlers:
                 await safe_edit(query, "✅ تم تعطيل الاشتراك الإجباري", bot=context.bot)
                 return
 
-            # ===== معالج رفع نسخة احتياطية =====
             elif data == "admin_upload_backup":
                 StateManager.set(user_id, UserState.WAIT_BACKUP_FILE)
                 await safe_edit(query, "📤 أرسل ملف النسخ الاحتياطي بصيغة .db:", bot=context.bot)
@@ -2546,7 +2544,7 @@ class CallbackHandlers:
 
         await _safe_answer(query, "⚠️ غير معروف", show_alert=True)
 
-    # ============ معالجات اللوحة الخاصة (panel) ============
+    # ============ معالجات اللوحة الخاصة (panel) — v7.5.0 ============
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data):
         """✅ v7.5.0: استخدام ChatPermissions الجديدة المتوافقة مع PTB v22"""
@@ -2555,7 +2553,7 @@ class CallbackHandlers:
             await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
             return
         if data == "panel_lock":
-            # ✅ قفل المجموعة - استخدام المعاملات الجديدة
+            # ✅ قفل المجموعة
             await context.bot.set_chat_permissions(
                 chat_id,
                 permissions=ChatPermissions(
@@ -2576,7 +2574,7 @@ class CallbackHandlers:
             )
             await safe_edit(query, "🔒 تم قفل المجموعة", bot=context.bot)
         elif data == "panel_unlock":
-            # ✅ فتح المجموعة - استخدام المعاملات الجديدة
+            # ✅ فتح المجموعة
             await context.bot.set_chat_permissions(
                 chat_id,
                 permissions=ChatPermissions(
@@ -2622,62 +2620,3 @@ class CallbackHandlers:
                 await safe_edit(query, "📝 أرسل إجابتك:", bot=context.bot)
             elif data == CB.CONTEST_WINNERS:
                 winners = await DB.get_contest_winners(10)
-                text = "🏆 الفائزون\n\n" + "\n".join(f"• {w['title']} - {w['winner_id']}" for w in winners) if winners else "📭 لا يوجد"
-                await safe_edit(query, text, bot=context.bot)
-                StateManager.clear(user_id)
-            elif data.startswith(CB.DECLARE_WINNER_SEL + ":"):
-                if not CONFIG.is_developer(user_id):
-                    await _safe_answer(query, "❌ غير مصرح", show_alert=True)
-                    return
-                try:
-                    cid = int(data.split(":")[-1])
-                except (ValueError, IndexError):
-                    await _safe_answer(query, "❌ بيانات غير صالحة", show_alert=True)
-                    return
-                winner = await DB.fetchone("SELECT user_id FROM contest_participants WHERE contest_id=? ORDER BY RANDOM() LIMIT 1", (cid,))
-                if winner:
-                    if await DB.declare_winner(cid, winner['user_id']):
-                        await safe_edit(query, f"✅ الفائز: {winner['user_id']}", bot=context.bot)
-                        try:
-                            await context.bot.send_message(winner['user_id'], "🎉 مبروك! فزت بالمسابقة!")
-                        except:
-                            pass
-                    else:
-                        await _safe_answer(query, "❌ فشل", show_alert=True)
-                else:
-                    await safe_edit(query, "❌ لا يوجد مشاركون", bot=context.bot)
-        except Exception as e:
-            logger.error(f"خطأ في المسابقات: {e}", exc_info=True)
-            await _safe_answer(query, "❌ حدث خطأ", show_alert=True)
-
-    # ============ معالجات الاستيراد ============
-    @staticmethod
-    async def _handle_import(update, context, query, user_id):
-        if not CONFIG.is_developer(user_id):
-            await _safe_answer(query, "❌ غير مصرح", show_alert=True)
-            return
-        if query.data == CB.ADMIN_IMPORT_REPLIES:
-            StateManager.set(user_id, UserState.WAIT_IMPORT_FILE)
-            await safe_edit(query, "📤 أرسل ملف JSON:", bot=context.bot)
-        elif query.data == CB.ADMIN_IMPORT_GITHUB:
-            StateManager.set(user_id, UserState.WAIT_GITHUB_URL)
-            await safe_edit(query, "📥 أرسل الرابط:", bot=context.bot)
-
-    # ============ النسخ الاحتياطي ============
-    @staticmethod
-    async def _do_backup(context, user_id):
-        try:
-            PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
-            success = await DB.backup_database(backup_file)
-            if not success:
-                await safe_send(context.bot, user_id, "❌ فشل النسخ الاحتياطي")
-                return
-            backups = sorted(PATHS.BACKUPS.glob("backup_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for old in backups[MAX_BACKUPS:]:
-                old.unlink(missing_ok=True)
-            with open(backup_file, 'rb') as f:
-                await context.bot.send_document(chat_id=user_id, document=f, filename=backup_file.name)
-        except Exception as e:
-            logger.error(f"❌ فشل النسخ: {e}")
-            await safe_send(context.bot, user_id, f"❌ فشل النسخ: {str(e)[:100]}")
