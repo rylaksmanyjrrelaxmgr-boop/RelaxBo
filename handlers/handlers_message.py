@@ -31,8 +31,10 @@ handlers_message.py - معالجات الرسائل - النسخة النهائ�
 - استخدام safe_send الموحدة في الردود التلقائية
 - إزالة المتغيرات غير المستخدمة
 - ربط جميع النصوص الثابتة بنظام الترجمة _trans بنسبة 100%
-- ✅ إضافة معالج WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي من زر admin_upload_backup
-- ✅ دعم كل المتغيرات في رسائل الترحيب والوداع ({user}, {name}, {username}, {mention}, {chat}, {user_id}, ...)
+- ✅ إضافة معالج WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي
+- ✅ دعم كل المتغيرات في رسائل الترحيب والوداع ({user}, {name}, {username}, ...)
+- ✅ [v7.5.1] handle_service: إزالة إرسال الترحيب/الوداع (منع الرسائل المزدوجة)
+  الآن الترحيب/الوداع يُرسلان فقط من handlers/chat_member.py (ChatMemberHandler)
 """
 
 import asyncio
@@ -47,7 +49,7 @@ from html import escape
 from typing import Optional
 from datetime import datetime
 
-from telegram import Update, User, Chat
+from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, TimedOut
 
@@ -84,7 +86,7 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     """
     try:
         text = await get_text(lang, key)
-        if text == key:  # لم يتم العثور على الترجمة
+        if text == key:
             return default
         return text
     except Exception:
@@ -92,75 +94,7 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
 
 
 # =====================================================================
-# ✅ دالة استبدال المتغيرات (نفس الموجودة في handlers/chat_member.py)
-# =====================================================================
-
-def _apply_template_variables(template: str, user: Optional[User], chat: Optional[Chat]) -> str:
-    """
-    استبدال كل المتغيرات في القالب.
-
-    المتغيرات المدعومة:
-      {user}        → الاسم الكامل (أحمد علي)
-      {name}        → الاسم الأول (أحمد)
-      {first_name}  → الاسم الأول (أحمد)
-      {last_name}   → الاسم الأخير (علي)
-      {full_name}   → الاسم الكامل (أحمد علي)
-      {username}    → @username
-      {mention}     → منشن HTML
-      {user_id}     → معرف المستخدم
-      {id}          → معرف المستخدم
-      {chat}        → اسم المجموعة
-      {chat_name}   → اسم المجموعة
-    """
-    if not template:
-        return template
-
-    # اسم المستخدم
-    if user:
-        first_name = user.first_name or "عضو"
-        last_name = user.last_name or ""
-        full_name = f"{first_name} {last_name}".strip() or "عضو"
-        username_str = f"@{user.username}" if user.username else ""
-        try:
-            mention_html = user.mention_html()
-        except Exception:
-            mention_html = full_name
-        user_id_str = str(user.id)
-    else:
-        first_name = "عضو"
-        last_name = ""
-        full_name = "عضو"
-        username_str = ""
-        mention_html = "عضو"
-        user_id_str = ""
-
-    # اسم المجموعة
-    chat_title = (chat.title if chat and chat.title else "المجموعة")
-
-    # الترتيب مهم: {user} أولاً قبل {username} (لمنع التداخل)
-    replacements = [
-        ("{full_name}", full_name),
-        ("{first_name}", first_name),
-        ("{last_name}", last_name),
-        ("{username}", username_str),
-        ("{user_id}", user_id_str),
-        ("{chat_name}", chat_title),
-        ("{mention}", mention_html),
-        ("{name}", first_name),
-        ("{user}", full_name),
-        ("{id}", user_id_str),
-        ("{chat}", chat_title),
-    ]
-
-    result = template
-    for placeholder, value in replacements:
-        result = result.replace(placeholder, value)
-
-    return result
-
-
-# =====================================================================
-# دوال الكاش الجديدة (مبنية على cache.py)
+# دوال الكاش
 # =====================================================================
 
 async def get_security_settings_cached(chat_id: int) -> dict:
@@ -315,7 +249,6 @@ class MessageHandlers:
                 UserState.WAIT_VIOLATION_DURATION: MessageHandlers._handle_violation_duration_input,
                 UserState.WAIT_REDEEM_GIFT: MessageHandlers._handle_redeem_gift_input,
                 UserState.WAIT_RESTORE: MessageHandlers._handle_restore_input,
-                # ✅ الحالة الجديدة لاستقبال ملف النسخ الاحتياطي
                 UserState.WAIT_BACKUP_FILE: MessageHandlers._handle_backup_file_input,
             }
 
@@ -359,7 +292,6 @@ class MessageHandlers:
         METRICS.increment_messages()
         settings = await get_security_settings_cached(chat_id)
 
-        # ✅ حذف رسائل الخدمة (انضمام/مغادرة) إذا كان delete_service مفعلاً
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
                 try:
@@ -494,7 +426,6 @@ class MessageHandlers:
         except Exception as e:
             logger.warning(f"تعذر إرسال تنبيه المخالفة: {e}")
 
-        # تطبيق العقوبة فقط إذا كانت محددة
         if penalty_type:
             max_strikes = settings.get('violation_strikes') or settings.get('max_warnings') or 3
             if violation_count >= max_strikes:
@@ -608,7 +539,6 @@ class MessageHandlers:
             except:
                 channel_name = f"قناة {channel_id}"
 
-            # التحقق من صلاحيات البوت في القناة
             try:
                 bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
                 if bot_member.status not in ['administrator', 'creator']:
@@ -629,7 +559,6 @@ class MessageHandlers:
                 StateManager.clear(user_id)
                 return
 
-            # التحقق من صلاحيات المستخدم (لغير المالك)
             if user_id != CONFIG.PRIMARY_OWNER_ID:
                 try:
                     user_member = await context.bot.get_chat_member(channel_id, user_id)
@@ -717,7 +646,6 @@ class MessageHandlers:
             media_type = 'video_note'
             media_file_id = msg.video_note.file_id
 
-        # نعتمد على DB.add_posts لفحص التكرار والحد الأقصى
         posts = [(text, media_type, media_file_id)]
         count = await DB.add_posts(user_id, channel_db_id, posts)
 
@@ -725,7 +653,6 @@ class MessageHandlers:
             msg = await _trans('post_added', lang, "✅ تمت إضافة المنشور")
             await safe_send(context.bot, user_id, msg)
         else:
-            # رسالة موحدة توضح الاحتمالين
             msg = await _trans(
                 'post_add_failed', lang,
                 "❌ لم تتم إضافة المنشور.\n"
@@ -2039,7 +1966,7 @@ class MessageHandlers:
 
 
     # =================================================================
-    # ✅ معالج استقبال ملف النسخ الاحتياطي (WAIT_BACKUP_FILE)
+    # معالج استقبال ملف النسخ الاحتياطي
     # =================================================================
 
     @staticmethod
@@ -2062,16 +1989,13 @@ class MessageHandlers:
 
         tmp_path = None
         try:
-            # تحميل الملف
             file = await doc.get_file()
             tmp_path = os.path.join(tempfile.gettempdir(), f"restore_{user_id}_{int(time.time())}.db")
             await file.download_to_drive(tmp_path)
 
-            # نسخة احتياطية قبل الاستعادة
             pre_restore = PATHS.BACKUPS / f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
             shutil.copy2(PATHS.DB, pre_restore)
 
-            # استعادة النسخة
             shutil.copy2(tmp_path, PATHS.DB)
 
             await safe_send(context.bot, user_id, "✅ تمت الاستعادة بنجاح! أعد تشغيل البوت لتفعيل التغييرات.")
@@ -2089,48 +2013,45 @@ class MessageHandlers:
 
 
     # =================================================================
-    # رسائل الخدمة
+    # v7.5.1: handle_service — الحذف فقط (بدون ترحيب/وداع)
+    # =================================================================
+    # ملاحظة مهمة:
+    #   - الترحيب والوداع يُرسلان فقط من handlers/chat_member.py
+    #   - هذا يمنع الرسائل المزدوجة عند انضمام/مغادرة الأعضاء
+    #   - هنا فقط: حذف رسائل الخدمة إذا كان delete_service مفعلاً
     # =================================================================
 
     @staticmethod
     async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """معالجة رسائل الخدمة (انضمام/مغادرة) مع دعم كل المتغيرات"""
+        """
+        معالجة رسائل الخدمة (انضمام/مغادرة).
+
+        ⚠️ مهم: هذا المعالج يقوم فقط بحذف رسائل الخدمة إذا كان
+        delete_service مفعلاً في إعدادات الأمان.
+
+        الترحيب والوداع يتم إرسالهما من handlers/chat_member.py
+        (ChatMemberHandler) لمنع الرسائل المزدوجة.
+        """
         if not update.effective_chat or not update.effective_message:
             return
-        chat_id = update.effective_chat.id
-        settings = await get_security_settings_cached(chat_id)
-        message = update.effective_message
-        chat = update.effective_chat
 
-        # ✅ حذف رسائل الانضمام والمغادرة إذا كان delete_service مفعلاً
-        if settings.get('delete_service'):
-            if message.new_chat_members or message.left_chat_member:
+        chat_id = update.effective_chat.id
+        message = update.effective_message
+
+        # حذف رسائل الانضمام والمغادرة إذا كان delete_service مفعلاً
+        if not (message.new_chat_members or message.left_chat_member):
+            return
+
+        try:
+            settings = await get_security_settings_cached(chat_id)
+            if settings.get('delete_service'):
                 try:
                     await message.delete()
                     logger.debug(f"🗑️ حذف رسالة خدمة في {chat_id}")
                 except Exception as e:
                     logger.debug(f"تعذر حذف رسالة الخدمة: {e}")
-                return
-
-        # ✅ رسالة الترحيب مع كل المتغيرات
-        if message.new_chat_members and settings.get('welcome_enabled'):
-            for member in message.new_chat_members:
-                if member.is_bot:
-                    continue
-                welcome_text = settings.get('welcome_text', 'مرحباً {user} 🤍')
-                # ✅ استبدال كل المتغيرات
-                welcome_text = _apply_template_variables(welcome_text, member, chat)
-                await safe_send(context.bot, chat_id, welcome_text, parse_mode='HTML')
-
-        # ✅ رسالة الوداع مع كل المتغيرات
-        if message.left_chat_member and settings.get('goodbye_enabled'):
-            member = message.left_chat_member
-            if member.is_bot:
-                return
-            goodbye_text = settings.get('goodbye_text', 'وداعاً {user} 👋')
-            # ✅ استبدال كل المتغيرات
-            goodbye_text = _apply_template_variables(goodbye_text, member, chat)
-            await safe_send(context.bot, chat_id, goodbye_text, parse_mode='HTML')
+        except Exception as e:
+            logger.debug(f"handle_service error: {e}")
 
 
     # =================================================================
