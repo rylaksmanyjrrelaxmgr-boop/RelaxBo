@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.4.7)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.2)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -26,6 +26,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.5: فصل دوال النقاط إلى database_points.py
 🆕 v7.4.6: فصل دوال النسخ الاحتياطي إلى database_backup.py
 🆕 v7.4.7: فصل دوال التذكيرات إلى database_reminders.py
+🆕 v7.5.2: إضافة 6 فهارس أداء + توافق MySQL للفهارس الجزئية
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -2309,15 +2310,24 @@ class Database(
     async def _create_secondary_indexes(self, indexes):
         try:
             async with self.connection() as conn:
+                created = 0
+                skipped = 0
+                failed = 0
                 for table, idx_name, create_sql in indexes:
                     try:
                         if await self._index_exists(conn, table, idx_name):
+                            skipped += 1
                             continue
                         await conn.execute(create_sql)
                         logger.info(f"✅ تم إنشاء فهرس ثانوي {idx_name}")
+                        created += 1
                     except Exception as e:
                         if "duplicate" not in str(e).lower() and "already exists" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
+                            failed += 1
+                logger.info(
+                    f"📊 انتهى إنشاء الفهارس: ✅ {created} جديد | ⏭️ {skipped} موجود | ❌ {failed} فشل"
+                )
         except asyncio.CancelledError:
             logger.info("🛑 مهمة إنشاء الفهارس الثانوية تم إلغاؤها")
         except Exception as e:
@@ -2498,12 +2508,116 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     # =====================================================================
+    # ✅ v7.5.2 — دوال الفهارس الثانوية (متوافقة مع SQLite / PostgreSQL / MySQL)
+    # =====================================================================
+
+    def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
+        """
+        يُرجع قائمة الفهارس الثانوية المناسبة لنوع قاعدة البيانات الحالي.
+
+        ملاحظات التوافق:
+          - PostgreSQL : يدعم IF NOT EXISTS + Partial Indexes (WHERE)
+          - SQLite     : يدعم IF NOT EXISTS + Partial Indexes (WHERE)
+          - MySQL      : لا يدعم أيّاً منهما → نستخدم CREATE INDEX عادي
+                         (دالة _index_exists تتحقق قبل الإنشاء، لذا آمن)
+        """
+        if USE_MYSQL:
+            # ═══════════════ MySQL (بدون IF NOT EXISTS + بدون WHERE) ═══════════════
+            return [
+                # ─── الفهارس الأساسية ───
+                ("posts", "idx_posts_fail_count",
+                 "CREATE INDEX idx_posts_fail_count ON posts(fail_count)"),
+                ("posts", "idx_posts_created_at",
+                 "CREATE INDEX idx_posts_created_at ON posts(created_at)"),
+                ("users", "idx_users_trial_used",
+                 "CREATE INDEX idx_users_trial_used ON users(trial_used)"),
+                ("banned_words", "idx_banned_words_word",
+                 "CREATE INDEX idx_banned_words_word ON banned_words(word)"),
+                ("auto_replies", "idx_auto_replies_keyword",
+                 "CREATE INDEX idx_auto_replies_keyword ON auto_replies(keyword)"),
+                ("referral_rewards", "idx_referral_rewards_count",
+                 "CREATE INDEX idx_referral_rewards_count ON referral_rewards(referral_count)"),
+                ("contest_participants", "idx_contest_participants_contest",
+                 "CREATE INDEX idx_contest_participants_contest ON contest_participants(contest_id)"),
+                ("gift_codes", "idx_gift_codes_plan",
+                 "CREATE INDEX idx_gift_codes_plan ON gift_codes(plan_id)"),
+                # ─── ✅ v7.5.2 — فهارس الأداء الجديدة ───
+                ("user_penalties", "idx_user_penalties_active_end",
+                 "CREATE INDEX idx_user_penalties_active_end "
+                 "ON user_penalties(status, end_time)"),
+                ("posts", "idx_posts_published",
+                 "CREATE INDEX idx_posts_published ON posts(published, published_at)"),
+                ("posts", "idx_posts_channel_published",
+                 "CREATE INDEX idx_posts_channel_published ON posts(channel_db_id, published)"),
+                ("subscriptions", "idx_subscriptions_active_end",
+                 "CREATE INDEX idx_subscriptions_active_end "
+                 "ON subscriptions(user_id, status, end_date)"),
+                ("user_reminder_settings", "idx_reminders_subscription",
+                 "CREATE INDEX idx_reminders_subscription "
+                 "ON user_reminder_settings(subscription_reminder, last_reminder_sent)"),
+                ("user_violations", "idx_violations_user_chat",
+                 "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
+            ]
+        else:
+            # ═══════════════ SQLite + PostgreSQL (IF NOT EXISTS + Partial Indexes) ═══════════════
+            return [
+                # ─── الفهارس الأساسية ───
+                ("posts", "idx_posts_fail_count",
+                 "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
+                ("posts", "idx_posts_created_at",
+                 "CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at)"),
+                ("users", "idx_users_trial_used",
+                 "CREATE INDEX IF NOT EXISTS idx_users_trial_used ON users(trial_used)"),
+                ("banned_words", "idx_banned_words_word",
+                 "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)"),
+                ("auto_replies", "idx_auto_replies_keyword",
+                 "CREATE INDEX IF NOT EXISTS idx_auto_replies_keyword ON auto_replies(keyword)"),
+                ("referral_rewards", "idx_referral_rewards_count",
+                 "CREATE INDEX IF NOT EXISTS idx_referral_rewards_count ON referral_rewards(referral_count)"),
+                ("contest_participants", "idx_contest_participants_contest",
+                 "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)"),
+                ("gift_codes", "idx_gift_codes_plan",
+                 "CREATE INDEX IF NOT EXISTS idx_gift_codes_plan ON gift_codes(plan_id)"),
+                # ─── ✅ v7.5.2 — فهارس الأداء الجديدة (Partial Indexes) ───
+                ("user_penalties", "idx_user_penalties_active_end",
+                 "CREATE INDEX IF NOT EXISTS idx_user_penalties_active_end "
+                 "ON user_penalties(status, end_time) WHERE status = 'active'"),
+                ("posts", "idx_posts_published",
+                 "CREATE INDEX IF NOT EXISTS idx_posts_published "
+                 "ON posts(published, published_at)"),
+                ("posts", "idx_posts_channel_published",
+                 "CREATE INDEX IF NOT EXISTS idx_posts_channel_published "
+                 "ON posts(channel_db_id, published)"),
+                ("subscriptions", "idx_subscriptions_active_end",
+                 "CREATE INDEX IF NOT EXISTS idx_subscriptions_active_end "
+                 "ON subscriptions(user_id, status, end_date) WHERE status = 'active'"),
+                ("user_reminder_settings", "idx_reminders_subscription",
+                 "CREATE INDEX IF NOT EXISTS idx_reminders_subscription "
+                 "ON user_reminder_settings(subscription_reminder, last_reminder_sent)"),
+                ("user_violations", "idx_violations_user_chat",
+                 "CREATE INDEX IF NOT EXISTS idx_violations_user_chat "
+                 "ON user_violations(user_id, chat_id)"),
+            ]
+
+    # =====================================================================
     # التهيئة الكاملة
     # =====================================================================
 
     async def initialize_db(self) -> bool:
+        """
+        التهيئة الكاملة لقاعدة البيانات:
+          1. إنشاء الـ Pool
+          2. إنشاء الجداول
+          3. ترحيل المخطط
+          4. البيانات الافتراضية (plans + banned_words + auto_replies)
+          5. إنشاء الفهارس الثانوية في مهمة خلفية (لا تعطّل البدء)
+          6. تشغيل مهمة تنظيف الكاش
+        """
         try:
+            # ─── الخطوة 1: تهيئة الـ Pool ───
             await self.initialize()
+
+            # ─── الخطوة 2: إنشاء الجداول + الترحيل + البيانات الافتراضية ───
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
@@ -2512,21 +2626,18 @@ class Database(
                 await self._import_auto_replies(conn)
                 await self._ensure_text_hash_column(conn)
 
+            # ─── الخطوة 3: إنشاء الفهارس الثانوية في مهمة خلفية ───
             if self._secondary_index_task is None or self._secondary_index_task.done():
-                secondary_indexes = [
-                    ("posts", "idx_posts_fail_count", "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
-                    ("posts", "idx_posts_created_at", "CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at)"),
-                    ("users", "idx_users_trial_used", "CREATE INDEX IF NOT EXISTS idx_users_trial_used ON users(trial_used)"),
-                    ("banned_words", "idx_banned_words_word", "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)"),
-                    ("auto_replies", "idx_auto_replies_keyword", "CREATE INDEX IF NOT EXISTS idx_auto_replies_keyword ON auto_replies(keyword)"),
-                    ("referral_rewards", "idx_referral_rewards_count", "CREATE INDEX IF NOT EXISTS idx_referral_rewards_count ON referral_rewards(referral_count)"),
-                    ("contest_participants", "idx_contest_participants_contest", "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)"),
-                    ("gift_codes", "idx_gift_codes_plan", "CREATE INDEX IF NOT EXISTS idx_gift_codes_plan ON gift_codes(plan_id)"),
-                ]
+                secondary_indexes = self._get_secondary_indexes()
+                logger.info(
+                    f"📊 جدولة إنشاء {len(secondary_indexes)} فهرس ثانوي "
+                    f"(DB={DB_TYPE.upper()})..."
+                )
                 self._secondary_index_task = asyncio.create_task(
                     self._create_secondary_indexes(secondary_indexes)
                 )
 
+            # ─── الخطوة 4: تشغيل مهمة تنظيف الكاش ───
             if CACHE_AVAILABLE and (
                 self._cache_cleanup_task is None or self._cache_cleanup_task.done()
             ):
@@ -2534,13 +2645,19 @@ class Database(
 
             logger.info("✅ تم تهيئة قاعدة البيانات بنجاح (مع المهام الخلفية)")
             return True
+
         except Exception as e:
             logger.error(f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True)
             return False
 
     async def pre_initialize(self):
+        """
+        تهيئة مبكرة (تستخدم عادةً من startup hook أو preload).
+        نفس خطوات initialize_db لكن بدون تسجيل صاخب.
+        """
         try:
             await self.initialize()
+
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
@@ -2549,8 +2666,14 @@ class Database(
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
 
+            # ─── جدولة الفهارس الثانوية ───
             if self._secondary_index_task is None or self._secondary_index_task.done():
-                self._secondary_index_task = asyncio.create_task(self._create_secondary_indexes([]))
+                secondary_indexes = self._get_secondary_indexes()
+                self._secondary_index_task = asyncio.create_task(
+                    self._create_secondary_indexes(secondary_indexes)
+                )
+
+            # ─── مهمة تنظيف الكاش ───
             if CACHE_AVAILABLE and (
                 self._cache_cleanup_task is None or self._cache_cleanup_task.done()
             ):
@@ -2558,8 +2681,9 @@ class Database(
 
             logger.info("✅ تم التهيئة المبكرة لقاعدة البيانات (مع المهام الخلفية)")
             return True
+
         except Exception as e:
-            logger.error(f"❌ فشل التهيئة المبكرة: {e}")
+            logger.error(f"❌ فشل التهيئة المبكرة: {e}", exc_info=True)
             return False
 
     # ═══════════════════════════════════════════════════════════════════
