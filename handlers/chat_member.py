@@ -196,7 +196,6 @@ async def _update_utils_cache(chat_id: int, admin_ids: Set[int]) -> None:
     """
     try:
         from utils import BackgroundTasks
-        # تحويل Set إلى List للتوافق
         BackgroundTasks._group_admins_cache[chat_id] = (time.time(), list(admin_ids))
         logger.debug(f"🔄 تم تحديث كاش المشرفين لـ {chat_id}: {len(admin_ids)} مشرف")
     except ImportError:
@@ -316,7 +315,6 @@ async def on_chat_member_update(
 
         # ب) تغيير في تفاصيل صلاحيات المشرف (بدون تغيير الوضع)
         if _is_admin_status(new_status) and _is_admin_status(old_status):
-            # قد تكون الصلاحيات تغيّرت
             try:
                 old_perms = _get_permissions_signature(cm_update.old_chat_member)
                 new_perms = _get_permissions_signature(cm_update.new_chat_member)
@@ -349,13 +347,10 @@ async def on_chat_member_update(
         # هـ) انضمام/مغادرة عادي
         if old_status in ("left", "kicked") and new_status in ("member", "restricted"):
             logger.debug(f"➕ انضم {user_id} إلى {chat.id}")
-
-            # إرسال ترحيب إن كان مفعّلاً
             await _handle_welcome(context, chat, user)
 
         elif old_status in ("member", "restricted") and new_status in ("left", "kicked"):
             logger.debug(f"➖ غادر {user_id} من {chat.id}")
-            # إرسال وداع إن كان مفعّلاً
             await _handle_goodbye(context, chat, user)
 
     except Exception as e:
