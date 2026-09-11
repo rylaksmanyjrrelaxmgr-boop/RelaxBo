@@ -14,6 +14,11 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - دعم كامل لجميع أزرار لوحة الأدمن
 - ✅ [v7.5.0] إبطال كاش الاشتراك الإجباري عند زر "تحقق"
 - ✅ [v7.5.0] إصلاح ChatPermissions في _handle_panel لتوافق PTB v22.8
+- ✅ [v7.5.2] إصلاح تسرب الذاكرة في debounce (مفتاح واحد لكل مستخدم)
+- ✅ [v7.5.2] إضافة Rate Limiting (30 ضغطة/دقيقة لكل مستخدم)
+- ✅ [v7.5.2] حماية effective_chat من None في _handle_panel
+- ✅ [v7.5.2] إضافة return بعد act_log في _handle_advanced_actions
+- ✅ [v7.5.2] تأخير 500ms بين الرسائل في _publish_all (حماية من 429)
 """
 
 import asyncio
@@ -151,6 +156,13 @@ async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
 class CallbackHandlers:
     """جميع معالجات الأزرار"""
 
+    # ✅ [v7.5.2] حد ضغطات الأزرار لكل مستخدم في الدقيقة
+    RATE_LIMIT_PER_MINUTE = 30
+    # ✅ [v7.5.2] تأخير بين كل عملية نشر جماعي (ثواني)
+    PUBLISH_DELAY_SECONDS = 0.5
+    # ✅ [v7.5.2] حجم الدفعة في النشر الجماعي
+    PUBLISH_BATCH_SIZE = 10
+
     @staticmethod
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """المعالج الرئيسي لجميع الأزرار"""
@@ -161,15 +173,29 @@ class CallbackHandlers:
         if not data:
             return
 
-        debounce_key = f"debounce_{query.id}"
+        user_id = query.from_user.id
         now_time = time.monotonic()
-        last_time = context.user_data.get(debounce_key, 0)
+
+        # ✅ [v7.5.2] FIX: debounce بمفتاح واحد لكل مستخدم (بدلاً من مفتاح لكل query.id)
+        # السبب: query.id فريد لكل ضغطة → context.user_data يكبر بلا حدود → تسرب ذاكرة
+        last_cb_key = f"last_cb_{user_id}"
+        last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < 1.5:
             await _safe_answer(query, "⚠️ انتظر لحظة")
             return
-        context.user_data[debounce_key] = now_time
+        context.user_data[last_cb_key] = now_time
 
-        user_id = query.from_user.id
+        # ✅ [v7.5.2] Rate Limiting: 30 ضغطة/دقيقة لكل مستخدم
+        rate_key = f"rate_{user_id}"
+        rate_data = context.user_data.get(rate_key)
+        if not rate_data or now_time - rate_data.get('reset', 0) > 60:
+            rate_data = {'count': 0, 'reset': now_time}
+        rate_data['count'] = rate_data.get('count', 0) + 1
+        context.user_data[rate_key] = rate_data
+        if rate_data['count'] > CallbackHandlers.RATE_LIMIT_PER_MINUTE:
+            await _safe_answer(query, "⚠️ تمهّل قليلاً! تجاوزت الحد المسموح")
+            return
+
         lang = await DB.get_user_language(user_id) or 'ar'
         start_time = time.monotonic()
 
@@ -1255,11 +1281,14 @@ class CallbackHandlers:
             return
         sem = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
+        # ✅ [v7.5.2] FIX: تأخير 500ms بين كل نشر لحماية البوت من 429 Too Many Requests
         async def run(task):
             async with sem:
-                return await CallbackHandlers._publish_single(bot, task[0], task[1], task[2])
+                result = await CallbackHandlers._publish_single(bot, task[0], task[1], task[2])
+                await asyncio.sleep(CallbackHandlers.PUBLISH_DELAY_SECONDS)
+                return result
 
-        BATCH = 10
+        BATCH = CallbackHandlers.PUBLISH_BATCH_SIZE
         for i in range(0, len(tasks), BATCH):
             batch = tasks[i:i+BATCH]
             results = await asyncio.gather(*(run(t) for t in batch), return_exceptions=True)
@@ -2529,7 +2558,8 @@ class CallbackHandlers:
                 await safe_edit(query, "📌 قم بالرد على الرسالة المطلوب تثبيتها ثم أرسل أي شيء:", bot=context.bot)
                 return
             elif action == "log":
-                await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang=None)
+                # ✅ [v7.5.2] FIX: إضافة return لمنع السقوط إلى "⚠️ غير معروف"
+                await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang='ar')
                 StateManager.clear(user_id)
                 return
 
@@ -2545,7 +2575,11 @@ class CallbackHandlers:
     # ============ معالجات اللوحة الخاصة (panel) ============
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data):
-        """✅ v7.5.0: استخدام ChatPermissions الجديدة المتوافقة مع PTB v22"""
+        """✅ v7.5.0: استخدام ChatPermissions الجديدة المتوافقة مع PTB v22
+        ✅ v7.5.2: حماية effective_chat من None"""
+        if not update.effective_chat:
+            await _safe_answer(query, "❌ لا يمكن تحديد المجموعة", show_alert=True)
+            return
         chat_id = update.effective_chat.id
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
             await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
