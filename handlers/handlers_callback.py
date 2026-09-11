@@ -13,6 +13,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - جميع الثوابت معرفة بشكل صحيح
 - دعم كامل لجميع أزرار لوحة الأدمن
 - ✅ [v7.5.0] إبطال كاش الاشتراك الإجباري عند زر "تحقق"
+- ✅ [v7.5.0] إصلاح ChatPermissions في _handle_panel لتوافق PTB v22.8
 """
 
 import asyncio
@@ -594,7 +595,6 @@ class CallbackHandlers:
                 else:
                     text = "❌ تعذر تفعيل التجربة"
                 await safe_edit(query, text, bot=context.bot)
-                # ✅ إبطال الكاش
                 await invalidate_user_cache(user_id)
                 return
 
@@ -622,10 +622,9 @@ class CallbackHandlers:
                 await CommandHandlers.language(update, context)
                 return
 
-            # ✅ v7.5.0: إبطال كاش الاشتراك الإجباري عند زر "تحقق"
+            # ✅ إبطال كاش الاشتراك الإجباري عند زر "تحقق"
             if base_data == CB.CHECK_SUB:
                 await _safe_answer(query)
-                # إبطال الكاش ليُعاد الفحص فوراً
                 try:
                     _invalidate_force_sub_cache(user_id)
                 except Exception as e:
@@ -653,7 +652,6 @@ class CallbackHandlers:
                 recycle_label = await _trans('auto_recycle_status', lang, "♻️ التدوير")
                 kb = KeyboardFactory.build("settings", lang=lang)
                 await safe_edit(query, f"⚙️ الإعدادات\n\n{auto_label}: {auto}\n{recycle_label}: {rec}", reply_markup=kb, bot=context.bot)
-                # ✅ إبطال الكاش
                 await invalidate_user_cache(user_id)
                 return
 
@@ -666,7 +664,6 @@ class CallbackHandlers:
                 recycle_label = await _trans('auto_recycle_status', lang, "♻️ التدوير")
                 kb = KeyboardFactory.build("settings", lang=lang)
                 await safe_edit(query, f"⚙️ الإعدادات\n\n{auto_label}: {auto}\n{recycle_label}: {rec}", reply_markup=kb, bot=context.bot)
-                # ✅ إبطال الكاش
                 await invalidate_user_cache(user_id)
                 return
 
@@ -798,7 +795,6 @@ class CallbackHandlers:
                 days = await DB.claim_referral_reward(user_id)
                 text = f"✅ تم صرف {days} يوم!" if days > 0 else "📭 لا توجد مكافآت"
                 await safe_edit(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=CB.REFERRAL)]]), bot=context.bot)
-                # ✅ إبطال الكاش
                 await invalidate_user_cache(user_id)
                 return
 
@@ -875,7 +871,6 @@ class CallbackHandlers:
             if base_data == CB.TRANS_OFF:
                 await DB.set_user_language(user_id, 'off')
                 await safe_edit(query, "✅ تم إيقاف الترجمة", bot=context.bot)
-                # ✅ إبطال الكاش
                 await invalidate_user_cache(user_id)
                 return
 
@@ -921,7 +916,6 @@ class CallbackHandlers:
                     return
                 if await DB.set_active_channel(user_id, ch_id):
                     await safe_edit(query, "✅ تم تحديد القناة!", bot=context.bot)
-                    # ✅ إبطال الكاش
                     await invalidate_user_cache(user_id)
                 else:
                     await _safe_answer(query, "❌ لا يمكنك تحديد هذه القناة", show_alert=True)
@@ -937,7 +931,6 @@ class CallbackHandlers:
                     await _safe_answer(query, "✅ تم الحذف")
                     context.user_data['channel_page'] = 0
                     await CallbackHandlers._show_channel_list(update, context, query, user_id, lang)
-                    # ✅ إبطال الكاش
                     await invalidate_user_cache(user_id)
                     return
                 else:
@@ -1125,7 +1118,6 @@ class CallbackHandlers:
                 if lang_set in ['ar', 'en', 'fr', 'tr', 'zh', 'ru', 'de', 'es', 'it', 'pt', 'ja', 'ko', 'fa', 'ur', 'nl', 'pl', 'hi', 'off']:
                     await DB.set_user_language(user_id, lang_set)
                     await _safe_answer(query, f"✅ {lang_set}")
-                    # ✅ إبطال الكاش
                     await invalidate_user_cache(user_id)
                     await CommandHandlers.start(update, context)
                 else:
@@ -2103,7 +2095,6 @@ class CallbackHandlers:
             # ===== معالج تعطيل الاشتراك الإجباري =====
             elif data == "admin_disable_force":
                 await DB.execute("UPDATE settings SET value = '' WHERE key = 'force_subscribe_channel'")
-                # ✅ إبطال الكاش في handlers_command
                 try:
                     _invalidate_force_sub_cache()
                 except Exception as e:
@@ -2118,7 +2109,6 @@ class CallbackHandlers:
                 return
 
             elif data == CB.ADMIN_REFRESH_CACHE:
-                # مسح الكاش
                 await invalidate_user_cache(user_id)
                 await safe_edit(query, "🔄 تم تحديث الكاش", bot=context.bot)
                 return
@@ -2559,15 +2549,52 @@ class CallbackHandlers:
     # ============ معالجات اللوحة الخاصة (panel) ============
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data):
+        """✅ v7.5.0: استخدام ChatPermissions الجديدة المتوافقة مع PTB v22"""
         chat_id = update.effective_chat.id
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
             await _safe_answer(query, "❌ لا صلاحية", show_alert=True)
             return
         if data == "panel_lock":
-            await context.bot.set_chat_permissions(chat_id, permissions=ChatPermissions(can_send_messages=False))
+            # ✅ قفل المجموعة - استخدام المعاملات الجديدة
+            await context.bot.set_chat_permissions(
+                chat_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_audios=False,
+                    can_send_documents=False,
+                    can_send_photos=False,
+                    can_send_videos=False,
+                    can_send_video_notes=False,
+                    can_send_voice_notes=False,
+                    can_send_polls=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False,
+                    can_change_info=False,
+                    can_invite_users=False,
+                    can_pin_messages=False,
+                )
+            )
             await safe_edit(query, "🔒 تم قفل المجموعة", bot=context.bot)
         elif data == "panel_unlock":
-            await context.bot.set_chat_permissions(chat_id, permissions=ChatPermissions(can_send_messages=True))
+            # ✅ فتح المجموعة - استخدام المعاملات الجديدة
+            await context.bot.set_chat_permissions(
+                chat_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=True,
+                    can_invite_users=True,
+                    can_pin_messages=True,
+                )
+            )
             await safe_edit(query, "🔓 تم فتح المجموعة", bot=context.bot)
         elif data == "panel_close":
             StateManager.clear(user_id)
