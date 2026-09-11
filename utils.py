@@ -16,6 +16,8 @@ utils.py - الأدوات المساعدة للبوت (نسخة محسّنة م�
 - ✅ إرسال إشعار النشر فقط عند أول منشور أو إعادة تدوير
 - ✅ إضافة حالة WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي
 - ✅ v7.4.7: تحسين sync_admins_periodically بكاش ذكي + توازي (يُسرّع /start)
+- ✅ v7.5.0: إصلاح ChatPermissions لتوافق python-telegram-bot v22.8
+  (can_send_media_messages محذوفة → استبدلت بـ 6 معاملات مفصلة)
 """
 
 import asyncio
@@ -173,7 +175,7 @@ class RateLimiter:
                     wait_time = 1 - (now - self._last_calls[0])
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
-                        now = time.time()  # إعادة حساب الوقت بعد الانتظار
+                        now = time.time()
                 self._last_calls.append(now)
 
 
@@ -254,7 +256,6 @@ class AutoReplyCache:
 
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
-# تعريف الكاشات المفقودة هنا
 _security_settings_cache = {}
 _security_settings_time = {}
 _auto_reply_settings_cache = {}
@@ -274,7 +275,6 @@ class TranslationManager:
     @classmethod
     @lru_cache(maxsize=32)
     def _load_translation_cached(cls, lang: str) -> Dict:
-        """تحميل ملف الترجمة مع التخزين المؤقت."""
         if lang == 'off':
             lang = cls._default_lang
         if lang in cls._translations:
@@ -291,7 +291,6 @@ class TranslationManager:
 
     @classmethod
     def load_translation(cls, lang: str) -> Dict:
-        """واجهة متوافقة مع الكود القديم."""
         return cls._load_translation_cached(lang)
 
     @classmethod
@@ -305,7 +304,6 @@ class TranslationManager:
         try:
             return template.format_map(kwargs)
         except KeyError:
-            # استبدال المفاتيح المفقودة بسلسلة فارغة
             return template.format_map(defaultdict(str, kwargs))
         except Exception:
             return template
@@ -338,7 +336,7 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
 
 
 # =====================================================================
-# 7. إدارة الحالات (مع إضافة WAIT_BACKUP_FILE)
+# 7. إدارة الحالات
 # =====================================================================
 
 class UserState(Enum):
@@ -403,7 +401,7 @@ class UserState(Enum):
     WAIT_PENALTY_RESTRICT_DURATION = auto()
     WAIT_MOOD = auto()
     WAIT_RESTORE = auto()
-    WAIT_BACKUP_FILE = auto()  # ✅ حالة جديدة لاستقبال ملف النسخ الاحتياطي
+    WAIT_BACKUP_FILE = auto()
 
 
 class StateManager:
@@ -438,7 +436,7 @@ class StateManager:
 
 
 # =====================================================================
-# 8. تعريفات الأزرار (CB) - كاملة
+# 8. تعريفات الأزرار (CB)
 # =====================================================================
 
 class CB:
@@ -594,8 +592,8 @@ class CB:
     ADMIN_INVOICES = "admin_invoices"
     ADMIN_PAYMENT_LOGS = "admin_payment_logs"
     ADMIN_GRANT_FREE = "admin_grant_free"
-    ADMIN_UPLOAD_BACKUP = "admin_upload_backup"       # ✅ زر رفع نسخة احتياطية
-    ADMIN_DISABLE_FORCE = "admin_disable_force"       # ✅ تعطيل الاشتراك الإجباري
+    ADMIN_UPLOAD_BACKUP = "admin_upload_backup"
+    ADMIN_DISABLE_FORCE = "admin_disable_force"
 
     AUTO_REPLY_MENU = "auto_reply_menu"
     AUTO_REPLY_TOGGLE = "auto_reply_toggle"
@@ -698,7 +696,6 @@ class KeyboardFactory:
 
     @classmethod
     def _load_config_for_lang(cls, lang: str) -> Dict:
-        """تحميل إعدادات الأزرار للغة معينة."""
         if lang == 'off':
             lang = cls._default_lang
 
@@ -859,7 +856,7 @@ class KeyboardFactory:
 
 
 # =====================================================================
-# 10. كاش الكلمات المحظورة (مع إصلاحات الأخطاء الستة)
+# 10. كاش الكلمات المحظورة
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -870,7 +867,6 @@ _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', False)
 
 
 def _normalize_word(word: Any) -> Optional[str]:
-    """تحويل الكلمة إلى نص صغير بدون مسافات، وتجاهل غير النصوص."""
     if not isinstance(word, str):
         return None
     word = word.strip().lower()
@@ -878,13 +874,6 @@ def _normalize_word(word: Any) -> Optional[str]:
 
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
-    """
-    جلب الكلمات المحظورة مع كاش اختياري.
-    الإصلاحات:
-    - لا يتم استخدام قفل إلا عند تفعيل الكاش.
-    - معالجة أخطاء قاعدة البيانات.
-    - التحقق من نوع البيانات وتجاهل غير النصوص.
-    """
     if _ENABLE_BANNED_WORDS_CACHE:
         if chat_id not in _banned_words_locks:
             _banned_words_locks[chat_id] = asyncio.Lock()
@@ -1019,7 +1008,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 
 
 # =====================================================================
-# 12. إرسال آمن (مع معالجة TimedOut ودعم الوسائط)
+# 12. إرسال آمن
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
@@ -1165,15 +1154,21 @@ class MutePenalty(PenaltyStrategy):
             return False, "لا يمكن كتم البوت"
         duration = kwargs.get('duration', 60)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
+        # ✅ v22: استخدام المعاملات الجديدة المفصلة (بدل can_send_media_messages المحذوفة)
         permissions = ChatPermissions(
             can_send_messages=False,
-            can_send_media_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
             can_send_polls=False,
             can_send_other_messages=False,
             can_add_web_page_previews=False,
             can_change_info=False,
             can_invite_users=True,
-            can_pin_messages=False
+            can_pin_messages=False,
         )
         try:
             await bot.restrict_chat_member(
@@ -1215,15 +1210,21 @@ class RestrictPenalty(PenaltyStrategy):
             return False, "لا يمكن تقييد البوت"
         duration = kwargs.get('duration', 0)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
+        # ✅ v22: استخدام المعاملات الجديدة المفصلة
         permissions = ChatPermissions(
             can_send_messages=True,
-            can_send_media_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
             can_send_polls=False,
             can_send_other_messages=False,
             can_add_web_page_previews=False,
             can_change_info=False,
             can_invite_users=True,
-            can_pin_messages=False
+            can_pin_messages=False,
         )
         try:
             await bot.restrict_chat_member(
@@ -1470,31 +1471,19 @@ def reload_replies_from_file() -> dict:
 # =====================================================================
 
 class BackgroundTasks:
-    # ═══════════════════════════════════════════════════════════════════
-    # ✅ v7.4.7: كاش لمشرفي المجموعات (يمنع الاستدعاءات المتكررة)
-    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v7.4.7: كاش لمشرفي المجموعات
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
-    _GROUP_ADMINS_CACHE_TTL = 600  # 10 دقائق
+    _GROUP_ADMINS_CACHE_TTL = 600
 
     @staticmethod
     async def _get_admin_ids_cached(bot, chat_id: int, force_refresh: bool = False) -> List[int]:
-        """
-        يجلب معرفات مشرفي المجموعة مع كاش 10 دقائق.
-        يمنع استدعاءات getChatAdministrators المتكررة.
-
-        - إذا كانت البيانات في الكاش → إرجاعها فوراً (بدون API call)
-        - إذا انتهت صلاحية الكاش → جلب جديد من Telegram
-        - إذا فشل الجلب → إرجاع الكاش القديم كطبقة أمان
-        """
         now = time.time()
 
-        # 1. فحص الكاش
         if not force_refresh and chat_id in BackgroundTasks._group_admins_cache:
             cached_time, cached_ids = BackgroundTasks._group_admins_cache[chat_id]
             if now - cached_time < BackgroundTasks._GROUP_ADMINS_CACHE_TTL:
                 return cached_ids
 
-        # 2. جلب جديد من Telegram
         try:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [
@@ -1505,7 +1494,6 @@ class BackgroundTasks:
             return admin_ids
         except Exception as e:
             logger.debug(f"⚠️ فشل جلب مشرفي {chat_id}: {e}")
-            # إرجاع الكاش القديم عند الفشل (بدل لا شيء)
             if chat_id in BackgroundTasks._group_admins_cache:
                 return BackgroundTasks._group_admins_cache[chat_id][1]
             return []
@@ -1562,10 +1550,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def _publish_single_channel(bot, ch, sleep_seconds, published_count):
-        """
-        نشر منشور واحد لقناة معينة.
-        - published_count: عدد المنشورات المنشورة مسبقاً (قبل هذا النشر)
-        """
         try:
             has_sub = await DB.has_active_subscription(ch['user_id'])
             if not has_sub:
@@ -1587,9 +1571,6 @@ class BackgroundTasks:
                 await DB.update_next_publish(ch['id'])
                 logger.info(f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة...")
 
-                # إرسال إشعار فقط إذا كان:
-                # - أول منشور على الإطلاق (published_count == 0)
-                # - أو تم إعادة التدوير (recycled == True)
                 if published_count == 0 or recycled:
                     try:
                         user_id = ch.get('user_id')
@@ -1747,25 +1728,9 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ Expire subs: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ✅ v7.4.7: تم تحسين sync_admins_periodically
-    #    - كاش 10 دقائق لكل مجموعة
-    #    - توازي بحد 3 طلبات متزامنة (بدل تسلسلي)
-    #    - تأخير 1 ثانية بين كل طلب
-    #    - كل ساعتين بدل ساعة (ChatMemberHandler يقوم بالعمل الفوري)
-    # ═══════════════════════════════════════════════════════════════════
     @staticmethod
     async def sync_admins_periodically(bot) -> None:
-        """
-        مزامنة مشرفي المجموعات (طبقة احتياطية بعد ChatMemberHandler).
-
-        - يعمل كل ساعتين (بدل ساعة).
-        - يحدّث 3 مجموعات بالتوازي كحد أقصى.
-        - تأخير 1 ثانية بين كل طلب.
-        - يستخدم الكاش لمنع الاستدعاءات المتكررة.
-        - إذا كان ChatMemberHandler يعمل، لن يُستدعى Telegram API غالباً.
-        """
-        await asyncio.sleep(180)  # تأخير أولي 3 دقائق (بدل دقيقة)
+        await asyncio.sleep(180)
 
         while True:
             try:
@@ -1778,7 +1743,6 @@ class BackgroundTasks:
                     await asyncio.sleep(7200)
                     continue
 
-                # ✅ الحد الأقصى 3 طلبات متزامنة (بدل تسلسلي)
                 semaphore = asyncio.Semaphore(3)
                 updated_count = 0
 
@@ -1792,19 +1756,16 @@ class BackgroundTasks:
                                 else group_row[0]
                             )
 
-                            # ✅ استخدام الكاش — لن يستدعي Telegram إذا كان محدثاً
                             admin_ids = await BackgroundTasks._get_admin_ids_cached(bot, chat_id)
                             if admin_ids:
                                 await DB.sync_group_admins(chat_id, admin_ids)
                                 updated_count += 1
 
-                            # ✅ تأخير 1 ثانية بين كل طلب
                             await asyncio.sleep(1.0)
 
                         except Exception as e:
                             logger.debug(f"Sync admins {group_row}: {e}")
 
-                # ✅ تنفيذ كل المهام بالتوازي مع حد أقصى 3
                 await asyncio.gather(
                     *[sync_one(g) for g in groups],
                     return_exceptions=True
@@ -1819,7 +1780,6 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ Sync admins: {e}")
 
-            # ✅ كل ساعتين (بدل ساعة)
             await asyncio.sleep(7200)
 
     @staticmethod
@@ -1845,7 +1805,6 @@ class BackgroundTasks:
                 _banned_words_cache_time.clear()
                 _auto_reply_cache.clear()
                 _auth_cache.clear()
-                # ✅ تنظيف كاش المشرفين أيضاً
                 BackgroundTasks._group_admins_cache.clear()
                 now = time.time()
                 expired_users = [
