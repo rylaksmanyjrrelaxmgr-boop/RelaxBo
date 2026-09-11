@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.2)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.3)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -27,6 +27,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.6: فصل دوال النسخ الاحتياطي إلى database_backup.py
 🆕 v7.4.7: فصل دوال التذكيرات إلى database_reminders.py
 🆕 v7.5.2: إضافة 6 فهارس أداء + توافق MySQL للفهارس الجزئية
+🆕 v7.5.3: تخطي استيراد البيانات المكررة (تحسين Cold Start ~9s)
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -2399,7 +2400,24 @@ class Database(
                     )
 
     async def _import_banned_words(self, conn):
+        """
+        ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الكلمات موجودة.
+        يوفّر ~7-8 ثوان في كل تشغيل بعد الأول.
+        """
         try:
+            # ✅ فحص سريع: هل استوردنا مسبقاً؟
+            existing_count = await self._fetchval_with_conn(
+                conn,
+                "SELECT COUNT(*) FROM banned_words WHERE chat_id = -1",
+                default=0,
+            )
+            if existing_count and existing_count >= 100:
+                logger.info(
+                    f"ℹ️ تم تخطي استيراد الكلمات المحظورة "
+                    f"({existing_count} موجودة مسبقاً)"
+                )
+                return
+
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
             if not BANNED_WORDS:
@@ -2433,7 +2451,24 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الكلمات المحظورة: {e}")
 
     async def _import_auto_replies(self, conn):
+        """
+        ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الردود موجودة.
+        يوفّر ~1-2 ثانية في كل تشغيل بعد الأول.
+        """
         try:
+            # ✅ فحص سريع: هل استوردنا مسبقاً؟
+            existing_count = await self._fetchval_with_conn(
+                conn,
+                "SELECT COUNT(*) FROM auto_replies WHERE chat_id = -1",
+                default=0,
+            )
+            if existing_count and existing_count >= 100:
+                logger.info(
+                    f"ℹ️ تم تخطي استيراد الردود التلقائية "
+                    f"({existing_count} موجودة مسبقاً)"
+                )
+                return
+
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
                 return
