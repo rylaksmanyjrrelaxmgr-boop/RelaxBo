@@ -19,6 +19,7 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
 - ✅ [v7.5.2] حماية effective_chat من None في _handle_panel
 - ✅ [v7.5.2] إضافة return بعد act_log في _handle_advanced_actions
 - ✅ [v7.5.2] تأخير 500ms بين الرسائل في _publish_all (حماية من 429)
+- ✅ [v7.5.5] إصلاح 'tuple' object has no attribute 'get' في _publish_single
 """
 
 import asyncio
@@ -177,7 +178,6 @@ class CallbackHandlers:
         now_time = time.monotonic()
 
         # ✅ [v7.5.2] FIX: debounce بمفتاح واحد لكل مستخدم (بدلاً من مفتاح لكل query.id)
-        # السبب: query.id فريد لكل ضغطة → context.user_data يكبر بلا حدود → تسرب ذاكرة
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < 1.5:
@@ -1184,8 +1184,54 @@ class CallbackHandlers:
                 logger.warning(f"🐢 زر بطيء {data}")
 
     # ============ دوال النشر ============
+
+    # ✅ [v7.5.5] دالة normalize post → dict
+    @staticmethod
+    def _normalize_post(post) -> Optional[Dict]:
+        """
+        ✅ v7.5.5: يضمن إرجاع dict من post أياً كان نوعه (dict / Row / tuple).
+        يحل مشكلة: 'tuple' object has no attribute 'get'
+        """
+        if post is None:
+            return None
+        # ✅ 1) dict جاهز
+        if isinstance(post, dict):
+            return post
+        # ✅ 2) aiosqlite.Row / asyncpg.Record / sqlite3.Row
+        try:
+            d = dict(post)
+            if d:
+                logger.warning(
+                    f"⚠️ get_next_post أرجع {type(post).__name__} "
+                    f"(تم التحويل إلى dict) — يُنصح بإصلاح database_channels_posts.py"
+                )
+                return d
+        except (TypeError, ValueError):
+            pass
+        # ✅ 3) tuple / list — نحاول استنتاج الترتيب من الطول
+        if isinstance(post, (tuple, list)):
+            short_keys = ['id', 'text', 'media_type', 'media_file_id']
+            full_keys = [
+                'id', 'channel_db_id', 'text', 'text_hash',
+                'media_type', 'media_file_id', 'published',
+                'fail_count', 'created_at', 'published_at'
+            ]
+            keys = short_keys if len(post) == 4 else full_keys
+            result = {k: post[i] for i, k in enumerate(keys) if i < len(post)}
+            logger.warning(
+                f"⚠️ get_next_post أرجع tuple({len(post)}) → تم تحويله: "
+                f"{list(result.keys())} — يُنصح بإصلاح database_channels_posts.py"
+            )
+            return result if result else None
+        return None
+
     @staticmethod
     async def _publish_single(bot, ch_db_id, ch_tele, post) -> bool:
+        # ✅ v7.5.5: normalize post to dict
+        post = CallbackHandlers._normalize_post(post)
+        if not post:
+            logger.error(f"❌ _publish_single: post غير صالح (None أو فشل التحويل)")
+            return False
         try:
             post_id = post.get('id')
             text = post.get('text', '')
@@ -1264,6 +1310,8 @@ class CallbackHandlers:
                 banned_count += 1
                 continue
             post = await DB.get_next_post(ch['id'])
+            # ✅ v7.5.5: normalize post قبل الإضافة
+            post = CallbackHandlers._normalize_post(post)
             if post:
                 ch_info = await DB.get_channel_info(user_id, ch['id'])
                 if ch_info:
@@ -1281,7 +1329,7 @@ class CallbackHandlers:
             return
         sem = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
-        # ✅ [v7.5.2] FIX: تأخير 500ms بين كل نشر لحماية البوت من 429 Too Many Requests
+        # ✅ [v7.5.2] تأخير 500ms بين كل نشر
         async def run(task):
             async with sem:
                 result = await CallbackHandlers._publish_single(bot, task[0], task[1], task[2])
@@ -2558,7 +2606,6 @@ class CallbackHandlers:
                 await safe_edit(query, "📌 قم بالرد على الرسالة المطلوب تثبيتها ثم أرسل أي شيء:", bot=context.bot)
                 return
             elif action == "log":
-                # ✅ [v7.5.2] FIX: إضافة return لمنع السقوط إلى "⚠️ غير معروف"
                 await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang='ar')
                 StateManager.clear(user_id)
                 return
