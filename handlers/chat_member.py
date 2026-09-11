@@ -17,6 +17,23 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
    - حظر/فك حظر (kicked ↔ member)
    - تغيير الصلاحيات التفصيلية (can_delete_messages, ...)
 
+5. ✅ إرسال الترحيب والوداع مع دعم كل المتغيرات:
+   - {user}        → الاسم الكامل (آمن HTML)
+   - {name}        → الاسم الأول (آمن HTML)
+   - {first_name}  → الاسم الأول (آمن HTML)
+   - {last_name}   → الاسم الأخير (آمن HTML)
+   - {full_name}   → الاسم الكامل (آمن HTML)
+   - {username}    → @username (آمن HTML)
+   - {mention}     → منشن HTML (قابل للنقر)
+   - {user_id}     → معرف المستخدم
+   - {id}          → معرف المستخدم
+   - {chat}        → اسم المجموعة (آمن HTML)
+   - {chat_name}   → اسم المجموعة (آمن HTML)
+
+6. ✅ حماية من كسر HTML:
+   - escape() لكل الأسماء والنصوص
+   - الأسماء الخاصة مثل <script> أو "Ahmed & Ali" آمنة
+
 📌 الفوائد:
    - لا حاجة لـ sync_admins_periodically (يمكن تعطيله)
    - استجابة فورية لتغييرات المشرفين
@@ -31,6 +48,7 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
 
 import logging
 import time
+from html import escape
 from typing import Optional, Set
 
 from telegram import Update, Chat, ChatMember, ChatMemberUpdated, User
@@ -71,6 +89,101 @@ def _extract_user_id(chat_member: ChatMember) -> Optional[int]:
     """استخراج معرف المستخدم."""
     user = _extract_user(chat_member)
     return user.id if user else None
+
+
+def _apply_template_variables(template: str, user: Optional[User], chat: Optional[Chat]) -> str:
+    """
+    استبدال كل المتغيرات في القالب مع تأمين HTML.
+
+    المتغيرات المدعومة:
+      {user}        → الاسم الكامل (آمن HTML)
+      {name}        → الاسم الأول (آمن HTML)
+      {first_name}  → الاسم الأول (آمن HTML)
+      {last_name}   → الاسم الأخير (آمن HTML)
+      {full_name}   → الاسم الكامل (آمن HTML)
+      {username}    → @username (آمن HTML)
+      {mention}     → منشن HTML (قابل للنقر)
+      {user_id}     → معرف المستخدم
+      {id}          → معرف المستخدم
+      {chat}        → اسم المجموعة (آمن HTML)
+      {chat_name}   → اسم المجموعة (آمن HTML)
+
+    ⚠️ ملاحظة مهمة:
+      كل النصوص تُمرَّر عبر escape() لمنع كسر HTML.
+      {mention} هو الاستثناء الوحيد لأنه يستخدم mention_html() المُؤمَّن.
+    """
+    if not template:
+        return template
+
+    # ═══════════════════════════════════════════════════════════════
+    # استخراج بيانات المستخدم مع تأمين HTML
+    # ═══════════════════════════════════════════════════════════════
+    if user:
+        # الاسم الأول — آمن HTML
+        first_name_raw = user.first_name or "عضو"
+        first_name = escape(first_name_raw)
+
+        # الاسم الأخير — آمن HTML
+        last_name_raw = user.last_name or ""
+        last_name = escape(last_name_raw)
+
+        # الاسم الكامل — آمن HTML
+        full_name_raw = f"{first_name_raw} {last_name_raw}".strip() or "عضو"
+        full_name = escape(full_name_raw)
+
+        # اسم المستخدم — آمن HTML
+        if user.username:
+            username_str = f"@{escape(user.username)}"
+        else:
+            username_str = ""
+
+        # منشن HTML — آمن (يستخدم mention_html نفسه)
+        try:
+            mention_html = user.mention_html()
+        except Exception:
+            mention_html = full_name
+
+        # معرف المستخدم
+        user_id_str = str(user.id)
+    else:
+        first_name = "عضو"
+        last_name = ""
+        full_name = "عضو"
+        username_str = ""
+        mention_html = "عضو"
+        user_id_str = ""
+
+    # ═══════════════════════════════════════════════════════════════
+    # اسم المجموعة — آمن HTML
+    # ═══════════════════════════════════════════════════════════════
+    if chat and chat.title:
+        chat_title = escape(chat.title)
+    else:
+        chat_title = "المجموعة"
+
+    # ═══════════════════════════════════════════════════════════════
+    # الاستبدال
+    # ⚠️ الترتيب مهم: {user} قبل {username} (لمنع التداخل)
+    # ═══════════════════════════════════════════════════════════════
+    replacements = [
+        ("{full_name}", full_name),
+        ("{first_name}", first_name),
+        ("{last_name}", last_name),
+        ("{username}", username_str),
+        ("{user_id}", user_id_str),
+        ("{chat_name}", chat_title),
+        ("{mention}", mention_html),
+        ("{name}", first_name),
+        ("{user}", full_name),
+        ("{id}", user_id_str),
+        ("{chat}", chat_title),
+    ]
+
+    result = template
+    for placeholder, value in replacements:
+        result = result.replace(placeholder, value)
+
+    return result
 
 
 # =====================================================================
@@ -242,7 +355,7 @@ async def on_chat_member_update(
 
         elif old_status in ("member", "restricted") and new_status in ("left", "kicked"):
             logger.debug(f"➖ غادر {user_id} من {chat.id}")
-            # يمكن إرسال وداع إن كان مفعّلاً
+            # إرسال وداع إن كان مفعّلاً
             await _handle_goodbye(context, chat, user)
 
     except Exception as e:
@@ -289,7 +402,18 @@ async def _handle_welcome(
     chat: Chat,
     user: Optional[User]
 ) -> None:
-    """إرسال رسالة ترحيب إن كانت مفعّلة."""
+    """
+    إرسال رسالة ترحيب إن كانت مفعّلة.
+
+    يدعم كل المتغيرات:
+      {user}, {name}, {first_name}, {last_name}, {full_name},
+      {username}, {mention}, {user_id}, {id}, {chat}, {chat_name}
+
+    ⚠️ ملاحظة:
+      - الترحيب يُرسل من هنا فقط (ChatMemberHandler)
+      - لا يُرسل من handle_service في handlers_message.py
+      - هذا يمنع الرسائل المزدوجة
+    """
     if not user or user.is_bot:
         return
 
@@ -300,16 +424,8 @@ async def _handle_welcome(
 
         welcome_text = settings.get("welcome_text") or "👋 أهلاً بك!"
 
-        # استبدال المتغيرات
-        welcome_text = welcome_text.replace(
-            "{name}", user.first_name or "عضو"
-        ).replace(
-            "{username}", f"@{user.username}" if user.username else ""
-        ).replace(
-            "{mention}", user.mention_html()
-        ).replace(
-            "{chat}", chat.title or ""
-        )
+        # ✅ استبدال آمن (مع escape للأسماء)
+        welcome_text = _apply_template_variables(welcome_text, user, chat)
 
         await context.bot.send_message(
             chat_id=chat.id,
@@ -328,7 +444,18 @@ async def _handle_goodbye(
     chat: Chat,
     user: Optional[User]
 ) -> None:
-    """إرسال رسالة وداع إن كانت مفعّلة."""
+    """
+    إرسال رسالة وداع إن كانت مفعّلة.
+
+    يدعم كل المتغيرات:
+      {user}, {name}, {first_name}, {last_name}, {full_name},
+      {username}, {mention}, {user_id}, {id}, {chat}, {chat_name}
+
+    ⚠️ ملاحظة:
+      - الوداع يُرسل من هنا فقط (ChatMemberHandler)
+      - لا يُرسل من handle_service في handlers_message.py
+      - هذا يمنع الرسائل المزدوجة
+    """
     if not user or user.is_bot:
         return
 
@@ -339,16 +466,8 @@ async def _handle_goodbye(
 
         goodbye_text = settings.get("goodbye_text") or "👋 وداعاً!"
 
-        # استبدال المتغيرات
-        goodbye_text = goodbye_text.replace(
-            "{name}", user.first_name or "عضو"
-        ).replace(
-            "{username}", f"@{user.username}" if user.username else ""
-        ).replace(
-            "{mention}", user.mention_html()
-        ).replace(
-            "{chat}", chat.title or ""
-        )
+        # ✅ استبدال آمن (مع escape للأسماء)
+        goodbye_text = _apply_template_variables(goodbye_text, user, chat)
 
         await context.bot.send_message(
             chat_id=chat.id,
