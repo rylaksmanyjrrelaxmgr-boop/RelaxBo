@@ -10,6 +10,7 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - إعادة تدوير المنشورات
 - تعديل الجدولة
 - عرض تفاصيل قناة
+- الرجوع للقائمة الرئيسية
 
 الاستخدام في bot.py:
     from handlers.handlers_channels_list import register_channels_list_handlers
@@ -662,7 +663,45 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. تسجيل كل الـ handlers
+# 7. الرجوع للقائمة الرئيسية
+# =====================================================================
+
+async def back_to_main_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    الرجوع للقائمة الرئيسية.
+    يستدعي CommandHandlers.start لعرض القائمة الرئيسية.
+    """
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+
+    try:
+        # استيراد ديناميكي (لتجنب circular import)
+        from handlers.handlers_command import CommandHandlers
+
+        # استدعاء start لعرض القائمة الرئيسية
+        await CommandHandlers.start(update, context)
+    except Exception as e:
+        logger.error(f"❌ back_to_main_menu: {e}", exc_info=True)
+        # fallback: رسالة بسيطة
+        try:
+            if query:
+                await query.edit_message_text(
+                    "🏠 <b>القائمة الرئيسية</b>\n\n"
+                    "أرسل /start لعرض القائمة",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+
+
+# =====================================================================
+# 8. تسجيل كل الـ handlers
 # =====================================================================
 
 def register_channels_list_handlers(application):
@@ -671,6 +710,15 @@ def register_channels_list_handlers(application):
     استدعِ هذه الدالة في bot.py بعد تهيئة التطبيق.
     """
     try:
+        # ═══ أولاً: الرجوع للقائمة الرئيسية ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                back_to_main_menu_callback,
+                pattern=r"^(main_menu|back_to_main_menu|back|home|start_back)$"
+            )
+        )
+
+        # ═══ قائمة القنوات ═══
         application.add_handler(
             CallbackQueryHandler(show_channels_list, pattern=r"^ch_list$")
         )
