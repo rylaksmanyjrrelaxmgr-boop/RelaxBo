@@ -10,7 +10,7 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - إعادة تدوير المنشورات
 - تعديل الجدولة
 - عرض تفاصيل قناة
-- الرجوع للقائمة الرئيسية
+- رجوع للقائمة الرئيسية (مع حذف الرسالة الحالية)
 
 الاستخدام في bot.py:
     from handlers.handlers_channels_list import register_channels_list_handlers
@@ -19,6 +19,7 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 """
 
 import logging
+import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# استيراد آمن (مع fallback)
+# استيراد آمن
 # =====================================================================
 
 try:
@@ -37,7 +38,7 @@ except ImportError:
     TimeUtils = None
 
 
-# زر الرجوع — مع fallback إذا لم يكن موجوداً
+# زر الرجوع — مع fallback
 try:
     from utils.keyboards import get_back_button
 except (ImportError, AttributeError):
@@ -50,15 +51,9 @@ except (ImportError, AttributeError):
 # =====================================================================
 
 async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    عرض قائمة كل القنوات مع حالتها.
-    يمكن استدعاؤها من:
-    - زر في القائمة الرئيسية (callback_data="ch_list")
-    - /channels
-    """
+    """عرض قائمة كل القنوات مع حالتها."""
     user_id = update.effective_user.id
 
-    # جلب القنوات مع الإحصائيات
     channels = await _get_channels_with_stats(user_id)
 
     if not channels:
@@ -68,7 +63,7 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel")],
-            [get_back_button()],
+            [InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu")],
         ])
     else:
         active_channel_id = await DB.get_active_channel(user_id)
@@ -109,7 +104,7 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _get_channels_with_stats(user_id: int):
-    """جلب كل قنوات المستخدم مع إحصائياتها في استعلام واحد."""
+    """جلب كل قنوات المستخدم مع إحصائياتها."""
     query = """
         SELECT 
             uc.id AS channel_db_id,
@@ -155,7 +150,6 @@ def _build_channels_text(channels, active_channel_id) -> str:
         published = ch.get("published", 0) or 0
         banned = ch.get("banned", 0)
 
-        # أيقونة الحالة
         if banned:
             icon = "🚫"
             status = "(محظورة)"
@@ -166,7 +160,6 @@ def _build_channels_text(channels, active_channel_id) -> str:
             icon = "⚪"
             status = ""
 
-        # اختصار الاسم
         if len(name) > 25:
             name = name[:22] + "..."
 
@@ -179,23 +172,16 @@ def _build_channels_text(channels, active_channel_id) -> str:
 
 
 def _build_channels_keyboard(channels, active_channel_id):
-    """
-    بناء لوحة الأزرار.
-    كل قناة = صف واحد بزرين:
-    - ✅/⚪ اختيار القناة
-    - ℹ️ تفاصيل
-    """
+    """بناء لوحة الأزرار."""
     keyboard = []
 
     for ch in channels:
         ch_db_id = ch["channel_db_id"]
         name = ch.get("channel_name") or "قناة"
 
-        # اختصار الاسم
         if len(name) > 20:
             name = name[:18] + "..."
 
-        # أيقونة الحالة
         if ch.get("banned", 0):
             select_icon = "🚫"
         elif ch_db_id == active_channel_id:
@@ -203,7 +189,6 @@ def _build_channels_keyboard(channels, active_channel_id):
         else:
             select_icon = "⚪"
 
-        # أزرار القناة
         keyboard.append([
             InlineKeyboardButton(
                 f"{select_icon} {name}",
@@ -215,14 +200,15 @@ def _build_channels_keyboard(channels, active_channel_id):
             ),
         ])
 
-    # أزرار عامة
     keyboard.append([
         InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel"),
     ])
     keyboard.append([
         InlineKeyboardButton("🗑️ حذف قناة", callback_data="ch_delete_menu"),
     ])
-    keyboard.append([get_back_button()])
+    keyboard.append([
+        InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu"),
+    ])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -244,17 +230,14 @@ async def channel_select_callback(
     except (ValueError, IndexError):
         return
 
-    # التحقق من الملكية
     owns = await DB.is_channel_owner(user_id, ch_db_id)
     if not owns:
         await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
         return
 
-    # تعيين نشطة
     success = await DB.set_active_channel(user_id, ch_db_id)
     if success:
         await query.answer("✅ تم تعيينها كقناة نشطة")
-        # تحديث القائمة
         await show_channels_list(update, context)
     else:
         await query.answer("⚠️ فشل التحديث", show_alert=True)
@@ -277,17 +260,14 @@ async def channel_info_callback(
     except (ValueError, IndexError):
         return
 
-    # جلب القناة
     ch = await DB.get_channel_by_id(user_id, ch_db_id)
     if not ch:
         await query.answer("⚠️ القناة غير موجودة", show_alert=True)
         return
 
-    # جلب الإحصائيات
     stats = await DB.get_channel_stats(user_id, ch_db_id)
     active_channel_id = await DB.get_active_channel(user_id)
 
-    # جلب الجدولة
     try:
         schedule = await DB.get_schedule(ch_db_id)
         interval_min = schedule.get("interval_minutes", 12) if schedule else 12
@@ -296,7 +276,6 @@ async def channel_info_callback(
         interval_min = 12
         next_publish = None
 
-    # بناء النص
     name = ch.get("channel_name", "قناة بدون اسم")
     ch_telegram_id = ch.get("channel_id", "غير معروف")
     banned = ch.get("banned", 0)
@@ -318,7 +297,6 @@ async def channel_info_callback(
         f"└ 📅 التالي: <b>{_format_date(next_publish)}</b>"
     )
 
-    # الأزرار
     buttons = []
 
     if ch_db_id != active_channel_id and not banned:
@@ -349,6 +327,9 @@ async def channel_info_callback(
     ])
     buttons.append([
         InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
+    ])
+    buttons.append([
+        InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")
     ])
 
     try:
@@ -414,7 +395,7 @@ async def channel_delete_menu_callback(
         ])
 
     buttons.append([
-        InlineKeyboardButton("↩️ رجوع", callback_data="ch_list")
+        InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
     ])
 
     try:
@@ -503,7 +484,6 @@ async def channel_delete_execute_callback(
             await query.answer("✅ تم الحذف", show_alert=True)
         except Exception:
             pass
-        # رجوع لقائمة القنوات
         await show_channels_list(update, context)
     else:
         await query.answer("⚠️ فشل الحذف", show_alert=True)
@@ -526,13 +506,11 @@ async def channel_recycle_callback(
     except (ValueError, IndexError):
         return
 
-    # التحقق من الملكية
     owns = await DB.is_channel_owner(user_id, ch_db_id)
     if not owns:
         await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
         return
 
-    # إعادة التدوير
     count = await DB.reset_posts(user_id, ch_db_id)
 
     try:
@@ -543,7 +521,6 @@ async def channel_recycle_callback(
     except Exception:
         pass
 
-    # رجوع لتفاصيل القناة
     await channel_info_callback(update, context)
 
 
@@ -564,7 +541,6 @@ async def channel_schedule_callback(
     except (ValueError, IndexError):
         return
 
-    # التحقق من الملكية
     owns = await DB.is_channel_owner(user_id, ch_db_id)
     if not owns:
         await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
@@ -663,7 +639,7 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. الرجوع للقائمة الرئيسية
+# 7. الرجوع للقائمة الرئيسية (✅ مُصلَح)
 # =====================================================================
 
 async def back_to_main_menu_callback(
@@ -671,33 +647,102 @@ async def back_to_main_menu_callback(
 ):
     """
     الرجوع للقائمة الرئيسية.
-    يستدعي CommandHandlers.start لعرض القائمة الرئيسية.
+
+    الخطوات:
+    1. الإجابة على الـ callback (لإخفاء مؤشر التحميل)
+    2. حذف الرسالة الحالية (قائمة القنوات)
+    3. استدعاء CommandHandlers.start لعرض القائمة الرئيسية
     """
     query = update.callback_query
-    if query:
-        try:
-            await query.answer()
-        except Exception:
-            pass
 
     try:
-        # استيراد ديناميكي (لتجنب circular import)
-        from handlers.handlers_command import CommandHandlers
+        await query.answer()
+    except Exception:
+        pass
 
-        # استدعاء start لعرض القائمة الرئيسية
-        await CommandHandlers.start(update, context)
+    # احذف الرسالة الحالية
+    try:
+        await query.message.delete()
     except Exception as e:
-        logger.error(f"❌ back_to_main_menu: {e}", exc_info=True)
-        # fallback: رسالة بسيطة
+        logger.debug(f"حذف الرسالة: {e}")
+        # إذا فشل الحذف، جرّب تعديل الرسالة إلى "جاري الرجوع..."
         try:
-            if query:
-                await query.edit_message_text(
-                    "🏠 <b>القائمة الرئيسية</b>\n\n"
-                    "أرسل /start لعرض القائمة",
-                    parse_mode="HTML",
-                )
+            await query.edit_message_text("🏠 جاري الرجوع للقائمة الرئيسية...")
         except Exception:
             pass
+
+    # استدعاء القائمة الرئيسية
+    try:
+        from handlers.handlers_command import CommandHandlers
+
+        # إنشاء update وهمي للرسالة
+        # (CommandHandlers.start عادةً يستخدم update.effective_user و update.message)
+        # لكن عند الاستدعاء من callback، update.message = None
+        # لذلك نستخدم message الخاص بالـ callback
+        if update.message is None and query.message:
+            # نمرر الرسالة الجديدة إلى CommandHandlers.start
+            # عبر chat_id الخاص بالمستخدم
+            try:
+                await CommandHandlers.start(update, context)
+            except (AttributeError, TypeError):
+                # fallback: أرسل رسالة جديدة
+                from handlers.handlers_command import CommandHandlers
+                # إنشاء رسالة نصية للقائمة الرئيسية
+                await _send_main_menu_fallback(context, query.from_user.id)
+        else:
+            await CommandHandlers.start(update, context)
+
+    except Exception as e:
+        logger.error(f"❌ back_to_main_menu: {e}", exc_info=True)
+        # fallback نهائي
+        try:
+            await _send_main_menu_fallback(context, query.from_user.id)
+        except Exception as e2:
+            logger.error(f"❌ fallback فشل: {e2}")
+            try:
+                await context.bot.send_message(
+                    query.from_user.id,
+                    "⚠️ فشل عرض القائمة الرئيسية.\nأرسل /start",
+                )
+            except Exception:
+                pass
+
+
+async def _send_main_menu_fallback(context, user_id: int):
+    """إرسال القائمة الرئيسية بطريقة احتياطية"""
+    try:
+        # جرّب استخدام KeyboardFactory
+        from utils import KeyboardFactory
+        keyboard = KeyboardFactory.main_menu() if hasattr(KeyboardFactory, "main_menu") else None
+
+        text = "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:"
+
+        if keyboard:
+            await context.bot.send_message(
+                user_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        else:
+            # أزرار افتراضية
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+                [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
+                [InlineKeyboardButton("💎 اشتراكي", callback_data="subscription_info")],
+                [InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings_menu")],
+                [InlineKeyboardButton("❓ مساعدة", callback_data="help_menu")],
+            ])
+            await context.bot.send_message(
+                user_id,
+                text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"_send_main_menu_fallback: {e}", exc_info=True)
+        raise
 
 
 # =====================================================================
@@ -710,11 +755,11 @@ def register_channels_list_handlers(application):
     استدعِ هذه الدالة في bot.py بعد تهيئة التطبيق.
     """
     try:
-        # ═══ أولاً: الرجوع للقائمة الرئيسية ═══
+        # ═══ الرجوع للقائمة الرئيسية (مهم: يسجل أولاً) ═══
         application.add_handler(
             CallbackQueryHandler(
                 back_to_main_menu_callback,
-                pattern=r"^(main_menu|back_to_main_menu|back|home|start_back)$"
+                pattern=r"^(main_menu|back_to_main|back_to_main_menu|home)$"
             )
         )
 
@@ -722,12 +767,16 @@ def register_channels_list_handlers(application):
         application.add_handler(
             CallbackQueryHandler(show_channels_list, pattern=r"^ch_list$")
         )
+
+        # ═══ اختيار/تفاصيل ═══
         application.add_handler(
             CallbackQueryHandler(channel_select_callback, pattern=r"^ch_select:")
         )
         application.add_handler(
             CallbackQueryHandler(channel_info_callback, pattern=r"^ch_info:")
         )
+
+        # ═══ الحذف ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_delete_menu_callback, pattern=r"^ch_delete_menu$"
@@ -743,11 +792,15 @@ def register_channels_list_handlers(application):
                 channel_delete_execute_callback, pattern=r"^ch_delete_execute:"
             )
         )
+
+        # ═══ إعادة التدوير ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_recycle_callback, pattern=r"^ch_recycle:"
             )
         )
+
+        # ═══ الجدولة ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_schedule_callback, pattern=r"^ch_schedule:"
