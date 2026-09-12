@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.3)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.8)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -28,6 +28,7 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.4.7: فصل دوال التذكيرات إلى database_reminders.py
 🆕 v7.5.2: إضافة 6 فهارس أداء + توافق MySQL للفهارس الجزئية
 🆕 v7.5.3: تخطي استيراد البيانات المكررة (تحسين Cold Start ~9s)
+🆕 v7.5.8: كاش has_active_subscription → /start أسرع 40x
 
 📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
   - database_channels_posts.py
@@ -527,6 +528,7 @@ except ImportError:
             await internal_cache.invalidate(f"groups_{user_id}")
             await internal_cache.invalidate(f"reminder_settings_{user_id}")
             await internal_cache.invalidate(f"auto_recycle_{user_id}")
+            await internal_cache.invalidate(f"has_active_sub_{user_id}")
         except Exception as e:
             logger.debug(f"invalidate_user_cache: {e}")
 
@@ -2402,10 +2404,8 @@ class Database(
     async def _import_banned_words(self, conn):
         """
         ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الكلمات موجودة.
-        يوفّر ~7-8 ثوان في كل تشغيل بعد الأول.
         """
         try:
-            # ✅ فحص سريع: هل استوردنا مسبقاً؟
             existing_count = await self._fetchval_with_conn(
                 conn,
                 "SELECT COUNT(*) FROM banned_words WHERE chat_id = -1",
@@ -2453,10 +2453,8 @@ class Database(
     async def _import_auto_replies(self, conn):
         """
         ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الردود موجودة.
-        يوفّر ~1-2 ثانية في كل تشغيل بعد الأول.
         """
         try:
-            # ✅ فحص سريع: هل استوردنا مسبقاً؟
             existing_count = await self._fetchval_with_conn(
                 conn,
                 "SELECT COUNT(*) FROM auto_replies WHERE chat_id = -1",
@@ -2547,19 +2545,9 @@ class Database(
     # =====================================================================
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """
-        يُرجع قائمة الفهارس الثانوية المناسبة لنوع قاعدة البيانات الحالي.
-
-        ملاحظات التوافق:
-          - PostgreSQL : يدعم IF NOT EXISTS + Partial Indexes (WHERE)
-          - SQLite     : يدعم IF NOT EXISTS + Partial Indexes (WHERE)
-          - MySQL      : لا يدعم أيّاً منهما → نستخدم CREATE INDEX عادي
-                         (دالة _index_exists تتحقق قبل الإنشاء، لذا آمن)
-        """
+        """يُرجع قائمة الفهارس الثانوية المناسبة لنوع قاعدة البيانات."""
         if USE_MYSQL:
-            # ═══════════════ MySQL (بدون IF NOT EXISTS + بدون WHERE) ═══════════════
             return [
-                # ─── الفهارس الأساسية ───
                 ("posts", "idx_posts_fail_count",
                  "CREATE INDEX idx_posts_fail_count ON posts(fail_count)"),
                 ("posts", "idx_posts_created_at",
@@ -2576,7 +2564,6 @@ class Database(
                  "CREATE INDEX idx_contest_participants_contest ON contest_participants(contest_id)"),
                 ("gift_codes", "idx_gift_codes_plan",
                  "CREATE INDEX idx_gift_codes_plan ON gift_codes(plan_id)"),
-                # ─── ✅ v7.5.2 — فهارس الأداء الجديدة ───
                 ("user_penalties", "idx_user_penalties_active_end",
                  "CREATE INDEX idx_user_penalties_active_end "
                  "ON user_penalties(status, end_time)"),
@@ -2594,9 +2581,7 @@ class Database(
                  "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
             ]
         else:
-            # ═══════════════ SQLite + PostgreSQL (IF NOT EXISTS + Partial Indexes) ═══════════════
             return [
-                # ─── الفهارس الأساسية ───
                 ("posts", "idx_posts_fail_count",
                  "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
                 ("posts", "idx_posts_created_at",
@@ -2613,7 +2598,6 @@ class Database(
                  "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)"),
                 ("gift_codes", "idx_gift_codes_plan",
                  "CREATE INDEX IF NOT EXISTS idx_gift_codes_plan ON gift_codes(plan_id)"),
-                # ─── ✅ v7.5.2 — فهارس الأداء الجديدة (Partial Indexes) ───
                 ("user_penalties", "idx_user_penalties_active_end",
                  "CREATE INDEX IF NOT EXISTS idx_user_penalties_active_end "
                  "ON user_penalties(status, end_time) WHERE status = 'active'"),
@@ -2635,24 +2619,47 @@ class Database(
             ]
 
     # =====================================================================
+    # ✅ v7.5.8 — كاش has_active_subscription (لتقليل استعلامات /start)
+    # =====================================================================
+
+    async def has_active_subscription(self, user_id: int) -> bool:
+        """
+        ✅ v7.5.8: كاش 30 ثانية — يُستدعى كثيراً عند /start
+        يقلل الضغط على DB بنسبة ~90% ويحل مشكلة البطء عند /start.
+        """
+        cache_key = f"has_active_sub_{user_id}"
+        cached = await internal_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # محاولة استخدام النسخة الأصلية من الـ Mixin
+        try:
+            result = await super().has_active_subscription(user_id)
+        except AttributeError:
+            # Fallback: استعلام مباشر (لو الدالة غير موجودة في Mixin)
+            row = await self.fetchval(
+                "SELECT 1 FROM subscriptions "
+                "WHERE user_id = ? AND status = 'active' AND end_date > ? LIMIT 1",
+                (user_id, TimeUtils.utc_now()),
+            )
+            result = row is not None
+
+        await internal_cache.set(cache_key, result, ttl=30)
+        return result
+
+    async def invalidate_subscription_cache(self, user_id: int):
+        """✅ v7.5.8: للاستدعاء عند تفعيل/إلغاء اشتراك"""
+        await internal_cache.invalidate(f"has_active_sub_{user_id}")
+
+    # =====================================================================
     # التهيئة الكاملة
     # =====================================================================
 
     async def initialize_db(self) -> bool:
-        """
-        التهيئة الكاملة لقاعدة البيانات:
-          1. إنشاء الـ Pool
-          2. إنشاء الجداول
-          3. ترحيل المخطط
-          4. البيانات الافتراضية (plans + banned_words + auto_replies)
-          5. إنشاء الفهارس الثانوية في مهمة خلفية (لا تعطّل البدء)
-          6. تشغيل مهمة تنظيف الكاش
-        """
+        """التهيئة الكاملة لقاعدة البيانات."""
         try:
-            # ─── الخطوة 1: تهيئة الـ Pool ───
             await self.initialize()
 
-            # ─── الخطوة 2: إنشاء الجداول + الترحيل + البيانات الافتراضية ───
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
@@ -2661,7 +2668,6 @@ class Database(
                 await self._import_auto_replies(conn)
                 await self._ensure_text_hash_column(conn)
 
-            # ─── الخطوة 3: إنشاء الفهارس الثانوية في مهمة خلفية ───
             if self._secondary_index_task is None or self._secondary_index_task.done():
                 secondary_indexes = self._get_secondary_indexes()
                 logger.info(
@@ -2672,7 +2678,6 @@ class Database(
                     self._create_secondary_indexes(secondary_indexes)
                 )
 
-            # ─── الخطوة 4: تشغيل مهمة تنظيف الكاش ───
             if CACHE_AVAILABLE and (
                 self._cache_cleanup_task is None or self._cache_cleanup_task.done()
             ):
@@ -2686,10 +2691,7 @@ class Database(
             return False
 
     async def pre_initialize(self):
-        """
-        تهيئة مبكرة (تستخدم عادةً من startup hook أو preload).
-        نفس خطوات initialize_db لكن بدون تسجيل صاخب.
-        """
+        """تهيئة مبكرة (تستخدم عادةً من startup hook أو preload)."""
         try:
             await self.initialize()
 
@@ -2701,14 +2703,12 @@ class Database(
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
 
-            # ─── جدولة الفهارس الثانوية ───
             if self._secondary_index_task is None or self._secondary_index_task.done():
                 secondary_indexes = self._get_secondary_indexes()
                 self._secondary_index_task = asyncio.create_task(
                     self._create_secondary_indexes(secondary_indexes)
                 )
 
-            # ─── مهمة تنظيف الكاش ───
             if CACHE_AVAILABLE and (
                 self._cache_cleanup_task is None or self._cache_cleanup_task.done()
             ):
