@@ -22,6 +22,7 @@
     "post_del": "🗑️ حذف منشور",
     "post_clear": "🧹 مسح الكل",
     "pub_all": "📤 نشر الكل",
+    "finish_posts": "✅ إنهاء",
     "plans": "💎 الباقات",
     "subscribe": "💎 اشتراك",
     "gift_plans": "🎁 شراء كود هدية",
@@ -105,6 +106,7 @@
     "buy_sub_30": "🗓️ شهر",
     "buy_sub_90": "🗓️ 3 أشهر",
     "buy_sub_365": "🗓️ سنة",
+    "auto_reply": "📝 الردود التلقائية",
     "auto_reply_add": "➕ إضافة رد",
     "auto_reply_del": "🗑️ حذف رد",
     "auto_reply_list": "📋 قائمة الردود",
@@ -172,6 +174,7 @@
     "sec_night_settings": "🌙 إعدادات الليل",
     "sec_penalty_durations": "⏳ مدد العقوبات",
     "sec_violation_settings": "⚖️ عقوبات المخالفات",
+    "sec_violation_penalties": "🚨 عقوبات المخالفات",
     "sec_activate_all": "✅ تفعيل الكل",
     "sec_deactivate_all": "❌ تعطيل الكل",
     "sec_close": "❌ إغلاق",
@@ -320,6 +323,15 @@
         ["act_restrict", "act_unban"],
         ["act_pin"],
         ["act_log"],
+        ["back"]
+      ]
+    },
+    "auto_reply": {
+      "rows": [
+        ["auto_reply_toggle", "auto_reply_admins"],
+        ["auto_reply_add", "auto_reply_del"],
+        ["auto_reply_list", "auto_reply_stats"],
+        ["auto_reply_reset"],
         ["back"]
       ]
     },
