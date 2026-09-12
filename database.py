@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.21)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.22)
 ================================================================================
+🆕 v7.5.22 (ضمان UNIQUE على settings.key):
+    ✅ _create_tables: استدعاء ensure_settings_unique_constraint() 
+       بعد إنشاء الجداول
+    ✅ يعمل تلقائياً على PostgreSQL/MySQL (يتجاهل SQLite)
+    ✅ يضمن عمل ON CONFLICT (key) في set_setting
+
 🆕 v7.5.21 (إصلاح register_user + TIMESTAMP):
     ✅ register_user: استبدال TimeUtils.sql_iso() بـ TimeUtils.utc_now() 
        للأعمدة TIMESTAMP (user_points.last_updated)
@@ -2371,6 +2377,9 @@ class Database(
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     async def _create_tables(self):
+        """
+        ✅ v7.5.22: إنشاء الجداول + ضمان UNIQUE على settings.key.
+        """
         if not TABLES_MODULE_AVAILABLE:
             raise RuntimeError(
                 "❌ database_tables.py غير متاح — تأكد من وجوده بجانب database.py"
@@ -2385,6 +2394,16 @@ class Database(
             else:
                 await create_tables_sqlite(conn, logger, TimeUtils)
                 logger.info("✅ تم إنشاء جداول SQLite عبر database_tables.py")
+
+        # ✅ v7.5.22: ضمان UNIQUE constraint على settings.key
+        try:
+            if hasattr(self, "ensure_settings_unique_constraint"):
+                await self.ensure_settings_unique_constraint()
+                logger.info("✅ تم التحقق من UNIQUE constraint على settings.key")
+            else:
+                logger.debug("ℹ️ ensure_settings_unique_constraint غير متاحة — تخطي")
+        except Exception as e:
+            logger.warning(f"⚠️ فشل التحقق من UNIQUE على settings.key: {e}")
 
     async def _add_column_safe(self, conn, table: str, col_name: str, col_def: str):
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or not re.match(
@@ -3365,7 +3384,8 @@ class Database(
 
         except Exception as e:
             logger.error(
-                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True            )
+                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True
+            )
             return False
 
     async def pre_initialize(self):
@@ -3884,7 +3904,6 @@ class Database(
                     )
                     return False
 
-                # ✅ v7.5.21: استخدام utc_now() بدل sql_iso() للأعمدة TIMESTAMP
                 try:
                     async with self.transaction() as conn:
                         if USE_POSTGRES:
