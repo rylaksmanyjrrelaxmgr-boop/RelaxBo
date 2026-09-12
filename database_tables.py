@@ -2,41 +2,33 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.8)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.9)
 ================================================================================
-🆕 v7.5.8 (إصلاحات v5.4):
-  ✅ _safe_now_iso: إزالة +00:00 من fallback (توافق MySQL)
-  ✅ حذف الكود الميت: _validate_json, TABLES_WITH_FK_RESTRICT
-  ✅ _fetch_existing_indexes_mysql: تبسيط + رفع level إلى INFO
-  ✅ فحص مسبق للأعمدة في CHECK لـ plans.features (PostgreSQL)
-  ✅ توحيد schema_version insert لكل المحركات
-  ✅ إضافة فحص أمان في _execute_batch_migrations (اسم الجدول)
-  ✅ إصلاح COALESCE في MySQL UNIQUE INDEX (يدعم NULL)
-  ✅ استخدام _safe_now_dt في PostgreSQL لكل الطوابع الزمنية
-  ✅ فحص COUNT الفهارس قبل الإنشاء
+🆕 v7.5.9 (تنظيف الفهارس القديمة):
+  ✅ DEPRECATED_INDEXES: قائمة الفهارس القديمة المراد حذفها
+  ✅ _drop_deprecated_indexes_postgres/sqlite/mysql: دوال الحذف
+  ✅ حذف الفهارس القديمة تلقائياً قبل إنشاء الجديدة
+  ✅ دمج _create_indexes_sqlite/postgres في دالة موحّدة
+  ✅ حذف _table_exists_mysql (كود ميت)
+  ✅ إضافة 'features = '' OR' في CHECK لـ PostgreSQL
 
-📌 v7.5.7 (v5.3):
-  - إضافة idx_ar_chat_keyword — فهرس مركب على auto_replies(chat_id, keyword)
-  - EXPECTED_INDEX_COUNT: 60 → 62
-  - إضافة idx_ar_usage — فهرس على usage_count
-
-📌 v7.5.6 (v5.2):
-  - FOREIGN_KEY_CHECKS مع try/finally
-  - posts UNIQUE مع COALESCE
-  - FKs مع ON DELETE RESTRICT
-  - _fetch_existing_indexes_mysql محسّنة بـ information_schema
-  - _create_indexes_postgres بدون transaction مُلغٍ
-  - _table_exists_mysql parameterized
-  - assert على عدد الفهارس
-  - إزالة chat_locks
-  - توحيد اسم idx_posts_unique
-  - CHECK على plans.features (JSON)
+📌 v7.5.8 (إصلاحات v5.4):
+  - _safe_now_iso: إزالة +00:00 من fallback (توافق MySQL)
+  - حذف الكود الميت: _validate_json, TABLES_WITH_FK_RESTRICT
+  - _fetch_existing_indexes_mysql: تبسيط + رفع level إلى INFO
+  - فحص مسبق للأعمدة في CHECK لـ plans.features (PostgreSQL)
+  - توحيد schema_version insert لكل المحركات
+  - إضافة فحص أمان في _execute_batch_migrations (اسم الجدول)
+  - إصلاح COALESCE في MySQL UNIQUE INDEX (يدعم NULL)
+  - استخدام _safe_now_dt في PostgreSQL لكل الطوابع الزمنية
+  - فحص COUNT الفهارس قبل الإنشاء
 ================================================================================
 """
 
 import os
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 # =====================================================================
@@ -144,7 +136,7 @@ COMMON_INDEXES = [
      "banned_words(chat_id, word)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # AUTO_REPLIES (4) — v7.5.7
+    # AUTO_REPLIES (4)
     # ═══════════════════════════════════════════════════════════════
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
@@ -262,6 +254,136 @@ COMMON_INDEXES = [
      "user_reminder_settings(subscription_reminder)"),
 ]
 
+# ✅ v7.5.9: قائمة الفهارس القديمة المراد حذفها (تنظيف)
+# هذه فهارس كانت موجودة في نسخ سابقة وتم استبدالها بفهارس أفضل
+DEPRECATED_INDEXES = [
+    # ═══ posts — نسخ قديمة أو مكررة ═══
+    "idx_posts_channel_pub_fail_created_optimized",
+    "idx_posts_next",
+    "idx_posts_channel_unpub",
+    "idx_posts_channel_pub",
+    "idx_posts_channel_pub_fail",
+    "idx_posts_channel_pub_fail_count",
+    "idx_posts_fail",
+    "idx_posts_created_at",
+    "idx_posts_fail_count",
+    "idx_posts_channel_created",
+    "idx_posts_channel_fail",
+    "idx_posts_channel_pub_fail",
+
+    # ═══ subscriptions — نسخ قديمة أو مكررة ═══
+    "idx_subscriptions_user_status",
+    "idx_subscriptions_user_status_end",
+    "idx_sub_user_status_end",
+    "idx_subscriptions_active",
+    "idx_subscriptions_active_end",
+    "idx_sub_user",
+    "idx_sub_end",
+    "idx_sub_status",
+
+    # ═══ user_channels — نسخ قديمة أو مكررة ═══
+    "idx_user_channels_user_banned",
+    "idx_user_channels_user_banned_only",
+    "idx_user_channels_user_banned_id",
+    "idx_user_channels_id_user",
+    "idx_uc_user_banned",
+    "idx_uc_user",
+    "idx_uc_channel_id",
+    "idx_uc_active",
+
+    # ═══ user_penalties — نسخ قديمة أو مكررة ═══
+    "idx_penalties_user_chat_status",
+    "idx_penalties_user_chat",
+    "idx_penalties_user",
+    "idx_user_penalties_active_end",
+    "idx_user_penalties_expiry",
+    "idx_user_penalties_cleanup",
+    "idx_penalties_chat_status",
+    "idx_penalties_chat",
+
+    # ═══ banned_words — نسخ مكررة ═══
+    "idx_banned_words_chat",
+    "idx_banned_words_word",
+
+    # ═══ user_reminder_settings — نسخ مكررة ═══
+    "idx_reminders_subscription",
+    "idx_reminder_subscription",
+    "idx_reminders_user",
+
+    # ═══ admin_logs — نسخ قديمة ═══
+    "idx_admin_logs_created",
+    "idx_admin_logs_admin",
+
+    # ═══ anonymous_admins — نسخ قديمة ═══
+    "idx_anonymous_admins_chat",
+    "idx_anonymous_admins_user",
+
+    # ═══ hidden_admins — نسخ قديمة ═══
+    "idx_hidden_admin_admin",
+
+    # ═══ group_admins — نسخ قديمة ═══
+    "idx_group_admins_user",
+    "idx_group_admins_chat",
+
+    # ═══ schedule — نسخ قديمة ═══
+    "idx_sched_next",
+    "idx_schedule_next",
+    "idx_schedule_next_channel",
+
+    # ═══ contest_participants — نسخ قديمة ═══
+    "idx_contest_participants_user",
+
+    # ═══ users — نسخ قديمة ═══
+    "idx_users_updated",
+    "idx_users_trial_used",
+    "idx_users_subscription",
+    "idx_users_referral",
+    "idx_users_banned_publish",
+
+    # ═══ referrals — نسخ قديمة ═══
+    "idx_referrals_referred",
+    "idx_referrals_created",
+
+    # ═══ contests — نسخ قديمة ═══
+    "idx_contests_end",
+
+    # ═══ hidden_owner_groups — نسخ قديمة ═══
+    "idx_hidden_owner_owner",
+
+    # ═══ support_tickets — نسخ قديمة ═══
+    "idx_tickets_user",
+    "idx_tickets_number",
+
+    # ═══ invoices — نسخ قديمة ═══
+    "idx_inv_status",
+    "idx_inv_number",
+
+    # ═══ auto_replies — نسخ قديمة ═══
+    "idx_auto_replies_keyword",
+    "idx_ar_keyword",
+
+    # ═══ settings — نسخ قديمة ═══
+    "idx_settings_key",
+
+    # ═══ user_violations — نسخ قديمة ═══
+    "idx_user_violations_user",
+    "idx_user_violations_chat",
+    "idx_violations_user_chat",
+
+    # ═══ user_warnings — نسخ قديمة ═══
+    "idx_user_warnings_user",
+    "idx_user_warnings_chat",
+
+    # ═══ payment_logs — نسخ قديمة ═══
+    # (idx_payment_logs_user موجود ومستخدم، لا نحذفه)
+
+    # ═══ contest_winners — نسخ قديمة ═══
+    # (لا يوجد فهرس على هذا الجدول)
+
+    # ═══ user_groups_link — نسخ قديمة ═══
+    "idx_ugl_user",
+]
+
 # ✅ v7.5.8: فحص فعلي لعدد الفهارس عند الاستيراد
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
     f"❌ عدد الفهارس غير مطابق: "
@@ -294,6 +416,13 @@ def _safe_now_dt(TimeUtils):
         except Exception as e:
             logging.debug(f"_safe_now_dt fallback: {e}")
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_valid_index_name(name: str) -> bool:
+    """✅ v7.5.9: فحص أمان لاسم الفهرس."""
+    if not name or not isinstance(name, str):
+        return False
+    return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
 
 
 # =====================================================================
@@ -348,7 +477,6 @@ async def _fetch_existing_indexes_mysql(conn, tables):
         await cursor.close()
         return {(r[0], r[1]) for r in rows}
     except Exception as e:
-        # ✅ v7.5.8: fallback مع logging level صحيح
         logging.warning(
             f"⚠️ information_schema فشل ({e}) — استخدام SHOW INDEX"
         )
@@ -358,7 +486,6 @@ async def _fetch_existing_indexes_mysql(conn, tables):
                 cursor = await conn.cursor()
                 await cursor.execute(f"SHOW INDEX FROM `{table}`")
                 rows = await cursor.fetchall()
-                # SHOW INDEX: [Table, Non_unique, Key_name, ...]
                 for r in rows:
                     existing.add((table, r[2]))
                 await cursor.close()
@@ -390,72 +517,131 @@ async def _fetch_existing_tables_sqlite(conn):
         return set()
 
 
-async def _table_exists_mysql(conn, table: str) -> bool:
+# =====================================================================
+# ✅ v7.5.9: دوال حذف الفهارس القديمة (DEPRECATED)
+# =====================================================================
+
+async def _drop_deprecated_indexes_postgres(conn, logger):
+    """
+    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في PostgreSQL.
+    """
+    if not DEPRECATED_INDEXES:
+        return
     try:
-        cursor = await conn.cursor()
-        await cursor.execute(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = DATABASE() AND table_name = %s",
-            (table,),
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[])",
+            DEPRECATED_INDEXES,
         )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return row is not None
-    except Exception:
-        try:
-            cursor = await conn.cursor()
-            await cursor.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = DATABASE() AND table_name = %s",
-                (table,),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            return row is not None
-        except Exception:
-            return False
+        existing = {row["indexname"] for row in rows}
+        if not existing:
+            return
+
+        dropped = 0
+        for idx_name in existing:
+            if not _is_valid_index_name(idx_name):
+                logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
+                continue
+            try:
+                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                dropped += 1
+            except Exception as e:
+                logger.warning(f"⚠️ فشل حذف فهرس {idx_name}: {e}")
+
+        if dropped > 0:
+            logger.info(f"🧹 PG: حُذف {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_postgres: {e}")
+
+
+async def _drop_deprecated_indexes_sqlite(conn, logger):
+    """
+    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في SQLite.
+    """
+    if not DEPRECATED_INDEXES:
+        return
+    try:
+        placeholders = ",".join(["?"] * len(DEPRECATED_INDEXES))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(DEPRECATED_INDEXES),
+        )
+        rows = await cursor.fetchall()
+        existing = {row[0] for row in rows}
+
+        dropped = 0
+        for idx_name in existing:
+            if not _is_valid_index_name(idx_name):
+                logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
+                continue
+            try:
+                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                dropped += 1
+            except Exception as e:
+                logger.warning(f"⚠️ SQLite فشل حذف {idx_name}: {e}")
+
+        if dropped > 0:
+            logger.info(f"🧹 SQLite: حُذف {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_sqlite: {e}")
+
+
+async def _drop_deprecated_indexes_mysql(conn, logger):
+    """
+    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في MySQL.
+    """
+    if not DEPRECATED_INDEXES:
+        return
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        existing = await _fetch_existing_indexes_mysql(conn, tables)
+
+        dropped = 0
+        for table, idx_name in existing:
+            if idx_name in DEPRECATED_INDEXES:
+                if not _is_valid_index_name(idx_name):
+                    logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
+                    continue
+                if not _is_valid_index_name(table):
+                    logger.warning(f"⚠️ اسم جدول غير صالح: {table}")
+                    continue
+                try:
+                    await conn.execute(
+                        f"DROP INDEX {idx_name} ON `{table}`"
+                    )
+                    dropped += 1
+                except Exception as e:
+                    # تجاهل الأخطاء الشائعة (فهرس غير موجود)
+                    err_msg = str(e).lower()
+                    if "1091" not in err_msg and "doesn't exist" not in err_msg:
+                        logger.warning(
+                            f"⚠️ MySQL فشل حذف {idx_name}: {e}"
+                        )
+
+        if dropped > 0:
+            logger.info(f"🧹 MySQL: حُذف {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_mysql: {e}")
 
 
 # =====================================================================
-# دوال إنشاء الفهارس
+# ✅ v7.5.9: دالة موحّدة لإنشاء الفهارس
 # =====================================================================
 
-async def _create_indexes_sqlite(conn, logger):
-    existing = await _fetch_existing_indexes_sqlite(conn)
-    to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
-
-    if not to_create:
+async def _create_indexes_generic(
+    conn, logger, db_name: str, fetch_existing_fn
+):
+    """
+    ✅ v7.5.9: دالة موحّدة لإنشاء الفهارس (SQLite + PostgreSQL).
+    """
+    try:
+        existing = await fetch_existing_fn(conn)
+    except Exception as e:
         if logger:
-            logger.info(
-                f"✅ SQLite: 0 فهرس جديد، "
-                f"{len(COMMON_INDEXES)} موجود، 0 فشل"
-            )
+            logger.warning(f"⚠️ {db_name} فشل جلب الفهارس: {e}")
         return
 
-    created = 0
-    failed = 0
-    for _table, idx_name, cols in to_create:
-        try:
-            await conn.execute(
-                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-            )
-            created += 1
-        except Exception as e:
-            failed += 1
-            if logger:
-                logger.warning(f"⚠️ SQLite فهرس {idx_name}: {e}")
-
-    skipped = len(COMMON_INDEXES) - len(to_create)
-    if logger:
-        logger.info(
-            f"✅ SQLite: {created} فهرس جديد، "
-            f"{skipped} موجود، {failed} فشل"
-        )
-
-
-async def _create_indexes_postgres(conn, logger):
-    index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
-    existing = await _fetch_existing_indexes_postgres(conn, index_names)
     to_create = [
         (t, n, c) for t, n, c in COMMON_INDEXES if n not in existing
     ]
@@ -463,7 +649,7 @@ async def _create_indexes_postgres(conn, logger):
     if not to_create:
         if logger:
             logger.info(
-                f"✅ PostgreSQL: 0 فهرس جديد، "
+                f"✅ {db_name}: 0 فهرس جديد، "
                 f"{len(COMMON_INDEXES)} موجود، 0 فشل"
             )
         return
@@ -471,6 +657,11 @@ async def _create_indexes_postgres(conn, logger):
     created = 0
     failed = 0
     for _table, idx_name, cols in to_create:
+        if not _is_valid_index_name(idx_name):
+            if logger:
+                logger.warning(f"⚠️ {db_name} اسم فهرس غير صالح: {idx_name}")
+            failed += 1
+            continue
         try:
             await conn.execute(
                 f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
@@ -479,14 +670,31 @@ async def _create_indexes_postgres(conn, logger):
         except Exception as e:
             failed += 1
             if logger:
-                logger.warning(f"⚠️ PG فهرس {idx_name}: {e}")
+                logger.warning(f"⚠️ {db_name} فهرس {idx_name}: {e}")
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
         logger.info(
-            f"✅ PostgreSQL: {created} فهرس جديد، "
+            f"✅ {db_name}: {created} فهرس جديد، "
             f"{skipped} موجود، {failed} فشل"
         )
+
+
+async def _create_indexes_sqlite(conn, logger):
+    """✅ v7.5.9: تستخدم الدالة الموحّدة."""
+    async def _fetch(c):
+        return await _fetch_existing_indexes_sqlite(c)
+    await _create_indexes_generic(conn, logger, "SQLite", _fetch)
+
+
+async def _create_indexes_postgres(conn, logger):
+    """✅ v7.5.9: تستخدم الدالة الموحّدة."""
+    index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
+
+    async def _fetch(c):
+        return await _fetch_existing_indexes_postgres(c, index_names)
+
+    await _create_indexes_generic(conn, logger, "PostgreSQL", _fetch)
 
 
 async def _create_indexes_mysql(conn, logger):
@@ -494,7 +702,12 @@ async def _create_indexes_mysql(conn, logger):
     ✅ v7.5.8: يفحص وجود الأعمدة قبل إنشاء الفهرس.
     """
     tables = set(t for t, _, _ in COMMON_INDEXES)
-    existing = await _fetch_existing_indexes_mysql(conn, tables)
+    try:
+        existing = await _fetch_existing_indexes_mysql(conn, tables)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ MySQL فشل جلب الفهارس: {e}")
+        return
 
     created = 0
     skipped = 0
@@ -502,6 +715,11 @@ async def _create_indexes_mysql(conn, logger):
     for table, idx_name, cols in COMMON_INDEXES:
         if (table, idx_name) in existing:
             skipped += 1
+            continue
+        if not _is_valid_index_name(idx_name):
+            if logger:
+                logger.warning(f"⚠️ MySQL اسم فهرس غير صالح: {idx_name}")
+            failed += 1
             continue
         try:
             await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
@@ -1102,6 +1320,10 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+    await _drop_deprecated_indexes_sqlite(conn, logger)
+
+    # ثم إنشاء الفهارس الجديدة
     await _create_indexes_sqlite(conn, logger)
 
     try:
@@ -1574,6 +1796,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             max_posts INTEGER,
             features TEXT CHECK (
                 features IS NULL
+                OR features = ''
                 OR features ~ '^\\s*[\\{\\[]'
             ),
             is_active INTEGER DEFAULT 1,
@@ -1700,6 +1923,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+    await _drop_deprecated_indexes_postgres(conn, logger)
+
+    # ثم إنشاء الفهارس الجديدة
     await _create_indexes_postgres(conn, logger)
 
     try:
@@ -2308,6 +2535,10 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+        await _drop_deprecated_indexes_mysql(conn, logger)
+
+        # ثم إنشاء الفهارس الجديدة
         await _create_indexes_mysql(conn, logger)
 
         try:
@@ -2351,5 +2582,6 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "COMMON_INDEXES",
     "EXPECTED_INDEX_COUNT",
+    "DEPRECATED_INDEXES",
     "DEFAULT_SETTINGS",
 ]
