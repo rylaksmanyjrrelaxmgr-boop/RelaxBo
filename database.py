@@ -2,20 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.17)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.19)
 ================================================================================
+🆕 v7.5.19 (إصلاح بطء أزرار الأمان):
+    ✅ _migrate_schema: إضافة violation_penalty_duration و violation_penalty
+       إلى جدول group_security — يحل خطأ "لا يوجد أي عمود صالح للتحديث"
+
 🆕 v7.5.17 (تحسين سرعة /start):
     ✅ get_start_data: استعلامات متوازية (asyncio.gather)
-       - 5 استعلامات صغيرة بدل استعلام واحد ثقيل بـ 4 subqueries
-       - الوقت = أبطأ استعلام بدل مجموع الكل
-       - معالجة channel_info بشكل منفصل
-    ✅ get_user: تحويله لاستعلامات متوازية أيضاً
+    ✅ get_user: تحويله لاستعلامات متوازية
     ✅ get_user_full_data: تحويله لاستعلامات متوازية
 
 🆕 v7.5.16 (إصلاح خطأ asyncpg datetime):
     ✅ _adapt_params: تحويل النصوص ISO datetime تلقائياً إلى datetime
-       عند استخدام PostgreSQL — يحل خطأ:
-       "invalid input for query argument $2: '...' (expected datetime, got 'str')"
+       عند استخدام PostgreSQL
 
 🆕 v7.5.15 (إصلاحات نهائية):
     ✅ _ensure_text_hash_column: فحص الفهرس دائمًا
@@ -1245,7 +1245,6 @@ def _adapt_params(params: tuple) -> tuple:
             else:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
 
-        # ✅ v7.5.16: تحويل النصوص ISO datetime إلى datetime لـ PostgreSQL
         elif isinstance(p, str) and USE_POSTGRES:
             if re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", p):
                 try:
@@ -2672,6 +2671,9 @@ class Database(
                     ("delete_penalty", "INTEGER DEFAULT 0"),
                     ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("delete_penalty_messages", "INTEGER DEFAULT 0"),
+                    # ✅ v7.5.19: أعمدة جديدة لحل خطأ "لا يوجد أي عمود صالح للتحديث"
+                    ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("violation_penalty", "TEXT DEFAULT 'none'"),
                 ],
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL"),
@@ -3399,8 +3401,6 @@ class Database(
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         """
         ✅ v7.5.17: استعلامات متوازية (asyncio.gather).
-        بدل استعلام واحد ثقيل بأربع subqueries، ننفذ 5 استعلامات صغيرة
-        بالتوازي — الوقت = أبطأ استعلام بدل مجموع الكل.
         """
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -3408,7 +3408,6 @@ class Database(
             return _clone_start_data(cached)
 
         try:
-            # ✅ استعلامات متوازية
             user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
                 self.fetchone(
                     "SELECT user_id, username, first_name, language, "
@@ -3457,7 +3456,6 @@ class Database(
         data["groups_count"] = groups_count or 0
         data["unpublished_posts"] = posts_count or 0
 
-        # ✅ جلب channel_info بشكل منفصل (فقط إذا active_channel موجود)
         if data.get("active_channel"):
             try:
                 ch = await self.fetchone(
@@ -3473,7 +3471,6 @@ class Database(
                     }
                     if ch else None
                 )
-                # للتوافق مع الكود القديم
                 if ch:
                     data["channel_name"] = ch.get("channel_name")
                     data["channel_id"] = ch.get("channel_id")
@@ -3496,9 +3493,6 @@ class Database(
     async def get_user_full_data(
         self, user_id: int, include_stats: bool = True
     ) -> Optional[Dict]:
-        """
-        ✅ v7.5.17: استعلامات متوازية.
-        """
         try:
             user_row = await self.fetchone(
                 "SELECT user_id, username, first_name, language, "
@@ -3560,7 +3554,6 @@ class Database(
             result["channels_count"] = 0
             result["groups_count"] = 0
 
-        # ✅ channel_info بشكل منفصل
         if result.get("active_channel"):
             try:
                 ch = await self.fetchone(
@@ -3630,7 +3623,6 @@ class Database(
             if cached:
                 return _clone_start_data(cached)
 
-            # ✅ استعلامات متوازية
             user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
                 self.fetchone(
                     "SELECT user_id, username, first_name, language, "
@@ -3674,7 +3666,6 @@ class Database(
             data["groups_count"] = groups_count or 0
             data["unpublished_posts"] = posts_count or 0
 
-            # channel_info منفصل
             if data.get("active_channel"):
                 try:
                     ch = await self.fetchone(
