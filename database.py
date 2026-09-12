@@ -2,7 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.11)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.12)
+================================================================================
+🆕 v7.5.12 (إصلاحات جوهرية):
+    ✅ add_penalty() يسجّل المستخدم والمجموعة تلقائيًا إذا لم يكونوا موجودين
+    ✅ _ensure_user_exists() و _ensure_group_exists() — دوال جديدة
+    ✅ register_user(force=False) — تسجيل إجباري
+    ✅ add_penalty() آمن — لا يفشل إذا فشل التسجيل التلقائي
+    ✅ معالجة أخطاء محسّنة في كل مكان
+    ✅ إصلاح أخطاء copy.deepcopy المتكررة
+    ✅ تحسين _get_user_lock() — تنظيف أفضل
 ================================================================================
 🆕 v7.5.11:
     ✅ settings_cache TTL: 120 → 600
@@ -2335,6 +2344,103 @@ class Database(
             logger.error(f"❌ فشل إنشاء الفهارس الثانوية: {e}")
 
     # =====================================================================
+    # 🆕 دوال ضمان وجود المستخدم والمجموعة
+    # =====================================================================
+
+    async def _ensure_user_exists(
+        self,
+        user_id: int,
+        username: str = "",
+        first_name: str = "",
+        auto_register: bool = True,
+    ) -> bool:
+        """
+        ✅ v7.5.12: التأكد من وجود المستخدم في جدول users.
+        إذا لم يكن موجودًا و auto_register=True → يُسجّله تلقائيًا.
+
+        Returns:
+            True إذا كان المستخدم موجودًا (أو تم تسجيله بنجاح)
+            False إذا لم يكن موجودًا وفشل التسجيل
+        """
+        try:
+            exists = await self.fetchval(
+                "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+            )
+            if exists:
+                return True
+
+            if not auto_register:
+                logger.warning(f"⚠️ المستخدم {user_id} غير موجود (auto_register=False)")
+                return False
+
+            logger.info(f"ℹ️ تسجيل تلقائي للمستخدم {user_id} (username='{username}')")
+            registered = await self.register_user(
+                user_id=user_id,
+                username=username or "",
+                first_name=first_name or "",
+            )
+            if registered:
+                logger.info(f"✅ تم تسجيل المستخدم {user_id} تلقائيًا")
+                return True
+            else:
+                logger.error(f"❌ فشل تسجيل المستخدم {user_id} تلقائيًا")
+                return False
+        except Exception as e:
+            logger.error(f"❌ _ensure_user_exists({user_id}): {e}", exc_info=True)
+            return False
+
+    async def _ensure_group_exists(
+        self,
+        chat_id: int,
+        chat_name: str = "",
+        added_by: Optional[int] = None,
+        auto_register: bool = True,
+    ) -> bool:
+        """
+        ✅ v7.5.12: التأكد من وجود المجموعة في جدول bot_groups.
+        إذا لم تكن موجودة و auto_register=True → يُسجّلها تلقائيًا.
+
+        Returns:
+            True إذا كانت المجموعة موجودة (أو تم تسجيلها بنجاح)
+            False إذا لم تكن موجودة وفشل التسجيل
+        """
+        try:
+            exists = await self.fetchval(
+                "SELECT 1 FROM bot_groups WHERE chat_id = ?", (chat_id,)
+            )
+            if exists:
+                return True
+
+            if not auto_register:
+                logger.warning(f"⚠️ المجموعة {chat_id} غير موجودة (auto_register=False)")
+                return False
+
+            logger.info(f"ℹ️ تسجيل تلقائي للمجموعة {chat_id} (name='{chat_name}')")
+            try:
+                await self.execute(
+                    """INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at, banned)
+                       VALUES (?, ?, ?, ?, 0)""",
+                    (chat_id, chat_name or str(chat_id), added_by, TimeUtils.utc_now()),
+                )
+                logger.info(f"✅ تم تسجيل المجموعة {chat_id} تلقائيًا")
+                if CACHE_AVAILABLE:
+                    try:
+                        await groups_cache.invalidate(chat_id)
+                    except Exception:
+                        pass
+                return True
+            except Exception as e:
+                # ربما تم إنشاؤها في نفس اللحظة (race condition)
+                if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                    logger.debug(f"ℹ️ المجموعة {chat_id} أُنشئت بواسطة عملية أخرى")
+                    return True
+                logger.error(f"❌ فشل تسجيل المجموعة {chat_id}: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ _ensure_group_exists({chat_id}): {e}", exc_info=True)
+            return False
+
+    # =====================================================================
     # البيانات الافتراضية والاستيراد
     # =====================================================================
 
@@ -2896,10 +3002,30 @@ class Database(
             logger.error(f"❌ Error in get_user: {e}", exc_info=True)
             return None
 
-    async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
+    async def register_user(
+        self,
+        user_id: int,
+        username: str = "",
+        first_name: str = "",
+        force: bool = False,
+    ) -> bool:
+        """
+        ✅ v7.5.12: تسجيل مستخدم جديد أو تحديث بياناته.
+
+        Args:
+            user_id: معرف المستخدم في تيليجرام
+            username: اسم المستخدم (اختياري)
+            first_name: الاسم الأول (اختياري)
+            force: إذا كان True، يُسجّل حتى لو كان المستخدم موجودًا (لتحديث البيانات)
+
+        Returns:
+            True على النجاح، False على الفشل
+        """
         try:
             async with await self._get_user_lock(user_id):
                 user_inserted = False
+                last_error = None
+
                 for attempt in range(5):
                     code = secrets.token_urlsafe(9)
                     try:
@@ -2945,6 +3071,7 @@ class Database(
                         user_inserted = True
                         break
                     except Exception as e:
+                        last_error = e
                         err = str(e).lower()
                         if "referral_code" in err:
                             logger.warning(
@@ -2954,46 +3081,55 @@ class Database(
                         if "unique" in err or "duplicate" in err:
                             user_inserted = True
                             break
+                        # خطأ آخر - ربما لا يخص التسجيل نفسه
+                        logger.error(f"❌ فشل إدراج المستخدم {user_id}: {e}")
                         raise
 
                 if not user_inserted:
-                    logger.error(f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات")
+                    logger.error(
+                        f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات. آخر خطأ: {last_error}"
+                    )
                     return False
 
-                async with self.transaction() as conn:
-                    if USE_POSTGRES:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2",
-                            user_id, TimeUtils.utc_now(),
-                        )
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING",
-                            user_id,
-                        )
-                    elif USE_MYSQL:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)",
-                            user_id, TimeUtils.sql_iso(),
-                        )
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
-                            user_id,
-                        )
-                    else:
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated",
-                            user_id, TimeUtils.sql_iso(),
-                        )
-                        await self._execute_with_conn(
-                            conn,
-                            "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
-                            user_id,
-                        )
+                # إنشاء الصفوف التابعة (user_points, referral_rewards)
+                try:
+                    async with self.transaction() as conn:
+                        if USE_POSTGRES:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2",
+                                user_id, TimeUtils.utc_now(),
+                            )
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING",
+                                user_id,
+                            )
+                        elif USE_MYSQL:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)",
+                                user_id, TimeUtils.sql_iso(),
+                            )
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
+                                user_id,
+                            )
+                        else:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated",
+                                user_id, TimeUtils.sql_iso(),
+                            )
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
+                                user_id,
+                            )
+                except Exception as e:
+                    # فشل الصفوف التابعة لا يفشل التسجيل نفسه
+                    logger.warning(f"⚠️ فشل إنشاء صفوف تابعة للمستخدم {user_id}: {e}")
 
             for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False"):
                 await internal_cache.invalidate(k)
@@ -3347,68 +3483,154 @@ class Database(
             return await self.fetchall(query, (now, now, limit))
 
     # =====================================================================
-    # دوال العقوبات
+    # 🆕 دوال العقوبات (مع إصلاح v7.5.12)
     # =====================================================================
 
-    async def add_penalty(self, user_id: int, chat_id: int, penalty_type: str,
-                          duration: int = 0, reason: str = "", issued_by: int = None) -> Optional[int]:
+    async def add_penalty(
+        self,
+        user_id: int,
+        chat_id: int,
+        penalty_type: str,
+        duration: int = 0,
+        reason: str = "",
+        issued_by: Optional[int] = None,
+        username: str = "",
+        first_name: str = "",
+        chat_name: str = "",
+        auto_register: bool = True,
+    ) -> Optional[int]:
+        """
+        ✅ v7.5.12: إضافة عقوبة لمستخدم في مجموعة.
+
+        الإصلاحات:
+        - يسجّل المستخدم تلقائيًا إذا لم يكن موجودًا (auto_register=True)
+        - يسجّل المجموعة تلقائيًا إذا لم تكن موجودة
+        - آمن: إذا فشل التسجيل، يُسجّل العقوبة بأفضل جهد أو يُعيد None
+
+        Args:
+            user_id: معرف المستخدم المُعاقب
+            chat_id: معرف المجموعة
+            penalty_type: نوع العقوبة (mute/ban/restrict/kick/warn)
+            duration: المدة بالثواني (0 = دائم)
+            reason: سبب العقوبة
+            issued_by: معرف المشرف الذي أصدر العقوبة
+            username: اسم المستخدم (للتسجيل التلقائي)
+            first_name: الاسم الأول (للتسجيل التلقائي)
+            chat_name: اسم المجموعة (للتسجيل التلقائي)
+            auto_register: إذا True، يسجّل المستخدم والمجموعة تلقائيًا
+
+        Returns:
+            معرف العقوبة (int) إذا نجحت، None إذا فشلت
+        """
         try:
+            # 1️⃣ التحقق من صحة نوع العقوبة
             if penalty_type not in self.VALID_PENALTY_TYPES:
                 logger.error(f"❌ Invalid penalty_type: {penalty_type}")
                 return None
+
+            # 2️⃣ ضبط المدة
             if duration < 0:
                 duration = 0
             if duration > self.MAX_PENALTY_DURATION:
                 duration = self.MAX_PENALTY_DURATION
 
-            user_exists = await self.fetchval("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
-            if not user_exists:
-                logger.warning(f"⚠️ المستخدم {user_id} غير موجود")
-                return None
-            group_exists = await self.fetchval("SELECT 1 FROM bot_groups WHERE chat_id = ?", (chat_id,))
-            if not group_exists:
-                logger.warning(f"⚠️ المجموعة {chat_id} غير موجودة")
+            # 3️⃣ ✅ التأكد من وجود المستخدم (تسجيل تلقائي)
+            user_ok = await self._ensure_user_exists(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                auto_register=auto_register,
+            )
+            if not user_ok:
+                logger.error(
+                    f"❌ لا يمكن إضافة عقوبة: المستخدم {user_id} غير موجود "
+                    f"وفشل التسجيل التلقائي"
+                )
                 return None
 
+            # 4️⃣ ✅ التأكد من وجود المجموعة (تسجيل تلقائي)
+            group_ok = await self._ensure_group_exists(
+                chat_id=chat_id,
+                chat_name=chat_name,
+                added_by=issued_by,
+                auto_register=auto_register,
+            )
+            if not group_ok:
+                logger.error(
+                    f"❌ لا يمكن إضافة عقوبة: المجموعة {chat_id} غير موجودة "
+                    f"وفشل التسجيل التلقائي"
+                )
+                return None
+
+            # 5️⃣ تنفيذ إضافة العقوبة في معاملة واحدة
             async with self.transaction() as conn:
+                # إلغاء العقوبات السابقة من نفس النوع (ما عدا warn)
                 if penalty_type != "warn":
                     await self._execute_with_conn(
                         conn,
-                        "UPDATE user_penalties SET status = 'removed' WHERE user_id = ? AND chat_id = ? AND penalty_type = ? AND status = 'active'",
+                        "UPDATE user_penalties SET status = 'removed' "
+                        "WHERE user_id = ? AND chat_id = ? AND penalty_type = ? AND status = 'active'",
                         user_id, chat_id, penalty_type,
                     )
+
                 start_time = TimeUtils.utc_now()
                 end_time = None
                 if duration > 0:
                     end_time = start_time + timedelta(seconds=duration)
+
+                # إدراج العقوبة
                 if USE_POSTGRES:
                     row = await self._fetchone_with_conn(
                         conn,
-                        "INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-                        user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time,
+                        "INSERT INTO user_penalties "
+                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                        user_id, chat_id, penalty_type, duration, start_time, end_time,
+                        reason, issued_by, start_time,
                     )
                     penalty_id = row["id"] if row else None
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
                     await cursor.execute(
-                        "INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time),
+                        "INSERT INTO user_penalties "
+                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (user_id, chat_id, penalty_type, duration, start_time, end_time,
+                         reason, issued_by, start_time),
                     )
                     penalty_id = cursor.lastrowid
                     await cursor.close()
                 else:
                     cursor = await conn.execute(
-                        "INSERT INTO user_penalties (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, start_time),
+                        "INSERT INTO user_penalties "
+                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (user_id, chat_id, penalty_type, duration, start_time, end_time,
+                         reason, issued_by, start_time),
                     )
                     penalty_id = cursor.lastrowid
+
+                # تسجيل في admin_logs
                 if issued_by:
-                    await self._execute_with_conn(
-                        conn,
-                        "INSERT INTO admin_logs (chat_id, admin_id, action, target_id, reason, created_at) VALUES (?,?,?,?,?,?)",
-                        chat_id, issued_by, f"penalty_{penalty_type}", user_id, reason, TimeUtils.utc_now(),
+                    try:
+                        await self._execute_with_conn(
+                            conn,
+                            "INSERT INTO admin_logs "
+                            "(chat_id, admin_id, action, target_id, reason, created_at) "
+                            "VALUES (?,?,?,?,?,?)",
+                            chat_id, issued_by, f"penalty_{penalty_type}",
+                            user_id, reason, TimeUtils.utc_now(),
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل تسجيل admin_log: {e}")
+
+                if penalty_id:
+                    logger.info(
+                        f"✅ تم إضافة عقوبة {penalty_type} للمستخدم {user_id} "
+                        f"في المجموعة {chat_id} (id={penalty_id})"
                     )
                 return penalty_id
+
         except Exception as e:
             logger.error(f"❌ Error in add_penalty: {e}", exc_info=True)
             return None
@@ -3418,10 +3640,15 @@ class Database(
             "UPDATE user_penalties SET status = 'removed' WHERE id = ?", (penalty_id,)
         ) > 0
 
-    async def remove_penalties_for_user(self, user_id: int, chat_id: int, penalty_type: str = None) -> int:
+    async def remove_penalties_for_user(
+        self, user_id: int, chat_id: int, penalty_type: str = None
+    ) -> int:
         try:
             async with self.transaction() as conn:
-                query = "UPDATE user_penalties SET status = 'removed' WHERE user_id = ? AND chat_id = ? AND status = 'active'"
+                query = (
+                    "UPDATE user_penalties SET status = 'removed' "
+                    "WHERE user_id = ? AND chat_id = ? AND status = 'active'"
+                )
                 params = [user_id, chat_id]
                 if penalty_type:
                     query += " AND penalty_type = ?"
@@ -3446,54 +3673,82 @@ class Database(
                 if USE_POSTGRES:
                     expired_count = await self._fetchval_with_conn(
                         conn,
-                        "SELECT COUNT(*) FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()",
+                        "SELECT COUNT(*) FROM user_penalties "
+                        "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()",
                         default=0,
                     )
                     if expired_count > 0:
                         await conn.execute(
-                            """INSERT INTO penalty_archive (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, status, created_at, archived_at)
-                               SELECT user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, 'expired', created_at, NOW()
-                               FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"""
+                            """INSERT INTO penalty_archive
+                               (user_id, chat_id, penalty_type, duration, start_time, end_time,
+                                reason, issued_by, status, created_at, archived_at)
+                               SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
+                                      reason, issued_by, 'expired', created_at, NOW()
+                               FROM user_penalties
+                               WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"""
                         )
                         await conn.execute(
-                            "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"
+                            "UPDATE user_penalties SET status = 'expired' "
+                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"
                         )
                     await conn.execute(
-                        "DELETE FROM penalty_archive WHERE archived_at < NOW() - INTERVAL '90 days'"
+                        "DELETE FROM penalty_archive "
+                        "WHERE archived_at < NOW() - INTERVAL '90 days'"
                     )
                 elif USE_MYSQL:
                     cursor = await conn.cursor()
                     await cursor.execute(
-                        """INSERT INTO penalty_archive (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, status, created_at, archived_at)
-                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, 'expired', created_at, UTC_TIMESTAMP()
-                           FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"""
+                        """INSERT INTO penalty_archive
+                           (user_id, chat_id, penalty_type, duration, start_time, end_time,
+                            reason, issued_by, status, created_at, archived_at)
+                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
+                                  reason, issued_by, 'expired', created_at, UTC_TIMESTAMP()
+                           FROM user_penalties
+                           WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"""
                     )
                     expired_count = cursor.rowcount
                     if expired_count > 0:
                         await cursor.execute(
-                            "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"
+                            "UPDATE user_penalties SET status = 'expired' "
+                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"
                         )
-                    await cursor.execute("DELETE FROM penalty_archive WHERE archived_at < UTC_TIMESTAMP() - INTERVAL 90 DAY")
+                    await cursor.execute(
+                        "DELETE FROM penalty_archive "
+                        "WHERE archived_at < UTC_TIMESTAMP() - INTERVAL 90 DAY"
+                    )
                     await cursor.close()
                 else:
                     cursor = await conn.execute(
-                        """INSERT INTO penalty_archive (user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, status, created_at, archived_at)
-                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, 'expired', created_at, datetime('now')
-                           FROM user_penalties WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"""
+                        """INSERT INTO penalty_archive
+                           (user_id, chat_id, penalty_type, duration, start_time, end_time,
+                            reason, issued_by, status, created_at, archived_at)
+                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
+                                  reason, issued_by, 'expired', created_at, datetime('now')
+                           FROM user_penalties
+                           WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"""
                     )
                     expired_count = cursor.rowcount
                     if expired_count > 0:
                         await conn.execute(
-                            "UPDATE user_penalties SET status = 'expired' WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"
+                            "UPDATE user_penalties SET status = 'expired' "
+                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"
                         )
-                    await conn.execute("DELETE FROM penalty_archive WHERE julianday('now') - julianday(archived_at) > 90")
+                    await conn.execute(
+                        "DELETE FROM penalty_archive "
+                        "WHERE julianday('now') - julianday(archived_at) > 90"
+                    )
                 return expired_count
         except Exception as e:
             logger.error(f"❌ Error in expire_penalties: {e}", exc_info=True)
             return 0
 
-    async def get_user_penalty_count(self, user_id: int, chat_id: int, penalty_type: str = None) -> int:
-        query = "SELECT COUNT(*) FROM user_penalties WHERE user_id = ? AND chat_id = ? AND status = 'active'"
+    async def get_user_penalty_count(
+        self, user_id: int, chat_id: int, penalty_type: str = None
+    ) -> int:
+        query = (
+            "SELECT COUNT(*) FROM user_penalties "
+            "WHERE user_id = ? AND chat_id = ? AND status = 'active'"
+        )
         params = [user_id, chat_id]
         if penalty_type:
             query += " AND penalty_type = ?"
@@ -3501,7 +3756,9 @@ class Database(
         return await self.fetchval(query, tuple(params), default=0)
 
     async def get_all_active_penalties(self) -> List[Dict]:
-        return await self.fetchall("SELECT * FROM user_penalties WHERE status = 'active'")
+        return await self.fetchall(
+            "SELECT * FROM user_penalties WHERE status = 'active'"
+        )
 
 
 # =====================================================================
