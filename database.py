@@ -4,18 +4,14 @@
 """
 database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.19)
 ================================================================================
-🆕 v7.5.19 (إصلاح بطء أزرار الأمان):
+🆕 v7.5.19 (إصلاح بطء أزرار الأمان + /start):
     ✅ _migrate_schema: إضافة violation_penalty_duration و violation_penalty
-       إلى جدول group_security — يحل خطأ "لا يوجد أي عمود صالح للتحديث"
-
-🆕 v7.5.17 (تحسين سرعة /start):
     ✅ get_start_data: استعلامات متوازية (asyncio.gather)
     ✅ get_user: تحويله لاستعلامات متوازية
     ✅ get_user_full_data: تحويله لاستعلامات متوازية
 
 🆕 v7.5.16 (إصلاح خطأ asyncpg datetime):
     ✅ _adapt_params: تحويل النصوص ISO datetime تلقائياً إلى datetime
-       عند استخدام PostgreSQL
 
 🆕 v7.5.15 (إصلاحات نهائية):
     ✅ _ensure_text_hash_column: فحص الفهرس دائمًا
@@ -2671,7 +2667,7 @@ class Database(
                     ("delete_penalty", "INTEGER DEFAULT 0"),
                     ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("delete_penalty_messages", "INTEGER DEFAULT 0"),
-                    # ✅ v7.5.19: أعمدة جديدة لحل خطأ "لا يوجد أي عمود صالح للتحديث"
+                    # ✅ v7.5.19: أعمدة جديدة
                     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("violation_penalty", "TEXT DEFAULT 'none'"),
                 ],
