@@ -2,27 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.5)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.6)
 ================================================================================
 - مستقل تماماً عن database.py (لتفادي circular imports)
 - يستقبل (conn, logger, TimeUtils) كمعاملات
 - جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
 - يحتوي على جدول schema_version لتتبع الإصدارات
 
-🚀 الإصدار v5 (v7.5.4):
-  - ✅ فحص الفهارس الموجودة في استعلام واحد (توفير ~15 ثانية)
-  - ✅ فحص الجداول الموجودة في استعلام واحد
-  - ✅ تصحيح عدّاد الفهارس
-  - ✅ 60 فهرس شامل
+🆕 v7.5.6 (v5.2) — إصلاحات جوهرية:
+  ✅ FOREIGN_KEY_CHECKS مع try/finally (MySQL) — لا يبقى معطلاً عند الفشل
+  ✅ posts UNIQUE مع COALESCE لتجنب مشكلة NULL
+  ✅ FKs مع ON DELETE RESTRICT (subscriptions, invoices, gift_codes)
+  ✅ _fetch_existing_indexes_mysql محسّنة بـ information_schema
+  ✅ _create_indexes_postgres بدون transaction مُلغٍ
+  ✅ _table_exists_mysql parameterized
+  ✅ إضافة assert على عدد الفهارس (60)
+  ✅ إزالة chat_locks (غير مستخدم)
+  ✅ توحيد اسم فهرس posts_unique بين المحركات
+  ✅ CHECK على plans.features (JSON صالح)
 
 🆕 v7.5.5 (v5.1):
-  - ✅ إزالة LONG_TEXT_COLUMNS غير المستخدم
-  - ✅ تحقق assert على عدد الفهارس
-  - ✅ دالة _fetch_existing_indexes_mysql مستقلة
-  - ✅ تحسينات اتساق
+  - إزالة LONG_TEXT_COLUMNS غير المستخدم
+  - إضافة assert على عدد الفهارس (لم يكن مُنفَّذًا)
+  - دالة _fetch_existing_indexes_mysql مستقلة
+  - تحسينات اتساق
+
+🚀 الإصدار v5 (v7.5.4):
+  - فحص الفهارس الموجودة في استعلام واحد (توفير ~15 ثانية)
+  - فحص الجداول الموجودة في استعلام واحد
+  - تصحيح عدّاد الفهارس
+  - 60 فهرس شامل
 """
 
 import os
+import json
+import logging
 from datetime import datetime, timezone
 
 # =====================================================================
@@ -37,6 +51,9 @@ DEFAULT_SETTINGS = (
     ("last_ticket_number", "0"),
     ("last_backup", ""),
 )
+
+# ✅ v7.5.6: عدد الفهارس المتوقع — للتحقق في assert
+EXPECTED_INDEX_COUNT = 60
 
 COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
@@ -204,29 +221,54 @@ COMMON_INDEXES = [
     ("user_reminder_settings", "idx_reminder_subscription", "user_reminder_settings(subscription_reminder)"),
 ]
 
+# ✅ v7.5.6: تحقق فعلي من عدد الفهارس
+assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
+    f"❌ عدد الفهارس غير مطابق: "
+    f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}. "
+    f"حدّث EXPECTED_INDEX_COUNT أو راجع COMMON_INDEXES."
+)
+
+# ✅ v7.5.6: قائمة الجداول التي تحتوي على FK (للاستخدام في التحقق)
+TABLES_WITH_FK_RESTRICT = {
+    "subscriptions": ("plan_id", "plans(id)"),
+    "invoices": ("plan_id", "plans(id)"),
+    "gift_codes": ("plan_id", "plans(id)"),
+}
+
 
 # =====================================================================
 # دوال مساعدة
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
-    """✅ fallback آمن للوقت"""
+    """✅ fallback آمن للوقت — مع تسجيل الفشل"""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"_safe_now_iso fallback: {e}")
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
 def _safe_now_dt(TimeUtils):
-    """يرجع datetime للـ PostgreSQL"""
+    """يرجع datetime للـ PostgreSQL — مع تسجيل الفشل"""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"_safe_now_dt fallback: {e}")
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _validate_json(text: str) -> bool:
+    """✅ v7.5.6: التحقق من أن النص JSON صالح"""
+    if text is None or text == "":
+        return True
+    try:
+        json.loads(text)
+        return True
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 
 # =====================================================================
@@ -248,7 +290,7 @@ async def _fetch_existing_indexes_postgres(conn, index_names):
 
 
 async def _fetch_existing_indexes_sqlite(conn):
-    """جلب كل الفهارس الموجودة في SQLite"""
+    """جلب كل الفهارس الموجودة في SQLite — استعلام واحد"""
     try:
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name IS NOT NULL"
@@ -260,19 +302,39 @@ async def _fetch_existing_indexes_sqlite(conn):
 
 
 async def _fetch_existing_indexes_mysql(conn, tables):
-    """جلب الفهارس الموجودة لجميع الجداول في MySQL"""
-    existing = set()
-    for table in tables:
-        try:
-            cursor = await conn.cursor()
-            await cursor.execute(f"SHOW INDEX FROM `{table}`")
-            rows = await cursor.fetchall()
-            for r in rows:
-                existing.add((table, r[2]))
-            await cursor.close()
-        except Exception:
-            continue
-    return existing
+    """
+    ✅ v7.5.6: جلب الفهارس الموجودة لجميع الجداول في استعلام واحد
+    باستخدام information_schema بدل SHOW INDEX لكل جدول.
+    """
+    if not tables:
+        return set()
+    try:
+        cursor = await conn.cursor()
+        placeholders = ",".join(["%s"] * len(tables))
+        await cursor.execute(
+            f"SELECT DISTINCT TABLE_NAME, INDEX_NAME "
+            f"FROM information_schema.statistics "
+            f"WHERE TABLE_SCHEMA = DATABASE() "
+            f"AND TABLE_NAME IN ({placeholders})",
+            tuple(tables),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {(r[0], r[1]) for r in rows}
+    except Exception:
+        # Fallback: استخدام SHOW INDEX لكل جدول
+        existing = set()
+        for table in tables:
+            try:
+                cursor = await conn.cursor()
+                await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                rows = await cursor.fetchall()
+                for r in rows:
+                    existing.add((table, r[2]))
+                await cursor.close()
+            except Exception:
+                continue
+        return existing
 
 
 async def _fetch_existing_tables_postgres(conn):
@@ -300,15 +362,27 @@ async def _fetch_existing_tables_sqlite(conn):
 
 
 async def _table_exists_mysql(conn, table: str) -> bool:
-    """فحص وجود جدول في MySQL"""
+    """✅ v7.5.6: فحص وجود جدول في MySQL باستخدام parameterized query"""
     try:
         cursor = await conn.cursor()
-        await cursor.execute(f"SHOW TABLES LIKE '{table}'")
+        await cursor.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = %s",
+            (table,),
+        )
         row = await cursor.fetchone()
         await cursor.close()
         return row is not None
     except Exception:
-        return False
+        # Fallback
+        try:
+            cursor = await conn.cursor()
+            await cursor.execute(f"SHOW TABLES LIKE '{table}'")
+            row = await cursor.fetchone()
+            await cursor.close()
+            return row is not None
+        except Exception:
+            return False
 
 
 # =====================================================================
@@ -342,7 +416,10 @@ async def _create_indexes_sqlite(conn, logger):
 
 
 async def _create_indexes_postgres(conn, logger):
-    """إنشاء فهارس PostgreSQL (batch check + transaction)"""
+    """
+    ✅ v7.5.6: إنشاء فهارس PostgreSQL فرديًا (بدون transaction مُلغٍ).
+    السبب: إذا فشل فهرس واحد في transaction، تُلغى كل الفهارس.
+    """
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     existing = await _fetch_existing_indexes_postgres(conn, index_names)
     to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
@@ -354,29 +431,14 @@ async def _create_indexes_postgres(conn, logger):
 
     created = 0
     failed = 0
-    try:
-        async with conn.transaction():
-            for _table, idx_name, cols in to_create:
-                try:
-                    await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
-                    created += 1
-                except Exception as e:
-                    failed += 1
-                    if logger:
-                        logger.warning(f"⚠️ PG فهرس {idx_name}: {e}")
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ PG transaction فشل ({e})، محاولة فردية...")
-        created = 0
-        failed = 0
-        for _table, idx_name, cols in to_create:
-            try:
-                await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
-                created += 1
-            except Exception as e2:
-                failed += 1
-                if logger:
-                    logger.warning(f"⚠️ PG فهرس {idx_name}: {e2}")
+    for _table, idx_name, cols in to_create:
+        try:
+            await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+            created += 1
+        except Exception as e:
+            failed += 1
+            if logger:
+                logger.warning(f"⚠️ PG فهرس {idx_name}: {e}")
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
@@ -384,7 +446,10 @@ async def _create_indexes_postgres(conn, logger):
 
 
 async def _create_indexes_mysql(conn, logger):
-    """إنشاء فهارس MySQL (SHOW INDEX per table)"""
+    """
+    ✅ v7.5.6: إنشاء فهارس MySQL مع فحص مسبق.
+    MySQL لا يدعم CREATE INDEX IF NOT EXISTS.
+    """
     tables = set(t for t, _, _ in COMMON_INDEXES)
     existing = await _fetch_existing_indexes_mysql(conn, tables)
 
@@ -460,6 +525,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     """)
 
     # ---------- POSTS ----------
+    # ✅ v7.5.6: UNIQUE مع COALESCE عبر فهرس منفصل
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -472,10 +538,23 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             fail_count INTEGER DEFAULT 0,
             created_at TEXT,
             published_at TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
-            UNIQUE(channel_db_id, text_hash, media_type, media_file_id)
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
+    # فهرس UNIQUE مع COALESCE (SQLite يدعم التعبيرات في الفهارس)
+    try:
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
+            ON posts(
+                channel_db_id,
+                text_hash,
+                COALESCE(media_type, ''),
+                COALESCE(media_file_id, '')
+            )
+        """)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ SQLite idx_posts_unique: {e}")
 
     # ---------- SCHEDULE ----------
     await conn.execute("""
@@ -625,16 +704,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             auto_remove_penalties INTEGER DEFAULT 1,
             violation_strikes INTEGER DEFAULT 3,
             violation_duration INTEGER DEFAULT 60
-        )
-    """)
-
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id INTEGER PRIMARY KEY,
-            locked INTEGER DEFAULT 0,
-            locked_at TEXT,
-            locked_by INTEGER
         )
     """)
 
@@ -875,6 +944,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     """)
 
     # ---------- PLANS ----------
+    # ✅ v7.5.6: features يجب أن يكون JSON صالحًا
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -885,7 +955,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             duration_days INTEGER,
             max_channels INTEGER,
             max_posts INTEGER,
-            features TEXT,
+            features TEXT CHECK(features IS NULL OR json_valid(features)),
             is_active INTEGER DEFAULT 1,
             is_gift INTEGER DEFAULT 0,
             created_at TEXT
@@ -893,6 +963,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     """)
 
     # ---------- SUBSCRIPTIONS ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -907,11 +978,12 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             created_at TEXT,
             updated_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
     # ---------- INVOICES ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -926,7 +998,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             paid_at TEXT,
             created_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
@@ -971,6 +1043,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     """)
 
     # ---------- GIFT_CODES ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -980,7 +1053,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             used_by INTEGER,
             used_at TEXT,
             created_at TEXT,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
@@ -1080,6 +1153,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     """)
 
     # ---------- POSTS ----------
+    # ✅ v7.5.6: UNIQUE مع COALESCE لتجنب مشكلة NULL
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
@@ -1095,10 +1169,19 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
         )
     """)
-    await conn.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
-        ON posts(channel_db_id, text_hash, media_type, media_file_id)
-    """)
+    try:
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
+            ON posts(
+                channel_db_id,
+                text_hash,
+                COALESCE(media_type, ''),
+                COALESCE(media_file_id, '')
+            )
+        """)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ PG idx_posts_unique: {e}")
 
     # ---------- SCHEDULE ----------
     await conn.execute("""
@@ -1248,16 +1331,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             auto_remove_penalties INTEGER DEFAULT 1,
             violation_strikes INTEGER DEFAULT 3,
             violation_duration INTEGER DEFAULT 60
-        )
-    """)
-
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id BIGINT PRIMARY KEY,
-            locked INTEGER DEFAULT 0,
-            locked_at TIMESTAMP,
-            locked_by BIGINT
         )
     """)
 
@@ -1499,6 +1572,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     """)
 
     # ---------- PLANS ----------
+    # ✅ v7.5.6: CHECK على features كـ JSON
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id SERIAL PRIMARY KEY,
@@ -1509,7 +1583,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             duration_days INTEGER,
             max_channels INTEGER,
             max_posts INTEGER,
-            features TEXT,
+            features TEXT CHECK(features IS NULL OR features::jsonb IS NOT NULL),
             is_active INTEGER DEFAULT 1,
             is_gift INTEGER DEFAULT 0,
             created_at TIMESTAMP
@@ -1517,6 +1591,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     """)
 
     # ---------- SUBSCRIPTIONS ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id SERIAL PRIMARY KEY,
@@ -1531,11 +1606,12 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             created_at TIMESTAMP,
             updated_at TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
     # ---------- INVOICES ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id SERIAL PRIMARY KEY,
@@ -1550,7 +1626,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             paid_at TIMESTAMP,
             created_at TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
@@ -1595,6 +1671,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     """)
 
     # ---------- GIFT_CODES ----------
+    # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id SERIAL PRIMARY KEY,
@@ -1604,7 +1681,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             used_by BIGINT,
             used_at TIMESTAMP,
             created_at TIMESTAMP,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
+            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
         )
     """)
 
@@ -1661,623 +1738,655 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 # =====================================================================
 
 async def create_tables_mysql(conn, logger, TimeUtils):
-    """إنشاء جميع جداول MySQL + الفهارس"""
-
+    """
+    إنشاء جميع جداول MySQL + الفهارس.
+    ✅ v7.5.6: FOREIGN_KEY_CHECKS مع try/finally
+    """
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
+    try:
+        # ---------- schema_version ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INT PRIMARY KEY,
+                applied_at DATETIME NOT NULL,
+                description TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- schema_version ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INT PRIMARY KEY,
-            applied_at DATETIME NOT NULL,
-            description TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- USERS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                language VARCHAR(10) DEFAULT 'ar',
+                auto_publish TINYINT(1) DEFAULT 1,
+                auto_recycle TINYINT(1) DEFAULT 1,
+                banned TINYINT(1) DEFAULT 0,
+                trial_used TINYINT(1) DEFAULT 0,
+                subscription_end DATETIME,
+                referral_code VARCHAR(255) UNIQUE,
+                created_at DATETIME,
+                updated_at DATETIME,
+                active_channel INT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- USERS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language VARCHAR(10) DEFAULT 'ar',
-            auto_publish TINYINT(1) DEFAULT 1,
-            auto_recycle TINYINT(1) DEFAULT 1,
-            banned TINYINT(1) DEFAULT 0,
-            trial_used TINYINT(1) DEFAULT 0,
-            subscription_end DATETIME,
-            referral_code VARCHAR(255) UNIQUE,
-            created_at DATETIME,
-            updated_at DATETIME,
-            active_channel INT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- USER_CHANNELS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                channel_id BIGINT,
+                channel_name VARCHAR(255),
+                banned TINYINT(1) DEFAULT 0,
+                created_at DATETIME,
+                UNIQUE KEY (user_id, channel_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- USER_CHANNELS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_channels (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            channel_id BIGINT,
-            channel_name VARCHAR(255),
-            banned TINYINT(1) DEFAULT 0,
-            created_at DATETIME,
-            UNIQUE KEY (user_id, channel_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- POSTS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                channel_db_id INT,
+                text TEXT NOT NULL,
+                text_hash CHAR(64) DEFAULT '',
+                media_type VARCHAR(50),
+                media_file_id VARCHAR(255),
+                published TINYINT(1) DEFAULT 0,
+                fail_count INT DEFAULT 0,
+                created_at DATETIME,
+                published_at DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        # ✅ v7.5.6: فهرس UNIQUE مع COALESCE
+        try:
+            await conn.execute("""
+                CREATE UNIQUE INDEX idx_posts_unique
+                ON posts(
+                    channel_db_id,
+                    text_hash,
+                    (COALESCE(media_type, '')),
+                    (COALESCE(media_file_id, ''))
+                )
+            """)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "duplicate" not in err_msg and "1061" not in err_msg and "already exists" not in err_msg:
+                if logger:
+                    logger.warning(f"⚠️ MySQL idx_posts_unique: {e}")
 
-    # ---------- POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            channel_db_id INT,
-            text TEXT NOT NULL,
-            text_hash CHAR(64) DEFAULT '',
-            media_type VARCHAR(50),
-            media_file_id VARCHAR(255),
-            published TINYINT(1) DEFAULT 0,
-            fail_count INT DEFAULT 0,
-            created_at DATETIME,
-            published_at DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
-            UNIQUE KEY idx_posts_unique (channel_db_id, text_hash, media_type, media_file_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- SCHEDULE ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                channel_db_id INT PRIMARY KEY,
+                schedule_type VARCHAR(50) DEFAULT 'interval_minutes',
+                interval_minutes INT DEFAULT 12,
+                interval_hours INT DEFAULT 0,
+                interval_days INT DEFAULT 0,
+                days_of_week TEXT,
+                specific_dates TEXT,
+                publish_time VARCHAR(10) DEFAULT '00:00',
+                cron_expression TEXT,
+                next_publish_date DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- SCHEDULE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schedule (
-            channel_db_id INT PRIMARY KEY,
-            schedule_type VARCHAR(50) DEFAULT 'interval_minutes',
-            interval_minutes INT DEFAULT 12,
-            interval_hours INT DEFAULT 0,
-            interval_days INT DEFAULT 0,
-            days_of_week TEXT,
-            specific_dates TEXT,
-            publish_time VARCHAR(10) DEFAULT '00:00',
-            cron_expression TEXT,
-            next_publish_date DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- LAST_PUBLISH ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS last_publish (
+                channel_db_id INT PRIMARY KEY,
+                last_publish_time DATETIME,
+                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- LAST_PUBLISH ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS last_publish (
-            channel_db_id INT PRIMARY KEY,
-            last_publish_time DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- BOT_GROUPS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id BIGINT PRIMARY KEY,
+                chat_name VARCHAR(255),
+                username VARCHAR(255),
+                added_by BIGINT,
+                added_at DATETIME,
+                updated_at DATETIME,
+                banned TINYINT(1) DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- BOT_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_groups (
-            chat_id BIGINT PRIMARY KEY,
-            chat_name VARCHAR(255),
-            username VARCHAR(255),
-            added_by BIGINT,
-            added_at DATETIME,
-            updated_at DATETIME,
-            banned TINYINT(1) DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- USER_GROUPS_LINK ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id BIGINT,
+                chat_id BIGINT,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- USER_GROUPS_LINK ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_groups_link (
-            user_id BIGINT,
-            chat_id BIGINT,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- GROUP_ADMINS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id BIGINT,
+                user_id BIGINT,
+                PRIMARY KEY (chat_id, user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- GROUP_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_admins (
-            chat_id BIGINT,
-            user_id BIGINT,
-            PRIMARY KEY (chat_id, user_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- HIDDEN_OWNER_GROUPS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+                chat_id BIGINT,
+                owner_id BIGINT,
+                is_hidden TINYINT(1) DEFAULT 1,
+                PRIMARY KEY (chat_id, owner_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- HIDDEN_OWNER_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
-            chat_id BIGINT,
-            owner_id BIGINT,
-            is_hidden TINYINT(1) DEFAULT 1,
-            PRIMARY KEY (chat_id, owner_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- HIDDEN_ADMINS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                chat_id BIGINT,
+                admin_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, admin_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- HIDDEN_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_admins (
-            chat_id BIGINT,
-            admin_id BIGINT,
-            added_by BIGINT,
-            added_at DATETIME,
-            PRIMARY KEY (chat_id, admin_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- ANONYMOUS_ADMINS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS anonymous_admins (
+                chat_id BIGINT NOT NULL,
+                anonymous_id BIGINT NOT NULL,
+                added_by BIGINT,
+                user_id BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, anonymous_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- ANONYMOUS_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS anonymous_admins (
-            chat_id BIGINT NOT NULL,
-            anonymous_id BIGINT NOT NULL,
-            added_by BIGINT,
-            user_id BIGINT,
-            added_at DATETIME,
-            PRIMARY KEY (chat_id, anonymous_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- GROUP_SECURITY ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_security (
+                chat_id BIGINT PRIMARY KEY,
+                delete_links TINYINT(1) DEFAULT 0,
+                mentions TINYINT(1) DEFAULT 0,
+                slow_mode TINYINT(1) DEFAULT 0,
+                slow_mode_seconds INT DEFAULT 5,
+                welcome_enabled TINYINT(1) DEFAULT 0,
+                welcome_text VARCHAR(2000) DEFAULT 'مرحباً {user} في {chat} 🤍',
+                goodbye_enabled TINYINT(1) DEFAULT 0,
+                goodbye_text VARCHAR(2000) DEFAULT 'وداعاً {user} 👋',
+                delete_banned_words TINYINT(1) DEFAULT 0,
+                auto_penalty VARCHAR(50) DEFAULT 'none',
+                auto_mute_duration INT DEFAULT 3600,
+                delete_videos TINYINT(1) DEFAULT 0,
+                delete_audio TINYINT(1) DEFAULT 0,
+                delete_animation TINYINT(1) DEFAULT 0,
+                delete_service TINYINT(1) DEFAULT 0,
+                delete_documents TINYINT(1) DEFAULT 0,
+                delete_stickers TINYINT(1) DEFAULT 0,
+                delete_forwarded TINYINT(1) DEFAULT 0,
+                delete_polls TINYINT(1) DEFAULT 0,
+                delete_games TINYINT(1) DEFAULT 0,
+                delete_voice TINYINT(1) DEFAULT 0,
+                delete_video_note TINYINT(1) DEFAULT 0,
+                delete_photos TINYINT(1) DEFAULT 0,
+                delete_penalty VARCHAR(50) DEFAULT 'none',
+                delete_penalty_duration INT DEFAULT 0,
+                delete_penalty_messages INT DEFAULT 0,
+                antiflood_enabled TINYINT(1) DEFAULT 0,
+                antiflood_messages INT DEFAULT 5,
+                antiflood_seconds INT DEFAULT 10,
+                antiflood_penalty VARCHAR(50) DEFAULT 'mute',
+                antiflood_penalty_duration INT DEFAULT 3600,
+                max_warnings INT DEFAULT 3,
+                warn_penalty VARCHAR(50) DEFAULT 'ban',
+                warn_penalty_duration INT DEFAULT 3600,
+                warn_enabled TINYINT(1) DEFAULT 0,
+                max_message_length INT DEFAULT 0,
+                night_mode_enabled TINYINT(1) DEFAULT 0,
+                night_mode_start VARCHAR(10) DEFAULT '23:00',
+                night_mode_end VARCHAR(10) DEFAULT '06:00',
+                night_mode_action VARCHAR(50) DEFAULT 'mute',
+                night_mode_action_duration INT DEFAULT 3600,
+                nsfw_enabled TINYINT(1) DEFAULT 0,
+                nsfw_threshold FLOAT DEFAULT 0.7,
+                nsfw_filter TINYINT(1) DEFAULT 0,
+                auto_approve_join TINYINT(1) DEFAULT 0,
+                auto_reject_join TINYINT(1) DEFAULT 0,
+                mute_default_duration INT DEFAULT 3600,
+                ban_default_duration INT DEFAULT 0,
+                warn_default_duration INT DEFAULT 0,
+                restrict_default_duration INT DEFAULT 1800,
+                enable_timed_penalties TINYINT(1) DEFAULT 1,
+                auto_remove_penalties TINYINT(1) DEFAULT 1,
+                violation_strikes INT DEFAULT 3,
+                violation_duration INT DEFAULT 60
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- GROUP_SECURITY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_security (
-            chat_id BIGINT PRIMARY KEY,
-            delete_links TINYINT(1) DEFAULT 0,
-            mentions TINYINT(1) DEFAULT 0,
-            slow_mode TINYINT(1) DEFAULT 0,
-            slow_mode_seconds INT DEFAULT 5,
-            welcome_enabled TINYINT(1) DEFAULT 0,
-            welcome_text VARCHAR(2000) DEFAULT 'مرحباً {user} في {chat} 🤍',
-            goodbye_enabled TINYINT(1) DEFAULT 0,
-            goodbye_text VARCHAR(2000) DEFAULT 'وداعاً {user} 👋',
-            delete_banned_words TINYINT(1) DEFAULT 0,
-            auto_penalty VARCHAR(50) DEFAULT 'none',
-            auto_mute_duration INT DEFAULT 3600,
-            delete_videos TINYINT(1) DEFAULT 0,
-            delete_audio TINYINT(1) DEFAULT 0,
-            delete_animation TINYINT(1) DEFAULT 0,
-            delete_service TINYINT(1) DEFAULT 0,
-            delete_documents TINYINT(1) DEFAULT 0,
-            delete_stickers TINYINT(1) DEFAULT 0,
-            delete_forwarded TINYINT(1) DEFAULT 0,
-            delete_polls TINYINT(1) DEFAULT 0,
-            delete_games TINYINT(1) DEFAULT 0,
-            delete_voice TINYINT(1) DEFAULT 0,
-            delete_video_note TINYINT(1) DEFAULT 0,
-            delete_photos TINYINT(1) DEFAULT 0,
-            delete_penalty VARCHAR(50) DEFAULT 'none',
-            delete_penalty_duration INT DEFAULT 0,
-            delete_penalty_messages INT DEFAULT 0,
-            antiflood_enabled TINYINT(1) DEFAULT 0,
-            antiflood_messages INT DEFAULT 5,
-            antiflood_seconds INT DEFAULT 10,
-            antiflood_penalty VARCHAR(50) DEFAULT 'mute',
-            antiflood_penalty_duration INT DEFAULT 3600,
-            max_warnings INT DEFAULT 3,
-            warn_penalty VARCHAR(50) DEFAULT 'ban',
-            warn_penalty_duration INT DEFAULT 3600,
-            warn_enabled TINYINT(1) DEFAULT 0,
-            max_message_length INT DEFAULT 0,
-            night_mode_enabled TINYINT(1) DEFAULT 0,
-            night_mode_start VARCHAR(10) DEFAULT '23:00',
-            night_mode_end VARCHAR(10) DEFAULT '06:00',
-            night_mode_action VARCHAR(50) DEFAULT 'mute',
-            night_mode_action_duration INT DEFAULT 3600,
-            nsfw_enabled TINYINT(1) DEFAULT 0,
-            nsfw_threshold FLOAT DEFAULT 0.7,
-            nsfw_filter TINYINT(1) DEFAULT 0,
-            auto_approve_join TINYINT(1) DEFAULT 0,
-            auto_reject_join TINYINT(1) DEFAULT 0,
-            mute_default_duration INT DEFAULT 3600,
-            ban_default_duration INT DEFAULT 0,
-            warn_default_duration INT DEFAULT 0,
-            restrict_default_duration INT DEFAULT 1800,
-            enable_timed_penalties TINYINT(1) DEFAULT 1,
-            auto_remove_penalties TINYINT(1) DEFAULT 1,
-            violation_strikes INT DEFAULT 3,
-            violation_duration INT DEFAULT 60
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- BANNED_WORDS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                word VARCHAR(255),
+                chat_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                UNIQUE KEY (word, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id BIGINT PRIMARY KEY,
-            locked TINYINT(1) DEFAULT 0,
-            locked_at DATETIME,
-            locked_by BIGINT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- AUTO_REPLIES ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                chat_id BIGINT,
+                keyword VARCHAR(255),
+                reply TEXT,
+                reply_type VARCHAR(50) DEFAULT 'text',
+                reply_media_id TEXT,
+                reply_buttons TEXT,
+                created_at DATETIME,
+                is_active TINYINT(1) DEFAULT 1,
+                usage_count INT DEFAULT 0,
+                PRIMARY KEY (chat_id, keyword)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- BANNED_WORDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            word VARCHAR(255),
-            chat_id BIGINT,
-            added_by BIGINT,
-            added_at DATETIME,
-            UNIQUE KEY (word, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- AUTO_REPLY_SETTINGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id BIGINT PRIMARY KEY,
+                enabled TINYINT(1) DEFAULT 0,
+                only_admins TINYINT(1) DEFAULT 0,
+                ignore_bots TINYINT(1) DEFAULT 1,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- AUTO_REPLIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_replies (
-            chat_id BIGINT,
-            keyword VARCHAR(255),
-            reply TEXT,
-            reply_type VARCHAR(50) DEFAULT 'text',
-            reply_media_id TEXT,
-            reply_buttons TEXT,
-            created_at DATETIME,
-            is_active TINYINT(1) DEFAULT 1,
-            usage_count INT DEFAULT 0,
-            PRIMARY KEY (chat_id, keyword)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- SUPPORT_TICKETS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                username VARCHAR(255),
+                message TEXT,
+                media_type VARCHAR(50),
+                media_file_id TEXT,
+                ticket_number INT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at DATETIME,
+                replied TINYINT(1) DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- AUTO_REPLY_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_reply_settings (
-            chat_id BIGINT PRIMARY KEY,
-            enabled TINYINT(1) DEFAULT 0,
-            only_admins TINYINT(1) DEFAULT 0,
-            ignore_bots TINYINT(1) DEFAULT 1,
-            updated_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- BOT_ADMINS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                added_by BIGINT,
+                added_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- SUPPORT_TICKETS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS support_tickets (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            username VARCHAR(255),
-            message TEXT,
-            media_type VARCHAR(50),
-            media_file_id TEXT,
-            ticket_number INT,
-            status VARCHAR(50) DEFAULT 'pending',
-            created_at DATETIME,
-            replied TINYINT(1) DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- SETTINGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                `key` VARCHAR(255) PRIMARY KEY,
+                `value` TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        for key, value in DEFAULT_SETTINGS:
+            try:
+                await conn.execute(
+                    "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
+                    (key, value),
+                )
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ MySQL settings '{key}': {e}")
 
-    # ---------- BOT_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_admins (
-            user_id BIGINT PRIMARY KEY,
-            added_by BIGINT,
-            added_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        # ---------- REFERRALS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                referrer_id BIGINT,
+                referred_id BIGINT,
+                created_at DATETIME,
+                UNIQUE KEY (referrer_id, referred_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
 
-    # ---------- SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            `key` VARCHAR(255) PRIMARY KEY,
-            `value` TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    for key, value in DEFAULT_SETTINGS:
+        # ---------- REFERRAL_REWARDS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                user_id BIGINT PRIMARY KEY,
+                referral_count INT DEFAULT 0,
+                total_reward_days INT DEFAULT 0,
+                claimed_reward_days INT DEFAULT 0,
+                last_referral_date DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_REMINDER_SETTINGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reminder_settings (
+                user_id BIGINT PRIMARY KEY,
+                subscription_reminder TINYINT(1) DEFAULT 1,
+                daily_stats_reminder TINYINT(1) DEFAULT 0,
+                weekly_report TINYINT(1) DEFAULT 1,
+                reminder_days_before INT DEFAULT 3,
+                last_reminder_sent DATETIME,
+                notification_lang VARCHAR(10) DEFAULT 'ar'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_TRANSLATION ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_translation (
+                user_id BIGINT PRIMARY KEY,
+                lang VARCHAR(10) DEFAULT 'off'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- CONTESTS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                creator_id BIGINT,
+                title VARCHAR(255),
+                description TEXT,
+                prize VARCHAR(255),
+                end_date DATETIME,
+                status VARCHAR(50) DEFAULT 'active',
+                winner_id BIGINT,
+                created_at DATETIME,
+                contest_type VARCHAR(50) DEFAULT 'raffle'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                contest_id INT,
+                answer TEXT,
+                joined_at DATETIME,
+                UNIQUE KEY (user_id, contest_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                contest_id INT,
+                winner_id BIGINT,
+                announced_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- ADMIN_LOGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                admin_id BIGINT,
+                action VARCHAR(255),
+                target_id BIGINT,
+                reason TEXT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_WARNINGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id BIGINT,
+                chat_id BIGINT,
+                warnings INT DEFAULT 0,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_VIOLATIONS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_violations (
+                user_id BIGINT,
+                chat_id BIGINT,
+                violation_count INT DEFAULT 0,
+                last_violation_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- GROUP_RULES ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id BIGINT PRIMARY KEY,
+                rules_text TEXT,
+                updated_by BIGINT,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_MESSAGES ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id BIGINT,
+                chat_id BIGINT,
+                message_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- SCHEDULED_POSTS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                text TEXT,
+                publish_time DATETIME,
+                fail_count INT DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- SENTIMENT_HISTORY ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentiment_history (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                text_encrypted BLOB,
+                sentiment VARCHAR(50),
+                score FLOAT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- PLANS ----------
+        # ✅ v7.5.6: features كـ TEXT (لا يمكن استخدام CHECK مع JSON بسهولة في MySQL < 8)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                name VARCHAR(100) UNIQUE,
+                description TEXT,
+                price INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                duration_days INT,
+                max_channels INT,
+                max_posts INT,
+                features TEXT,
+                is_active TINYINT(1) DEFAULT 1,
+                is_gift TINYINT(1) DEFAULT 0,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- SUBSCRIPTIONS ----------
+        # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                plan_id INT,
+                status VARCHAR(50) DEFAULT 'active',
+                start_date DATETIME,
+                end_date DATETIME,
+                auto_renew TINYINT(1) DEFAULT 0,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_subscription_id VARCHAR(255),
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- INVOICES ----------
+        # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                number VARCHAR(50) UNIQUE,
+                user_id BIGINT,
+                plan_id INT,
+                amount INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                status VARCHAR(50) DEFAULT 'pending',
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_payment_id VARCHAR(255),
+                paid_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- PAYMENT_LOGS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                event_type VARCHAR(100),
+                data TEXT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_PENALTIES ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_penalties (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type VARCHAR(50),
+                duration INT,
+                start_time DATETIME,
+                end_time DATETIME,
+                reason TEXT,
+                issued_by BIGINT,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- VIOLATION_PENALTIES ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS violation_penalties (
+                chat_id BIGINT NOT NULL,
+                violation_type VARCHAR(50) NOT NULL,
+                penalty_type VARCHAR(50) NOT NULL DEFAULT 'mute',
+                duration_seconds INT DEFAULT 3600,
+                PRIMARY KEY (chat_id, violation_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- GIFT_CODES ----------
+        # ✅ v7.5.6: plan_id مع ON DELETE RESTRICT
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                code VARCHAR(50) UNIQUE,
+                plan_id INT,
+                creator_id BIGINT,
+                used_by BIGINT,
+                used_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- USER_POINTS ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_points (
+                user_id BIGINT PRIMARY KEY,
+                points INT DEFAULT 0,
+                last_updated DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ---------- PENALTY_ARCHIVE ----------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS penalty_archive (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type VARCHAR(50),
+                duration INT,
+                start_time DATETIME,
+                end_time DATETIME,
+                reason TEXT,
+                issued_by BIGINT,
+                status VARCHAR(50),
+                created_at DATETIME,
+                archived_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ============ الفهارس ============
+        await _create_indexes_mysql(conn, logger)
+
+        # تسجيل إصدار المخطط
         try:
             await conn.execute(
-                "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
-                (key, value),
+                "INSERT IGNORE INTO schema_version (version, applied_at, description) "
+                "VALUES (%s, %s, %s)",
+                (
+                    CURRENT_SCHEMA_VERSION,
+                    _safe_now_iso(TimeUtils),
+                    "initial schema",
+                ),
             )
         except Exception as e:
             if logger:
-                logger.warning(f"⚠️ MySQL settings '{key}': {e}")
+                logger.warning(f"⚠️ schema_version MySQL: {e}")
 
-    # ---------- REFERRALS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            referrer_id BIGINT,
-            referred_id BIGINT,
-            created_at DATETIME,
-            UNIQUE KEY (referrer_id, referred_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- REFERRAL_REWARDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referral_rewards (
-            user_id BIGINT PRIMARY KEY,
-            referral_count INT DEFAULT 0,
-            total_reward_days INT DEFAULT 0,
-            claimed_reward_days INT DEFAULT 0,
-            last_referral_date DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_REMINDER_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_reminder_settings (
-            user_id BIGINT PRIMARY KEY,
-            subscription_reminder TINYINT(1) DEFAULT 1,
-            daily_stats_reminder TINYINT(1) DEFAULT 0,
-            weekly_report TINYINT(1) DEFAULT 1,
-            reminder_days_before INT DEFAULT 3,
-            last_reminder_sent DATETIME,
-            notification_lang VARCHAR(10) DEFAULT 'ar'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_TRANSLATION ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_translation (
-            user_id BIGINT PRIMARY KEY,
-            lang VARCHAR(10) DEFAULT 'off'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- CONTESTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contests (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            creator_id BIGINT,
-            title VARCHAR(255),
-            description TEXT,
-            prize VARCHAR(255),
-            end_date DATETIME,
-            status VARCHAR(50) DEFAULT 'active',
-            winner_id BIGINT,
-            created_at DATETIME,
-            contest_type VARCHAR(50) DEFAULT 'raffle'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_participants (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            contest_id INT,
-            answer TEXT,
-            joined_at DATETIME,
-            UNIQUE KEY (user_id, contest_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_winners (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            contest_id INT,
-            winner_id BIGINT,
-            announced_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- ADMIN_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            chat_id BIGINT,
-            admin_id BIGINT,
-            action VARCHAR(255),
-            target_id BIGINT,
-            reason TEXT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_WARNINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_warnings (
-            user_id BIGINT,
-            chat_id BIGINT,
-            warnings INT DEFAULT 0,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_VIOLATIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_violations (
-            user_id BIGINT,
-            chat_id BIGINT,
-            violation_count INT DEFAULT 0,
-            last_violation_time DATETIME,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- GROUP_RULES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_rules (
-            chat_id BIGINT PRIMARY KEY,
-            rules_text TEXT,
-            updated_by BIGINT,
-            updated_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_MESSAGES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_messages (
-            user_id BIGINT,
-            chat_id BIGINT,
-            message_time DATETIME,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SCHEDULED_POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_posts (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            chat_id BIGINT,
-            text TEXT,
-            publish_time DATETIME,
-            fail_count INT DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SENTIMENT_HISTORY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS sentiment_history (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            text_encrypted BLOB,
-            sentiment VARCHAR(50),
-            score FLOAT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- PLANS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(100) UNIQUE,
-            description TEXT,
-            price INT,
-            currency VARCHAR(10) DEFAULT 'XTR',
-            duration_days INT,
-            max_channels INT,
-            max_posts INT,
-            features TEXT,
-            is_active TINYINT(1) DEFAULT 1,
-            is_gift TINYINT(1) DEFAULT 0,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SUBSCRIPTIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            plan_id INT,
-            status VARCHAR(50) DEFAULT 'active',
-            start_date DATETIME,
-            end_date DATETIME,
-            auto_renew TINYINT(1) DEFAULT 0,
-            provider VARCHAR(50) DEFAULT 'xtr',
-            provider_subscription_id VARCHAR(255),
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- INVOICES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            number VARCHAR(50) UNIQUE,
-            user_id BIGINT,
-            plan_id INT,
-            amount INT,
-            currency VARCHAR(10) DEFAULT 'XTR',
-            status VARCHAR(50) DEFAULT 'pending',
-            provider VARCHAR(50) DEFAULT 'xtr',
-            provider_payment_id VARCHAR(255),
-            paid_at DATETIME,
-            created_at DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- PAYMENT_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS payment_logs (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            provider VARCHAR(50) DEFAULT 'xtr',
-            event_type VARCHAR(100),
-            data TEXT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_penalties (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type VARCHAR(50),
-            duration INT,
-            start_time DATETIME,
-            end_time DATETIME,
-            reason TEXT,
-            issued_by BIGINT,
-            status VARCHAR(50) DEFAULT 'active',
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- VIOLATION_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS violation_penalties (
-            chat_id BIGINT NOT NULL,
-            violation_type VARCHAR(50) NOT NULL,
-            penalty_type VARCHAR(50) NOT NULL DEFAULT 'mute',
-            duration_seconds INT DEFAULT 3600,
-            PRIMARY KEY (chat_id, violation_type)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- GIFT_CODES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS gift_codes (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            code VARCHAR(50) UNIQUE,
-            plan_id INT,
-            creator_id BIGINT,
-            used_by BIGINT,
-            used_at DATETIME,
-            created_at DATETIME,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_POINTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_points (
-            user_id BIGINT PRIMARY KEY,
-            points INT DEFAULT 0,
-            last_updated DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- PENALTY_ARCHIVE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS penalty_archive (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type VARCHAR(50),
-            duration INT,
-            start_time DATETIME,
-            end_time DATETIME,
-            reason TEXT,
-            issued_by BIGINT,
-            status VARCHAR(50),
-            created_at DATETIME,
-            archived_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    await conn.execute("SET FOREIGN_KEY_CHECKS=1")
-
-    # ============ الفهارس ============
-    await _create_indexes_mysql(conn, logger)
-
-    # تسجيل إصدار المخطط
-    try:
-        await conn.execute(
-            "INSERT IGNORE INTO schema_version (version, applied_at, description) "
-            "VALUES (%s, %s, %s)",
-            (
-                CURRENT_SCHEMA_VERSION,
-                _safe_now_iso(TimeUtils),
-                "initial schema",
-            ),
-        )
-    except Exception as e:
         if logger:
-            logger.warning(f"⚠️ schema_version MySQL: {e}")
+            logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
 
-    if logger:
-        logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
+    finally:
+        # ✅ v7.5.6: إعادة تفعيل FOREIGN_KEY_CHECKS دائمًا
+        try:
+            await conn.execute("SET FOREIGN_KEY_CHECKS=1")
+        except Exception as e:
+            if logger:
+                logger.error(f"❌ فشل إعادة تفعيل FOREIGN_KEY_CHECKS: {e}")
+
+
+# =====================================================================
+# تصدير
+# =====================================================================
+
+__all__ = [
+    "create_tables_sqlite",
+    "create_tables_postgres",
+    "create_tables_mysql",
+    "CURRENT_SCHEMA_VERSION",
+    "COMMON_INDEXES",
+    "EXPECTED_INDEX_COUNT",
+    "DEFAULT_SETTINGS",
+]
