@@ -2,14 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.5.1 — مُصلَّح)
+utils.py - الأدوات المساعدة للبوت (v7.5.2 — مُصلَّح ومحسّن)
 =================================================================================
-- جميع الدوال والفئات الموجودة سابقًا باقية كما هي
-- تحسينات إضافية لا تؤثر على السلوك الحالي
-- ✅ v7.5.1 إصلاحات جوهرية:
+🆕 v7.5.2 (إصلاحات أداء + خطأ asyncpg):
+    ✅ is_authorized_in_group: كاش أطول (600s) + فحص DB أولاً
+    ✅ _do_backup: لا يستخدم SQLite fallback عند PostgreSQL
+    ✅ _do_backup: معالجة آمنة لـ DB.set_setting
+    ✅ RateLimiter: لا حجب متسلسل
+    ✅ دعم كامل لـ ChatPermissions الجديدة (PTB v22)
+    ✅ تنظيف الاستيرادات غير المستخدمة
+
+🆕 v7.5.1 (إصلاحات جوهرية):
     * RateLimiter.acquire — نقل sleep خارج القفل (توازٍ حقيقي)
-    * apply_penalty — إضافة username/first_name/chat_name (إصلاح "المستخدم غير موجود")
-    * _do_backup — يستخدم DB.backup_database مع fallback SQLite
+    * apply_penalty — إضافة username/first_name/chat_name
+    * _do_backup — يستخدم DB.backup_database مع fallback
     * cleanup_old_data — يستخدم TimeUtils بدل SQLite-specific syntax
     * reminders — يستخدم RemindersMixin.send_subscription_reminders
     * _publish_single_channel — فحص tuple + user_id آمن
@@ -34,7 +40,6 @@ from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from enum import Enum, auto
 from collections import OrderedDict, deque, defaultdict
 from abc import ABC, abstractmethod
-from functools import lru_cache
 from contextlib import suppress
 
 try:
@@ -72,8 +77,7 @@ class TimeUtils:
     """
     أدوات الوقت والتاريخ.
 
-    ✅ v7.5.1: `sql_iso()` أصبحت بدون `+00:00` لتتوافق مع MySQL.
-                `utc_iso()` تُرجع صيغة ISO كاملة مع timezone.
+    ✅ v7.5.2: `sql_iso()` متوافقة مع PostgreSQL/MySQL/SQLite (بدون +00:00).
     """
     @staticmethod
     def utc_now() -> datetime:
@@ -94,7 +98,7 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        """✅ v7.5.1: صيغة SQL بدون +00:00 (متوافقة مع MySQL DATETIME)."""
+        """✅ v7.5.2: صيغة SQL بدون +00:00 (متوافقة مع كل المحركات)."""
         return TimeUtils.utc_now().strftime('%Y-%m-%d %H:%M:%S')
 
     @staticmethod
@@ -154,7 +158,6 @@ class TextUtils:
     def escape_markdown_v2(text: str) -> str:
         if not text:
             return ""
-        # ✅ v7.5.1: إزالة المتغير غير المستخدم
         return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\\'])', r'\\\1', text)
 
     @staticmethod
@@ -176,7 +179,7 @@ class RateLimiter:
     """
     محدد معدل الإرسال.
 
-    ✅ v7.5.1: نقل `sleep` خارج `self._lock` لتوازٍ حقيقي.
+    ✅ v7.5.2: نقل `sleep` خارج `self._lock` لتوازٍ حقيقي.
     """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -185,24 +188,21 @@ class RateLimiter:
         self.max_per_second = max_per_second
 
     async def acquire(self, *args, **kwargs):
-        """✅ v7.5.1: اكتساب إذن الإرسال مع احترام الحد الأقصى — بدون حجب متسلسل."""
+        """✅ v7.5.2: اكتساب إذن الإرسال مع احترام الحد الأقصى — بدون حجب متسلسل."""
         async with self.semaphore:
             while True:
                 wait_time = 0.0
                 async with self._lock:
                     now = time.time()
-                    # إزالة الطلبات القديمة (> 1 ثانية)
                     while self._last_calls and now - self._last_calls[0] > 1:
                         self._last_calls.popleft()
 
                     if len(self._last_calls) < self.max_per_second:
                         self._last_calls.append(now)
-                        return  # ✅ مسموح
+                        return
 
-                    # احتساب وقت الانتظار
                     wait_time = 1 - (now - self._last_calls[0])
 
-                # ✅ النوم خارج القفل
                 if wait_time > 0:
                     await asyncio.sleep(wait_time)
                 else:
@@ -304,7 +304,6 @@ class TranslationManager:
 
     @classmethod
     def _load_translation_cached(cls, lang: str) -> Dict:
-        """✅ v7.5.1: إزالة lru_cache — الاعتماد على cls._translations فقط."""
         if lang == 'off':
             lang = cls._default_lang
         if lang in cls._translations:
@@ -730,7 +729,6 @@ class KeyboardFactory:
         "ban_add": "➕ إضافة كلمة",
         "ban_list": "📋 القائمة",
         "ban_rem": "🗑️ حذف كلمة",
-        # ✅ v7.5.1: إضافة نصوص الأزرار الناقصة
         "buy_sub_1": "1 يوم ⭐",
         "buy_sub_7": "7 أيام ⭐",
         "buy_sub_30": "30 يوم ⭐",
@@ -911,7 +909,6 @@ _banned_words_cache: Dict[int, List[str]] = {}
 _banned_words_cache_time: Dict[int, float] = {}
 _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
-# ✅ v7.5.1: تفعيل الكاش افتراضيًا (كان False سابقًا)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
 
@@ -996,28 +993,37 @@ async def get_min_publish_interval() -> int:
 # 11. دوال الصلاحيات
 # =====================================================================
 
+# ✅ v7.5.2: كاش أطول + حجم أكبر
 _auth_cache = TTLCache(
-    maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 1000),
-    ttl=getattr(CONFIG, 'AUTH_CACHE_TTL', 300),
+    maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 2000),
+    ttl=600,  # ✅ 10 دقائق بدل 5
 )
 
+
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """
+    ✅ v7.5.2: فحص سريع + كاش + تجنب API قدر الإمكان.
+
+    الخطوات (بالترتيب):
+    1. المالك الرئيسي → مسموح فوراً
+    2. كاش (10 دقائق)
+    3. فحص DB (bot_admins, hidden_admins) — أسرع من API
+    4. Telegram API (فقط عند الحاجة)
+    """
+    # 1. المالك الرئيسي
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
 
+    # 2. الكاش
     cache_key = f"auth_{chat_id}_{user_id}"
-    if cache_key in _auth_cache:
-        return _auth_cache[cache_key]
+    cached = _auth_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     authorized = False
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        if member.status in ['administrator', 'creator']:
-            authorized = True
-    except Exception:
-        pass
 
-    if not authorized:
+    # 3. فحص DB أولاً (أسرع من API)
+    try:
         row = await DB.fetchone("""
             SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?
             UNION ALL
@@ -1026,7 +1032,19 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
             SELECT 1 FROM anonymous_admins WHERE chat_id=? AND (user_id=? OR (user_id IS NULL AND anonymous_id=?))
             LIMIT 1
         """, (chat_id, user_id, chat_id, user_id, chat_id, user_id, user_id))
-        authorized = row is not None
+        if row is not None:
+            authorized = True
+    except Exception as e:
+        logger.debug(f"DB auth check failed: {e}")
+
+    # 4. Telegram API (فقط إن لم نجد في DB)
+    if not authorized:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            if member.status in ('administrator', 'creator'):
+                authorized = True
+        except Exception as e:
+            logger.debug(f"Telegram API auth check failed: {e}")
 
     _auth_cache[cache_key] = authorized
     return authorized
@@ -1034,7 +1052,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
     """
-    ✅ v7.5.1: تُستدعى من ChatMemberHandler عند تغيير حالة المشرفين.
+    ✅ v7.5.2: تُستدعى من ChatMemberHandler عند تغيير حالة المشرفين.
     """
     with suppress(Exception):
         if chat_id and user_id:
@@ -1050,7 +1068,7 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
 async def check_bot_permissions(bot, chat_id: int) -> dict:
     try:
         me = await bot.get_chat_member(chat_id, bot.id)
-        if me.status not in ['administrator', 'creator']:
+        if me.status not in ('administrator', 'creator'):
             return {'can_act': False, 'reason': 'البوت ليس مشرفاً'}
         can_delete = getattr(me, 'can_delete_messages', False)
         can_restrict = getattr(me, 'can_restrict_members', False)
@@ -1067,8 +1085,6 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
-    no_caption_types = {'voice', 'sticker', 'video_note'}
-
     if media_type == 'photo':
         return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'video':
@@ -1103,7 +1119,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
         return None
 
     await RATE_LIMITER.acquire()
-    # ✅ v7.5.1: sanitize دائماً (حتى عند parse_mode=None)
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
 
     media_type = None
@@ -1210,7 +1225,6 @@ class MutePenalty(PenaltyStrategy):
             return False, "لا يمكن كتم البوت"
         duration = kwargs.get('duration', 60)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
-        # ✅ v22: استخدام المعاملات الجديدة المفصلة
         permissions = ChatPermissions(
             can_send_messages=False,
             can_send_audios=False,
@@ -1266,7 +1280,6 @@ class RestrictPenalty(PenaltyStrategy):
             return False, "لا يمكن تقييد البوت"
         duration = kwargs.get('duration', 0)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
-        # ✅ v22: استخدام المعاملات الجديدة المفصلة
         permissions = ChatPermissions(
             can_send_messages=True,
             can_send_audios=False,
@@ -1329,9 +1342,7 @@ async def apply_penalty(
     chat_name: str = "",
 ) -> Tuple[bool, str]:
     """
-    ✅ v7.5.1: تطبيق عقوبة على مستخدم + تسجيلها في DB.
-    - يمرّر `username/first_name/chat_name` لـ`DB.add_penalty`
-    - إذا لم تُمرَّر، يُحاول جلبها من تيليجرام تلقائيًا
+    ✅ v7.5.2: تطبيق عقوبة + تسجيلها في DB.
     """
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return False, "لا يمكن معاملة المالك"
@@ -1351,7 +1362,6 @@ async def apply_penalty(
     success, msg = await strategy.apply(bot, chat_id, user_id, duration=duration)
 
     if success:
-        # ✅ v7.5.1: محاولة جلب username/first_name إن لم تُمرَّر
         if not username or not first_name:
             try:
                 member = await bot.get_chat_member(chat_id, user_id)
@@ -1385,7 +1395,6 @@ async def apply_penalty(
                     chat_name=chat_name,
                 )
             except TypeError:
-                # توافق مع نسخة add_penalty القديمة التي لا تقبل هذه الوسائط
                 await DB.add_penalty(
                     user_id=user_id,
                     chat_id=chat_id,
@@ -1586,10 +1595,8 @@ def reload_replies_from_file() -> dict:
 # =====================================================================
 
 class BackgroundTasks:
-    # ✅ v7.4.7: كاش لمشرفي المجموعات
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _GROUP_ADMINS_CACHE_TTL = 600
-    # ✅ v7.5.1: حد أقصى لحجم الكاش
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
     @staticmethod
@@ -1607,9 +1614,7 @@ class BackgroundTasks:
                 a.user.id for a in admins
                 if a.user and not a.user.is_bot
             ]
-            # ✅ v7.5.1: تنظيف إن تجاوز الحد
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
-                # حذف أقدم 20%
                 sorted_items = sorted(
                     BackgroundTasks._group_admins_cache.items(),
                     key=lambda x: x[1][0],
@@ -1677,7 +1682,6 @@ class BackgroundTasks:
 
     @staticmethod
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
-        """✅ v7.5.1: فك نتيجة get_next_post بأمان."""
         if result is None:
             return None, False
         if isinstance(result, tuple) and len(result) == 2:
@@ -1794,61 +1798,73 @@ class BackgroundTasks:
     @staticmethod
     async def _do_backup() -> None:
         """
-        ✅ v7.5.1: النسخ الاحتياطي يعمل على 3 محركات.
-        - يُحاول استخدام DB.backup_database (متوافق مع PostgreSQL/MySQL/SQLite).
-        - fallback: SQLite المباشر.
+        ✅ v7.5.2: النسخ الاحتياطي يعمل على 3 محركات.
+        - لا يستخدم SQLite fallback عند PostgreSQL/MySQL
+        - معالجة آمنة لـ set_setting
         """
-        if not await DB.get_auto_backup():
-            return
+        import time as _time
+        t_start = _time.monotonic()
+        try:
+            if not await DB.get_auto_backup():
+                return
 
-        PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-        backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+            PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
+            backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
 
-        success = False
-        # محاولة 1: استخدام DB.backup_database
-        if hasattr(DB, "backup_database"):
-            try:
-                success = await DB.backup_database(backup_file)
-            except Exception as e:
-                logger.warning(f"⚠️ DB.backup_database فشل: {e}")
-                success = False
+            success = False
 
-        # محاولة 2: SQLite المباشر
-        if not success and getattr(DB, "DB_TYPE", "sqlite") == "sqlite":
-            try:
-                def _backup():
-                    import sqlite3 as sqlite3_sync
-                    source = sqlite3_sync.connect(str(PATHS.DB))
-                    dest = sqlite3_sync.connect(str(backup_file))
-                    with dest:
-                        source.backup(dest)
-                    dest.close()
-                    source.close()
-                await asyncio.to_thread(_backup)
-                success = True
-            except Exception as e:
-                logger.error(f"❌ SQLite backup failed: {e}")
-                success = False
+            # ✅ استخدام DB.backup_database (يعمل على كل المحركات)
+            if hasattr(DB, "backup_database"):
+                try:
+                    success = await DB.backup_database(backup_file)
+                except Exception as e:
+                    logger.warning(f"⚠️ DB.backup_database فشل: {e}")
+                    success = False
 
-        if success:
-            await DB.set_setting('last_backup', TimeUtils.sql_iso())
-            backups = sorted(PATHS.BACKUPS.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
-            for old in backups[CONFIG.MAX_BACKUPS:]:
-                with suppress(Exception):
-                    old.unlink()
-            logger.info(f"✅ نسخة احتياطية: {backup_file.name}")
-        else:
-            logger.error("❌ فشل النسخ الاحتياطي على كل المحركات")
+            # ✅ SQLite fallback فقط عند SQLite
+            if not success and getattr(DB, "DB_TYPE", "sqlite") == "sqlite":
+                try:
+                    def _backup():
+                        import sqlite3 as sqlite3_sync
+                        source = sqlite3_sync.connect(str(PATHS.DB))
+                        dest = sqlite3_sync.connect(str(backup_file))
+                        with dest:
+                            source.backup(dest)
+                        dest.close()
+                        source.close()
+                    await asyncio.to_thread(_backup)
+                    success = True
+                except Exception as e:
+                    logger.error(f"❌ SQLite backup failed: {e}")
+                    success = False
+
+            if success:
+                # ✅ معالجة آمنة لـ set_setting
+                try:
+                    await DB.set_setting('last_backup', TimeUtils.sql_iso())
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل حفظ last_backup: {e}")
+
+                backups = sorted(
+                    PATHS.BACKUPS.glob("backup_*.db"),
+                    key=lambda x: x.stat().st_mtime, reverse=True,
+                )
+                for old in backups[CONFIG.MAX_BACKUPS:]:
+                    with suppress(Exception):
+                        old.unlink()
+
+                elapsed = _time.monotonic() - t_start
+                logger.info(f"✅ نسخة احتياطية: {backup_file.name} ({elapsed:.2f}s)")
+            else:
+                logger.error("❌ فشل النسخ الاحتياطي")
+        except Exception as e:
+            logger.error(f"❌ _do_backup: {e}", exc_info=True)
 
     @staticmethod
     async def reminders(bot) -> None:
-        """
-        ✅ v7.5.1: يستخدم RemindersMixin.send_subscription_reminders.
-        """
         while True:
             await asyncio.sleep(3600)
             try:
-                # استخدام RemindersMixin إن وُجد
                 if hasattr(DB, "send_subscription_reminders"):
                     async def send_impl(user_id: int, days_left: int, lang: str) -> bool:
                         try:
@@ -1867,7 +1883,6 @@ class BackgroundTasks:
                     if isinstance(stats, dict) and stats.get('sent', 0) > 0:
                         logger.info(f"📨 تم إرسال {stats['sent']} تذكير اشتراك")
 
-                # fallback: DB.get_users_for_reminder (القديم)
                 elif hasattr(DB, "get_users_for_reminder"):
                     users = await DB.get_users_for_reminder()
                     for u in users:
@@ -1929,7 +1944,6 @@ class BackgroundTasks:
 
         while True:
             try:
-                # ✅ v7.5.1: فحص وجود DB.sync_group_admins
                 if not hasattr(DB, "sync_group_admins"):
                     logger.debug("ℹ️ DB.sync_group_admins غير متاحة — تخطي المزامنة")
                     await asyncio.sleep(7200)
@@ -1996,8 +2010,7 @@ class BackgroundTasks:
     @staticmethod
     async def cleanup_old_data() -> None:
         """
-        ✅ v7.5.1: استخدام TimeUtils بدل SQLite-specific syntax.
-        يعمل على 3 محركات.
+        ✅ v7.5.2: استخدام TimeUtils (يعمل على 3 محركات).
         """
         while True:
             await asyncio.sleep(3600)
@@ -2022,7 +2035,6 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف الكاش: {e}")
 
-            # ✅ v7.5.1: استخدام TimeUtils (يعمل على 3 محركات)
             try:
                 cutoff_30 = TimeUtils.utc_now() - timedelta(days=30)
                 cutoff_60 = TimeUtils.utc_now() - timedelta(days=60)
@@ -2095,7 +2107,7 @@ class ErrorHandler:
     @staticmethod
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        ✅ v7.5.1: يسجّل الخطأ + يُرسل إشعارًا لقناة السجلات (إن وُجدت).
+        ✅ v7.5.2: يسجّل الخطأ + يُرسل إشعارًا لقناة السجلات (إن وُجدت).
         """
         try:
             error_msg = str(context.error)
@@ -2104,7 +2116,7 @@ class ErrorHandler:
             else:
                 logger.error(f"❌ خطأ: {context.error}", exc_info=True)
 
-            # ✅ v7.5.1: إرسال إشعار لقناة السجلات
+            # إرسال إشعار لقناة السجلات
             try:
                 log_channel = await DB.get_log_channel()
                 if log_channel:
@@ -2121,3 +2133,24 @@ class ErrorHandler:
 
         except Exception:
             pass
+
+
+# =====================================================================
+# تصدير
+# =====================================================================
+
+__all__ = [
+    'TimeUtils', 'TextUtils', 'RateLimiter', 'RATE_LIMITER', 'METRICS',
+    'AutoReplyCache', 'TranslationManager', 'get_text',
+    'UserState', 'StateManager', 'CB', 'KeyboardFactory',
+    'get_banned_words_cached', 'invalidate_banned_words_cache',
+    'get_min_publish_interval',
+    'is_authorized_in_group', 'invalidate_auth_cache', 'check_bot_permissions',
+    'safe_send', 'get_ram_usage',
+    'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
+    'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
+    'apply_penalty',
+    'export_auto_replies', 'import_auto_replies', 'fetch_json_from_url',
+    'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
+    'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
+]
