@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_settings.py - دوال الإعدادات العامة (v7.4.6)
+database_settings.py - دوال الإعدادات العامة (v7.4.7)
 ================================================================================
 SettingsMixin:
+  - ensure_settings_unique_constraint : 🆕 v7.4.7 ضمان UNIQUE على key
   - get_setting                  : جلب إعداد من جدول settings
   - get_settings_batch           : جلب عدة إعدادات باستعلام واحد
   - get_start_settings           : إعدادات /start محسّنة
@@ -14,6 +15,13 @@ SettingsMixin:
   - get_publish_interval         : فترة النشر (بالدقائق)
   - get_auto_backup              : تفعيل النسخ الاحتياطي التلقائي
 
+🆕 v7.4.7 (UNIQUE تلقائي):
+  ✅ ensure_settings_unique_constraint: تُضيف UNIQUE على key إذا لم يكن موجوداً
+    - PostgreSQL: ALTER TABLE settings ADD CONSTRAINT settings_key_unique UNIQUE (key)
+    - MySQL: ALTER TABLE settings ADD UNIQUE KEY settings_key_unique (key)
+    - SQLite: تُتجاهل (PRIMARY KEY كافٍ)
+  ✅ تُستدعى في initialize_db / pre_initialize بعد إنشاء الجداول
+
 🆕 v7.4.6 (إصلاحات PostgreSQL):
   ✅ set_setting: يعمل بدون UNIQUE constraint على key
     - PostgreSQL: يُجرّب ON CONFLICT أولاً
@@ -22,7 +30,6 @@ SettingsMixin:
     - SQLite: INSERT OR REPLACE
   ✅ get_settings_batch: PostgreSQL يستخدم $1, $2 بدل ?,?
   ✅ معالجة القيم الفارغة ("" → None)
-  ✅ تنظيف الاستيرادات
 
 🆕 v7.4.5:
   ✅ كاش للقيم المفقودة (sentinel __MISSING__)
@@ -61,6 +68,125 @@ def _get_db_type() -> str:
 
 class SettingsMixin:
     """Mixin يحتوي كل دوال الإعدادات العامة"""
+
+    # =====================================================================
+    # 0) 🆕 v7.4.7: ضمان UNIQUE constraint على settings.key
+    # =====================================================================
+
+    async def ensure_settings_unique_constraint(self) -> bool:
+        """
+        ✅ v7.4.7: تُضمن وجود UNIQUE constraint على settings.key.
+
+        - آمنة: تفحص أولاً قبل الإضافة
+        - لا تُكرّر الإضافة إذا كان موجوداً
+        - تُتجاهل في SQLite (PRIMARY KEY كافٍ)
+        - تُستدعى بعد إنشاء الجداول
+
+        Returns:
+            True إذا كان UNIQUE موجوداً أو أُضيف بنجاح
+            False إذا فشلت الإضافة
+        """
+        db_type = _get_db_type()
+
+        # ✅ SQLite: PRIMARY KEY كافٍ
+        if db_type == "sqlite":
+            logger.debug("ℹ️ SQLite: PRIMARY KEY على settings.key كافٍ")
+            return True
+
+        try:
+            if db_type == "postgres":
+                # 1) فحص وجود UNIQUE constraint
+                exists = await self.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_indexes
+                        WHERE tablename = 'settings'
+                          AND indexdef ILIKE '%unique%'
+                          AND indexdef ILIKE '%(key)%'
+                    )
+                    """,
+                    default=False,
+                )
+
+                if exists:
+                    logger.debug("✅ UNIQUE على settings.key موجود مسبقاً")
+                    return True
+
+                # 2) فحص وجود constraint بنفس الاسم
+                constraint_exists = await self.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'settings_key_unique'
+                    )
+                    """,
+                    default=False,
+                )
+
+                if constraint_exists:
+                    logger.debug(
+                        "✅ UNIQUE constraint 'settings_key_unique' موجود"
+                    )
+                    return True
+
+                # 3) أضف constraint
+                await self.execute(
+                    "ALTER TABLE settings "
+                    "ADD CONSTRAINT settings_key_unique UNIQUE (key)"
+                )
+                logger.info(
+                    "✅ أُضيف UNIQUE constraint على settings.key"
+                )
+                return True
+
+            elif db_type == "mysql":
+                # 1) فحص وجود UNIQUE KEY
+                rows = await self.fetchall(
+                    "SHOW INDEX FROM `settings` WHERE Key_name = 'settings_key_unique'"
+                )
+                if rows:
+                    logger.debug(
+                        "✅ UNIQUE KEY 'settings_key_unique' موجود"
+                    )
+                    return True
+
+                # 2) فحص أي UNIQUE على key
+                rows = await self.fetchall(
+                    "SHOW INDEX FROM `settings` WHERE Column_name = 'key' "
+                    "AND Non_unique = 0"
+                )
+                if rows:
+                    logger.debug("✅ UNIQUE على settings.key موجود مسبقاً")
+                    return True
+
+                # 3) أضف UNIQUE KEY
+                await self.execute(
+                    "ALTER TABLE `settings` "
+                    "ADD UNIQUE KEY settings_key_unique (`key`)"
+                )
+                logger.info(
+                    "✅ أُضيف UNIQUE KEY على settings.key"
+                )
+                return True
+
+            return True
+
+        except Exception as e:
+            err_msg = str(e).lower()
+            # ✅ إذا كان constraint موجوداً (خطأ متوقع من سباق)
+            if "already exists" in err_msg or "duplicate" in err_msg:
+                logger.debug(
+                    f"ℹ️ UNIQUE constraint موجود مسبقاً (سباق): {e}"
+                )
+                return True
+
+            # ✅ خطأ آخر — نسجّله لكن لا نوقف التهيئة
+            logger.warning(
+                f"⚠️ فشل إضافة UNIQUE على settings.key: {e}"
+            )
+            return False
 
     # =====================================================================
     # 1) جلب إعداد واحد
@@ -223,9 +349,6 @@ class SettingsMixin:
                 result = await self.execute(query, (key, value))
 
             # ✅ إذا نجح UPSERT، نُكمل
-            # - PostgreSQL UPSERT: يُرجع 1
-            # - MySQL UPSERT: يُرجع 1 أو 2
-            # - SQLite: يُرجع 1
             if result is not None and result > 0:
                 # إبطال الكاش
                 if self.CACHE_AVAILABLE:
