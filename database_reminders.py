@@ -2,40 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (نسخة كاملة)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.5)
 ================================================================================
 - مستقل تماماً عن database.py (لتفادي circular imports)
 - يستقبل (conn, logger, TimeUtils) كمعاملات
 - جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
 - يحتوي على جدول schema_version لتتبع الإصدارات
 
-🚀 الإصدار v6 (v7.5.5):
-  - ✅ إصلاح #1: SQLite — إزالة executescript واستخدام حلقة آمنة
-  - ✅ إصلاح #2: PostgreSQL — transaction بدل استعلام متعدد (خطأ)
-  - ✅ إصلاح #4: MySQL — VARCHAR بدل TEXT لأعمدة DEFAULT
-  - ✅ إصلاح #5: MySQL — media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
-  - ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
-  - ✅ إصلاح #8: SQLite — ON CONFLICT بدل INSERT OR IGNORE
-  - ✅ إصلاح #9: schema_version — applied_at fallback آمن
-  - ✅ إضافة 11 فهرس حرج (reverse lookups + leaderboard + publishing)
-  - ✅ فهارس وقائية للتنظيف
-  - ✅ تنظيف الفهارس المكررة
-  - ✅ v7.5.4: تحسين Cold Start — فحص الفهارس الموجودة في استعلام واحد
-    * PostgreSQL: SELECT indexname FROM pg_indexes WHERE indexname = ANY($1)
-    * SQLite    : SELECT name FROM sqlite_master WHERE type='index'
-    * MySQL     : SHOW INDEX لكل جدول مرة واحدة
-    * توفير ~15 ثانية في كل تشغيل
-  - ✅ v7.5.4: تحسين Cold Start — فحص الجداول الموجودة في استعلام واحد
-    * PostgreSQL: SELECT table_name FROM information_schema.tables
-    * SQLite    : SELECT name FROM sqlite_master WHERE type='table'
-  - ✅ v7.5.4: تصحيح عدّاد الفهارس (كان يعرض "60 جديد" عند وجودها جميعاً)
+🚀 الإصدار v5 (v7.5.4):
+  - ✅ فحص الفهارس الموجودة في استعلام واحد (توفير ~15 ثانية)
+  - ✅ فحص الجداول الموجودة في استعلام واحد
+  - ✅ تصحيح عدّاد الفهارس
+  - ✅ 60 فهرس شامل
 
-🆕 v6 (v7.5.5) — إصلاحات إضافية:
-  - ✅ إصلاح #10: توحيد عدّاد "موجود" في _create_indexes_sqlite
-    * كان يستخدم len(existing) الذي يتضمن فهارس خارجية → عدّاد مضلّل
-    * الآن يستخدم len(COMMON_INDEXES) دائماً للاتساق مع PG
-  - ✅ إصلاح #11: _create_indexes_mysql — تحقق من وجود الجدول قبل SHOW INDEX
-    * تجنّب خطأ "Table doesn't exist" عند تشغيل أول مرة
+🆕 v7.5.5 (v5.1):
+  - ✅ إزالة LONG_TEXT_COLUMNS غير المستخدم
+  - ✅ تحقق assert على عدد الفهارس
+  - ✅ دالة _fetch_existing_indexes_mysql مستقلة
+  - ✅ تحسينات اتساق
 """
 
 import os
@@ -54,14 +38,9 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# أعمدة النص العربي الطويلة (بدون DEFAULT في MySQL)
-LONG_TEXT_COLUMNS = {
-    "group_security": ["welcome_text", "goodbye_text"],
-}
-
 COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
-    # USERS
+    # USERS (6)
     # ═══════════════════════════════════════════════════════════════
     ("users", "idx_users_banned", "users(banned)"),
     ("users", "idx_users_active_channel", "users(active_channel)"),
@@ -71,7 +50,7 @@ COMMON_INDEXES = [
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_CHANNELS
+    # USER_CHANNELS (4)
     # ═══════════════════════════════════════════════════════════════
     ("user_channels", "idx_uc_user", "user_channels(user_id)"),
     ("user_channels", "idx_user_channels_user_created", "user_channels(user_id, created_at DESC)"),
@@ -79,7 +58,7 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user", "user_channels(banned, user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # POSTS
+    # POSTS (5)
     # ═══════════════════════════════════════════════════════════════
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel", "posts(channel_db_id)"),
@@ -88,36 +67,36 @@ COMMON_INDEXES = [
     ("posts", "idx_posts_channel_pub_fail_created", "posts(channel_db_id, published, fail_count, created_at)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # BOT_GROUPS
+    # BOT_GROUPS (2)
     # ═══════════════════════════════════════════════════════════════
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_GROUPS_LINK
+    # USER_GROUPS_LINK (1)
     # ═══════════════════════════════════════════════════════════════
     ("user_groups_link", "idx_user_groups_link_user_id", "user_groups_link(user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # GROUP_ADMINS
+    # GROUP_ADMINS (2)
     # ═══════════════════════════════════════════════════════════════
     ("group_admins", "idx_group_admins_user_id", "group_admins(user_id)"),
     ("group_admins", "idx_group_admins_user_chat", "group_admins(user_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_OWNER_GROUPS
+    # HIDDEN_OWNER_GROUPS (2)
     # ═══════════════════════════════════════════════════════════════
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "hidden_owner_groups(owner_id)"),
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat", "hidden_owner_groups(owner_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_ADMINS
+    # HIDDEN_ADMINS (2)
     # ═══════════════════════════════════════════════════════════════
     ("hidden_admins", "idx_hidden_admins_admin_id", "hidden_admins(admin_id)"),
     ("hidden_admins", "idx_hidden_admins_admin_chat", "hidden_admins(admin_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # ANONYMOUS_ADMINS
+    # ANONYMOUS_ADMINS (4)
     # ═══════════════════════════════════════════════════════════════
     ("anonymous_admins", "idx_anonymous_admins_user_id", "anonymous_admins(user_id)"),
     ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "anonymous_admins(anonymous_id)"),
@@ -125,25 +104,25 @@ COMMON_INDEXES = [
     ("anonymous_admins", "idx_anon_anon_chat", "anonymous_admins(anonymous_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # BANNED_WORDS
+    # BANNED_WORDS (2)
     # ═══════════════════════════════════════════════════════════════
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
     ("banned_words", "idx_banned_words_chat_word", "banned_words(chat_id, word)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # AUTO_REPLIES
+    # AUTO_REPLIES (2)
     # ═══════════════════════════════════════════════════════════════
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup", "auto_replies(chat_id, keyword, is_active)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # SCHEDULE
+    # SCHEDULE (2)
     # ═══════════════════════════════════════════════════════════════
     ("schedule", "idx_schedule_next_publish", "schedule(next_publish_date)"),
     ("schedule", "idx_schedule_channel_next", "schedule(channel_db_id, next_publish_date)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # SUBSCRIPTIONS
+    # SUBSCRIPTIONS (5)
     # ═══════════════════════════════════════════════════════════════
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
@@ -152,24 +131,24 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_subscriptions_user_status_end", "subscriptions(user_id, status, end_date)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # INVOICES
+    # INVOICES (1)
     # ═══════════════════════════════════════════════════════════════
     ("invoices", "idx_inv_user", "invoices(user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # REFERRALS
+    # REFERRALS (2)
     # ═══════════════════════════════════════════════════════════════
     ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
     ("referrals", "idx_referrals_referrer_created", "referrals(referrer_id, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # CONTESTS
+    # CONTESTS (2)
     # ═══════════════════════════════════════════════════════════════
     ("contests", "idx_contests_status", "contests(status)"),
     ("contests", "idx_contests_status_end", "contests(status, end_date)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_PENALTIES
+    # USER_PENALTIES (4)
     # ═══════════════════════════════════════════════════════════════
     ("user_penalties", "idx_penalties_user", "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat", "user_penalties(chat_id)"),
@@ -177,50 +156,50 @@ COMMON_INDEXES = [
     ("user_penalties", "idx_penalties_user_chat_status_end", "user_penalties(user_id, chat_id, status, end_time)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_POINTS
+    # USER_POINTS (2)
     # ═══════════════════════════════════════════════════════════════
     ("user_points", "idx_points_user", "user_points(user_id)"),
     ("user_points", "idx_user_points_value", "user_points(points DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # SUPPORT_TICKETS
+    # SUPPORT_TICKETS (2)
     # ═══════════════════════════════════════════════════════════════
     ("support_tickets", "idx_tickets_status", "support_tickets(status)"),
     ("support_tickets", "idx_tickets_status_created", "support_tickets(status, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # PAYMENT_LOGS
+    # PAYMENT_LOGS (1)
     # ═══════════════════════════════════════════════════════════════
     ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # ADMIN_LOGS
+    # ADMIN_LOGS (1)
     # ═══════════════════════════════════════════════════════════════
     ("admin_logs", "idx_admin_logs_chat", "admin_logs(chat_id, id DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # PENALTY_ARCHIVE
+    # PENALTY_ARCHIVE (1)
     # ═══════════════════════════════════════════════════════════════
     ("penalty_archive", "idx_penalty_archive_archived", "penalty_archive(archived_at)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # SENTIMENT_HISTORY
+    # SENTIMENT_HISTORY (2)
     # ═══════════════════════════════════════════════════════════════
     ("sentiment_history", "idx_sentiment_user_chat", "sentiment_history(user_id, chat_id)"),
     ("sentiment_history", "idx_sentiment_created", "sentiment_history(created_at)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_MESSAGES
+    # USER_MESSAGES (1)
     # ═══════════════════════════════════════════════════════════════
     ("user_messages", "idx_user_messages_chat", "user_messages(chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # SCHEDULED_POSTS
+    # SCHEDULED_POSTS (1)
     # ═══════════════════════════════════════════════════════════════
     ("scheduled_posts", "idx_scheduled_posts_time", "scheduled_posts(publish_time)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # USER_REMINDER_SETTINGS
+    # USER_REMINDER_SETTINGS (1)
     # ═══════════════════════════════════════════════════════════════
     ("user_reminder_settings", "idx_reminder_subscription", "user_reminder_settings(subscription_reminder)"),
 ]
@@ -231,7 +210,7 @@ COMMON_INDEXES = [
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
-    """✅ إصلاح #9: fallback آمن للوقت"""
+    """✅ fallback آمن للوقت"""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
@@ -251,11 +230,11 @@ def _safe_now_dt(TimeUtils):
 
 
 # =====================================================================
-# 🆕 v7.5.4 — دوال فحص جماعية (Batch Existence Checks)
+# دوال فحص جماعية (Batch Existence Checks)
 # =====================================================================
 
 async def _fetch_existing_indexes_postgres(conn, index_names):
-    """جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)"""
+    """جلب الفهارس الموجودة في استعلام واحد"""
     if not index_names:
         return set()
     try:
@@ -278,6 +257,22 @@ async def _fetch_existing_indexes_sqlite(conn):
         return {row[0] for row in rows}
     except Exception:
         return set()
+
+
+async def _fetch_existing_indexes_mysql(conn, tables):
+    """جلب الفهارس الموجودة لجميع الجداول في MySQL"""
+    existing = set()
+    for table in tables:
+        try:
+            cursor = await conn.cursor()
+            await cursor.execute(f"SHOW INDEX FROM `{table}`")
+            rows = await cursor.fetchall()
+            for r in rows:
+                existing.add((table, r[2]))
+            await cursor.close()
+        except Exception:
+            continue
+    return existing
 
 
 async def _fetch_existing_tables_postgres(conn):
@@ -305,7 +300,7 @@ async def _fetch_existing_tables_sqlite(conn):
 
 
 async def _table_exists_mysql(conn, table: str) -> bool:
-    """✅ v7.5.5: تحقق من وجود جدول MySQL قبل SHOW INDEX"""
+    """فحص وجود جدول في MySQL"""
     try:
         cursor = await conn.cursor()
         await cursor.execute(f"SHOW TABLES LIKE '{table}'")
@@ -317,28 +312,19 @@ async def _table_exists_mysql(conn, table: str) -> bool:
 
 
 # =====================================================================
-# دالة مساعدة: إنشاء الفهارس (لكل نوع DB) — محسّنة في v7.5.5
+# دوال إنشاء الفهارس
 # =====================================================================
 
 async def _create_indexes_sqlite(conn, logger):
-    """
-    ✅ v7.5.4: تحسين Cold Start — فحص جماعي للفهارس الموجودة.
-    ✅ v7.5.5: توحيد عدّاد "موجود" = len(COMMON_INDEXES)
-    """
-    # 1) جلب الفهارس الموجودة في استعلام واحد
+    """إنشاء فهارس SQLite (batch check)"""
     existing = await _fetch_existing_indexes_sqlite(conn)
-
-    # 2) تحديد المفقودة
     to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
 
     if not to_create:
         if logger:
-            logger.info(
-                f"✅ SQLite: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل"
-            )
+            logger.info(f"✅ SQLite: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل")
         return
 
-    # 3) إنشاء المفقودة فقط
     created = 0
     failed = 0
     for _table, idx_name, cols in to_create:
@@ -352,44 +338,27 @@ async def _create_indexes_sqlite(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(
-            f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
-        )
+        logger.info(f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
 
 
 async def _create_indexes_postgres(conn, logger):
-    """
-    ✅ v7.5.4: تحسين Cold Start بشكل كبير.
-    - استعلام واحد لجلب جميع الفهارس الموجودة
-    - إنشاء الفهارس المفقودة فقط
-    - يوفّر ~15 ثانية في كل تشغيل بعد الأول
-    """
-    # 1) جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)
+    """إنشاء فهارس PostgreSQL (batch check + transaction)"""
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     existing = await _fetch_existing_indexes_postgres(conn, index_names)
-
-    # 2) تحديد المفقودة فقط
-    to_create = [
-        (t, n, c) for t, n, c in COMMON_INDEXES if n not in existing
-    ]
+    to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
 
     if not to_create:
         if logger:
-            logger.info(
-                f"✅ PostgreSQL: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل"
-            )
+            logger.info(f"✅ PostgreSQL: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل")
         return
 
-    # 3) إنشاء المفقودة فقط داخل transaction
     created = 0
     failed = 0
     try:
         async with conn.transaction():
             for _table, idx_name, cols in to_create:
                 try:
-                    await conn.execute(
-                        f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                    )
+                    await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
                     created += 1
                 except Exception as e:
                     failed += 1
@@ -402,9 +371,7 @@ async def _create_indexes_postgres(conn, logger):
         failed = 0
         for _table, idx_name, cols in to_create:
             try:
-                await conn.execute(
-                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                )
+                await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
                 created += 1
             except Exception as e2:
                 failed += 1
@@ -413,35 +380,13 @@ async def _create_indexes_postgres(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(
-            f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
-        )
+        logger.info(f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
 
 
 async def _create_indexes_mysql(conn, logger):
-    """
-    ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
-    ✅ v7.5.5: تحقق من وجود الجدول قبل SHOW INDEX (تجنّب خطأ أول تشغيل)
-    """
-    # جمع الأسماء الفريدة للجداول
+    """إنشاء فهارس MySQL (SHOW INDEX per table)"""
     tables = set(t for t, _, _ in COMMON_INDEXES)
-
-    existing = set()
-    for table in tables:
-        # ✅ v7.5.5: تحقق من وجود الجدول قبل SHOW INDEX
-        if not await _table_exists_mysql(conn, table):
-            continue
-        try:
-            cursor = await conn.cursor()
-            await cursor.execute(f"SHOW INDEX FROM `{table}`")
-            rows = await cursor.fetchall()
-            for r in rows:
-                # r[2] = Key_name
-                existing.add((table, r[2]))
-            await cursor.close()
-        except Exception as e:
-            if logger:
-                logger.debug(f"⚠️ SHOW INDEX لـ {table}: {e}")
+    existing = await _fetch_existing_indexes_mysql(conn, tables)
 
     created = 0
     skipped = 0
@@ -455,11 +400,7 @@ async def _create_indexes_mysql(conn, logger):
             created += 1
         except Exception as e:
             err_msg = str(e).lower()
-            if (
-                "duplicate" in err_msg
-                or "already exists" in err_msg
-                or "1061" in err_msg
-            ):
+            if "duplicate" in err_msg or "already exists" in err_msg or "1061" in err_msg:
                 skipped += 1
             else:
                 failed += 1
@@ -768,7 +709,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             value TEXT
         )
     """)
-    # ✅ إصلاح #8: ON CONFLICT بدل INSERT OR IGNORE
     for key, value in DEFAULT_SETTINGS:
         try:
             await conn.execute(
@@ -1072,7 +1012,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ 🚀 الفهارس — v7.5.5 فحص جماعي ============
+    # ============ الفهارس ============
     await _create_indexes_sqlite(conn, logger)
 
     # تسجيل إصدار المخطط
@@ -1696,7 +1636,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ============ 🚀 الفهارس — v7.5.5 فحص جماعي ============
+    # ============ الفهارس ============
     await _create_indexes_postgres(conn, logger)
 
     # تسجيل إصدار المخطط
@@ -1767,7 +1707,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     """)
 
     # ---------- POSTS ----------
-    # ✅ إصلاح #5: media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1876,7 +1815,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     """)
 
     # ---------- GROUP_SECURITY ----------
-    # ✅ إصلاح #4: welcome_text / goodbye_text كـ VARCHAR (TEXT لا يدعم DEFAULT)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -1885,9 +1823,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             slow_mode TINYINT(1) DEFAULT 0,
             slow_mode_seconds INT DEFAULT 5,
             welcome_enabled TINYINT(1) DEFAULT 0,
-            welcome_text VARCHAR(500) DEFAULT 'مرحباً {user} في {chat} 🤍',
+            welcome_text VARCHAR(2000) DEFAULT 'مرحباً {user} في {chat} 🤍',
             goodbye_enabled TINYINT(1) DEFAULT 0,
-            goodbye_text VARCHAR(500) DEFAULT 'وداعاً {user} 👋',
+            goodbye_text VARCHAR(2000) DEFAULT 'وداعاً {user} 👋',
             delete_banned_words TINYINT(1) DEFAULT 0,
             auto_penalty VARCHAR(50) DEFAULT 'none',
             auto_mute_duration INT DEFAULT 3600,
@@ -2323,7 +2261,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
 
     await conn.execute("SET FOREIGN_KEY_CHECKS=1")
 
-    # ============ 🚀 الفهارس MySQL — SHOW INDEX ============
+    # ============ الفهارس ============
     await _create_indexes_mysql(conn, logger)
 
     # تسجيل إصدار المخطط
