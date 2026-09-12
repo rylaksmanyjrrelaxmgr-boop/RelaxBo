@@ -2,22 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (نسخة محسّنة مع إصلاح خطأ النشر)
+utils.py - الأدوات المساعدة للبوت (v7.5.1 — مُصلَّح)
 =================================================================================
 - جميع الدوال والفئات الموجودة سابقًا باقية كما هي
-- تحسينات إضافية طفيفة لا تؤثر على السلوك الحالي
-- دمج اختياري مع cache.py (بدون إزالة الكاشات المحلية)
-- إصلاحات دقيقة في بعض النقاط
-- تطبيق الإصلاحات المقترحة (النقاط 1،6،7،8،9،14)
-- تطبيق إصلاحات إضافية بعد الفحص الثاني (النقاط 1،2،5،6،8،9،11،13،14)
-- إضافة تحسينات اختيارية: timeout للطلبات، تحسين أسماء المتغيرات، فحص Content-Type
-- إضافة عرض حالة الوسائط في _format_security_text
-- ✅ إصلاح خطأ tuple في النشر التلقائي: تعديل _publish_single_channel لاستقبال (post, recycled)
-- ✅ إرسال إشعار النشر فقط عند أول منشور أو إعادة تدوير
-- ✅ إضافة حالة WAIT_BACKUP_FILE لاستقبال ملفات النسخ الاحتياطي
-- ✅ v7.4.7: تحسين sync_admins_periodically بكاش ذكي + توازي (يُسرّع /start)
-- ✅ v7.5.0: إصلاح ChatPermissions لتوافق python-telegram-bot v22.8
-  (can_send_media_messages محذوفة → استبدلت بـ 6 معاملات مفصلة)
+- تحسينات إضافية لا تؤثر على السلوك الحالي
+- ✅ v7.5.1 إصلاحات جوهرية:
+    * RateLimiter.acquire — نقل sleep خارج القفل (توازٍ حقيقي)
+    * apply_penalty — إضافة username/first_name/chat_name (إصلاح "المستخدم غير موجود")
+    * _do_backup — يستخدم DB.backup_database مع fallback SQLite
+    * cleanup_old_data — يستخدم TimeUtils بدل SQLite-specific syntax
+    * reminders — يستخدم RemindersMixin.send_subscription_reminders
+    * _publish_single_channel — فحص tuple + user_id آمن
+    * invalidate_auth_cache — يدعم الاستدعاء من ChatMemberHandler
+    * TimeUtils.sql_iso — توحيد مع database.py
+    * _group_admins_cache — حد أقصى للحجم
+    * ErrorHandler — إشعار log_channel
+=================================================================================
 """
 
 import asyncio
@@ -30,7 +30,7 @@ import random
 import importlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Tuple, Any, Union
+from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from enum import Enum, auto
 from collections import OrderedDict, deque, defaultdict
 from abc import ABC, abstractmethod
@@ -69,7 +69,12 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class TimeUtils:
-    """أدوات الوقت والتاريخ."""
+    """
+    أدوات الوقت والتاريخ.
+
+    ✅ v7.5.1: `sql_iso()` أصبحت بدون `+00:00` لتتوافق مع MySQL.
+                `utc_iso()` تُرجع صيغة ISO كاملة مع timezone.
+    """
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -80,7 +85,8 @@ class TimeUtils:
 
     @staticmethod
     def utc_iso() -> str:
-        return TimeUtils.utc_now().isoformat()
+        """صيغة ISO كاملة (مع +00:00) — للاستخدامات العامة."""
+        return TimeUtils.utc_now().isoformat() + "+00:00"
 
     @staticmethod
     def mecca_iso() -> str:
@@ -88,6 +94,7 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
+        """✅ v7.5.1: صيغة SQL بدون +00:00 (متوافقة مع MySQL DATETIME)."""
         return TimeUtils.utc_now().strftime('%Y-%m-%d %H:%M:%S')
 
     @staticmethod
@@ -102,13 +109,22 @@ class TimeUtils:
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
         if not date_str:
             return None
+        if isinstance(date_str, datetime):
+            if date_str.tzinfo is not None:
+                return date_str.astimezone(timezone.utc).replace(tzinfo=None)
+            return date_str
         try:
             return datetime.fromisoformat(date_str)
-        except ValueError:
-            try:
-                return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-            except ValueError:
-                return None
+        except (ValueError, TypeError):
+            pass
+        try:
+            return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            pass
+        try:
+            return datetime.strptime(date_str, '%Y-%m-%d')
+        except (ValueError, TypeError):
+            return None
 
 
 # =====================================================================
@@ -138,7 +154,7 @@ class TextUtils:
     def escape_markdown_v2(text: str) -> str:
         if not text:
             return ""
-        special = r'_*[]()~`>#+\-=|{}.!\\\''
+        # ✅ v7.5.1: إزالة المتغير غير المستخدم
         return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\\'])', r'\\\1', text)
 
     @staticmethod
@@ -157,7 +173,11 @@ class TextUtils:
 # =====================================================================
 
 class RateLimiter:
-    """محدد معدل الإرسال."""
+    """
+    محدد معدل الإرسال.
+
+    ✅ v7.5.1: نقل `sleep` خارج `self._lock` لتوازٍ حقيقي.
+    """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._last_calls = deque(maxlen=max_per_second * 2)
@@ -165,18 +185,28 @@ class RateLimiter:
         self.max_per_second = max_per_second
 
     async def acquire(self, *args, **kwargs):
-        """اكتساب إذن الإرسال مع احترام الحد الأقصى."""
+        """✅ v7.5.1: اكتساب إذن الإرسال مع احترام الحد الأقصى — بدون حجب متسلسل."""
         async with self.semaphore:
-            async with self._lock:
-                now = time.time()
-                while self._last_calls and now - self._last_calls[0] > 1:
-                    self._last_calls.popleft()
-                if len(self._last_calls) >= self.max_per_second:
+            while True:
+                wait_time = 0.0
+                async with self._lock:
+                    now = time.time()
+                    # إزالة الطلبات القديمة (> 1 ثانية)
+                    while self._last_calls and now - self._last_calls[0] > 1:
+                        self._last_calls.popleft()
+
+                    if len(self._last_calls) < self.max_per_second:
+                        self._last_calls.append(now)
+                        return  # ✅ مسموح
+
+                    # احتساب وقت الانتظار
                     wait_time = 1 - (now - self._last_calls[0])
-                    if wait_time > 0:
-                        await asyncio.sleep(wait_time)
-                        now = time.time()
-                self._last_calls.append(now)
+
+                # ✅ النوم خارج القفل
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                else:
+                    await asyncio.sleep(0.01)
 
 
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
@@ -273,20 +303,28 @@ class TranslationManager:
     _default_lang: str = "ar"
 
     @classmethod
-    @lru_cache(maxsize=32)
     def _load_translation_cached(cls, lang: str) -> Dict:
+        """✅ v7.5.1: إزالة lru_cache — الاعتماد على cls._translations فقط."""
         if lang == 'off':
             lang = cls._default_lang
         if lang in cls._translations:
             return cls._translations[lang]
+
         file_path = Path(cls._locales_dir) / f"{lang}.json"
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 cls._translations[lang] = json.load(f)
                 return cls._translations[lang]
-        except Exception:
+        except FileNotFoundError:
             if lang != cls._default_lang:
                 return cls._load_translation_cached(cls._default_lang)
+            cls._translations[lang] = {}
+            return {}
+        except Exception as e:
+            logger.error(f"❌ فشل قراءة ملف الترجمة {lang}: {e}")
+            if lang != cls._default_lang:
+                return cls._load_translation_cached(cls._default_lang)
+            cls._translations[lang] = {}
             return {}
 
     @classmethod
@@ -692,6 +730,16 @@ class KeyboardFactory:
         "ban_add": "➕ إضافة كلمة",
         "ban_list": "📋 القائمة",
         "ban_rem": "🗑️ حذف كلمة",
+        # ✅ v7.5.1: إضافة نصوص الأزرار الناقصة
+        "buy_sub_1": "1 يوم ⭐",
+        "buy_sub_7": "7 أيام ⭐",
+        "buy_sub_30": "30 يوم ⭐",
+        "buy_sub_90": "90 يوم ⭐",
+        "buy_sub_365": "365 يوم ⭐",
+        "gift_plans": "🎁 الهدايا",
+        "redeem_gift": "🎟️ استبدال كود",
+        "panel_close": "🔒 إغلاق",
+        "sec_links_on": "🔗 الروابط ✅",
     }
 
     @classmethod
@@ -863,7 +911,8 @@ _banned_words_cache: Dict[int, List[str]] = {}
 _banned_words_cache_time: Dict[int, float] = {}
 _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
-_ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', False)
+# ✅ v7.5.1: تفعيل الكاش افتراضيًا (كان False سابقًا)
+_ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
 
 def _normalize_word(word: Any) -> Optional[str]:
@@ -947,7 +996,10 @@ async def get_min_publish_interval() -> int:
 # 11. دوال الصلاحيات
 # =====================================================================
 
-_auth_cache = TTLCache(maxsize=CONFIG.AUTH_CACHE_SIZE, ttl=CONFIG.AUTH_CACHE_TTL)
+_auth_cache = TTLCache(
+    maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 1000),
+    ttl=getattr(CONFIG, 'AUTH_CACHE_TTL', 300),
+)
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     if user_id == CONFIG.PRIMARY_OWNER_ID:
@@ -981,6 +1033,9 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
+    """
+    ✅ v7.5.1: تُستدعى من ChatMemberHandler عند تغيير حالة المشرفين.
+    """
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
@@ -1048,6 +1103,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
         return None
 
     await RATE_LIMITER.acquire()
+    # ✅ v7.5.1: sanitize دائماً (حتى عند parse_mode=None)
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
 
     media_type = None
@@ -1154,7 +1210,7 @@ class MutePenalty(PenaltyStrategy):
             return False, "لا يمكن كتم البوت"
         duration = kwargs.get('duration', 60)
         until_date = TimeUtils.utc_now() + timedelta(seconds=duration) if duration > 0 else None
-        # ✅ v22: استخدام المعاملات الجديدة المفصلة (بدل can_send_media_messages المحذوفة)
+        # ✅ v22: استخدام المعاملات الجديدة المفصلة
         permissions = ChatPermissions(
             can_send_messages=False,
             can_send_audios=False,
@@ -1260,32 +1316,91 @@ class PenaltyFactory:
         return strategies.get(penalty_type)
 
 
-async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str, duration: int = 60, reason: str = "", moderator: int = None) -> Tuple[bool, str]:
+async def apply_penalty(
+    bot,
+    chat_id: int,
+    user_id: int,
+    penalty: str,
+    duration: int = 60,
+    reason: str = "",
+    moderator: int = None,
+    username: str = "",
+    first_name: str = "",
+    chat_name: str = "",
+) -> Tuple[bool, str]:
+    """
+    ✅ v7.5.1: تطبيق عقوبة على مستخدم + تسجيلها في DB.
+    - يمرّر `username/first_name/chat_name` لـ`DB.add_penalty`
+    - إذا لم تُمرَّر، يُحاول جلبها من تيليجرام تلقائيًا
+    """
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return False, "لا يمكن معاملة المالك"
     if user_id == bot.id:
         return False, "لا يمكن معاملة البوت"
     if await is_authorized_in_group(bot, chat_id, user_id):
         return False, "لا يمكن معاملة مشرف"
+
     perms = await check_bot_permissions(bot, chat_id)
     if not perms['can_act']:
         return False, "الصلاحيات غير كافية"
+
     strategy = PenaltyFactory.get_strategy(penalty)
     if not strategy:
         return False, "نوع عقوبة غير معروف"
+
     success, msg = await strategy.apply(bot, chat_id, user_id, duration=duration)
+
     if success:
+        # ✅ v7.5.1: محاولة جلب username/first_name إن لم تُمرَّر
+        if not username or not first_name:
+            try:
+                member = await bot.get_chat_member(chat_id, user_id)
+                tg_user = getattr(member, "user", None)
+                if tg_user:
+                    if not username:
+                        username = tg_user.username or ""
+                    if not first_name:
+                        first_name = tg_user.first_name or ""
+            except Exception as e:
+                logger.debug(f"تعذر جلب بيانات المستخدم {user_id}: {e}")
+
+        if not chat_name:
+            try:
+                chat = await bot.get_chat(chat_id)
+                chat_name = getattr(chat, "title", "") or ""
+            except Exception as e:
+                logger.debug(f"تعذر جلب اسم المجموعة {chat_id}: {e}")
+
         if penalty in DB.VALID_PENALTY_TYPES:
-            await DB.add_penalty(
-                user_id=user_id,
-                chat_id=chat_id,
-                penalty_type=penalty,
-                duration=duration,
-                reason=reason,
-                issued_by=moderator
-            )
+            try:
+                await DB.add_penalty(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    penalty_type=penalty,
+                    duration=duration,
+                    reason=reason,
+                    issued_by=moderator,
+                    username=username,
+                    first_name=first_name,
+                    chat_name=chat_name,
+                )
+            except TypeError:
+                # توافق مع نسخة add_penalty القديمة التي لا تقبل هذه الوسائط
+                await DB.add_penalty(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    penalty_type=penalty,
+                    duration=duration,
+                    reason=reason,
+                    issued_by=moderator,
+                )
+
         if moderator:
-            await DB.add_admin_log(chat_id, moderator, penalty, user_id, reason)
+            try:
+                await DB.add_admin_log(chat_id, moderator, penalty, user_id, reason)
+            except Exception as e:
+                logger.debug(f"تعذر تسجيل admin_log: {e}")
+
     return success, msg
 
 
@@ -1474,6 +1589,8 @@ class BackgroundTasks:
     # ✅ v7.4.7: كاش لمشرفي المجموعات
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _GROUP_ADMINS_CACHE_TTL = 600
+    # ✅ v7.5.1: حد أقصى لحجم الكاش
+    _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
     @staticmethod
     async def _get_admin_ids_cached(bot, chat_id: int, force_refresh: bool = False) -> List[int]:
@@ -1490,6 +1607,16 @@ class BackgroundTasks:
                 a.user.id for a in admins
                 if a.user and not a.user.is_bot
             ]
+            # ✅ v7.5.1: تنظيف إن تجاوز الحد
+            if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
+                # حذف أقدم 20%
+                sorted_items = sorted(
+                    BackgroundTasks._group_admins_cache.items(),
+                    key=lambda x: x[1][0],
+                )
+                for k, _ in sorted_items[: BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5]:
+                    BackgroundTasks._group_admins_cache.pop(k, None)
+
             BackgroundTasks._group_admins_cache[chat_id] = (now, admin_ids)
             return admin_ids
         except Exception as e:
@@ -1549,19 +1676,33 @@ class BackgroundTasks:
             return False
 
     @staticmethod
+    def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
+        """✅ v7.5.1: فك نتيجة get_next_post بأمان."""
+        if result is None:
+            return None, False
+        if isinstance(result, tuple) and len(result) == 2:
+            post_dict, was_recycled = result
+            if post_dict is None or isinstance(post_dict, dict):
+                return post_dict, bool(was_recycled)
+            return None, False
+        if isinstance(result, dict):
+            return result, False
+        return None, False
+
+    @staticmethod
     async def _publish_single_channel(bot, ch, sleep_seconds, published_count):
+        user_id = None
         try:
-            has_sub = await DB.has_active_subscription(ch['user_id'])
+            user_id = ch.get('user_id') if isinstance(ch, dict) else None
+            has_sub = await DB.has_active_subscription(user_id) if user_id else False
             if not has_sub:
-                logger.info(f"⏭️ تخطي القناة {ch['id']} لانتهاء الاشتراك")
+                logger.info(f"⏭️ تخطي القناة {ch.get('id')} لانتهاء الاشتراك")
                 return
 
-            result = await DB.get_next_post(ch['id'])
-            if result is None:
-                return
-            post, recycled = result
+            raw_result = await DB.get_next_post(ch['id'])
+            post, recycled = BackgroundTasks._unwrap_get_next_post(raw_result)
 
-            if post is None:
+            if not post:
                 return
 
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
@@ -1572,12 +1713,11 @@ class BackgroundTasks:
                 logger.info(f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة...")
 
                 if published_count == 0 or recycled:
-                    try:
-                        user_id = ch.get('user_id')
-                        if user_id:
+                    if user_id:
+                        try:
                             await safe_send(bot, user_id, "✅ تم نشر منشور في قناتك")
-                    except Exception as e:
-                        logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
+                        except Exception as e:
+                            logger.warning(f"تعذر إرسال إشعار النشر للمستخدم {user_id}: {e}")
 
                 await asyncio.sleep(sleep_seconds)
             else:
@@ -1653,45 +1793,100 @@ class BackgroundTasks:
 
     @staticmethod
     async def _do_backup() -> None:
-        if await DB.get_auto_backup():
-            PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+        """
+        ✅ v7.5.1: النسخ الاحتياطي يعمل على 3 محركات.
+        - يُحاول استخدام DB.backup_database (متوافق مع PostgreSQL/MySQL/SQLite).
+        - fallback: SQLite المباشر.
+        """
+        if not await DB.get_auto_backup():
+            return
 
-            def _backup():
-                import sqlite3 as sqlite3_sync
-                source = sqlite3_sync.connect(str(PATHS.DB))
-                dest = sqlite3_sync.connect(str(backup_file))
-                with dest:
-                    source.backup(dest)
-                dest.close()
-                source.close()
+        PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
+        backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
 
-            await asyncio.to_thread(_backup)
+        success = False
+        # محاولة 1: استخدام DB.backup_database
+        if hasattr(DB, "backup_database"):
+            try:
+                success = await DB.backup_database(backup_file)
+            except Exception as e:
+                logger.warning(f"⚠️ DB.backup_database فشل: {e}")
+                success = False
+
+        # محاولة 2: SQLite المباشر
+        if not success and getattr(DB, "DB_TYPE", "sqlite") == "sqlite":
+            try:
+                def _backup():
+                    import sqlite3 as sqlite3_sync
+                    source = sqlite3_sync.connect(str(PATHS.DB))
+                    dest = sqlite3_sync.connect(str(backup_file))
+                    with dest:
+                        source.backup(dest)
+                    dest.close()
+                    source.close()
+                await asyncio.to_thread(_backup)
+                success = True
+            except Exception as e:
+                logger.error(f"❌ SQLite backup failed: {e}")
+                success = False
+
+        if success:
             await DB.set_setting('last_backup', TimeUtils.sql_iso())
             backups = sorted(PATHS.BACKUPS.glob("backup_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
             for old in backups[CONFIG.MAX_BACKUPS:]:
-                old.unlink()
+                with suppress(Exception):
+                    old.unlink()
+            logger.info(f"✅ نسخة احتياطية: {backup_file.name}")
+        else:
+            logger.error("❌ فشل النسخ الاحتياطي على كل المحركات")
 
     @staticmethod
     async def reminders(bot) -> None:
+        """
+        ✅ v7.5.1: يستخدم RemindersMixin.send_subscription_reminders.
+        """
         while True:
             await asyncio.sleep(3600)
             try:
-                users = await DB.get_users_for_reminder()
-                for u in users:
-                    try:
+                # استخدام RemindersMixin إن وُجد
+                if hasattr(DB, "send_subscription_reminders"):
+                    async def send_impl(user_id: int, days_left: int, lang: str) -> bool:
                         try:
-                            days = int(u['days_left'])
-                        except (ValueError, TypeError):
-                            continue
-                        lang = u.get('language', 'ar')
-                        text = await get_text(lang, 'reminder_subscription_expires', days=days)
-                        if text == 'reminder_subscription_expires':
-                            text = f"⚠️ اشتراكك سينتهي بعد {days} يوم"
-                        await safe_send(bot, u['user_id'], text)
-                        await asyncio.sleep(0.1)
-                    except Exception:
-                        pass
+                            text = await get_text(
+                                lang, 'reminder_subscription_expires', days=days_left
+                            )
+                            if text == 'reminder_subscription_expires':
+                                text = f"⚠️ اشتراكك سينتهي بعد {days_left} يوم"
+                            result = await safe_send(bot, user_id, text)
+                            return result is not None
+                        except Exception as e:
+                            logger.debug(f"فشل إرسال تذكير لـ {user_id}: {e}")
+                            return False
+
+                    stats = await DB.send_subscription_reminders(send_impl)
+                    if isinstance(stats, dict) and stats.get('sent', 0) > 0:
+                        logger.info(f"📨 تم إرسال {stats['sent']} تذكير اشتراك")
+
+                # fallback: DB.get_users_for_reminder (القديم)
+                elif hasattr(DB, "get_users_for_reminder"):
+                    users = await DB.get_users_for_reminder()
+                    for u in users:
+                        try:
+                            try:
+                                days = int(u['days_left'])
+                            except (ValueError, TypeError, KeyError):
+                                continue
+                            lang = u.get('language', 'ar')
+                            text = await get_text(lang, 'reminder_subscription_expires', days=days)
+                            if text == 'reminder_subscription_expires':
+                                text = f"⚠️ اشتراكك سينتهي بعد {days} يوم"
+                            await safe_send(bot, u['user_id'], text)
+                            await asyncio.sleep(0.1)
+                        except Exception:
+                            pass
+                else:
+                    logger.debug("ℹ️ لا توجد دوال تذكيرات متاحة")
+
             except Exception as e:
                 logger.error(f"❌ Reminders: {e}")
 
@@ -1734,6 +1929,12 @@ class BackgroundTasks:
 
         while True:
             try:
+                # ✅ v7.5.1: فحص وجود DB.sync_group_admins
+                if not hasattr(DB, "sync_group_admins"):
+                    logger.debug("ℹ️ DB.sync_group_admins غير متاحة — تخطي المزامنة")
+                    await asyncio.sleep(7200)
+                    continue
+
                 groups = await asyncio.wait_for(
                     DB.fetchall("SELECT chat_id FROM bot_groups WHERE banned=0"),
                     timeout=15
@@ -1794,6 +1995,10 @@ class BackgroundTasks:
 
     @staticmethod
     async def cleanup_old_data() -> None:
+        """
+        ✅ v7.5.1: استخدام TimeUtils بدل SQLite-specific syntax.
+        يعمل على 3 محركات.
+        """
         while True:
             await asyncio.sleep(3600)
             try:
@@ -1817,10 +2022,24 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف الكاش: {e}")
 
+            # ✅ v7.5.1: استخدام TimeUtils (يعمل على 3 محركات)
             try:
-                await DB.execute("DELETE FROM admin_logs WHERE created_at < datetime('now', '-30 days')")
-                await DB.execute("DELETE FROM user_penalties WHERE created_at < datetime('now', '-60 days')")
-                await DB.execute("DELETE FROM payment_logs WHERE created_at < datetime('now', '-90 days')")
+                cutoff_30 = TimeUtils.utc_now() - timedelta(days=30)
+                cutoff_60 = TimeUtils.utc_now() - timedelta(days=60)
+                cutoff_90 = TimeUtils.utc_now() - timedelta(days=90)
+
+                await DB.execute(
+                    "DELETE FROM admin_logs WHERE created_at < ?",
+                    (cutoff_30,)
+                )
+                await DB.execute(
+                    "DELETE FROM user_penalties WHERE created_at < ?",
+                    (cutoff_60,)
+                )
+                await DB.execute(
+                    "DELETE FROM payment_logs WHERE created_at < ?",
+                    (cutoff_90,)
+                )
                 logger.info("✅ تم تنظيف البيانات القديمة")
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
@@ -1875,10 +2094,30 @@ async def webhook_handler(request):
 class ErrorHandler:
     @staticmethod
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.5.1: يسجّل الخطأ + يُرسل إشعارًا لقناة السجلات (إن وُجدت).
+        """
         try:
+            error_msg = str(context.error)
             if update:
                 logger.error(f"❌ خطأ في التحديث {update.update_id}: {context.error}", exc_info=True)
             else:
                 logger.error(f"❌ خطأ: {context.error}", exc_info=True)
+
+            # ✅ v7.5.1: إرسال إشعار لقناة السجلات
+            try:
+                log_channel = await DB.get_log_channel()
+                if log_channel:
+                    short_msg = (
+                        f"❌ **خطأ في البوت**\n\n"
+                        f"📝 {error_msg[:300]}\n"
+                        f"🕐 {TimeUtils.mecca_iso()}"
+                    )
+                    if update and update.effective_user:
+                        short_msg += f"\n👤 {update.effective_user.id}"
+                    await safe_send(context.bot, log_channel, short_msg, parse_mode='Markdown')
+            except Exception:
+                pass
+
         except Exception:
             pass
