@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (النسخة النهائية المحسّنة)
+cache.py - نظام الكاش المتقدم للبوت (النسخة v7.5.18)
 ================================================================
+🆕 v7.5.18 (تحسين /start بشكل هائل):
+    ✅ UserDataCache.get_or_load: انتظار حقيقي بدل pass (منع تحميل مكرر)
+    ✅ UserDataCache._load_user_full_data: استدعاء واحد ذكي
+       بدل 13 استعلاماً منفصلاً → 7 استعلامات فقط
+    ✅ استخدام Event حقيقي لمنع race conditions
+
 - كاش TTL مع حد أقصى للحجم وتنظيف تلقائي
 - كاش شامل للمستخدم مع تحميل كامل البيانات دفعة واحدة
 - كاش منفصل للقنوات والمجموعات والصلاحيات
@@ -368,6 +374,11 @@ class ChannelsCache:
             await self.cache.clear()
             await self.channel_info.clear()
 
+    async def invalidate_all(self) -> None:
+        """مسح كل كاش القنوات"""
+        await self.cache.clear()
+        await self.channel_info.clear()
+
 
 # =====================================================================
 # 6. كاش المجموعات
@@ -406,23 +417,29 @@ class GroupsCache:
             await self.cache.clear()
             await self.group_info.clear()
 
+    async def invalidate_all(self) -> None:
+        """مسح كل كاش المجموعات"""
+        await self.cache.clear()
+        await self.group_info.clear()
+
 
 # =====================================================================
-# 7. كاش المستخدم الشامل (الأهم)
+# 7. كاش المستخدم الشامل (الأهم) — v7.5.18
 # =====================================================================
 
 class UserDataCache:
     """
     كاش شامل لبيانات المستخدم (جميع المعلومات في كائن واحد)
-    - يقلل عدد استعلامات /start من 8 إلى 2-3 استعلامات
-    - TTL = 60 ثانية
-    - يتم إبطاله عند تغيير أي بيانات للمستخدم
-    - يدعم تحميل البيانات دفعة واحدة
+
+    ✅ v7.5.18:
+      - get_or_load: انتظار حقيقي لمنع التحميل المتكرر (Event بدل pass)
+      - _load_user_full_data: استدعاء واحد ذكي (db.get_start_data)
+        بدل 13 استعلاماً منفصلاً
     """
 
     def __init__(self):
         self.cache = TTLCache(maxsize=1000, ttl=60)  # 60 ثانية
-        self._loading = {}  # منع التحميل المتكرر لنفس المستخدم
+        self._loading = {}  # {user_id: asyncio.Event}
         self._lock = asyncio.Lock()
 
     async def get(self, user_id: int) -> Optional[Dict]:
@@ -451,44 +468,65 @@ class UserDataCache:
 
     async def get_or_load(self, user_id: int, db) -> Dict:
         """
-        جلب من الكاش، أو تحميل من قاعدة البيانات إذا لم يكن موجوداً
-        مع منع التحميل المتكرر لنفس المستخدم
+        ✅ v7.5.18: جلب من الكاش أو تحميل مع منع التحميل المتكرر
+        باستخدام asyncio.Event (انتظار حقيقي، ليس pass).
         """
         # 1. محاولة من الكاش
         cached = await self.get(user_id)
         if cached is not None:
             return cached
 
-        # 2. منع التحميل المتكرر
+        # 2. منع التحميل المتكرر — استخدام Event حقيقي
+        my_event = None
+        wait_event = None
         async with self._lock:
-            if user_id in self._loading:
-                # انتظر حتى ينتهي التحميل الحالي
-                pass
+            existing = self._loading.get(user_id)
+            if existing is not None:
+                wait_event = existing
             else:
-                self._loading[user_id] = True
+                my_event = asyncio.Event()
+                self._loading[user_id] = my_event
 
+        # 3. إذا كان هناك تحميل جارٍ، انتظره
+        if wait_event is not None:
+            try:
+                await asyncio.wait_for(wait_event.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"⚠️ انتظار تحميل المستخدم {user_id} تجاوز 10s"
+                )
+            # بعد الانتظار، حاول الكاش مرة أخرى
+            cached = await self.get(user_id)
+            if cached is not None:
+                return cached
+            # إذا لم ينجح التحميل الأول، حمّل بنفسك (احتياط)
+            return await self._load_user_full_data(db, user_id)
+
+        # 4. نحن المسؤولون عن التحميل
         try:
-            # 3. تحميل البيانات
             data = await self._load_user_full_data(db, user_id)
-            
-            # 4. تخزين في الكاش
             await self.set(user_id, data)
-            
             return data
         finally:
+            # ✅ v7.5.18: إشعار المنتظرين
             async with self._lock:
                 self._loading.pop(user_id, None)
+            if my_event is not None:
+                my_event.set()
 
     async def _load_user_full_data(self, db, user_id: int) -> Dict:
         """
-        تحميل جميع بيانات المستخدم في استعلامات متوازية
-        باستخدام asyncio.gather
+        ✅ v7.5.18: استدعاء واحد ذكي بدل 13 استعلاماً منفصلاً.
+
+        - يستخدم db.get_start_data() الذي أصبح موازياً في v7.5.17
+        - ثم يجلب القنوات والمجموعات بالتوازي فقط عند الحاجة
+        - النتيجة: 5-7 استعلامات بدل 13
         """
-        # 1. جلب بيانات المستخدم الأساسية
-        user_data = await db.get_user(user_id, include_stats=False)
-        
-        if not user_data:
-            # إذا لم يكن المستخدم موجوداً، نعيد بيانات افتراضية
+        # 1. استدعاء واحد ذكي — يجلب كل البيانات الأساسية بالتوازي
+        start_data = await db.get_start_data(user_id)
+
+        if not start_data:
+            # مستخدم غير موجود
             return {
                 'exists': False,
                 'language': 'ar',
@@ -502,59 +540,54 @@ class UserDataCache:
                 'groups_count': 0,
                 'channels': [],
                 'channels_count': 0,
-                'user_data': None
+                'user_data': None,
+                'cached_at': time.time(),
             }
 
-        # 2. جلب البيانات الإضافية بشكل متوازٍ
-        tasks = [
-            db.get_active_channel(user_id),
-            db.has_active_subscription(user_id),
-            db.get_auto_publish_status(user_id),
-            db.get_auto_recycle_status(user_id),
-            db.get_user_groups(user_id),
-            db.get_user_channels(user_id),
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 2. ✅ جلب القنوات والمجموعات بالتوازي (فقط عند الحاجة)
+        try:
+            channels, groups = await asyncio.gather(
+                db.get_user_channels(user_id),
+                db.get_user_groups(user_id),
+                return_exceptions=True,
+            )
+            if isinstance(channels, Exception):
+                logger.debug(f"get_user_channels فشل: {channels}")
+                channels = []
+            if isinstance(groups, Exception):
+                logger.debug(f"get_user_groups فشل: {groups}")
+                groups = []
+        except Exception as e:
+            logger.debug(f"جلب القنوات/المجموعات فشل: {e}")
+            channels = []
+            groups = []
 
-        active_channel = results[0] if not isinstance(results[0], Exception) else None
-        has_sub = results[1] if not isinstance(results[1], Exception) else False
-        auto_pub = results[2] if not isinstance(results[2], Exception) else True
-        auto_rec = results[3] if not isinstance(results[3], Exception) else True
-        groups = results[4] if not isinstance(results[4], Exception) else []
-        channels = results[5] if not isinstance(results[5], Exception) else []
+        # 3. بناء الكائن الموحّد
+        # ملاحظة: auto_publish/auto_recycle قد تكون int (0/1) من SQL،
+        # نحوّلها إلى bool لضمان التوافق
+        auto_pub_raw = start_data.get('auto_publish', 1)
+        auto_rec_raw = start_data.get('auto_recycle', 1)
 
-        # 3. جلب معلومات القناة النشطة وعدد المنشورات غير المنشورة
-        channel_info = None
-        unpublished_posts = 0
-        if active_channel:
-            try:
-                channel_info = await db.get_channel_info(user_id, active_channel)
-                if channel_info:
-                    unpublished_posts = await db.get_unpublished_posts_count(user_id, active_channel)
-            except Exception:
-                pass
-
-        # 4. بناء كائن البيانات الكامل
         return {
             'exists': True,
-            'language': user_data.get('language', 'ar'),
-            'active_channel': active_channel,
-            'channel_info': channel_info,
-            'unpublished_posts': unpublished_posts,
-            'has_subscription': has_sub,
-            'auto_publish': auto_pub,
-            'auto_recycle': auto_rec,
+            'language': start_data.get('language') or 'ar',
+            'active_channel': start_data.get('active_channel'),
+            'channel_info': start_data.get('channel_info'),
+            'unpublished_posts': start_data.get('unpublished_posts', 0) or 0,
+            'has_subscription': bool(start_data.get('has_subscription', False)),
+            'auto_publish': bool(auto_pub_raw) if not isinstance(auto_pub_raw, bool) else auto_pub_raw,
+            'auto_recycle': bool(auto_rec_raw) if not isinstance(auto_rec_raw, bool) else auto_rec_raw,
             'groups': groups,
-            'groups_count': len(groups) if isinstance(groups, list) else 0,
+            'groups_count': start_data.get('groups_count', 0) or 0,
             'channels': channels,
-            'channels_count': len(channels) if isinstance(channels, list) else 0,
-            'user_data': user_data,
-            'cached_at': time.time()
+            'channels_count': start_data.get('channels_count', 0) or 0,
+            'user_data': start_data,
+            'cached_at': time.time(),
         }
 
 
 # =====================================================================
-# 8. كاش المنشورات (جديد)
+# 8. كاش المنشورات
 # =====================================================================
 
 class PostsCache:
