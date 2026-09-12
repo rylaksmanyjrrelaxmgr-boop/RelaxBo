@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.8)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.9)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -29,19 +29,8 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 🆕 v7.5.2: إضافة 6 فهارس أداء + توافق MySQL للفهارس الجزئية
 🆕 v7.5.3: تخطي استيراد البيانات المكررة (تحسين Cold Start ~9s)
 🆕 v7.5.8: كاش has_active_subscription → /start أسرع 40x
-
-📌 ملاحظة: يجب أن تكون هذه الملفات بجانب database.py:
-  - database_channels_posts.py
-  - database_subscriptions.py
-  - database_groups.py
-  - database_tickets.py
-  - database_contests.py
-  - database_stats.py
-  - database_settings.py
-  - database_points.py
-  - database_backup.py
-  - database_reminders.py
-  - database_tables.py
+🆕 v7.5.9: كاش get_auto_publish_status + دالة get_user_settings_batch
+         (حل مشكلة الاستعلامات البطيئة 1.5-2s عند ضغط زر الإعدادات)
 """
 
 import os
@@ -528,6 +517,8 @@ except ImportError:
             await internal_cache.invalidate(f"groups_{user_id}")
             await internal_cache.invalidate(f"reminder_settings_{user_id}")
             await internal_cache.invalidate(f"auto_recycle_{user_id}")
+            await internal_cache.invalidate(f"auto_publish_{user_id}")           # ✅ v7.5.9
+            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
             await internal_cache.invalidate(f"has_active_sub_{user_id}")
         except Exception as e:
             logger.debug(f"invalidate_user_cache: {e}")
@@ -2976,10 +2967,26 @@ class Database(
                 await invalidate_user_cache(user_id)
         return result
 
+    # ✅ v7.5.9: get_auto_publish_status مع كاش (كان بدون كاش — سبب البطء)
     async def get_auto_publish_status(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT auto_publish FROM users WHERE user_id = ?", (user_id,), default=1)
-        return result == 1
+        """
+        ✅ v7.5.9: كاش 60 ثانية — كان يستدعي DB في كل ضغطة زر.
+        يحل مشكلة الاستعلامات البطيئة (1.5-2s) عند فتح الإعدادات.
+        """
+        cache_key = f"auto_publish_{user_id}"
+        cached = await internal_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await self.fetchval(
+            "SELECT auto_publish FROM users WHERE user_id = ?",
+            (user_id,),
+            default=1,
+        )
+        is_enabled = result == 1
+        await internal_cache.set(cache_key, is_enabled, ttl=60)
+        return is_enabled
 
+    # ✅ v7.5.9: set_auto_publish يُبطل الكاش الجديد
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
         result = await self.execute(
             "UPDATE users SET auto_publish = ? WHERE user_id = ?",
@@ -2987,6 +2994,8 @@ class Database(
         ) > 0
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"auto_publish_{user_id}")           # ✅ v7.5.9
+            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -3009,9 +3018,37 @@ class Database(
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
             await internal_cache.invalidate(f"auto_recycle_{user_id}")
+            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
+
+    # ✅ v7.5.9: دالة batch — استعلام واحد بدل اثنين
+    async def get_user_settings_batch(self, user_id: int) -> Dict[str, Any]:
+        """
+        ✅ v7.5.9: جلب auto_publish + auto_recycle + language في استعلام واحد.
+        تُستخدم في CB.SETTINGS و CB.TOGGLE_AUTO و CB.TOGGLE_REC
+        لتقليل عدد الاستعلامات من 2 إلى 1 + كاش 60 ثانية.
+        """
+        cache_key = f"user_settings_batch_{user_id}"
+        cached = await internal_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        row = await self.fetchone(
+            "SELECT auto_publish, auto_recycle, language FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        if not row:
+            data = {'auto_publish': True, 'auto_recycle': True, 'language': 'ar'}
+        else:
+            data = {
+                'auto_publish': row.get('auto_publish', 1) == 1,
+                'auto_recycle': row.get('auto_recycle', 1) == 1,
+                'language': row.get('language') or 'ar',
+            }
+        await internal_cache.set(cache_key, data, ttl=60)
+        return data
 
     async def is_user_banned(self, user_id: int) -> bool:
         result = await self.fetchval("SELECT banned FROM users WHERE user_id = ?", (user_id,), default=0)
