@@ -2,52 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.22)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.23)
 ================================================================================
+🆕 v7.5.23 (إصلاح عدّاد المنشورات):
+    ✅ get_start_data: `unpublished_posts` = للقناة النشطة فقط
+    ✅ get_user_full_data: `unpublished_posts` = للقناة النشطة فقط
+    ✅ حماية ضد active_channel = NULL (استخدام COALESCE)
+    ✅ إضافة حقل `total_unpublished_posts` للعرض الإجمالي (اختياري)
+
 🆕 v7.5.22 (ضمان UNIQUE على settings.key):
-    ✅ _create_tables: استدعاء ensure_settings_unique_constraint() 
-       بعد إنشاء الجداول
+    ✅ _create_tables: استدعاء ensure_settings_unique_constraint()
     ✅ يعمل تلقائياً على PostgreSQL/MySQL (يتجاهل SQLite)
     ✅ يضمن عمل ON CONFLICT (key) في set_setting
 
 🆕 v7.5.21 (إصلاح register_user + TIMESTAMP):
-    ✅ register_user: استبدال TimeUtils.sql_iso() بـ TimeUtils.utc_now() 
-       للأعمدة TIMESTAMP (user_points.last_updated)
+    ✅ register_user: استبدال TimeUtils.sql_iso() بـ TimeUtils.utc_now()
     ✅ register_user (not force): نفس الإصلاح
     ✅ يمنع خطأ: "expected a datetime.date or datetime.datetime instance, got 'str'"
 
 🆕 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء):
-    ✅ _adapt_params(params, query): لا يحوّل str → datetime (إصلاح DataError)
+    ✅ _adapt_params(params, query): لا يحوّل str → datetime
     ✅ تمرير query إلى كل استدعاءات _adapt_params
-    ✅ get_start_data: استعلام واحد بدل 5 (أسرع بكثير)
-    ✅ get_user: استعلام واحد موحّد بدل gather
-    ✅ إزالة copy.deepcopy من مسار الكاش الساخن (استخدام _clone_start_data)
-    ✅ TTL أطول للـ lang_* (600s بدل 30s)
+    ✅ get_start_data: استعلام واحد بدل 5
+    ✅ get_user: استعلام واحد موحّد
+    ✅ إزالة copy.deepcopy من مسار الكاش الساخن
+    ✅ TTL أطول للـ lang_* (600s)
     ✅ PRAGMA wal_autocheckpoint + mmap_size لـ SQLite
-    ✅ كاش محسّن للـ security settings
-
-🆕 v7.5.19 (إصلاح بطء أزرار الأمان + /start):
-    ✅ _migrate_schema: إضافة violation_penalty_duration و violation_penalty
-    ✅ get_start_data: استعلامات متوازية (asyncio.gather)
-    ✅ get_user: تحويله لاستعلامات متوازية
-    ✅ get_user_full_data: تحويله لاستعلامات متوازية
-
-🆕 v7.5.16 (إصلاح خطأ asyncpg datetime):
-    ✅ _adapt_params: تحويل النصوص ISO datetime تلقائياً إلى datetime
-
-🆕 v7.5.15 (إصلاحات نهائية):
-    ✅ _ensure_text_hash_column: فحص الفهرس دائمًا
-    ✅ register_user: احترام force=True/False
-    ✅ _get_penalty_lock: حماية من التضخم المفرط
-    ✅ cleanup_user_locks: إزالة _waiters
-    ✅ get_user: نسخة في الـ cache
-
-🆕 v7.5.14 (إصلاحات أمنية + race conditions):
-    ✅ _get_penalty_lock: قفل مركّب (user_id, chat_id)
-    ✅ add_penalty: قفل كامل + status='active' صراحة
-    ✅ _create_pool_with_retry: retry أُسّي
-    ✅ _validate_column_def: فحص أمني شامل
-    ✅ _clone_start_data: أسرع 10x من deepcopy
 ================================================================================
 """
 
@@ -1237,18 +1217,6 @@ def _convert_upsert(query: str) -> str:
 def _adapt_params(params: tuple, query: str = "") -> tuple:
     """
     ✅ v7.5.20: تحويل datetime → النوع المناسب لـ DB.
-
-    المبدأ:
-    - datetime → datetime (PostgreSQL) / str (MySQL/SQLite)
-    - str يبقى str دائماً (لا تحويل تلقائي — لأن العمود قد يكون TEXT)
-    - bool → bool (PostgreSQL) / int (آخر)
-
-    ⚠️ إصلاح خطأ asyncpg:
-    "invalid input for query argument $2: (expected str, got datetime)"
-
-    ⚠️ ملاحظة v7.5.21:
-    لا تمرّر TimeUtils.sql_iso() لعمود TIMESTAMP في PostgreSQL.
-    استخدم TimeUtils.utc_now() بدلاً منه.
     """
     if params is None:
         return ()
@@ -1323,12 +1291,6 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        """
-        ✅ v7.5.13: بدون +00:00 لتوافق MySQL DATETIME.
-
-        ⚠️ v7.5.21: لا تستخدم هذه الدالة لعمود TIMESTAMP في PostgreSQL!
-        استخدم TimeUtils.utc_now() بدلاً منها.
-        """
         return TimeUtils.utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
@@ -2377,9 +2339,6 @@ class Database(
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     async def _create_tables(self):
-        """
-        ✅ v7.5.22: إنشاء الجداول + ضمان UNIQUE على settings.key.
-        """
         if not TABLES_MODULE_AVAILABLE:
             raise RuntimeError(
                 "❌ database_tables.py غير متاح — تأكد من وجوده بجانب database.py"
@@ -2395,7 +2354,6 @@ class Database(
                 await create_tables_sqlite(conn, logger, TimeUtils)
                 logger.info("✅ تم إنشاء جداول SQLite عبر database_tables.py")
 
-        # ✅ v7.5.22: ضمان UNIQUE constraint على settings.key
         try:
             if hasattr(self, "ensure_settings_unique_constraint"):
                 await self.ensure_settings_unique_constraint()
@@ -3429,7 +3387,9 @@ class Database(
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         """
-        ✅ v7.5.20: استعلام واحد بدل 5 (أسرع بكثير).
+        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
+        ✅ total_unpublished_posts = إجمالي كل القنوات.
+        ✅ حماية من active_channel = NULL عبر COALESCE.
         """
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -3453,9 +3413,13 @@ class Database(
                         WHERE g.user_id = u.user_id
                        ) AS groups_count,
                        (SELECT COUNT(*) FROM posts p
+                        WHERE p.channel_db_id = COALESCE(u.active_channel, -1)
+                          AND p.published = 0
+                       ) AS unpublished_posts,
+                       (SELECT COUNT(*) FROM posts p
                         JOIN user_channels uc2 ON p.channel_db_id = uc2.id
                         WHERE uc2.user_id = u.user_id AND p.published = 0
-                       ) AS unpublished_posts
+                       ) AS total_unpublished_posts
                 FROM users u
                 WHERE u.user_id = ?
                 """,
@@ -3475,6 +3439,7 @@ class Database(
         data["channels_count"] = data.get("channels_count") or 0
         data["groups_count"] = data.get("groups_count") or 0
         data["unpublished_posts"] = data.get("unpublished_posts") or 0
+        data["total_unpublished_posts"] = data.get("total_unpublished_posts") or 0
 
         if data.get("active_channel"):
             try:
@@ -3512,7 +3477,7 @@ class Database(
         self, user_id: int, include_stats: bool = True
     ) -> Optional[Dict]:
         """
-        ✅ v7.5.20: استعلام واحد موحّد.
+        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
         """
         try:
             if include_stats:
@@ -3532,9 +3497,13 @@ class Database(
                             WHERE g.user_id = u.user_id
                            ) AS groups_count,
                            (SELECT COUNT(*) FROM posts p
+                            WHERE p.channel_db_id = COALESCE(u.active_channel, -1)
+                              AND p.published = 0
+                           ) AS unpublished_posts,
+                           (SELECT COUNT(*) FROM posts p
                             JOIN user_channels uc2 ON p.channel_db_id = uc2.id
                             WHERE uc2.user_id = u.user_id AND p.published = 0
-                           ) AS unpublished_posts
+                           ) AS total_unpublished_posts
                     FROM users u
                     WHERE u.user_id = ?
                     """,
@@ -3561,9 +3530,13 @@ class Database(
             result["channels_count"] = result.get("channels_count") or 0
             result["groups_count"] = result.get("groups_count") or 0
             result["unpublished_posts"] = result.get("unpublished_posts") or 0
+            result["total_unpublished_posts"] = (
+                result.get("total_unpublished_posts") or 0
+            )
         else:
             result["has_subscription"] = False
             result["unpublished_posts"] = 0
+            result["total_unpublished_posts"] = 0
             result["channels_count"] = 0
             result["groups_count"] = 0
 
@@ -3603,7 +3576,7 @@ class Database(
         self, user_id: int, include_stats: bool = False
     ) -> Optional[Dict]:
         """
-        ✅ v7.5.20: استعلام واحد + إزالة copy.deepcopy من المسار الساخن.
+        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
         """
         try:
             if CACHE_AVAILABLE:
@@ -3615,6 +3588,9 @@ class Database(
                         if include_stats:
                             user_data["unpublished_posts"] = cached_data.get(
                                 "unpublished_posts", 0
+                            )
+                            user_data["total_unpublished_posts"] = cached_data.get(
+                                "total_unpublished_posts", 0
                             )
                             user_data["has_subscription"] = cached_data.get(
                                 "has_subscription", False
@@ -3654,9 +3630,13 @@ class Database(
                             WHERE g.user_id = u.user_id
                            ) AS groups_count,
                            (SELECT COUNT(*) FROM posts p
+                            WHERE p.channel_db_id = COALESCE(u.active_channel, -1)
+                              AND p.published = 0
+                           ) AS unpublished_posts,
+                           (SELECT COUNT(*) FROM posts p
                             JOIN user_channels uc2 ON p.channel_db_id = uc2.id
                             WHERE uc2.user_id = u.user_id AND p.published = 0
-                           ) AS unpublished_posts
+                           ) AS total_unpublished_posts
                     FROM users u
                     WHERE u.user_id = ?
                     """,
@@ -3680,11 +3660,15 @@ class Database(
                 data["channels_count"] = data.get("channels_count") or 0
                 data["groups_count"] = data.get("groups_count") or 0
                 data["unpublished_posts"] = data.get("unpublished_posts") or 0
+                data["total_unpublished_posts"] = (
+                    data.get("total_unpublished_posts") or 0
+                )
             else:
                 data["has_subscription"] = False
                 data["channels_count"] = 0
                 data["groups_count"] = 0
                 data["unpublished_posts"] = 0
+                data["total_unpublished_posts"] = 0
 
             if data.get("active_channel"):
                 try:
@@ -3731,6 +3715,9 @@ class Database(
                         else None
                     ),
                     "unpublished_posts": data.get("unpublished_posts", 0),
+                    "total_unpublished_posts": data.get(
+                        "total_unpublished_posts", 0
+                    ),
                     "has_subscription": data.get("has_subscription", False),
                     "auto_publish": data.get("auto_publish", True),
                     "auto_recycle": data.get("auto_recycle", True),
@@ -3777,7 +3764,6 @@ class Database(
                             logger.debug(
                                 f"تحديث مستخدم موجود {user_id}: {e}"
                             )
-                        # ✅ v7.5.21: استخدام utc_now() بدل sql_iso() للأعمدة TIMESTAMP
                         try:
                             if USE_MYSQL:
                                 await self.execute(
@@ -3985,9 +3971,6 @@ class Database(
             return False
 
     async def get_user_language(self, user_id: int) -> str:
-        """
-        ✅ v7.5.20: TTL أطول (600s بدل 30s).
-        """
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
