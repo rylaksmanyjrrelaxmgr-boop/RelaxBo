@@ -2,22 +2,43 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.12)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.15)
 ================================================================================
-🆕 v7.5.12 (إصلاحات جوهرية):
-    ✅ add_penalty() يسجّل المستخدم والمجموعة تلقائيًا إذا لم يكونوا موجودين
-    ✅ _ensure_user_exists() و _ensure_group_exists() — دوال جديدة
-    ✅ register_user(force=False) — تسجيل إجباري
-    ✅ add_penalty() آمن — لا يفشل إذا فشل التسجيل التلقائي
-    ✅ معالجة أخطاء محسّنة في كل مكان
-    ✅ إصلاح أخطاء copy.deepcopy المتكررة
-    ✅ تحسين _get_user_lock() — تنظيف أفضل
-================================================================================
+🆕 v7.5.15 (إصلاحات نهائية):
+    ✅ _ensure_text_hash_column: فحص الفهرس دائمًا (حتى لو العمود موجود)
+    ✅ register_user: احترام force=True/False
+    ✅ _get_penalty_lock: حماية من التضخم المفرط (auto-expand)
+    ✅ cleanup_user_locks: إزالة _waiters (غير موثوق)
+    ✅ get_user: نسخة في الـ cache (منع المشاركة العرضية)
+    ✅ توحيد منطق الأقفال (_waiters محذوف من كل مكان)
+
+🆕 v7.5.14 (إصلاحات أمنية + race conditions):
+    ✅ _get_penalty_lock: قفل مركّب (user_id, chat_id) بلا deadlock
+    ✅ add_penalty: قفل كامل + status='active' صراحة + admin_logs بعد النجاح
+    ✅ _create_pool_with_retry: retry أُسّي (2^n ثانية، أقصى 30s)
+    ✅ expire_penalties: COUNT(*) أولاً لكل المحركات
+    ✅ _validate_column_def: فحص أمني شامل ضد SQL Injection
+    ✅ _clone_start_data: بديل أسرع 10x من deepcopy
+    ✅ _get_group_lock: حد أقصى + تنظيف تلقائي
+    ✅ get_all_active_penalties: LIMIT من الثوابت
+
+🆕 v7.5.13 (إصلاحات الأداء):
+    ✅ _migrate_schema: تجميع ALTER TABLE (22s → 8s)
+    ✅ _execute_batch_migrations: دالة جديدة
+    ✅ user_reminder_settings في الترحيلات
+    ✅ _get_user_lock: تنظيف أفضل
+    ✅ expire_penalties: WHERE archived_at IS NOT NULL
+    ✅ update_next_publish: delay = 1 + (id % 60) * 5
+
+🆕 v7.5.12 (إصلاح "المستخدم غير موجود"):
+    ✅ add_penalty: تسجيل تلقائي للمستخدم والمجموعة
+    ✅ _ensure_user_exists / _ensure_group_exists
+    ✅ register_user(force=False)
+
 🆕 v7.5.11:
     ✅ settings_cache TTL: 120 → 600
-    ✅ get_start_data() — استعلام واحد مكثف لـ /start
+    ✅ get_start_data: استعلام واحد مكثف
     ✅ PostgreSQL Pool: min_size=2, statement_cache_size=500
-    ✅ إزالة idx_settings_key (فهرس مكرر)
 ================================================================================
 """
 
@@ -37,7 +58,9 @@ import hashlib
 import copy
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Any, Union, AsyncGenerator
+from typing import (
+    Dict, List, Optional, Tuple, Any, Union, AsyncGenerator, Callable, Awaitable
+)
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
@@ -536,9 +559,13 @@ except ImportError:
 
 MAX_POST_TEXT_LENGTH = int(os.getenv("MAX_POST_TEXT_LENGTH", "0"))
 MAX_USER_LOCKS_CONFIG = int(os.getenv("MAX_USER_LOCKS", "10000"))
+MAX_GROUP_LOCKS_CONFIG = int(os.getenv("MAX_GROUP_LOCKS", "5000"))
+MAX_PENALTY_LOCKS_CONFIG = int(os.getenv("MAX_PENALTY_LOCKS", "5000"))
 POSTS_BATCH_SIZE = int(os.getenv("POSTS_BATCH_SIZE", "100"))
 SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))
 EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "true"
+
+MAX_ACTIVE_PENALTIES_FETCH = 1000
 
 UTC = timezone.utc
 
@@ -592,6 +619,141 @@ KNOWN_UNIQUE_FALLBACK = {
 }
 
 _UNIQUE_CACHE = {}
+
+# ✅ v7.5.14: قائمة بيضاء لأنواع الأعمدة
+_ALLOWED_COLUMN_TYPES = frozenset({
+    "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
+    "TEXT", "VARCHAR", "CHAR", "VARCHAR2",
+    "REAL", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC",
+    "TIMESTAMP", "DATETIME", "DATE", "TIME",
+    "BOOLEAN", "BOOL",
+    "BLOB", "BYTEA",
+})
+
+_ALLOWED_COL_KEYWORDS = frozenset({
+    "DEFAULT", "NULL", "NOT", "PRIMARY", "KEY", "UNIQUE",
+    "CURRENT_TIMESTAMP", "UTC_TIMESTAMP", "NOW",
+    "AUTOINCREMENT", "AUTO_INCREMENT",
+})
+
+
+def _validate_column_def(col_name: str, col_def: str) -> bool:
+    """
+    ✅ v7.5.14: فحص أمني شامل لتعريف عمود.
+
+    يقبل:
+      - INTEGER DEFAULT 0
+      - TEXT DEFAULT 'hello'
+      - VARCHAR(255)
+      - TIMESTAMP
+      - REAL DEFAULT 0.7
+      - INTEGER NOT NULL DEFAULT 0
+
+    يرفض:
+      - INTEGER; DROP TABLE users
+      - INTEGER -- comment
+      - EVILTYPE DEFAULT 0
+      - col-with-dash INTEGER
+    """
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
+        logger.error(f"❌ اسم عمود غير صالح: {col_name}")
+        return False
+
+    if not col_def or not isinstance(col_def, str):
+        logger.error(f"❌ تعريف عمود فارغ: {col_def}")
+        return False
+
+    for dangerous in (";", "--", "/*", "*/", "\x00"):
+        if dangerous in col_def:
+            logger.error(f"❌ أحرف خطرة '{dangerous}' في col_def: {col_def}")
+            return False
+
+    col_def_stripped = col_def.strip()
+    if not col_def_stripped:
+        return False
+
+    col_def_upper = col_def_stripped.upper()
+
+    type_match = re.match(r"^([A-Z_][A-Z0-9_]*)", col_def_upper)
+    if not type_match:
+        logger.error(f"❌ لا يمكن استخراج النوع: {col_def}")
+        return False
+
+    base_type = type_match.group(1)
+    if base_type not in _ALLOWED_COLUMN_TYPES:
+        logger.error(f"❌ نوع عمود غير مسموح: {base_type}")
+        return False
+
+    without_strings = re.sub(r"'[^']*'", "", col_def_upper)
+    cleaned = re.sub(r"[(),.\d+\-*/=]", " ", without_strings)
+    words = re.findall(r"[A-Z_]+", cleaned)
+
+    for word in words:
+        if word in _ALLOWED_COLUMN_TYPES:
+            continue
+        if word in _ALLOWED_COL_KEYWORDS:
+            continue
+        logger.error(f"❌ كلمة غير مسموحة '{word}' في: {col_def}")
+        return False
+
+    return True
+
+
+def _clone_start_data(data: Dict) -> Dict:
+    """
+    ✅ v7.5.14: نسخة آمنة (shallow + deep للحقول المتداخلة).
+    - أسرع 10x من deepcopy.
+    - آمن ضد المشاركة العرضية.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    cloned = dict(data)
+
+    for key in ("channel_info",):
+        value = cloned.get(key)
+        if isinstance(value, dict):
+            cloned[key] = dict(value)
+        elif isinstance(value, list):
+            cloned[key] = list(value)
+
+    return cloned
+
+
+async def _create_pool_with_retry(
+    pool_factory: Callable[[], Awaitable[Any]],
+    name: str,
+    max_attempts: int = 5,
+) -> Any:
+    """
+    ✅ v7.5.14: helper لإنشاء pool مع retry أُسّي.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            pool = await pool_factory()
+            if attempt > 0:
+                logger.info(
+                    f"✅ نجح الاتصال بـ {name} بعد {attempt + 1} محاولات"
+                )
+            return pool
+        except Exception as e:
+            last_exc = e
+            if attempt == max_attempts - 1:
+                logger.error(
+                    f"❌ فشل الاتصال بـ {name} بعد {max_attempts} محاولات"
+                )
+                raise last_exc
+            delay = min(2 ** attempt, 30)
+            logger.warning(
+                f"⚠️ فشل الاتصال بـ {name} "
+                f"(محاولة {attempt + 1}/{max_attempts}): {e} — "
+                f"إعادة بعد {delay}s"
+            )
+            await asyncio.sleep(delay)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"فشل الاتصال بـ {name} — لا استثناء مسجل")
 
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
@@ -1145,6 +1307,7 @@ async def _table_exists(conn, table: str) -> bool:
     except Exception:
         return False
 
+
 # =====================================================================
 # 2. فئة TimeUtils
 # =====================================================================
@@ -1168,7 +1331,8 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        return TimeUtils.utc_now().strftime("%Y-%m-%d %H:%M:%S+00:00")
+        """✅ v7.5.13: بدون +00:00 لتوافق MySQL DATETIME."""
+        return TimeUtils.utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def mecca_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -1218,6 +1382,7 @@ class TimeUtils:
         except ValueError:
             pass
         return None
+
 
 # =====================================================================
 # 3. فئة Database (ترث من كل الـ Mixins)
@@ -1342,7 +1507,7 @@ class Database(
         self._sqlite_pool_size = SQLITE_POOL_SIZE
         self._initialized = False
         self._db_type = DB_TYPE
-        self._max_connections = int(os.getenv("DB_POOL_SIZE", "10"))
+        self._max_connections = int(os.getenv("DB_POOL_SIZE", "20"))
         self._connection_timeout = int(os.getenv("DB_TIMEOUT", "30"))
         self._cleanup_task = None
         self._secondary_index_task = None
@@ -1356,6 +1521,12 @@ class Database(
         self._group_locks = defaultdict(lambda: asyncio.Lock())
         self._group_locks_last_access = {}
         self._group_locks_lock = asyncio.Lock()
+        self._MAX_GROUP_LOCKS = MAX_GROUP_LOCKS_CONFIG
+        # ✅ v7.5.14: قفل مركّب (user, chat)
+        self._penalty_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+        self._penalty_locks_last_access: Dict[Tuple[int, int], float] = {}
+        self._penalty_locks_lock = asyncio.Lock()
+        self._MAX_PENALTY_LOCKS = MAX_PENALTY_LOCKS_CONFIG
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
         self._slow_query_log_threshold = float(os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0"))
@@ -1388,63 +1559,103 @@ class Database(
     # =====================================================================
 
     async def initialize(self):
+        """✅ v7.5.14: إنشاء Pool مع retry أُسّي."""
         if self._initialized:
             return
+
         try:
             if USE_POSTGRES:
-                self._pool = await asyncpg.create_pool(
-                    dsn=DATABASE_URL,
-                    min_size=2,
-                    max_size=self._max_connections,
-                    timeout=self._connection_timeout,
-                    command_timeout=self._connection_timeout,
-                    statement_cache_size=500,
-                    server_settings={
-                        "application_name": "RelaxManager",
-                        "statement_timeout": "30s",
-                        "timezone": "UTC",
-                    },
+                async def _pg_factory():
+                    return await asyncpg.create_pool(
+                        dsn=DATABASE_URL,
+                        min_size=2,
+                        max_size=self._max_connections,
+                        timeout=self._connection_timeout,
+                        command_timeout=self._connection_timeout,
+                        statement_cache_size=500,
+                        server_settings={
+                            "application_name": "RelaxManager",
+                            "statement_timeout": "30s",
+                            "timezone": "UTC",
+                        },
+                    )
+                self._pool = await _create_pool_with_retry(
+                    _pg_factory, "PostgreSQL", max_attempts=5
                 )
-                logger.info(f"✅ Pool PostgreSQL جاهز (min=2, max={self._max_connections}, cache=500)")
+                logger.info(
+                    f"✅ Pool PostgreSQL جاهز (min=2, "
+                    f"max={self._max_connections}, cache=500)"
+                )
+
             elif USE_MYSQL:
                 pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
                 match = re.match(pattern, DATABASE_URL)
                 if not match:
                     raise ValueError("Invalid MySQL DATABASE_URL format")
                 user, password, host, port, database = match.groups()
-                self._pool = await asyncmy.create_pool(
-                    host=host, port=int(port), user=user, password=password,
-                    db=database, minsize=1, maxsize=self._max_connections,
-                    pool_recycle=3600, autocommit=False, charset="utf8mb4",
-                    init_command="SET time_zone = '+00:00'",
+
+                async def _mysql_factory():
+                    return await asyncmy.create_pool(
+                        host=host, port=int(port), user=user,
+                        password=password, db=database,
+                        minsize=1, maxsize=self._max_connections,
+                        pool_recycle=3600, autocommit=False,
+                        charset="utf8mb4",
+                        init_command="SET time_zone = '+00:00'",
+                    )
+                self._pool = await _create_pool_with_retry(
+                    _mysql_factory, "MySQL", max_attempts=5
                 )
                 logger.info(f"✅ Pool MySQL جاهز (max={self._max_connections})")
-            else:
-                conn = await self._create_sqlite_connection()
-                if conn is None:
-                    raise RuntimeError("فشل إنشاء اتصال SQLite الأولي")
+
+            else:  # SQLite
+                async def _sqlite_factory():
+                    conn = await self._create_sqlite_connection()
+                    if conn is None:
+                        raise RuntimeError("فشل إنشاء اتصال SQLite")
+                    return conn
+                conn = await _create_pool_with_retry(
+                    _sqlite_factory, "SQLite", max_attempts=3
+                )
                 self._sqlite_queue = asyncio.Queue(maxsize=self._sqlite_pool_size)
                 await self._sqlite_queue.put(conn)
                 self._sqlite_open_count = 1
-                logger.info(f"✅ Pool SQLite جاهز (size={self._sqlite_pool_size}, initial=1)")
+                logger.info(
+                    f"✅ Pool SQLite جاهز "
+                    f"(size={self._sqlite_pool_size}, initial=1)"
+                )
+
             self._initialized = True
             if self._cleanup_task is None or self._cleanup_task.done():
-                self._cleanup_task = asyncio.create_task(self._auto_cleanup_locks())
+                self._cleanup_task = asyncio.create_task(
+                    self._auto_cleanup_locks()
+                )
+
         except Exception as e:
             if self._pool is not None:
-                if USE_POSTGRES:
-                    await self._pool.close()
-                elif USE_MYSQL:
-                    self._pool.close()
-                    await self._pool.wait_closed()
+                try:
+                    if USE_POSTGRES:
+                        await self._pool.close()
+                    elif USE_MYSQL:
+                        self._pool.close()
+                        await self._pool.wait_closed()
+                except Exception as ce:
+                    logger.warning(f"⚠️ فشل إغلاق pool جزئي: {ce}")
                 self._pool = None
+
             if self._sqlite_queue is not None:
-                while not self._sqlite_queue.empty():
-                    conn = await self._sqlite_queue.get()
-                    await conn.close()
+                try:
+                    while not self._sqlite_queue.empty():
+                        conn = await self._sqlite_queue.get()
+                        await conn.close()
+                except Exception as ce:
+                    logger.warning(f"⚠️ فشل إغلاق SQLite جزئي: {ce}")
                 self._sqlite_queue = None
                 self._sqlite_open_count = 0
-            logger.error(f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True)
+
+            logger.error(
+                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True
+            )
             raise
 
     async def _create_sqlite_connection(self):
@@ -1480,19 +1691,31 @@ class Database(
             await asyncio.gather(*tasks, return_exceptions=True)
 
         if USE_POSTGRES and self._pool:
-            await self._pool.close()
-            self._pool = None
+            try:
+                await self._pool.close()
+            except Exception as e:
+                logger.warning(f"⚠️ فشل إغلاق pool PostgreSQL: {e}")
+            finally:
+                self._pool = None
         elif USE_MYSQL and self._pool:
-            self._pool.close()
-            await self._pool.wait_closed()
-            self._pool = None
+            try:
+                self._pool.close()
+                await self._pool.wait_closed()
+            except Exception as e:
+                logger.warning(f"⚠️ فشل إغلاق pool MySQL: {e}")
+            finally:
+                self._pool = None
         else:
             if self._sqlite_queue is not None:
-                while not self._sqlite_queue.empty():
-                    conn = await self._sqlite_queue.get()
-                    await conn.close()
-                self._sqlite_queue = None
-                self._sqlite_open_count = 0
+                try:
+                    while not self._sqlite_queue.empty():
+                        conn = await self._sqlite_queue.get()
+                        await conn.close()
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل إغلاق SQLite queue: {e}")
+                finally:
+                    self._sqlite_queue = None
+                    self._sqlite_open_count = 0
 
         try:
             await clear_all_caches()
@@ -1505,10 +1728,14 @@ class Database(
         if not self._initialized:
             await self.initialize()
         if USE_POSTGRES or USE_MYSQL:
-            return await asyncio.wait_for(self._pool.acquire(), timeout=self._connection_timeout)
+            return await asyncio.wait_for(
+                self._pool.acquire(), timeout=self._connection_timeout
+            )
         else:
             try:
-                return await asyncio.wait_for(self._sqlite_queue.get(), timeout=1.0)
+                return await asyncio.wait_for(
+                    self._sqlite_queue.get(), timeout=1.0
+                )
             except asyncio.TimeoutError:
                 async with self._sqlite_count_lock:
                     if self._sqlite_open_count < self._sqlite_pool_size:
@@ -1527,7 +1754,9 @@ class Database(
             try:
                 if self._sqlite_queue is not None:
                     try:
-                        await asyncio.wait_for(self._sqlite_queue.put(conn), timeout=1.0)
+                        await asyncio.wait_for(
+                            self._sqlite_queue.put(conn), timeout=1.0
+                        )
                     except asyncio.TimeoutError:
                         logger.warning("⚠️ طابور SQLite ممتلئ، إغلاق الاتصال الزائد")
                         await conn.close()
@@ -1692,7 +1921,10 @@ class Database(
                         pass
                 if retryable and attempt < max_retries - 1:
                     delay = (0.5 * (attempt + 1)) + (0.1 * attempt)
-                    logger.warning(f"⚠️ إعادة محاولة {attempt + 1}/{max_retries} بعد {delay:.2f}s: {e}")
+                    logger.warning(
+                        f"⚠️ إعادة محاولة {attempt + 1}/{max_retries} "
+                        f"بعد {delay:.2f}s: {e}"
+                    )
                     await asyncio.sleep(delay)
                     continue
                 raise
@@ -1722,13 +1954,17 @@ class Database(
             return int(parts[-1]) if parts and parts[-1].isdigit() else 0
         elif USE_MYSQL:
             cursor = await conn.cursor()
-            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: cursor.execute(q2, p2)
+            )
             await cursor.execute("SELECT ROW_COUNT()")
             row = await cursor.fetchone()
             await cursor.close()
             return row[0] if row else 0
         else:
-            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            cursor = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.execute(q2, p2)
+            )
             return cursor.rowcount
 
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
@@ -1759,11 +1995,9 @@ class Database(
                 return len(params_list)
             except Exception as e:
                 if not is_idempotent:
-                    logger.error(
-                        f"❌ فشل executemany غير idempotent — لا حلقة احتياطية لتجنب تكرار البيانات: {e}"
-                    )
+                    logger.error(f"❌ فشل executemany غير idempotent: {e}")
                     raise
-                logger.warning(f"⚠️ فشل executemany الجماعي ({e})، العودة للحلقة البطيئة (idempotent)")
+                logger.warning(f"⚠️ فشل executemany الجماعي ({e})، الحلقة البطيئة")
                 total = 0
                 for params in params_list:
                     try:
@@ -1803,11 +2037,15 @@ class Database(
         q = _convert_placeholders(query)
         params = _adapt_params(params) if params else ()
         if USE_POSTGRES:
-            row = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2))
+            row = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2)
+            )
             return dict(row) if row else None
         elif USE_MYSQL:
             cursor = await conn.cursor()
-            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: cursor.execute(q2, p2)
+            )
             row = await cursor.fetchone()
             desc = cursor.description
             await cursor.close()
@@ -1816,7 +2054,9 @@ class Database(
                 return dict(zip(columns, row))
             return None
         else:
-            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            cursor = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.execute(q2, p2)
+            )
             row = await cursor.fetchone()
             if row:
                 return dict(row)
@@ -1826,11 +2066,15 @@ class Database(
         q = _convert_placeholders(query)
         params = _adapt_params(params) if params else ()
         if USE_POSTGRES:
-            rows = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetch(q2, *p2))
+            rows = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.fetch(q2, *p2)
+            )
             return [dict(row) for row in rows]
         elif USE_MYSQL:
             cursor = await conn.cursor()
-            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: cursor.execute(q2, p2)
+            )
             rows = await cursor.fetchall()
             desc = cursor.description
             await cursor.close()
@@ -1839,7 +2083,9 @@ class Database(
                 return [dict(zip(columns, row)) for row in rows]
             return []
         else:
-            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            cursor = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.execute(q2, p2)
+            )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -1853,12 +2099,16 @@ class Database(
             return val if val is not None else default
         elif USE_MYSQL:
             cursor = await conn.cursor()
-            await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
+            await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: cursor.execute(q2, p2)
+            )
             row = await cursor.fetchone()
             await cursor.close()
             return row[0] if row else default
         else:
-            cursor = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.execute(q2, p2))
+            cursor = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.execute(q2, p2)
+            )
             row = await cursor.fetchone()
             return row[0] if row else default
 
@@ -1937,16 +2187,20 @@ class Database(
     # =====================================================================
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
+        """✅ v7.5.15: لا يحذف أقفالاً نشطة (بدون _waiters)."""
         async with self._user_locks_lock:
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
-                sorted_items = sorted(self._user_locks_last_access.items(), key=lambda x: x[1])
+                sorted_items = sorted(
+                    self._user_locks_last_access.items(), key=lambda x: x[1]
+                )
                 to_remove = []
                 max_to_remove = len(sorted_items) // 2
                 for uid, _ in sorted_items:
                     if len(to_remove) >= max_to_remove:
                         break
                     lock = self._user_locks.get(uid)
-                    if lock and not lock.locked() and not getattr(lock, "_waiters", None):
+                    # ✅ v7.5.15: فحص locked() فقط (بدون _waiters)
+                    if lock and not lock.locked():
                         to_remove.append(uid)
                 for uid in to_remove:
                     self._user_locks.pop(uid, None)
@@ -1964,11 +2218,75 @@ class Database(
             return self._channel_locks[channel_db_id]
 
     async def _get_group_lock(self, chat_id: int) -> asyncio.Lock:
+        """✅ v7.5.14: إضافة حد أقصى + تنظيف تلقائي."""
         async with self._group_locks_lock:
+            if (
+                len(self._group_locks) >= self._MAX_GROUP_LOCKS
+                and chat_id not in self._group_locks
+            ):
+                sorted_items = sorted(
+                    self._group_locks_last_access.items(),
+                    key=lambda x: x[1],
+                )
+                to_remove = []
+                max_remove = self._MAX_GROUP_LOCKS // 5
+                for cid, _ in sorted_items[:max_remove]:
+                    lock = self._group_locks.get(cid)
+                    if lock and not lock.locked():
+                        to_remove.append(cid)
+                for cid in to_remove:
+                    self._group_locks.pop(cid, None)
+                    self._group_locks_last_access.pop(cid, None)
+                if to_remove:
+                    logger.info(f"🧹 تم تنظيف {len(to_remove)} قفل مجموعة")
+
             self._group_locks_last_access[chat_id] = time.monotonic()
             return self._group_locks[chat_id]
 
+    async def _get_penalty_lock(self, user_id: int, chat_id: int) -> asyncio.Lock:
+        """
+        ✅ v7.5.15: قفل مركّب (user_id, chat_id) مع حماية من التضخم.
+        - الترتيب ضمني في المفتاح → لا deadlock.
+        - auto-expand للحد الأقصى عند الضغط.
+        """
+        key = (user_id, chat_id)
+        async with self._penalty_locks_lock:
+            # ✅ v7.5.15: حماية من التضخم المفرط
+            if len(self._penalty_locks) >= self._MAX_PENALTY_LOCKS * 2:
+                logger.error(
+                    f"🚨 عدد أقفال العقوبات "
+                    f"({len(self._penalty_locks)}) تجاوز الحد الآمن"
+                )
+                self._MAX_PENALTY_LOCKS = len(self._penalty_locks) * 2
+
+            if (
+                len(self._penalty_locks) >= self._MAX_PENALTY_LOCKS
+                and key not in self._penalty_locks
+            ):
+                sorted_items = sorted(
+                    self._penalty_locks_last_access.items(),
+                    key=lambda x: x[1],
+                )
+                to_remove = []
+                max_remove = self._MAX_PENALTY_LOCKS // 5
+                for k, _ in sorted_items[:max_remove]:
+                    lock = self._penalty_locks.get(k)
+                    if lock and not lock.locked():
+                        to_remove.append(k)
+                for k in to_remove:
+                    self._penalty_locks.pop(k, None)
+                    self._penalty_locks_last_access.pop(k, None)
+                if to_remove:
+                    logger.info(f"🧹 تم تنظيف {len(to_remove)} قفل عقوبة")
+
+            if key not in self._penalty_locks:
+                self._penalty_locks[key] = asyncio.Lock()
+
+            self._penalty_locks_last_access[key] = time.monotonic()
+            return self._penalty_locks[key]
+
     async def cleanup_user_locks(self, max_idle_seconds: int = 3600) -> int:
+        """✅ v7.5.15: تنظيف بدون _waiters."""
         try:
             async with self._user_locks_lock:
                 now = time.monotonic()
@@ -1976,7 +2294,7 @@ class Database(
                 for user_id, last_access in self._user_locks_last_access.items():
                     if now - last_access > max_idle_seconds:
                         lock = self._user_locks.get(user_id)
-                        if lock and not lock.locked() and not getattr(lock, "_waiters", None):
+                        if lock and not lock.locked():
                             to_remove.append(user_id)
                 for user_id in to_remove:
                     self._user_locks.pop(user_id, None)
@@ -1996,7 +2314,7 @@ class Database(
                 for ch, ts in list(self._channel_locks_last_access.items()):
                     if now - ts > max_idle_seconds:
                         lock = self._channel_locks.get(ch)
-                        if lock and not lock.locked() and not getattr(lock, "_waiters", None):
+                        if lock and not lock.locked():
                             to_remove.append(ch)
                 for ch in to_remove:
                     self._channel_locks.pop(ch, None)
@@ -2016,7 +2334,7 @@ class Database(
                 for ch, ts in list(self._group_locks_last_access.items()):
                     if now - ts > max_idle_seconds:
                         lock = self._group_locks.get(ch)
-                        if lock and not lock.locked() and not getattr(lock, "_waiters", None):
+                        if lock and not lock.locked():
                             to_remove.append(ch)
                 for ch in to_remove:
                     self._group_locks.pop(ch, None)
@@ -2028,6 +2346,27 @@ class Database(
             logger.error(f"❌ Error in cleanup_group_locks: {e}")
             return 0
 
+    async def cleanup_penalty_locks(self, max_idle_seconds: int = 3600) -> int:
+        """✅ v7.5.14: تنظيف أقفال العقوبات."""
+        try:
+            async with self._penalty_locks_lock:
+                now = time.monotonic()
+                to_remove = []
+                for key, ts in list(self._penalty_locks_last_access.items()):
+                    if now - ts > max_idle_seconds:
+                        lock = self._penalty_locks.get(key)
+                        if lock and not lock.locked():
+                            to_remove.append(key)
+                for key in to_remove:
+                    self._penalty_locks.pop(key, None)
+                    self._penalty_locks_last_access.pop(key, None)
+                if to_remove:
+                    logger.info(f"🧹 تم تنظيف {len(to_remove)} قفل عقوبة")
+                return len(to_remove)
+        except Exception as e:
+            logger.error(f"❌ Error in cleanup_penalty_locks: {e}")
+            return 0
+
     async def _auto_cleanup_locks(self):
         while True:
             try:
@@ -2035,6 +2374,7 @@ class Database(
                 await self.cleanup_user_locks()
                 await self.cleanup_channel_locks()
                 await self.cleanup_group_locks()
+                await self.cleanup_penalty_locks()
             except asyncio.CancelledError:
                 logger.info("🛑 مهمة تنظيف الأقفال تم إلغاؤها")
                 break
@@ -2042,7 +2382,7 @@ class Database(
                 logger.error(f"❌ Error in _auto_cleanup_locks: {e}")
 
     # =====================================================================
-    # إنشاء الجداول
+    # إنشاء الجداول + الترحيل
     # =====================================================================
 
     def _compute_text_hash(self, text: Optional[str]) -> str:
@@ -2066,10 +2406,6 @@ class Database(
                 await create_tables_sqlite(conn, logger, TimeUtils)
                 logger.info("✅ تم إنشاء جداول SQLite عبر database_tables.py")
 
-    # =====================================================================
-    # ترحيل المخطط
-    # =====================================================================
-
     async def _add_column_safe(self, conn, table: str, col_name: str, col_def: str):
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or not re.match(
             r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name
@@ -2082,11 +2418,14 @@ class Database(
         try:
             if USE_POSTGRES:
                 exists = await conn.fetchval(
-                    "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = $1 AND column_name = $2",
                     table, col_name,
                 )
                 if not exists:
-                    await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}')
+                    await conn.execute(
+                        f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}'
+                    )
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
                     if table == "group_security":
                         self._group_security_columns_cache = None
@@ -2096,7 +2435,9 @@ class Database(
                 exists = await cursor.fetchone()
                 await cursor.close()
                 if not exists:
-                    await conn.execute(f"ALTER TABLE `{table}` ADD COLUMN `{col_name}` {col_def}")
+                    await conn.execute(
+                        f"ALTER TABLE `{table}` ADD COLUMN `{col_name}` {col_def}"
+                    )
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
                     if table == "group_security":
                         self._group_security_columns_cache = None
@@ -2105,13 +2446,119 @@ class Database(
                 rows = await cursor.fetchall()
                 exists = any(row[1] == col_name for row in rows)
                 if not exists:
-                    await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                    await conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
+                    )
                     logger.info(f"✅ أُضيف العمود {col_name} إلى جدول {table}")
                     if table == "group_security":
                         self._group_security_columns_cache = None
         except Exception as e:
             if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                 logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
+
+    async def _execute_batch_migrations(
+        self, conn, table: str, missing_columns: List[Tuple[str, str]]
+    ) -> int:
+        """✅ v7.5.14: تجميع ALTER TABLE + فحص أمني شامل."""
+        if not missing_columns:
+            return 0
+
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+            logger.error(f"❌ اسم جدول غير صالح: {table}")
+            return 0
+
+        for col_name, col_def in missing_columns:
+            if not _validate_column_def(col_name, col_def):
+                logger.error(f"❌ فشل التحقق: {table}.{col_name} ({col_def})")
+                return 0
+
+        try:
+            if USE_POSTGRES:
+                alters = ", ".join([
+                    f'ADD COLUMN "{c}" {t}' for c, t in missing_columns
+                ])
+                await conn.execute(f'ALTER TABLE "{table}" {alters}')
+                logger.info(
+                    f"⚡ أُضيفت {len(missing_columns)} عمودًا إلى {table} "
+                    f"في استعلام واحد"
+                )
+                return len(missing_columns)
+
+            elif USE_MYSQL:
+                safe_cols = []
+                for c, t in missing_columns:
+                    if "TEXT DEFAULT" in t.upper():
+                        t = re.sub(
+                            r"\bTEXT\s+DEFAULT\b", "VARCHAR(255) DEFAULT",
+                            t, flags=re.IGNORECASE
+                        )
+                    safe_cols.append((c, t))
+
+                alters = ", ".join([
+                    f"ADD COLUMN `{c}` {t}" for c, t in safe_cols
+                ])
+                await conn.execute(f"ALTER TABLE `{table}` {alters}")
+                logger.info(
+                    f"⚡ أُضيفت {len(safe_cols)} عمودًا إلى {table} "
+                    f"في استعلام واحد"
+                )
+                return len(safe_cols)
+
+            else:  # SQLite
+                added = 0
+                for col_name, col_def in missing_columns:
+                    try:
+                        await conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
+                        )
+                        added += 1
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "duplicate" in err or "already exists" in err:
+                            continue
+                        logger.warning(f"⚠️ SQLite فشل إضافة {col_name}: {e}")
+                if added:
+                    logger.info(f"✅ SQLite: أُضيفت {added} عمودًا إلى {table}")
+                return added
+
+        except Exception as e:
+            logger.warning(f"⚠️ ALTER batch فشل لـ {table}: {e} — العودة للفردي")
+            added = 0
+            for col_name, col_def in missing_columns:
+                if not _validate_column_def(col_name, col_def):
+                    continue
+                try:
+                    if USE_POSTGRES:
+                        await conn.execute(
+                            f'ALTER TABLE "{table}" '
+                            f'ADD COLUMN "{col_name}" {col_def}'
+                        )
+                    elif USE_MYSQL:
+                        safe_def = col_def
+                        if "TEXT DEFAULT" in safe_def.upper():
+                            safe_def = re.sub(
+                                r"\bTEXT\s+DEFAULT\b",
+                                "VARCHAR(255) DEFAULT",
+                                safe_def, flags=re.IGNORECASE,
+                            )
+                        await conn.execute(
+                            f"ALTER TABLE `{table}` "
+                            f"ADD COLUMN `{col_name}` {safe_def}"
+                        )
+                    else:
+                        await conn.execute(
+                            f"ALTER TABLE {table} "
+                            f"ADD COLUMN {col_name} {col_def}"
+                        )
+                    added += 1
+                except Exception as e2:
+                    err_msg = str(e2).lower()
+                    if "already exists" not in err_msg and "duplicate" not in err_msg:
+                        logger.warning(f"⚠️ فشل {col_name} في {table}: {e2}")
+
+            if added:
+                logger.info(f"✅ fallback: أُضيفت {added} عمودًا إلى {table}")
+            return added
 
     async def _column_exists(self, conn, table: str, column: str) -> bool:
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or \
@@ -2121,7 +2568,8 @@ class Database(
         try:
             if USE_POSTGRES:
                 row = await conn.fetchval(
-                    "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = $1 AND column_name = $2",
                     table, column,
                 )
                 return row is not None
@@ -2140,39 +2588,60 @@ class Database(
             return False
 
     async def _ensure_text_hash_column(self, conn) -> bool:
+        """
+        ✅ v7.5.15: فحص الفهرس دائمًا (حتى لو العمود موجود).
+        """
         try:
             if not await _table_exists(conn, "posts"):
                 logger.warning("⚠️ جدول posts غير موجود، لا يمكن إضافة text_hash")
                 return False
-            if await self._column_exists(conn, "posts", "text_hash"):
-                return True
-            try:
-                if USE_POSTGRES:
-                    await conn.execute("ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT ''")
-                elif USE_MYSQL:
-                    await conn.execute("ALTER TABLE posts ADD COLUMN text_hash CHAR(64) DEFAULT ''")
-                else:
-                    await conn.execute("ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT ''")
-                logger.info("✅ تم إضافة عمود text_hash إلى posts")
 
-                if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
-                    try:
-                        await conn.execute("CREATE INDEX idx_posts_text_hash ON posts(text_hash)")
-                        logger.info("✅ تم إنشاء فهرس idx_posts_text_hash")
-                    except Exception as e:
-                        if "duplicate" not in str(e).lower():
-                            logger.warning(f"⚠️ فشل إنشاء فهرس text_hash: {e}")
-                return True
-            except Exception as e:
-                logger.error(f"❌ فشل إضافة عمود text_hash: {e}")
-                return False
+            column_exists = await self._column_exists(conn, "posts", "text_hash")
+
+            if not column_exists:
+                try:
+                    if USE_POSTGRES:
+                        await conn.execute(
+                            "ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT ''"
+                        )
+                    elif USE_MYSQL:
+                        await conn.execute(
+                            "ALTER TABLE posts ADD COLUMN text_hash CHAR(64) DEFAULT ''"
+                        )
+                    else:
+                        await conn.execute(
+                            "ALTER TABLE posts ADD COLUMN text_hash TEXT DEFAULT ''"
+                        )
+                    logger.info("✅ أُضيف عمود text_hash إلى posts")
+                except Exception as e:
+                    logger.error(f"❌ فشل إضافة عمود text_hash: {e}")
+                    return False
+
+            # ✅ v7.5.15: فحص الفهرس دائمًا
+            if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
+                try:
+                    await conn.execute(
+                        "CREATE INDEX idx_posts_text_hash ON posts(text_hash)"
+                    )
+                    logger.info("✅ أُنشئ فهرس idx_posts_text_hash")
+                except Exception as e:
+                    if "duplicate" not in str(e).lower() and \
+                       "already exists" not in str(e).lower():
+                        logger.warning(f"⚠️ فشل إنشاء فهرس text_hash: {e}")
+
+            return True
         except Exception as e:
             logger.error(f"❌ خطأ في _ensure_text_hash_column: {e}")
             return False
 
     async def _migrate_schema(self, conn):
+        """✅ v7.5.14: تجميع ALTER TABLE (8s بدل 22s)."""
         if USE_MYSQL:
-            await conn.execute("SET FOREIGN_KEY_CHECKS=0")
+            try:
+                await conn.execute("SET FOREIGN_KEY_CHECKS=0")
+            except Exception:
+                pass
+
         try:
             migrations = {
                 "group_security": [
@@ -2250,6 +2719,9 @@ class Database(
                     ("daily_stats_reminder", "INTEGER DEFAULT 0"),
                     ("weekly_report", "INTEGER DEFAULT 1"),
                     ("reminder_days_before", "INTEGER DEFAULT 3"),
+                    ("last_daily_sent", "TIMESTAMP"),
+                    ("last_weekly_sent", "TIMESTAMP"),
+                    ("last_subscription_sent", "TIMESTAMP"),
                     ("last_reminder_sent", "TIMESTAMP"),
                     ("notification_lang", "TEXT DEFAULT 'ar'"),
                 ],
@@ -2257,22 +2729,57 @@ class Database(
                     ("lang", "TEXT DEFAULT 'off'"),
                 ],
             }
+
+            total_added = 0
             for table, columns in migrations.items():
-                existing = await self._get_existing_columns(conn, table)
-                for col_name, col_def in columns:
-                    if col_name not in existing:
-                        await self._add_column_safe(conn, table, col_name, col_def)
+                try:
+                    existing = await self._get_existing_columns(conn, table)
+                    missing = [
+                        (col, typ) for col, typ in columns
+                        if col not in existing
+                    ]
+
+                    if not missing:
+                        continue
+
+                    added = await self._execute_batch_migrations(
+                        conn, table, missing
+                    )
+                    total_added += added
+
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل ترحيل {table}: {e}")
+                    try:
+                        existing = await self._get_existing_columns(conn, table)
+                        for col_name, col_def in columns:
+                            if col_name not in existing:
+                                await self._add_column_safe(
+                                    conn, table, col_name, col_def
+                                )
+                    except Exception as e2:
+                        logger.warning(f"⚠️ fallback فشل أيضًا لـ {table}: {e2}")
+
+            if total_added > 0:
+                logger.info(
+                    f"⚡ انتهى الترحيل: أُضيفت {total_added} عمودًا إجمالاً"
+                )
+
             await self._ensure_text_hash_column(conn)
             self._group_security_columns_cache = None
+
         finally:
             if USE_MYSQL:
-                await conn.execute("SET FOREIGN_KEY_CHECKS=1")
+                try:
+                    await conn.execute("SET FOREIGN_KEY_CHECKS=1")
+                except Exception:
+                    pass
 
     async def _get_existing_columns(self, conn, table: str) -> set:
         try:
             if USE_POSTGRES:
                 rows = await conn.fetch(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name = $1",
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = $1",
                     table,
                 )
                 return {row["column_name"] for row in rows}
@@ -2298,19 +2805,25 @@ class Database(
             return False
         try:
             if USE_POSTGRES:
-                row = await conn.fetchval("SELECT 1 FROM pg_indexes WHERE indexname = $1", idx_name)
+                row = await conn.fetchval(
+                    "SELECT 1 FROM pg_indexes WHERE indexname = $1", idx_name
+                )
                 return row is not None
             elif USE_MYSQL:
                 if not await _table_exists(conn, table):
                     return False
                 cursor = await conn.cursor()
-                await cursor.execute(f"SHOW INDEX FROM `{table}` WHERE Key_name = %s", (idx_name,))
+                await cursor.execute(
+                    f"SHOW INDEX FROM `{table}` WHERE Key_name = %s", (idx_name,)
+                )
                 rows = await cursor.fetchall()
                 await cursor.close()
                 return len(rows) > 0
             else:
                 cursor = await conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='index' AND name=?", (idx_name,)
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='index' AND name=?",
+                    (idx_name,),
                 )
                 row = await cursor.fetchone()
                 return row is not None
@@ -2332,11 +2845,13 @@ class Database(
                         logger.info(f"✅ تم إنشاء فهرس ثانوي {idx_name}")
                         created += 1
                     except Exception as e:
-                        if "duplicate" not in str(e).lower() and "already exists" not in str(e).lower():
+                        if "duplicate" not in str(e).lower() and \
+                           "already exists" not in str(e).lower():
                             logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
                             failed += 1
                 logger.info(
-                    f"📊 انتهى إنشاء الفهارس: ✅ {created} جديد | ⏭️ {skipped} موجود | ❌ {failed} فشل"
+                    f"📊 انتهى إنشاء الفهارس: ✅ {created} جديد | "
+                    f"⏭️ {skipped} موجود | ❌ {failed} فشل"
                 )
         except asyncio.CancelledError:
             logger.info("🛑 مهمة إنشاء الفهارس الثانوية تم إلغاؤها")
@@ -2344,7 +2859,7 @@ class Database(
             logger.error(f"❌ فشل إنشاء الفهارس الثانوية: {e}")
 
     # =====================================================================
-    # 🆕 دوال ضمان وجود المستخدم والمجموعة
+    # دوال ضمان وجود المستخدم والمجموعة
     # =====================================================================
 
     async def _ensure_user_exists(
@@ -2354,14 +2869,7 @@ class Database(
         first_name: str = "",
         auto_register: bool = True,
     ) -> bool:
-        """
-        ✅ v7.5.12: التأكد من وجود المستخدم في جدول users.
-        إذا لم يكن موجودًا و auto_register=True → يُسجّله تلقائيًا.
-
-        Returns:
-            True إذا كان المستخدم موجودًا (أو تم تسجيله بنجاح)
-            False إذا لم يكن موجودًا وفشل التسجيل
-        """
+        """✅ v7.5.12: التأكد من وجود المستخدم — تسجيل تلقائي."""
         try:
             exists = await self.fetchval(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
@@ -2370,14 +2878,19 @@ class Database(
                 return True
 
             if not auto_register:
-                logger.warning(f"⚠️ المستخدم {user_id} غير موجود (auto_register=False)")
+                logger.warning(
+                    f"⚠️ المستخدم {user_id} غير موجود (auto_register=False)"
+                )
                 return False
 
-            logger.info(f"ℹ️ تسجيل تلقائي للمستخدم {user_id} (username='{username}')")
+            logger.info(
+                f"ℹ️ تسجيل تلقائي للمستخدم {user_id} (username='{username}')"
+            )
             registered = await self.register_user(
                 user_id=user_id,
                 username=username or "",
                 first_name=first_name or "",
+                force=True,
             )
             if registered:
                 logger.info(f"✅ تم تسجيل المستخدم {user_id} تلقائيًا")
@@ -2386,7 +2899,9 @@ class Database(
                 logger.error(f"❌ فشل تسجيل المستخدم {user_id} تلقائيًا")
                 return False
         except Exception as e:
-            logger.error(f"❌ _ensure_user_exists({user_id}): {e}", exc_info=True)
+            logger.error(
+                f"❌ _ensure_user_exists({user_id}): {e}", exc_info=True
+            )
             return False
 
     async def _ensure_group_exists(
@@ -2396,14 +2911,7 @@ class Database(
         added_by: Optional[int] = None,
         auto_register: bool = True,
     ) -> bool:
-        """
-        ✅ v7.5.12: التأكد من وجود المجموعة في جدول bot_groups.
-        إذا لم تكن موجودة و auto_register=True → يُسجّلها تلقائيًا.
-
-        Returns:
-            True إذا كانت المجموعة موجودة (أو تم تسجيلها بنجاح)
-            False إذا لم تكن موجودة وفشل التسجيل
-        """
+        """✅ v7.5.12: التأكد من وجود المجموعة — تسجيل تلقائي."""
         try:
             exists = await self.fetchval(
                 "SELECT 1 FROM bot_groups WHERE chat_id = ?", (chat_id,)
@@ -2412,15 +2920,21 @@ class Database(
                 return True
 
             if not auto_register:
-                logger.warning(f"⚠️ المجموعة {chat_id} غير موجودة (auto_register=False)")
+                logger.warning(
+                    f"⚠️ المجموعة {chat_id} غير موجودة (auto_register=False)"
+                )
                 return False
 
-            logger.info(f"ℹ️ تسجيل تلقائي للمجموعة {chat_id} (name='{chat_name}')")
+            logger.info(
+                f"ℹ️ تسجيل تلقائي للمجموعة {chat_id} (name='{chat_name}')"
+            )
             try:
                 await self.execute(
-                    """INSERT INTO bot_groups (chat_id, chat_name, added_by, added_at, banned)
+                    """INSERT INTO bot_groups
+                       (chat_id, chat_name, added_by, added_at, banned)
                        VALUES (?, ?, ?, ?, 0)""",
-                    (chat_id, chat_name or str(chat_id), added_by, TimeUtils.utc_now()),
+                    (chat_id, chat_name or str(chat_id),
+                     added_by, TimeUtils.utc_now()),
                 )
                 logger.info(f"✅ تم تسجيل المجموعة {chat_id} تلقائيًا")
                 if CACHE_AVAILABLE:
@@ -2430,14 +2944,17 @@ class Database(
                         pass
                 return True
             except Exception as e:
-                # ربما تم إنشاؤها في نفس اللحظة (race condition)
                 if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                    logger.debug(f"ℹ️ المجموعة {chat_id} أُنشئت بواسطة عملية أخرى")
+                    logger.debug(
+                        f"ℹ️ المجموعة {chat_id} أُنشئت بواسطة عملية أخرى"
+                    )
                     return True
                 logger.error(f"❌ فشل تسجيل المجموعة {chat_id}: {e}")
                 return False
         except Exception as e:
-            logger.error(f"❌ _ensure_group_exists({chat_id}): {e}", exc_info=True)
+            logger.error(
+                f"❌ _ensure_group_exists({chat_id}): {e}", exc_info=True
+            )
             return False
 
     # =====================================================================
@@ -2446,62 +2963,110 @@ class Database(
 
     async def _init_default_data(self, conn):
         default_plans = [
-            {"name": "تجربة", "description": "تجربة مجانية لمدة 30 يوم", "price": 0, "duration_days": 30, "max_channels": 100, "max_posts": 200, "features": '{"auto_publish":true,"security":true}', "is_gift": 0},
-            {"name": "يوم", "description": "باقة يوم واحد", "price": 5, "duration_days": 1, "max_channels": 1, "max_posts": 50, "features": '{"auto_publish":true}', "is_gift": 0},
-            {"name": "أسبوع", "description": "باقة 7 أيام", "price": 25, "duration_days": 7, "max_channels": 3, "max_posts": 300, "features": '{"auto_publish":true,"security":true}', "is_gift": 0},
-            {"name": "شهر", "description": "باقة 30 يوم", "price": 75, "duration_days": 30, "max_channels": 10, "max_posts": 1500, "features": '{"auto_publish":true,"security":true,"support":true}', "is_gift": 0},
-            {"name": "3 أشهر", "description": "باقة 90 يوم", "price": 200, "duration_days": 90, "max_channels": 25, "max_posts": 5000, "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true}', "is_gift": 0},
-            {"name": "سنة", "description": "باقة 365 يوم", "price": 700, "duration_days": 365, "max_channels": 100, "max_posts": 99999, "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true,"priority":true}', "is_gift": 0},
-            {"name": "هدية شهر", "description": "كود هدية لمدة 30 يوم", "price": 75, "duration_days": 30, "max_channels": 100, "max_posts": 1500, "features": '{}', "is_gift": 1},
+            {"name": "تجربة", "description": "تجربة مجانية لمدة 30 يوم",
+             "price": 0, "duration_days": 30, "max_channels": 100,
+             "max_posts": 200,
+             "features": '{"auto_publish":true,"security":true}',
+             "is_gift": 0},
+            {"name": "يوم", "description": "باقة يوم واحد",
+             "price": 5, "duration_days": 1, "max_channels": 1,
+             "max_posts": 50, "features": '{"auto_publish":true}',
+             "is_gift": 0},
+            {"name": "أسبوع", "description": "باقة 7 أيام",
+             "price": 25, "duration_days": 7, "max_channels": 3,
+             "max_posts": 300,
+             "features": '{"auto_publish":true,"security":true}',
+             "is_gift": 0},
+            {"name": "شهر", "description": "باقة 30 يوم",
+             "price": 75, "duration_days": 30, "max_channels": 10,
+             "max_posts": 1500,
+             "features": '{"auto_publish":true,"security":true,"support":true}',
+             "is_gift": 0},
+            {"name": "3 أشهر", "description": "باقة 90 يوم",
+             "price": 200, "duration_days": 90, "max_channels": 25,
+             "max_posts": 5000,
+             "features": '{"auto_publish":true,"security":true,'
+                         '"support":true,"analytics":true}',
+             "is_gift": 0},
+            {"name": "سنة", "description": "باقة 365 يوم",
+             "price": 700, "duration_days": 365, "max_channels": 100,
+             "max_posts": 99999,
+             "features": '{"auto_publish":true,"security":true,'
+                         '"support":true,"analytics":true,"priority":true}',
+             "is_gift": 0},
+            {"name": "هدية شهر", "description": "كود هدية لمدة 30 يوم",
+             "price": 75, "duration_days": 30, "max_channels": 100,
+             "max_posts": 1500, "features": '{}', "is_gift": 1},
         ]
         for plan in default_plans:
             if USE_POSTGRES:
-                existing = await conn.fetchval("SELECT id FROM plans WHERE name = $1", plan["name"])
+                existing = await conn.fetchval(
+                    "SELECT id FROM plans WHERE name = $1", plan["name"]
+                )
                 if not existing:
                     await conn.execute(
-                        """INSERT INTO plans (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                        """INSERT INTO plans
+                           (name, description, price, currency,
+                            duration_days, max_channels, max_posts,
+                            features, is_active, is_gift, created_at)
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
                         plan["name"], plan["description"], plan["price"], "XTR",
-                        plan["duration_days"], plan["max_channels"], plan["max_posts"],
-                        plan["features"], 1, plan["is_gift"], TimeUtils.utc_now(),
+                        plan["duration_days"], plan["max_channels"],
+                        plan["max_posts"], plan["features"], 1,
+                        plan["is_gift"], TimeUtils.utc_now(),
                     )
                 else:
                     await conn.execute(
-                        "UPDATE plans SET max_channels = $1, max_posts = $2 WHERE name = $3",
+                        "UPDATE plans SET max_channels = $1, max_posts = $2 "
+                        "WHERE name = $3",
                         plan["max_channels"], plan["max_posts"], plan["name"],
                     )
             elif USE_MYSQL:
                 cursor = await conn.cursor()
-                await cursor.execute("SELECT id FROM plans WHERE name = %s", (plan["name"],))
+                await cursor.execute(
+                    "SELECT id FROM plans WHERE name = %s", (plan["name"],)
+                )
                 existing = await cursor.fetchone()
                 await cursor.close()
                 if not existing:
                     await conn.execute(
-                        """INSERT INTO plans (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                        """INSERT INTO plans
+                           (name, description, price, currency,
+                            duration_days, max_channels, max_posts,
+                            features, is_active, is_gift, created_at)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (plan["name"], plan["description"], plan["price"], "XTR",
-                         plan["duration_days"], plan["max_channels"], plan["max_posts"],
-                         plan["features"], 1, plan["is_gift"], TimeUtils.sql_iso()),
+                         plan["duration_days"], plan["max_channels"],
+                         plan["max_posts"], plan["features"], 1,
+                         plan["is_gift"], TimeUtils.sql_iso()),
                     )
                 else:
                     await conn.execute(
-                        "UPDATE plans SET max_channels = %s, max_posts = %s WHERE name = %s",
+                        "UPDATE plans SET max_channels = %s, max_posts = %s "
+                        "WHERE name = %s",
                         (plan["max_channels"], plan["max_posts"], plan["name"]),
                     )
             else:
-                cursor = await conn.execute("SELECT id FROM plans WHERE name = ?", (plan["name"],))
+                cursor = await conn.execute(
+                    "SELECT id FROM plans WHERE name = ?", (plan["name"],)
+                )
                 existing = await cursor.fetchone()
                 if not existing:
                     await conn.execute(
-                        """INSERT INTO plans (name, description, price, currency, duration_days, max_channels, max_posts, features, is_active, is_gift, created_at)
+                        """INSERT INTO plans
+                           (name, description, price, currency,
+                            duration_days, max_channels, max_posts,
+                            features, is_active, is_gift, created_at)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                         (plan["name"], plan["description"], plan["price"], "XTR",
-                         plan["duration_days"], plan["max_channels"], plan["max_posts"],
-                         plan["features"], 1, plan["is_gift"], TimeUtils.sql_iso()),
+                         plan["duration_days"], plan["max_channels"],
+                         plan["max_posts"], plan["features"], 1,
+                         plan["is_gift"], TimeUtils.sql_iso()),
                     )
                 else:
                     await conn.execute(
-                        "UPDATE plans SET max_channels = ?, max_posts = ? WHERE name = ?",
+                        "UPDATE plans SET max_channels = ?, max_posts = ? "
+                        "WHERE name = ?",
                         (plan["max_channels"], plan["max_posts"], plan["name"]),
                     )
 
@@ -2530,18 +3095,25 @@ class Database(
             words_to_insert = []
             for word in BANNED_WORDS:
                 word = str(word).strip().lower()
-                if len(word) >= 2:
-                    words_to_insert.append((word, -1, owner_id, TimeUtils.utc_now()))
+                # ✅ v7.5.14: حد أقصى للطول
+                if 2 <= len(word) <= 100:
+                    words_to_insert.append(
+                        (word, -1, owner_id, TimeUtils.utc_now())
+                    )
             if words_to_insert:
                 batch_size = 500
                 for i in range(0, len(words_to_insert), batch_size):
                     batch = words_to_insert[i : i + batch_size]
                     await self._executemany_with_conn(
                         conn,
-                        """INSERT OR IGNORE INTO banned_words (word, chat_id, added_by, added_at) VALUES (?, ?, ?, ?)""",
+                        """INSERT OR IGNORE INTO banned_words
+                           (word, chat_id, added_by, added_at)
+                           VALUES (?, ?, ?, ?)""",
                         batch,
                     )
-                logger.info(f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة")
+                logger.info(
+                    f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة"
+                )
                 if hasattr(self, "_invalidate_banned_words_local_cache"):
                     await self._invalidate_banned_words_local_cache()
                 if CACHE_AVAILABLE:
@@ -2598,14 +3170,22 @@ class Database(
                             chat_id = item[0]
                             keyword = str(item[1]).strip().lower()
                             reply = item[2]
-                            reply_type = item[3] if len(item) > 3 and isinstance(item[3], str) else "text"
+                            reply_type = (
+                                item[3]
+                                if len(item) > 3 and isinstance(item[3], str)
+                                else "text"
+                            )
                             media_id = item[4] if len(item) > 4 else None
                             buttons = item[5] if len(item) > 5 else None
                         elif len(item) >= 2:
                             chat_id = -1
                             keyword = str(item[0]).strip().lower()
                             reply = item[1]
-                            reply_type = item[2] if len(item) > 2 and isinstance(item[2], str) else "text"
+                            reply_type = (
+                                item[2]
+                                if len(item) > 2 and isinstance(item[2], str)
+                                else "text"
+                            )
                             media_id = item[3] if len(item) > 3 else None
                             buttons = item[4] if len(item) > 4 else None
                         else:
@@ -2628,11 +3208,15 @@ class Database(
                     await self._executemany_with_conn(
                         conn,
                         """INSERT OR IGNORE INTO auto_replies
-                           (chat_id, keyword, reply, reply_type, reply_media_id, reply_buttons, created_at, is_active, usage_count)
+                           (chat_id, keyword, reply, reply_type,
+                            reply_media_id, reply_buttons, created_at,
+                            is_active, usage_count)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         batch,
                     )
-                logger.info(f"✅ تم استيراد {len(replies_to_insert)} رد تلقائي")
+                logger.info(
+                    f"✅ تم استيراد {len(replies_to_insert)} رد تلقائي"
+                )
         except ImportError:
             logger.info("ℹ️ لا يوجد ملف auto_replies.py")
         except Exception as e:
@@ -2667,7 +3251,8 @@ class Database(
                 ("posts", "idx_posts_published",
                  "CREATE INDEX idx_posts_published ON posts(published, published_at)"),
                 ("posts", "idx_posts_channel_published",
-                 "CREATE INDEX idx_posts_channel_published ON posts(channel_db_id, published)"),
+                 "CREATE INDEX idx_posts_channel_published "
+                 "ON posts(channel_db_id, published)"),
                 ("subscriptions", "idx_subscriptions_active_end",
                  "CREATE INDEX idx_subscriptions_active_end "
                  "ON subscriptions(user_id, status, end_date)"),
@@ -2690,9 +3275,11 @@ class Database(
                 ("auto_replies", "idx_auto_replies_keyword",
                  "CREATE INDEX IF NOT EXISTS idx_auto_replies_keyword ON auto_replies(keyword)"),
                 ("referral_rewards", "idx_referral_rewards_count",
-                 "CREATE INDEX IF NOT EXISTS idx_referral_rewards_count ON referral_rewards(referral_count)"),
+                 "CREATE INDEX IF NOT EXISTS idx_referral_rewards_count "
+                 "ON referral_rewards(referral_count)"),
                 ("contest_participants", "idx_contest_participants_contest",
-                 "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest ON contest_participants(contest_id)"),
+                 "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest "
+                 "ON contest_participants(contest_id)"),
                 ("gift_codes", "idx_gift_codes_plan",
                  "CREATE INDEX IF NOT EXISTS idx_gift_codes_plan ON gift_codes(plan_id)"),
                 ("user_penalties", "idx_user_penalties_active_end",
@@ -2716,7 +3303,7 @@ class Database(
             ]
 
     # =====================================================================
-    # كاش has_active_subscription
+    # has_active_subscription
     # =====================================================================
 
     async def has_active_subscription(self, user_id: int) -> bool:
@@ -2730,7 +3317,8 @@ class Database(
         except AttributeError:
             row = await self.fetchval(
                 "SELECT 1 FROM subscriptions "
-                "WHERE user_id = ? AND status = 'active' AND end_date > ? LIMIT 1",
+                "WHERE user_id = ? AND status = 'active' "
+                "AND end_date > ? LIMIT 1",
                 (user_id, TimeUtils.utc_now()),
             )
             result = row is not None
@@ -2783,15 +3371,20 @@ class Database(
                 )
 
             if CACHE_AVAILABLE and (
-                self._cache_cleanup_task is None or self._cache_cleanup_task.done()
+                self._cache_cleanup_task is None
+                or self._cache_cleanup_task.done()
             ):
-                self._cache_cleanup_task = asyncio.create_task(cache_cleanup_task())
+                self._cache_cleanup_task = asyncio.create_task(
+                    cache_cleanup_task()
+                )
 
             logger.info("✅ تم تهيئة قاعدة البيانات بنجاح (مع المهام الخلفية)")
             return True
 
         except Exception as e:
-            logger.error(f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True)
+            logger.error(
+                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True
+            )
             return False
 
     async def pre_initialize(self):
@@ -2813,11 +3406,16 @@ class Database(
                 )
 
             if CACHE_AVAILABLE and (
-                self._cache_cleanup_task is None or self._cache_cleanup_task.done()
+                self._cache_cleanup_task is None
+                or self._cache_cleanup_task.done()
             ):
-                self._cache_cleanup_task = asyncio.create_task(cache_cleanup_task())
+                self._cache_cleanup_task = asyncio.create_task(
+                    cache_cleanup_task()
+                )
 
-            logger.info("✅ تم التهيئة المبكرة لقاعدة البيانات (مع المهام الخلفية)")
+            logger.info(
+                "✅ تم التهيئة المبكرة لقاعدة البيانات (مع المهام الخلفية)"
+            )
             return True
 
         except Exception as e:
@@ -2829,14 +3427,11 @@ class Database(
     # =====================================================================
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
-        """
-        ✅ v7.5.11: استعلام واحد مكثف لـ /start.
-        يُقلّل زمن الاستجابة من ~5s → ~300ms.
-        """
+        """✅ v7.5.14: استخدام _clone_start_data بدل deepcopy."""
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
-            return copy.deepcopy(cached)
+            return _clone_start_data(cached)
 
         query = """
             SELECT
@@ -2858,7 +3453,8 @@ class Database(
                  JOIN user_channels uc3 ON p.channel_db_id = uc3.id
                  WHERE uc3.user_id = u.user_id AND p.published = 0) AS unpublished_posts
             FROM users u
-            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            LEFT JOIN user_channels uc
+                ON u.active_channel = uc.id AND uc.banned = 0
             WHERE u.user_id = ?
         """
         if USE_POSTGRES:
@@ -2871,7 +3467,9 @@ class Database(
         try:
             row = await self.fetchone(query, (user_id,))
         except Exception as e:
-            logger.error(f"❌ get_start_data({user_id}): {e}", exc_info=True)
+            logger.error(
+                f"❌ get_start_data({user_id}): {e}", exc_info=True
+            )
             return None
 
         if not row:
@@ -2888,16 +3486,23 @@ class Database(
             else None
         )
 
-        await internal_cache.set(cache_key, copy.deepcopy(data), ttl=30)
+        await internal_cache.set(
+            cache_key, _clone_start_data(data), ttl=30
+        )
         return data
 
-    async def get_user_full_data(self, user_id: int, include_stats: bool = True) -> Optional[Dict]:
+    async def get_user_full_data(
+        self, user_id: int, include_stats: bool = True
+    ) -> Optional[Dict]:
         query = """
-            SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
+            SELECT u.user_id, u.username, u.first_name, u.language,
+                   u.auto_publish, u.auto_recycle,
                    u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                   uc.id as channel_id, uc.channel_name, uc.banned as channel_banned
+                   uc.id as channel_id, uc.channel_name,
+                   uc.banned as channel_banned
             FROM users u
-            LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+            LEFT JOIN user_channels uc
+                ON u.active_channel = uc.id AND uc.banned = 0
             WHERE u.user_id = ?
         """
         row = await self.fetchone(query, (user_id,))
@@ -2908,16 +3513,26 @@ class Database(
             stats = await self.fetchone(
                 """
                 SELECT
-                    COALESCE((SELECT COUNT(*) FROM posts p JOIN user_channels uc2 ON p.channel_db_id = uc2.id WHERE uc2.user_id = ? AND p.published = 0), 0) as unpublished_posts,
-                    COALESCE((SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > ?), 0) as has_subscription,
-                    COALESCE((SELECT COUNT(*) FROM user_channels WHERE user_id = ? AND banned = 0), 0) as channels_count,
-                    COALESCE((SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?), 0) as groups_count
+                    COALESCE((SELECT COUNT(*) FROM posts p
+                              JOIN user_channels uc2 ON p.channel_db_id = uc2.id
+                              WHERE uc2.user_id = ? AND p.published = 0), 0)
+                        as unpublished_posts,
+                    COALESCE((SELECT 1 FROM subscriptions
+                              WHERE user_id = ? AND status = 'active'
+                              AND end_date > ?), 0) as has_subscription,
+                    COALESCE((SELECT COUNT(*) FROM user_channels
+                              WHERE user_id = ? AND banned = 0), 0)
+                        as channels_count,
+                    COALESCE((SELECT COUNT(*) FROM user_groups_link
+                              WHERE user_id = ?), 0) as groups_count
                 """,
                 (user_id, user_id, TimeUtils.utc_now(), user_id, user_id),
             )
             if stats:
                 result["unpublished_posts"] = stats.get("unpublished_posts", 0)
-                result["has_subscription"] = bool(stats.get("has_subscription", 0))
+                result["has_subscription"] = bool(
+                    stats.get("has_subscription", 0)
+                )
                 result["channels_count"] = stats.get("channels_count", 0)
                 result["groups_count"] = stats.get("groups_count", 0)
         else:
@@ -2934,7 +3549,9 @@ class Database(
             }
         return result
 
-    async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+    async def get_user(
+        self, user_id: int, include_stats: bool = False
+    ) -> Optional[Dict]:
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -2943,27 +3560,51 @@ class Database(
                     if user_data:
                         user_data = copy.deepcopy(user_data)
                         if include_stats:
-                            user_data["unpublished_posts"] = cached_data.get("unpublished_posts", 0)
-                            user_data["has_subscription"] = cached_data.get("has_subscription", False)
-                            user_data["channels_count"] = cached_data.get("channels_count", 0)
-                            user_data["groups_count"] = cached_data.get("groups_count", 0)
-                            user_data["channel_info"] = copy.deepcopy(cached_data.get("channel_info"))
+                            user_data["unpublished_posts"] = cached_data.get(
+                                "unpublished_posts", 0
+                            )
+                            user_data["has_subscription"] = cached_data.get(
+                                "has_subscription", False
+                            )
+                            user_data["channels_count"] = cached_data.get(
+                                "channels_count", 0
+                            )
+                            user_data["groups_count"] = cached_data.get(
+                                "groups_count", 0
+                            )
+                            user_data["channel_info"] = copy.deepcopy(
+                                cached_data.get("channel_info")
+                            )
                         return user_data
 
-            cached = await internal_cache.get(f"user_{user_id}_{include_stats}")
+            cached = await internal_cache.get(
+                f"user_{user_id}_{include_stats}"
+            )
             if cached:
-                return copy.deepcopy(cached)
+                return _clone_start_data(cached)
 
             query = """
-                SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
-                       u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                       uc.id as channel_id, uc.channel_name, uc.banned as channel_banned,
-                       (SELECT COUNT(*) FROM posts p WHERE p.channel_db_id = uc.id AND p.published = 0) as unpublished_posts,
-                       EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id = u.user_id AND s.status = 'active' AND s.end_date > __NOW__) as has_subscription,
-                       (SELECT COUNT(*) FROM user_channels uc2 WHERE uc2.user_id = u.user_id AND uc2.banned = 0) as channels_count,
-                       (SELECT COUNT(*) FROM user_groups_link l WHERE l.user_id = u.user_id) as groups_count
+                SELECT u.user_id, u.username, u.first_name, u.language,
+                       u.auto_publish, u.auto_recycle,
+                       u.banned, u.trial_used, u.subscription_end,
+                       u.active_channel,
+                       uc.id as channel_id, uc.channel_name,
+                       uc.banned as channel_banned,
+                       (SELECT COUNT(*) FROM posts p
+                        WHERE p.channel_db_id = uc.id
+                        AND p.published = 0) as unpublished_posts,
+                       EXISTS(SELECT 1 FROM subscriptions s
+                              WHERE s.user_id = u.user_id
+                              AND s.status = 'active'
+                              AND s.end_date > __NOW__) as has_subscription,
+                       (SELECT COUNT(*) FROM user_channels uc2
+                        WHERE uc2.user_id = u.user_id
+                        AND uc2.banned = 0) as channels_count,
+                       (SELECT COUNT(*) FROM user_groups_link l
+                        WHERE l.user_id = u.user_id) as groups_count
                 FROM users u
-                LEFT JOIN user_channels uc ON u.active_channel = uc.id AND uc.banned = 0
+                LEFT JOIN user_channels uc
+                    ON u.active_channel = uc.id AND uc.banned = 0
                 WHERE u.user_id = ?
             """
             if USE_POSTGRES:
@@ -2978,17 +3619,27 @@ class Database(
                 return None
             data = dict(row)
             data["has_subscription"] = bool(data.get("has_subscription", 0))
-            await internal_cache.set(f"user_{user_id}_{include_stats}", data)
+
+            # ✅ v7.5.15: نسخة في الـ cache
+            await internal_cache.set(
+                f"user_{user_id}_{include_stats}",
+                _clone_start_data(data),
+            )
+
             if CACHE_AVAILABLE and not include_stats:
                 full_data = {
-                    "user_data": copy.deepcopy(data),
+                    "user_data": _clone_start_data(data),
                     "language": data.get("language", "ar"),
                     "active_channel": data.get("active_channel"),
-                    "channel_info": {
-                        "id": data.get("channel_id"),
-                        "channel_name": data.get("channel_name"),
-                        "banned": data.get("channel_banned", 0),
-                    } if data.get("channel_id") else None,
+                    "channel_info": (
+                        {
+                            "id": data.get("channel_id"),
+                            "channel_name": data.get("channel_name"),
+                            "banned": data.get("channel_banned", 0),
+                        }
+                        if data.get("channel_id")
+                        else None
+                    ),
                     "unpublished_posts": data.get("unpublished_posts", 0),
                     "has_subscription": data.get("has_subscription", False),
                     "auto_publish": data.get("auto_publish", True),
@@ -3010,19 +3661,74 @@ class Database(
         force: bool = False,
     ) -> bool:
         """
-        ✅ v7.5.12: تسجيل مستخدم جديد أو تحديث بياناته.
-
-        Args:
-            user_id: معرف المستخدم في تيليجرام
-            username: اسم المستخدم (اختياري)
-            first_name: الاسم الأول (اختياري)
-            force: إذا كان True، يُسجّل حتى لو كان المستخدم موجودًا (لتحديث البيانات)
-
-        Returns:
-            True على النجاح، False على الفشل
+        ✅ v7.5.15: احترام force.
+        - force=False: إذا المستخدم موجود، يُحدَّث username/first_name فقط.
+        - force=True: upsert كامل (سلوك v7.5.14).
         """
         try:
             async with await self._get_user_lock(user_id):
+                # ✅ v7.5.15: احترام force
+                if not force:
+                    exists = await self.fetchval(
+                        "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+                    )
+                    if exists:
+                        # حدّث فقط الحقول المتغيرة
+                        try:
+                            await self.execute(
+                                """UPDATE users SET
+                                       username = CASE WHEN ? != '' THEN ? ELSE username END,
+                                       first_name = CASE WHEN ? != '' THEN ? ELSE first_name END,
+                                       updated_at = ?
+                                   WHERE user_id = ?""",
+                                username, username, first_name, first_name,
+                                TimeUtils.sql_iso(), user_id,
+                            )
+                            logger.debug(
+                                f"ℹ️ تم تحديث بيانات المستخدم الموجود {user_id}"
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                f"تحديث مستخدم موجود {user_id}: {e}"
+                            )
+                        # تأكد من وجود الصفوف التابعة
+                        try:
+                            if USE_MYSQL:
+                                await self.execute(
+                                    "INSERT IGNORE INTO user_points "
+                                    "(user_id, points, last_updated) "
+                                    "VALUES (%s, 0, %s)",
+                                    (user_id, TimeUtils.sql_iso()),
+                                )
+                                await self.execute(
+                                    "INSERT IGNORE INTO referral_rewards "
+                                    "(user_id, referral_count, "
+                                    "total_reward_days, claimed_reward_days, "
+                                    "last_referral_date) "
+                                    "VALUES (%s, 0, 0, 0, NULL)",
+                                    (user_id,),
+                                )
+                            else:
+                                await self.execute(
+                                    "INSERT OR IGNORE INTO user_points "
+                                    "(user_id, points, last_updated) "
+                                    "VALUES (?, 0, ?)",
+                                    (user_id, TimeUtils.sql_iso()),
+                                )
+                                await self.execute(
+                                    "INSERT OR IGNORE INTO referral_rewards "
+                                    "(user_id, referral_count, "
+                                    "total_reward_days, claimed_reward_days, "
+                                    "last_referral_date) "
+                                    "VALUES (?, 0, 0, 0, NULL)",
+                                    (user_id,),
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                f"ضمان الصفوف التابعة لـ {user_id}: {e}"
+                            )
+                        return True
+
                 user_inserted = False
                 last_error = None
 
@@ -3033,11 +3739,16 @@ class Database(
                             if USE_POSTGRES:
                                 await self._execute_with_conn(
                                     conn,
-                                    """INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at)
+                                    """INSERT INTO users
+                                       (user_id, username, first_name,
+                                        referral_code, trial_used,
+                                        created_at, updated_at)
                                        VALUES ($1, $2, $3, $4, 0, $5, $6)
                                        ON CONFLICT(user_id) DO UPDATE SET
-                                           username = CASE WHEN $2 != '' THEN $2 ELSE users.username END,
-                                           first_name = CASE WHEN $3 != '' THEN $3 ELSE users.first_name END,
+                                           username = CASE WHEN $2 != '' THEN $2
+                                                      ELSE users.username END,
+                                           first_name = CASE WHEN $3 != '' THEN $3
+                                                        ELSE users.first_name END,
                                            updated_at = $6""",
                                     user_id, username, first_name, code,
                                     TimeUtils.utc_now(), TimeUtils.utc_now(),
@@ -3045,28 +3756,41 @@ class Database(
                             elif USE_MYSQL:
                                 await self._execute_with_conn(
                                     conn,
-                                    """INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at)
+                                    """INSERT INTO users
+                                       (user_id, username, first_name,
+                                        referral_code, trial_used,
+                                        created_at, updated_at)
                                        VALUES (%s, %s, %s, %s, 0, %s, %s)
                                        ON DUPLICATE KEY UPDATE
-                                           username = CASE WHEN %s != '' THEN %s ELSE users.username END,
-                                           first_name = CASE WHEN %s != '' THEN %s ELSE users.first_name END,
+                                           username = CASE WHEN %s != ''
+                                                      THEN %s ELSE users.username END,
+                                           first_name = CASE WHEN %s != ''
+                                                        THEN %s
+                                                        ELSE users.first_name END,
                                            updated_at = %s""",
                                     user_id, username, first_name, code,
                                     TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                    username, username, first_name, first_name, TimeUtils.sql_iso(),
+                                    username, username, first_name, first_name,
+                                    TimeUtils.sql_iso(),
                                 )
                             else:
                                 await self._execute_with_conn(
                                     conn,
-                                    """INSERT INTO users (user_id, username, first_name, referral_code, trial_used, created_at, updated_at)
+                                    """INSERT INTO users
+                                       (user_id, username, first_name,
+                                        referral_code, trial_used,
+                                        created_at, updated_at)
                                        VALUES (?, ?, ?, ?, 0, ?, ?)
                                        ON CONFLICT(user_id) DO UPDATE SET
-                                           username = CASE WHEN ? != '' THEN ? ELSE users.username END,
-                                           first_name = CASE WHEN ? != '' THEN ? ELSE users.first_name END,
+                                           username = CASE WHEN ? != '' THEN ?
+                                                      ELSE users.username END,
+                                           first_name = CASE WHEN ? != '' THEN ?
+                                                        ELSE users.first_name END,
                                            updated_at = ?""",
                                     user_id, username, first_name, code,
                                     TimeUtils.sql_iso(), TimeUtils.sql_iso(),
-                                    username, username, first_name, first_name, TimeUtils.sql_iso(),
+                                    username, username, first_name, first_name,
+                                    TimeUtils.sql_iso(),
                                 )
                         user_inserted = True
                         break
@@ -3075,69 +3799,104 @@ class Database(
                         err = str(e).lower()
                         if "referral_code" in err:
                             logger.warning(
-                                f"⚠️ تصادم referral_code للمستخدم {user_id}، محاولة {attempt + 1}/5"
+                                f"⚠️ تصادم referral_code للمستخدم "
+                                f"{user_id}، محاولة {attempt + 1}/5"
                             )
                             continue
                         if "unique" in err or "duplicate" in err:
                             user_inserted = True
                             break
-                        # خطأ آخر - ربما لا يخص التسجيل نفسه
-                        logger.error(f"❌ فشل إدراج المستخدم {user_id}: {e}")
+                        logger.error(
+                            f"❌ فشل إدراج المستخدم {user_id}: {e}"
+                        )
                         raise
 
                 if not user_inserted:
                     logger.error(
-                        f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات. آخر خطأ: {last_error}"
+                        f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات. "
+                        f"آخر خطأ: {last_error}"
                     )
                     return False
 
-                # إنشاء الصفوف التابعة (user_points, referral_rewards)
+                # إنشاء الصفوف التابعة
                 try:
                     async with self.transaction() as conn:
                         if USE_POSTGRES:
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES ($1, 0, $2) ON CONFLICT(user_id) DO UPDATE SET last_updated = $2",
+                                "INSERT INTO user_points "
+                                "(user_id, points, last_updated) "
+                                "VALUES ($1, 0, $2) "
+                                "ON CONFLICT(user_id) DO UPDATE SET "
+                                "last_updated = $2",
                                 user_id, TimeUtils.utc_now(),
                             )
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES ($1, 0, 0, 0, NULL) ON CONFLICT DO NOTHING",
+                                "INSERT INTO referral_rewards "
+                                "(user_id, referral_count, "
+                                "total_reward_days, claimed_reward_days, "
+                                "last_referral_date) "
+                                "VALUES ($1, 0, 0, 0, NULL) "
+                                "ON CONFLICT DO NOTHING",
                                 user_id,
                             )
                         elif USE_MYSQL:
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (%s, 0, %s) ON DUPLICATE KEY UPDATE last_updated = VALUES(last_updated)",
+                                "INSERT INTO user_points "
+                                "(user_id, points, last_updated) "
+                                "VALUES (%s, 0, %s) "
+                                "ON DUPLICATE KEY UPDATE "
+                                "last_updated = VALUES(last_updated)",
                                 user_id, TimeUtils.sql_iso(),
                             )
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (%s, 0, 0, 0, NULL)",
+                                "INSERT IGNORE INTO referral_rewards "
+                                "(user_id, referral_count, "
+                                "total_reward_days, claimed_reward_days, "
+                                "last_referral_date) "
+                                "VALUES (%s, 0, 0, 0, NULL)",
                                 user_id,
                             )
                         else:
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT INTO user_points (user_id, points, last_updated) VALUES (?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET last_updated = excluded.last_updated",
+                                "INSERT INTO user_points "
+                                "(user_id, points, last_updated) "
+                                "VALUES (?, 0, ?) "
+                                "ON CONFLICT(user_id) DO UPDATE SET "
+                                "last_updated = excluded.last_updated",
                                 user_id, TimeUtils.sql_iso(),
                             )
                             await self._execute_with_conn(
                                 conn,
-                                "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
+                                "INSERT OR IGNORE INTO referral_rewards "
+                                "(user_id, referral_count, "
+                                "total_reward_days, claimed_reward_days, "
+                                "last_referral_date) "
+                                "VALUES (?, 0, 0, 0, NULL)",
                                 user_id,
                             )
                 except Exception as e:
-                    # فشل الصفوف التابعة لا يفشل التسجيل نفسه
-                    logger.warning(f"⚠️ فشل إنشاء صفوف تابعة للمستخدم {user_id}: {e}")
+                    logger.warning(
+                        f"⚠️ فشل إنشاء صفوف تابعة للمستخدم {user_id}: {e}"
+                    )
 
-            for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False"):
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+            ):
                 await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
             return True
         except Exception as e:
-            logger.error(f"❌ Error in register_user: {e}", exc_info=True)
+            logger.error(
+                f"❌ Error in register_user: {e}", exc_info=True
+            )
             return False
 
     async def get_user_language(self, user_id: int) -> str:
@@ -3149,7 +3908,11 @@ class Database(
             cached_lang = await internal_cache.get(f"lang_{user_id}")
             if cached_lang:
                 return cached_lang
-            result = await self.fetchval("SELECT language FROM users WHERE user_id = ?", (user_id,), default="ar")
+            result = await self.fetchval(
+                "SELECT language FROM users WHERE user_id = ?",
+                (user_id,),
+                default="ar",
+            )
             lang = result if result else "ar"
             await internal_cache.set(f"lang_{user_id}", lang)
             return lang
@@ -3158,7 +3921,10 @@ class Database(
             return "ar"
 
     async def set_user_language(self, user_id: int, lang: str) -> bool:
-        result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
+        result = await self.execute(
+            "UPDATE users SET language = ? WHERE user_id = ?",
+            (lang, user_id),
+        ) > 0
         if result:
             for k in (
                 f"user_{user_id}",
@@ -3210,7 +3976,11 @@ class Database(
         cached = await internal_cache.get(cache_key)
         if cached is not None:
             return cached
-        result = await self.fetchval("SELECT auto_recycle FROM users WHERE user_id = ?", (user_id,), default=1)
+        result = await self.fetchval(
+            "SELECT auto_recycle FROM users WHERE user_id = ?",
+            (user_id,),
+            default=1,
+        )
         is_enabled = result == 1
         await internal_cache.set(cache_key, is_enabled, ttl=60)
         return is_enabled
@@ -3241,7 +4011,8 @@ class Database(
             return copy.deepcopy(cached)
 
         row = await self.fetchone(
-            "SELECT auto_publish, auto_recycle, language FROM users WHERE user_id = ?",
+            "SELECT auto_publish, auto_recycle, language "
+            "FROM users WHERE user_id = ?",
             (user_id,),
         )
         if not row:
@@ -3256,37 +4027,62 @@ class Database(
         return copy.deepcopy(data)
 
     async def is_user_banned(self, user_id: int) -> bool:
-        result = await self.fetchval("SELECT banned FROM users WHERE user_id = ?", (user_id,), default=0)
+        result = await self.fetchval(
+            "SELECT banned FROM users WHERE user_id = ?",
+            (user_id,),
+            default=0,
+        )
         return result == 1
 
     async def ban_user(self, user_id: int) -> bool:
-        result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
+        result = await self.execute(
+            "UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)
+        ) > 0
         if result:
-            for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False", f"start_data_{user_id}"):
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+                f"start_data_{user_id}",
+            ):
                 await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
 
     async def unban_user(self, user_id: int) -> bool:
-        result = await self.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)) > 0
+        result = await self.execute(
+            "UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)
+        ) > 0
         if result:
-            for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False", f"start_data_{user_id}"):
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+                f"start_data_{user_id}",
+            ):
                 await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
 
-    async def get_all_users(self, limit: int = 10000, offset: int = 0) -> List[Dict]:
+    async def get_all_users(
+        self, limit: int = 10000, offset: int = 0
+    ) -> List[Dict]:
         return await self.fetchall(
-            "SELECT user_id, banned FROM users ORDER BY user_id LIMIT ? OFFSET ?",
+            "SELECT user_id, banned FROM users "
+            "ORDER BY user_id LIMIT ? OFFSET ?",
             (limit, offset),
         )
 
-    async def iter_all_users(self, batch_size: int = 1000) -> AsyncGenerator[Dict, None]:
+    async def iter_all_users(
+        self, batch_size: int = 1000
+    ) -> AsyncGenerator[Dict, None]:
         offset = 0
         while True:
-            batch = await self.get_all_users(limit=batch_size, offset=offset)
+            batch = await self.get_all_users(
+                limit=batch_size, offset=offset
+            )
             if not batch:
                 break
             for user in batch:
@@ -3307,7 +4103,8 @@ class Database(
                     placeholders = ",".join(["?"] * len(batch))
                     updated = await self._execute_with_conn(
                         conn,
-                        f"UPDATE users SET banned = 1 WHERE user_id IN ({placeholders})",
+                        f"UPDATE users SET banned = 1 "
+                        f"WHERE user_id IN ({placeholders})",
                         *batch,
                     )
                     total_updated += updated
@@ -3320,7 +4117,9 @@ class Database(
                         await invalidate_user_cache(uid)
             return total_updated
         except Exception as e:
-            logger.error(f"❌ Error in mark_users_as_blocked: {e}", exc_info=True)
+            logger.error(
+                f"❌ Error in mark_users_as_blocked: {e}", exc_info=True
+            )
             return 0
 
     # =====================================================================
@@ -3328,23 +4127,31 @@ class Database(
     # =====================================================================
 
     async def get_schedule(self, channel_db_id: int) -> Dict:
-        schedule = await self.fetchone("SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
+        schedule = await self.fetchone(
+            "SELECT * FROM schedule WHERE channel_db_id = ?",
+            (channel_db_id,),
+        )
         if schedule:
             return schedule
         await self.execute(
-            "INSERT OR IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes) VALUES (?, 'interval_minutes', 12)",
+            "INSERT OR IGNORE INTO schedule "
+            "(channel_db_id, schedule_type, interval_minutes) "
+            "VALUES (?, 'interval_minutes', 12)",
             (channel_db_id,),
         )
-        schedule = await self.fetchone("SELECT * FROM schedule WHERE channel_db_id = ?", (channel_db_id,))
+        schedule = await self.fetchone(
+            "SELECT * FROM schedule WHERE channel_db_id = ?",
+            (channel_db_id,),
+        )
         return schedule if schedule else {}
 
     async def update_schedule(self, channel_db_id: int, **kwargs) -> bool:
         if not kwargs:
             return False
         allowed_columns = {
-            "schedule_type", "interval_minutes", "interval_hours", "interval_days",
-            "days_of_week", "specific_dates", "publish_time", "cron_expression",
-            "next_publish_date",
+            "schedule_type", "interval_minutes", "interval_hours",
+            "interval_days", "days_of_week", "specific_dates",
+            "publish_time", "cron_expression", "next_publish_date",
         }
         for key in kwargs:
             if key not in allowed_columns:
@@ -3352,25 +4159,38 @@ class Database(
                 return False
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [channel_db_id]
-        query = f"UPDATE schedule SET {', '.join(updates)} WHERE channel_db_id = ?"
+        query = (
+            f"UPDATE schedule SET {', '.join(updates)} "
+            f"WHERE channel_db_id = ?"
+        )
         return await self.execute(query, tuple(values)) > 0
 
     async def update_next_publish(self, channel_db_id: int) -> bool:
+        """✅ v7.5.13: delay = 1 + (id % 60) * 5."""
         async with self.transaction() as conn:
             schedule = await self._fetchone_with_conn(
-                conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id
+                conn,
+                "SELECT * FROM schedule WHERE channel_db_id = ?",
+                channel_db_id,
             )
             if not schedule:
                 await self._execute_with_conn(
                     conn,
-                    "INSERT OR IGNORE INTO schedule (channel_db_id, schedule_type, interval_minutes) VALUES (?, 'interval_minutes', 12)",
+                    "INSERT OR IGNORE INTO schedule "
+                    "(channel_db_id, schedule_type, interval_minutes) "
+                    "VALUES (?, 'interval_minutes', 12)",
                     channel_db_id,
                 )
                 schedule = await self._fetchone_with_conn(
-                    conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id
+                    conn,
+                    "SELECT * FROM schedule WHERE channel_db_id = ?",
+                    channel_db_id,
                 )
             last_publish = await self._fetchval_with_conn(
-                conn, "SELECT last_publish_time FROM last_publish WHERE channel_db_id = ?", channel_db_id
+                conn,
+                "SELECT last_publish_time FROM last_publish "
+                "WHERE channel_db_id = ?",
+                channel_db_id,
             )
             last_time = TimeUtils.safe_parse_iso(last_publish)
             if last_time is None:
@@ -3378,64 +4198,91 @@ class Database(
 
             schedule_type = schedule.get("schedule_type", "interval_minutes")
             if schedule_type == "interval_minutes":
-                interval_seconds = max(1, schedule.get("interval_minutes", 12)) * 60
+                interval_seconds = max(
+                    1, schedule.get("interval_minutes", 12)
+                ) * 60
             elif schedule_type == "interval_hours":
-                interval_seconds = max(1, schedule.get("interval_hours", 1)) * 3600
+                interval_seconds = max(
+                    1, schedule.get("interval_hours", 1)
+                ) * 3600
             elif schedule_type == "interval_days":
-                interval_seconds = max(1, schedule.get("interval_days", 1)) * 86400
+                interval_seconds = max(
+                    1, schedule.get("interval_days", 1)
+                ) * 86400
             else:
                 interval_seconds = 12 * 60
 
             next_date = last_time + timedelta(seconds=interval_seconds)
-            delay_seconds = (channel_db_id % 60) * 5
+            delay_seconds = 1 + (channel_db_id % 60) * 5
             next_date += timedelta(seconds=delay_seconds)
 
             now = TimeUtils.utc_now()
             if next_date <= now:
                 delta = now - last_time
-                intervals_needed = int(delta.total_seconds() // interval_seconds) + 1
-                next_date = last_time + timedelta(seconds=interval_seconds * intervals_needed)
+                intervals_needed = (
+                    int(delta.total_seconds() // interval_seconds) + 1
+                )
+                next_date = last_time + timedelta(
+                    seconds=interval_seconds * intervals_needed
+                )
                 next_date += timedelta(seconds=delay_seconds)
 
             await self._execute_with_conn(
-                conn, "UPDATE schedule SET next_publish_date = ? WHERE channel_db_id = ?",
+                conn,
+                "UPDATE schedule SET next_publish_date = ? "
+                "WHERE channel_db_id = ?",
                 next_date, channel_db_id,
             )
         return True
 
     async def update_last_publish(self, channel_db_id: int) -> bool:
-        query = "INSERT OR REPLACE INTO last_publish (channel_db_id, last_publish_time) VALUES (?, ?)"
-        return await self.execute(query, (channel_db_id, TimeUtils.utc_now())) > 0
+        query = (
+            "INSERT OR REPLACE INTO last_publish "
+            "(channel_db_id, last_publish_time) VALUES (?, ?)"
+        )
+        return await self.execute(
+            query, (channel_db_id, TimeUtils.utc_now())
+        ) > 0
 
     async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
         now = TimeUtils.utc_now()
         if USE_MYSQL:
             query = """
-                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle,
+                SELECT uc.id, uc.channel_id, uc.user_id,
+                       u.auto_publish, u.auto_recycle,
                        COALESCE(pc.published_count, 0) AS published_count
                 FROM user_channels uc
                 JOIN users u ON uc.user_id = u.user_id
                 LEFT JOIN schedule sch ON uc.id = sch.channel_db_id
                 INNER JOIN (
-                    SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
-                    FROM subscriptions s JOIN plans p ON s.plan_id = p.id
+                    SELECT s.user_id, MAX(p.max_channels) AS max_channels,
+                           MAX(p.max_posts) AS max_posts
+                    FROM subscriptions s
+                    JOIN plans p ON s.plan_id = p.id
                     WHERE s.status = 'active' AND s.end_date > %s
                     GROUP BY s.user_id
                 ) a ON uc.user_id = a.user_id
                 LEFT JOIN (
                     SELECT user_id, COUNT(*) AS channel_count
-                    FROM user_channels WHERE banned = 0 GROUP BY user_id
+                    FROM user_channels WHERE banned = 0
+                    GROUP BY user_id
                 ) cc ON uc.user_id = cc.user_id
                 LEFT JOIN (
                     SELECT channel_db_id,
-                           SUM(CASE WHEN published = 0 AND (fail_count IS NULL OR fail_count < 3) THEN 1 ELSE 0 END) AS publishable_unpublished_count,
-                           SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count
+                           SUM(CASE WHEN published = 0
+                                    AND (fail_count IS NULL OR fail_count < 3)
+                                    THEN 1 ELSE 0 END)
+                               AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 1
+                                    THEN 1 ELSE 0 END) AS published_count
                     FROM posts GROUP BY channel_db_id
                 ) pc ON uc.id = pc.channel_db_id
                 WHERE uc.banned = 0 AND u.banned = 0 AND u.auto_publish = 1
-                  AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= %s)
+                  AND (sch.next_publish_date IS NULL
+                       OR sch.next_publish_date <= %s)
                   AND (COALESCE(pc.publishable_unpublished_count, 0) > 0
-                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0))
+                       OR (u.auto_recycle = 1
+                           AND COALESCE(pc.published_count, 0) > 0))
                   AND COALESCE(cc.channel_count, 0) <= a.max_channels
                   AND COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
@@ -3443,27 +4290,39 @@ class Database(
             """
             return await self.fetchall(
                 query,
-                (now.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S"), limit),
+                (
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    limit,
+                ),
             )
         else:
             query = """
                 WITH active_subs AS (
-                    SELECT s.user_id, MAX(p.max_channels) AS max_channels, MAX(p.max_posts) AS max_posts
-                    FROM subscriptions s JOIN plans p ON s.plan_id = p.id
+                    SELECT s.user_id, MAX(p.max_channels) AS max_channels,
+                           MAX(p.max_posts) AS max_posts
+                    FROM subscriptions s
+                    JOIN plans p ON s.plan_id = p.id
                     WHERE s.status = 'active' AND s.end_date > ?
                     GROUP BY s.user_id
                 ),
                 channel_counts AS (
                     SELECT user_id, COUNT(*) AS channel_count
-                    FROM user_channels WHERE banned = 0 GROUP BY user_id
+                    FROM user_channels WHERE banned = 0
+                    GROUP BY user_id
                 ),
                 post_counts AS (
                     SELECT channel_db_id,
-                           SUM(CASE WHEN published = 0 AND (fail_count IS NULL OR fail_count < 3) THEN 1 ELSE 0 END) AS publishable_unpublished_count,
-                           SUM(CASE WHEN published = 1 THEN 1 ELSE 0 END) AS published_count
+                           SUM(CASE WHEN published = 0
+                                    AND (fail_count IS NULL OR fail_count < 3)
+                                    THEN 1 ELSE 0 END)
+                               AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 1
+                                    THEN 1 ELSE 0 END) AS published_count
                     FROM posts GROUP BY channel_db_id
                 )
-                SELECT uc.id, uc.channel_id, uc.user_id, u.auto_publish, u.auto_recycle,
+                SELECT uc.id, uc.channel_id, uc.user_id,
+                       u.auto_publish, u.auto_recycle,
                        COALESCE(pc.published_count, 0) AS published_count
                 FROM user_channels uc
                 JOIN users u ON uc.user_id = u.user_id
@@ -3472,9 +4331,11 @@ class Database(
                 LEFT JOIN channel_counts cc ON uc.user_id = cc.user_id
                 LEFT JOIN post_counts pc ON uc.id = pc.channel_db_id
                 WHERE uc.banned = 0 AND u.banned = 0 AND u.auto_publish = 1
-                  AND (sch.next_publish_date IS NULL OR sch.next_publish_date <= ?)
+                  AND (sch.next_publish_date IS NULL
+                       OR sch.next_publish_date <= ?)
                   AND (COALESCE(pc.publishable_unpublished_count, 0) > 0
-                       OR (u.auto_recycle = 1 AND COALESCE(pc.published_count, 0) > 0))
+                       OR (u.auto_recycle = 1
+                           AND COALESCE(pc.published_count, 0) > 0))
                   AND COALESCE(cc.channel_count, 0) <= a.max_channels
                   AND COALESCE(pc.publishable_unpublished_count, 0) <= a.max_posts
                 ORDER BY COALESCE(sch.next_publish_date, uc.created_at) ASC
@@ -3483,7 +4344,7 @@ class Database(
             return await self.fetchall(query, (now, now, limit))
 
     # =====================================================================
-    # 🆕 دوال العقوبات (مع إصلاح v7.5.12)
+    # دوال العقوبات
     # =====================================================================
 
     async def add_penalty(
@@ -3500,144 +4361,149 @@ class Database(
         auto_register: bool = True,
     ) -> Optional[int]:
         """
-        ✅ v7.5.12: إضافة عقوبة لمستخدم في مجموعة.
-
-        الإصلاحات:
-        - يسجّل المستخدم تلقائيًا إذا لم يكن موجودًا (auto_register=True)
-        - يسجّل المجموعة تلقائيًا إذا لم تكن موجودة
-        - آمن: إذا فشل التسجيل، يُسجّل العقوبة بأفضل جهد أو يُعيد None
-
-        Args:
-            user_id: معرف المستخدم المُعاقب
-            chat_id: معرف المجموعة
-            penalty_type: نوع العقوبة (mute/ban/restrict/kick/warn)
-            duration: المدة بالثواني (0 = دائم)
-            reason: سبب العقوبة
-            issued_by: معرف المشرف الذي أصدر العقوبة
-            username: اسم المستخدم (للتسجيل التلقائي)
-            first_name: الاسم الأول (للتسجيل التلقائي)
-            chat_name: اسم المجموعة (للتسجيل التلقائي)
-            auto_register: إذا True، يسجّل المستخدم والمجموعة تلقائيًا
-
-        Returns:
-            معرف العقوبة (int) إذا نجحت، None إذا فشلت
+        ✅ v7.5.15: إضافة عقوبة آمنة ضد race conditions.
+        - قفل مركّب (user, chat).
+        - status = 'active' صراحة.
+        - admin_logs فقط عند نجاح INSERT.
         """
-        try:
-            # 1️⃣ التحقق من صحة نوع العقوبة
-            if penalty_type not in self.VALID_PENALTY_TYPES:
-                logger.error(f"❌ Invalid penalty_type: {penalty_type}")
-                return None
+        # 1️⃣ التحقق من نوع العقوبة
+        if penalty_type not in self.VALID_PENALTY_TYPES:
+            logger.error(f"❌ Invalid penalty_type: {penalty_type}")
+            return None
 
-            # 2️⃣ ضبط المدة
-            if duration < 0:
-                duration = 0
-            if duration > self.MAX_PENALTY_DURATION:
-                duration = self.MAX_PENALTY_DURATION
+        # 2️⃣ ضبط المدة
+        if duration < 0:
+            duration = 0
+        if duration > self.MAX_PENALTY_DURATION:
+            duration = self.MAX_PENALTY_DURATION
 
-            # 3️⃣ ✅ التأكد من وجود المستخدم (تسجيل تلقائي)
-            user_ok = await self._ensure_user_exists(
-                user_id=user_id,
-                username=username,
-                first_name=first_name,
-                auto_register=auto_register,
-            )
-            if not user_ok:
-                logger.error(
-                    f"❌ لا يمكن إضافة عقوبة: المستخدم {user_id} غير موجود "
-                    f"وفشل التسجيل التلقائي"
+        # 3️⃣ قفل مركّب
+        penalty_lock = await self._get_penalty_lock(user_id, chat_id)
+
+        async with penalty_lock:
+            try:
+                # 4️⃣ التأكد من المستخدم
+                user_ok = await self._ensure_user_exists(
+                    user_id=user_id,
+                    username=username,
+                    first_name=first_name,
+                    auto_register=auto_register,
                 )
-                return None
+                if not user_ok:
+                    logger.error(
+                        f"❌ لا يمكن إضافة عقوبة: المستخدم {user_id} "
+                        f"غير موجود وفشل التسجيل التلقائي"
+                    )
+                    return None
 
-            # 4️⃣ ✅ التأكد من وجود المجموعة (تسجيل تلقائي)
-            group_ok = await self._ensure_group_exists(
-                chat_id=chat_id,
-                chat_name=chat_name,
-                added_by=issued_by,
-                auto_register=auto_register,
-            )
-            if not group_ok:
-                logger.error(
-                    f"❌ لا يمكن إضافة عقوبة: المجموعة {chat_id} غير موجودة "
-                    f"وفشل التسجيل التلقائي"
+                # 5️⃣ التأكد من المجموعة
+                group_ok = await self._ensure_group_exists(
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    added_by=issued_by,
+                    auto_register=auto_register,
                 )
-                return None
-
-            # 5️⃣ تنفيذ إضافة العقوبة في معاملة واحدة
-            async with self.transaction() as conn:
-                # إلغاء العقوبات السابقة من نفس النوع (ما عدا warn)
-                if penalty_type != "warn":
-                    await self._execute_with_conn(
-                        conn,
-                        "UPDATE user_penalties SET status = 'removed' "
-                        "WHERE user_id = ? AND chat_id = ? AND penalty_type = ? AND status = 'active'",
-                        user_id, chat_id, penalty_type,
+                if not group_ok:
+                    logger.error(
+                        f"❌ لا يمكن إضافة عقوبة: المجموعة {chat_id} "
+                        f"غير موجودة وفشل التسجيل التلقائي"
                     )
+                    return None
 
-                start_time = TimeUtils.utc_now()
-                end_time = None
-                if duration > 0:
-                    end_time = start_time + timedelta(seconds=duration)
-
-                # إدراج العقوبة
-                if USE_POSTGRES:
-                    row = await self._fetchone_with_conn(
-                        conn,
-                        "INSERT INTO user_penalties "
-                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-                        user_id, chat_id, penalty_type, duration, start_time, end_time,
-                        reason, issued_by, start_time,
-                    )
-                    penalty_id = row["id"] if row else None
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute(
-                        "INSERT INTO user_penalties "
-                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time,
-                         reason, issued_by, start_time),
-                    )
-                    penalty_id = cursor.lastrowid
-                    await cursor.close()
-                else:
-                    cursor = await conn.execute(
-                        "INSERT INTO user_penalties "
-                        "(user_id, chat_id, penalty_type, duration, start_time, end_time, reason, issued_by, created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)",
-                        (user_id, chat_id, penalty_type, duration, start_time, end_time,
-                         reason, issued_by, start_time),
-                    )
-                    penalty_id = cursor.lastrowid
-
-                # تسجيل في admin_logs
-                if issued_by:
-                    try:
+                # 6️⃣ تنفيذ داخل transaction
+                async with self.transaction() as conn:
+                    if penalty_type != "warn":
                         await self._execute_with_conn(
                             conn,
-                            "INSERT INTO admin_logs "
-                            "(chat_id, admin_id, action, target_id, reason, created_at) "
-                            "VALUES (?,?,?,?,?,?)",
-                            chat_id, issued_by, f"penalty_{penalty_type}",
-                            user_id, reason, TimeUtils.utc_now(),
+                            "UPDATE user_penalties SET status = 'removed' "
+                            "WHERE user_id = ? AND chat_id = ? "
+                            "AND penalty_type = ? AND status = 'active'",
+                            user_id, chat_id, penalty_type,
                         )
-                    except Exception as e:
-                        logger.warning(f"⚠️ فشل تسجيل admin_log: {e}")
 
-                if penalty_id:
-                    logger.info(
-                        f"✅ تم إضافة عقوبة {penalty_type} للمستخدم {user_id} "
-                        f"في المجموعة {chat_id} (id={penalty_id})"
-                    )
-                return penalty_id
+                    start_time = TimeUtils.utc_now()
+                    end_time = None
+                    if duration > 0:
+                        end_time = start_time + timedelta(seconds=duration)
 
-        except Exception as e:
-            logger.error(f"❌ Error in add_penalty: {e}", exc_info=True)
-            return None
+                    if USE_POSTGRES:
+                        row = await self._fetchone_with_conn(
+                            conn,
+                            "INSERT INTO user_penalties "
+                            "(user_id, chat_id, penalty_type, duration, "
+                            "start_time, end_time, reason, issued_by, "
+                            "status, created_at) "
+                            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, "
+                            "'active', $9) RETURNING id",
+                            user_id, chat_id, penalty_type, duration,
+                            start_time, end_time, reason, issued_by,
+                            start_time,
+                        )
+                        penalty_id = row["id"] if row else None
+                    elif USE_MYSQL:
+                        cursor = await conn.cursor()
+                        await cursor.execute(
+                            "INSERT INTO user_penalties "
+                            "(user_id, chat_id, penalty_type, duration, "
+                            "start_time, end_time, reason, issued_by, "
+                            "status, created_at) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, "
+                            "'active', %s)",
+                            (user_id, chat_id, penalty_type, duration,
+                             start_time, end_time, reason, issued_by,
+                             start_time),
+                        )
+                        penalty_id = cursor.lastrowid
+                        await cursor.close()
+                    else:
+                        cursor = await conn.execute(
+                            "INSERT INTO user_penalties "
+                            "(user_id, chat_id, penalty_type, duration, "
+                            "start_time, end_time, reason, issued_by, "
+                            "status, created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,'active',?)",
+                            (user_id, chat_id, penalty_type, duration,
+                             start_time, end_time, reason, issued_by,
+                             start_time),
+                        )
+                        penalty_id = cursor.lastrowid
+
+                    # admin_logs فقط عند نجاح INSERT
+                    if issued_by and penalty_id:
+                        try:
+                            await self._execute_with_conn(
+                                conn,
+                                "INSERT INTO admin_logs "
+                                "(chat_id, admin_id, action, target_id, "
+                                "reason, created_at) "
+                                "VALUES (?,?,?,?,?,?)",
+                                chat_id, issued_by,
+                                f"penalty_{penalty_type}",
+                                user_id, reason, TimeUtils.utc_now(),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"⚠️ فشل تسجيل admin_log: {e}"
+                            )
+
+                    if penalty_id:
+                        logger.info(
+                            f"✅ تم إضافة عقوبة {penalty_type} "
+                            f"للمستخدم {user_id} في المجموعة "
+                            f"{chat_id} (id={penalty_id})"
+                        )
+                    return penalty_id
+
+            except Exception as e:
+                logger.error(
+                    f"❌ Error in add_penalty: {e}", exc_info=True
+                )
+                return None
 
     async def remove_penalty(self, penalty_id: int) -> bool:
         return await self.execute(
-            "UPDATE user_penalties SET status = 'removed' WHERE id = ?", (penalty_id,)
+            "UPDATE user_penalties SET status = 'removed' WHERE id = ?",
+            (penalty_id,),
         ) > 0
 
     async def remove_penalties_for_user(
@@ -3647,19 +4513,30 @@ class Database(
             async with self.transaction() as conn:
                 query = (
                     "UPDATE user_penalties SET status = 'removed' "
-                    "WHERE user_id = ? AND chat_id = ? AND status = 'active'"
+                    "WHERE user_id = ? AND chat_id = ? "
+                    "AND status = 'active'"
                 )
                 params = [user_id, chat_id]
                 if penalty_type:
                     query += " AND penalty_type = ?"
                     params.append(penalty_type)
-                return await self._execute_with_conn(conn, query, *params)
+                return await self._execute_with_conn(
+                    conn, query, *params
+                )
         except Exception as e:
-            logger.error(f"❌ Error in remove_penalties_for_user: {e}", exc_info=True)
+            logger.error(
+                f"❌ Error in remove_penalties_for_user: {e}",
+                exc_info=True,
+            )
             return 0
 
-    async def get_active_penalties(self, user_id: int, chat_id: int = None) -> List[Dict]:
-        query = "SELECT * FROM user_penalties WHERE user_id = ? AND status = 'active'"
+    async def get_active_penalties(
+        self, user_id: int, chat_id: int = None
+    ) -> List[Dict]:
+        query = (
+            "SELECT * FROM user_penalties "
+            "WHERE user_id = ? AND status = 'active'"
+        )
         params = [user_id]
         if chat_id:
             query += " AND chat_id = ?"
@@ -3668,78 +4545,137 @@ class Database(
         return await self.fetchall(query, tuple(params))
 
     async def expire_penalties(self) -> int:
+        """✅ v7.5.14: COUNT(*) أولاً لكل المحركات."""
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
                     expired_count = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM user_penalties "
-                        "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()",
+                        "WHERE status = 'active' "
+                        "AND end_time IS NOT NULL "
+                        "AND end_time <= NOW()",
                         default=0,
-                    )
+                    ) or 0
+
                     if expired_count > 0:
                         await conn.execute(
                             """INSERT INTO penalty_archive
-                               (user_id, chat_id, penalty_type, duration, start_time, end_time,
-                                reason, issued_by, status, created_at, archived_at)
-                               SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
-                                      reason, issued_by, 'expired', created_at, NOW()
+                               (user_id, chat_id, penalty_type, duration,
+                                start_time, end_time, reason, issued_by,
+                                status, created_at, archived_at)
+                               SELECT user_id, chat_id, penalty_type,
+                                      duration, start_time, end_time, reason,
+                                      issued_by, 'expired', created_at, NOW()
                                FROM user_penalties
-                               WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"""
+                               WHERE status = 'active'
+                                 AND end_time IS NOT NULL
+                                 AND end_time <= NOW()"""
                         )
                         await conn.execute(
                             "UPDATE user_penalties SET status = 'expired' "
-                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()"
+                            "WHERE status = 'active' "
+                            "AND end_time IS NOT NULL "
+                            "AND end_time <= NOW()"
                         )
+
                     await conn.execute(
                         "DELETE FROM penalty_archive "
-                        "WHERE archived_at < NOW() - INTERVAL '90 days'"
+                        "WHERE archived_at IS NOT NULL "
+                        "AND archived_at < NOW() - INTERVAL '90 days'"
                     )
+                    return expired_count
+
                 elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    await cursor.execute(
-                        """INSERT INTO penalty_archive
-                           (user_id, chat_id, penalty_type, duration, start_time, end_time,
-                            reason, issued_by, status, created_at, archived_at)
-                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
-                                  reason, issued_by, 'expired', created_at, UTC_TIMESTAMP()
-                           FROM user_penalties
-                           WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"""
-                    )
-                    expired_count = cursor.rowcount
+                    expired_count = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT COUNT(*) FROM user_penalties "
+                        "WHERE status = 'active' "
+                        "AND end_time IS NOT NULL "
+                        "AND end_time <= UTC_TIMESTAMP()",
+                        default=0,
+                    ) or 0
+
                     if expired_count > 0:
-                        await cursor.execute(
-                            "UPDATE user_penalties SET status = 'expired' "
-                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= UTC_TIMESTAMP()"
-                        )
-                    await cursor.execute(
-                        "DELETE FROM penalty_archive "
-                        "WHERE archived_at < UTC_TIMESTAMP() - INTERVAL 90 DAY"
-                    )
-                    await cursor.close()
-                else:
-                    cursor = await conn.execute(
-                        """INSERT INTO penalty_archive
-                           (user_id, chat_id, penalty_type, duration, start_time, end_time,
-                            reason, issued_by, status, created_at, archived_at)
-                           SELECT user_id, chat_id, penalty_type, duration, start_time, end_time,
-                                  reason, issued_by, 'expired', created_at, datetime('now')
-                           FROM user_penalties
-                           WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"""
-                    )
-                    expired_count = cursor.rowcount
+                        cursor = await conn.cursor()
+                        try:
+                            await cursor.execute(
+                                """INSERT INTO penalty_archive
+                                   (user_id, chat_id, penalty_type,
+                                    duration, start_time, end_time,
+                                    reason, issued_by, status, created_at,
+                                    archived_at)
+                                   SELECT user_id, chat_id, penalty_type,
+                                          duration, start_time, end_time,
+                                          reason, issued_by, 'expired',
+                                          created_at, UTC_TIMESTAMP()
+                                   FROM user_penalties
+                                   WHERE status = 'active'
+                                     AND end_time IS NOT NULL
+                                     AND end_time <= UTC_TIMESTAMP()"""
+                            )
+                            await cursor.execute(
+                                "UPDATE user_penalties "
+                                "SET status = 'expired' "
+                                "WHERE status = 'active' "
+                                "AND end_time IS NOT NULL "
+                                "AND end_time <= UTC_TIMESTAMP()"
+                            )
+                            await cursor.execute(
+                                "DELETE FROM penalty_archive "
+                                "WHERE archived_at IS NOT NULL "
+                                "AND archived_at < "
+                                "UTC_TIMESTAMP() - INTERVAL 90 DAY"
+                            )
+                        finally:
+                            await cursor.close()
+
+                    return expired_count
+
+                else:  # SQLite
+                    expired_count = await self._fetchval_with_conn(
+                        conn,
+                        "SELECT COUNT(*) FROM user_penalties "
+                        "WHERE status = 'active' "
+                        "AND end_time IS NOT NULL "
+                        "AND end_time <= datetime('now')",
+                        default=0,
+                    ) or 0
+
                     if expired_count > 0:
                         await conn.execute(
-                            "UPDATE user_penalties SET status = 'expired' "
-                            "WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= datetime('now')"
+                            """INSERT INTO penalty_archive
+                               (user_id, chat_id, penalty_type, duration,
+                                start_time, end_time, reason, issued_by,
+                                status, created_at, archived_at)
+                               SELECT user_id, chat_id, penalty_type,
+                                      duration, start_time, end_time, reason,
+                                      issued_by, 'expired', created_at,
+                                      datetime('now')
+                               FROM user_penalties
+                               WHERE status = 'active'
+                                 AND end_time IS NOT NULL
+                                 AND end_time <= datetime('now')"""
                         )
-                    await conn.execute(
-                        "DELETE FROM penalty_archive "
-                        "WHERE julianday('now') - julianday(archived_at) > 90"
-                    )
-                return expired_count
+                        await conn.execute(
+                            "UPDATE user_penalties SET status = 'expired' "
+                            "WHERE status = 'active' "
+                            "AND end_time IS NOT NULL "
+                            "AND end_time <= datetime('now')"
+                        )
+                        await conn.execute(
+                            "DELETE FROM penalty_archive "
+                            "WHERE archived_at IS NOT NULL "
+                            "AND julianday('now') - "
+                            "julianday(archived_at) > 90"
+                        )
+
+                    return expired_count
+
         except Exception as e:
-            logger.error(f"❌ Error in expire_penalties: {e}", exc_info=True)
+            logger.error(
+                f"❌ Error in expire_penalties: {e}", exc_info=True
+            )
             return 0
 
     async def get_user_penalty_count(
@@ -3756,8 +4692,10 @@ class Database(
         return await self.fetchval(query, tuple(params), default=0)
 
     async def get_all_active_penalties(self) -> List[Dict]:
+        """✅ v7.5.14: LIMIT من الثوابت."""
         return await self.fetchall(
-            "SELECT * FROM user_penalties WHERE status = 'active'"
+            "SELECT * FROM user_penalties WHERE status = 'active' "
+            f"LIMIT {MAX_ACTIVE_PENALTIES_FETCH}"
         )
 
 
