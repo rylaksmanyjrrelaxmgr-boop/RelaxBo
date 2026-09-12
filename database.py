@@ -5,8 +5,10 @@
 database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.11)
 ================================================================================
 🆕 v7.5.11:
-    ✅ settings_cache TTL: 120 → 600 (تقليل استعلامات settings بنسبة 80%)
-    ✅ get_start_data() — استعلام واحد مكثف لـ /start (5 استعلامات → 1)
+    ✅ settings_cache TTL: 120 → 600
+    ✅ get_start_data() — استعلام واحد مكثف لـ /start
+    ✅ PostgreSQL Pool: min_size=2, statement_cache_size=500
+    ✅ إزالة idx_settings_key (فهرس مكرر)
 ================================================================================
 """
 
@@ -442,7 +444,6 @@ try:
 except ImportError:
     user_cache = SimpleCache(default_ttl=60)
     banned_words_cache = SimpleCache(default_ttl=300)
-    # ✅ v7.5.11: TTL من 120 → 600 ثانية (10 دقائق)
     settings_cache = SettingsCache(default_ttl=600)
     channels_cache = SimpleCache(default_ttl=60)
     groups_cache = SimpleCache(default_ttl=60)
@@ -1384,17 +1385,18 @@ class Database(
             if USE_POSTGRES:
                 self._pool = await asyncpg.create_pool(
                     dsn=DATABASE_URL,
-                    min_size=1,
+                    min_size=2,
                     max_size=self._max_connections,
                     timeout=self._connection_timeout,
                     command_timeout=self._connection_timeout,
+                    statement_cache_size=500,
                     server_settings={
                         "application_name": "RelaxManager",
                         "statement_timeout": "30s",
                         "timezone": "UTC",
                     },
                 )
-                logger.info(f"✅ Pool PostgreSQL جاهز (max={self._max_connections})")
+                logger.info(f"✅ Pool PostgreSQL جاهز (min=2, max={self._max_connections}, cache=500)")
             elif USE_MYSQL:
                 pattern = r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)"
                 match = re.match(pattern, DATABASE_URL)
@@ -2568,9 +2570,6 @@ class Database(
                  "ON user_reminder_settings(subscription_reminder, last_reminder_sent)"),
                 ("user_violations", "idx_violations_user_chat",
                  "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
-                # ✅ v7.5.11: فهارس إضافية لتحسين الاستعلامات البطيئة
-                ("settings", "idx_settings_key",
-                 "CREATE INDEX idx_settings_key ON settings(`key`)"),
             ]
         else:
             return [
@@ -2608,9 +2607,6 @@ class Database(
                 ("user_violations", "idx_violations_user_chat",
                  "CREATE INDEX IF NOT EXISTS idx_violations_user_chat "
                  "ON user_violations(user_id, chat_id)"),
-                # ✅ v7.5.11: فهرس settings.key (حرج لتسريع /start)
-                ("settings", "idx_settings_key",
-                 "CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(key)"),
             ]
 
     # =====================================================================
@@ -2726,7 +2722,6 @@ class Database(
     # دوال المستخدمين
     # =====================================================================
 
-    # ✅ v7.5.11: دالة جديدة مُحسّنة لـ /start (استعلام واحد بدل 5)
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         """
         ✅ v7.5.11: استعلام واحد مكثف لـ /start.
