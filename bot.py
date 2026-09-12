@@ -20,6 +20,13 @@
 🆕 v3:
 - ✅ keep_alive() لمنع cold start على Render Free tier
 - ✅ تحسين استقرار البوت على Render
+
+🆕 v4 (الجديد):
+- ✅ قائمة القنوات مع حالتها (handlers_channels_list)
+- ✅ تعيين القناة النشطة من الواجهة
+- ✅ حذف قناة مع تأكيد
+- ✅ تعديل الجدولة لكل قناة
+- ✅ إعادة تدوير المنشورات
 """
 
 import asyncio
@@ -45,6 +52,9 @@ from handlers import (
     MessageHandlers,
     chat_member,  # ✅ معالج تحديثات المشرفين
 )
+# ✅ v4: استيراد handlers قائمة القنوات
+from handlers.handlers_channels_list import register_channels_list_handlers
+
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send
@@ -209,10 +219,6 @@ async def health_check(request):
 async def keep_alive():
     """
     يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة.
-
-    - Render Free tier يوقف الخدمة بعد 15 دقيقة خمول
-    - هذا الـ ping يمنع الإيقاف
-    - يستخدم /health endpoint
     """
     await asyncio.sleep(60)  # انتظار أولي 60 ثانية بعد الإقلاع
 
@@ -222,7 +228,6 @@ async def keep_alive():
         logger.info("ℹ️ keep_alive: RENDER_EXTERNAL_URL غير موجود، سيتم تعطيله")
         return
 
-    # إزالة / في النهاية إن وجدت
     url = url.rstrip('/')
     health_url = f"{url}/health"
 
@@ -421,7 +426,17 @@ async def main():
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-    # معالج الأزرار
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v4: قائمة القنوات — يجب أن يكون قبل CallbackHandlers.handle
+    #    حتى تستقبل الـ callbacks الخاصة بـ ch_* أولاً
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        register_channels_list_handlers(app)
+        logger.info("✅ handlers قائمة القنوات مُسجَّل")
+    except Exception as e:
+        logger.error(f"❌ فشل تسجيل handlers القنوات: {e}", exc_info=True)
+
+    # معالج الأزرار العام (يأتي بعد handlers القنوات)
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
 
     # معالجات الرسائل
@@ -451,11 +466,6 @@ async def main():
 
     # ═══════════════════════════════════════════════════════════════════
     # ✅ v2: تسجيل معالج تحديثات المشرفين (ChatMemberHandler)
-    #    يستقبل إشعارات Telegram عند:
-    #    - تعيين/إزالة مشرف
-    #    - تغيير صلاحيات مشرف
-    #    - كتم/حظر/إلغاء
-    #    - إضافة/إزالة البوت من مجموعة
     # ═══════════════════════════════════════════════════════════════════
     chat_member.register(app)
     logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
@@ -495,8 +505,6 @@ async def main():
         asyncio.create_task(run_task_with_retry(BackgroundTasks.flush_usage_periodically, task_name="flush_usage")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_subscriptions, task_name="expire_subscriptions")),
 
-        # ⚠️ sync_admins_periodically أصبحت طبقة احتياطية فقط (بعد ChatMemberHandler)
-        #    تعمل كل ساعتين بدل ساعة (تم تعديل المدة في utils.py)
         asyncio.create_task(run_task_with_retry(BackgroundTasks.sync_admins_periodically, app.bot, task_name="sync_admins")),
 
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_penalties_periodically, task_name="expire_penalties")),
