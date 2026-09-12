@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.5.2 — مُصلَّح ومحسّن)
+utils.py - الأدوات المساعدة للبوت (v7.5.3 — مُصلَّح ومحسّن نهائياً)
 =================================================================================
+🆕 v7.5.3 (إصلاح بطء الأزرار أثناء النشر):
+    ✅ PUBLISH_RATE_LIMITER: RateLimiter منفصل للنشر (يمنع التأثير على الأزرار)
+    ✅ safe_send: timeout قصير (2s) لتفادي البطء عند ازدحام rate limiter
+    ✅ _do_backup: معالجة آمنة لـ set_setting
+
 🆕 v7.5.2 (إصلاحات أداء + خطأ asyncpg):
     ✅ is_authorized_in_group: كاش أطول (600s) + فحص DB أولاً
     ✅ _do_backup: لا يستخدم SQLite fallback عند PostgreSQL
-    ✅ _do_backup: معالجة آمنة لـ DB.set_setting
     ✅ RateLimiter: لا حجب متسلسل
     ✅ دعم كامل لـ ChatPermissions الجديدة (PTB v22)
     ✅ تنظيف الاستيرادات غير المستخدمة
@@ -78,6 +82,9 @@ class TimeUtils:
     أدوات الوقت والتاريخ.
 
     ✅ v7.5.2: `sql_iso()` متوافقة مع PostgreSQL/MySQL/SQLite (بدون +00:00).
+
+    ⚠️ v7.5.21: لا تستخدم `sql_iso()` لعمود TIMESTAMP في PostgreSQL!
+    استخدم `utc_now()` بدلاً منه.
     """
     @staticmethod
     def utc_now() -> datetime:
@@ -98,7 +105,12 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        """✅ v7.5.2: صيغة SQL بدون +00:00 (متوافقة مع كل المحركات)."""
+        """
+        ✅ v7.5.2: صيغة SQL بدون +00:00 (متوافقة مع كل المحركات).
+
+        ⚠️ v7.5.21: للأعمدة TEXT/VARCHAR فقط.
+        للأعمدة TIMESTAMP استخدم utc_now().
+        """
         return TimeUtils.utc_now().strftime('%Y-%m-%d %H:%M:%S')
 
     @staticmethod
@@ -209,7 +221,11 @@ class RateLimiter:
                     await asyncio.sleep(0.01)
 
 
+# ✅ v7.5.3: RATE_LIMITER رئيسي (للأزرار والإشعارات العادية)
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
+
+# ✅ v7.5.3: PUBLISH_RATE_LIMITER منفصل للنشر (يمنع تأخير الأزرار)
+PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 
 
 # =====================================================================
@@ -1115,10 +1131,18 @@ async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, rep
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
+    """
+    ✅ v7.5.3: إرسال آمن مع timeout قصير لـ rate limiter.
+    """
     if not text and not any(k in kwargs for k in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']):
         return None
 
-    await RATE_LIMITER.acquire()
+    # ✅ v7.5.3: timeout قصير — يمنع البطء عند ازدحام rate limiter
+    try:
+        await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=2.0)
+    except asyncio.TimeoutError:
+        logger.debug("⚠️ RATE_LIMITER timeout — متابعة بدون انتظار")
+
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
 
     media_type = None
@@ -1798,7 +1822,7 @@ class BackgroundTasks:
     @staticmethod
     async def _do_backup() -> None:
         """
-        ✅ v7.5.2: النسخ الاحتياطي يعمل على 3 محركات.
+        ✅ v7.5.3: النسخ الاحتياطي يعمل على 3 محركات.
         - لا يستخدم SQLite fallback عند PostgreSQL/MySQL
         - معالجة آمنة لـ set_setting
         """
@@ -1813,7 +1837,6 @@ class BackgroundTasks:
 
             success = False
 
-            # ✅ استخدام DB.backup_database (يعمل على كل المحركات)
             if hasattr(DB, "backup_database"):
                 try:
                     success = await DB.backup_database(backup_file)
@@ -1821,7 +1844,6 @@ class BackgroundTasks:
                     logger.warning(f"⚠️ DB.backup_database فشل: {e}")
                     success = False
 
-            # ✅ SQLite fallback فقط عند SQLite
             if not success and getattr(DB, "DB_TYPE", "sqlite") == "sqlite":
                 try:
                     def _backup():
@@ -1839,7 +1861,6 @@ class BackgroundTasks:
                     success = False
 
             if success:
-                # ✅ معالجة آمنة لـ set_setting
                 try:
                     await DB.set_setting('last_backup', TimeUtils.sql_iso())
                 except Exception as e:
@@ -2010,7 +2031,7 @@ class BackgroundTasks:
     @staticmethod
     async def cleanup_old_data() -> None:
         """
-        ✅ v7.5.2: استخدام TimeUtils (يعمل على 3 محركات).
+        ✅ v7.5.3: استخدام TimeUtils (يعمل على 3 محركات).
         """
         while True:
             await asyncio.sleep(3600)
@@ -2116,7 +2137,6 @@ class ErrorHandler:
             else:
                 logger.error(f"❌ خطأ: {context.error}", exc_info=True)
 
-            # إرسال إشعار لقناة السجلات
             try:
                 log_channel = await DB.get_log_channel()
                 if log_channel:
@@ -2140,7 +2160,8 @@ class ErrorHandler:
 # =====================================================================
 
 __all__ = [
-    'TimeUtils', 'TextUtils', 'RateLimiter', 'RATE_LIMITER', 'METRICS',
+    'TimeUtils', 'TextUtils', 'RateLimiter', 'RATE_LIMITER',
+    'PUBLISH_RATE_LIMITER', 'METRICS',
     'AutoReplyCache', 'TranslationManager', 'get_text',
     'UserState', 'StateManager', 'CB', 'KeyboardFactory',
     'get_banned_words_cached', 'invalidate_banned_words_cache',
