@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.15)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.16)
 ================================================================================
+🆕 v7.5.16 (إصلاح خطأ asyncpg datetime):
+    ✅ _adapt_params: تحويل النصوص ISO datetime تلقائياً إلى datetime
+       عند استخدام PostgreSQL — يحل خطأ:
+       "invalid input for query argument $2: '...' (expected datetime, got 'str')"
+    ✅ يغطي كل الأماكن التي تستخدم TimeUtils.sql_iso() كمعامل استعلام
+
 🆕 v7.5.15 (إصلاحات نهائية):
     ✅ _ensure_text_hash_column: فحص الفهرس دائمًا (حتى لو العمود موجود)
     ✅ register_user: احترام force=True/False
@@ -1258,6 +1264,17 @@ def _convert_upsert(query: str) -> str:
 
 
 def _adapt_params(params: tuple) -> tuple:
+    """
+    ✅ v7.5.16: تحويل النصوص ISO datetime إلى كائنات datetime
+    عند استخدام PostgreSQL.
+
+    هذا يحل خطأ asyncpg:
+      "invalid input for query argument $2: '2026-09-12 15:38:40'
+       (expected a datetime.date or datetime.datetime instance, got 'str')"
+
+    السبب: بعض الدوال (مثل TimeUtils.sql_iso()) تُعيد str، وبعض
+    الـ Mixins تمررها مباشرة إلى asyncpg دون تحويل.
+    """
     if params is None:
         return ()
     new_params = []
@@ -1275,6 +1292,31 @@ def _adapt_params(params: tuple) -> tuple:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
             else:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
+
+        # ✅ v7.5.16: تحويل النصوص ISO datetime إلى datetime لـ PostgreSQL
+        elif isinstance(p, str) and USE_POSTGRES:
+            # نمط "YYYY-MM-DD HH:MM:SS" أو "YYYY-MM-DDTHH:MM:SS"
+            if re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", p):
+                try:
+                    parsed = datetime.fromisoformat(
+                        p.replace(" ", "T").replace("Z", "+00:00")
+                    )
+                    if parsed.tzinfo is not None:
+                        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+                    new_params.append(parsed)
+                    continue
+                except (ValueError, TypeError):
+                    pass
+            # نمط "YYYY-MM-DD" (تاريخ فقط)
+            elif re.match(r"^\d{4}-\d{2}-\d{2}$", p):
+                try:
+                    parsed = datetime.strptime(p, "%Y-%m-%d")
+                    new_params.append(parsed)
+                    continue
+                except (ValueError, TypeError):
+                    pass
+            new_params.append(p)
+
         elif isinstance(p, bool):
             if USE_POSTGRES:
                 new_params.append(p)
