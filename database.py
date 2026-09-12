@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.19)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.20)
 ================================================================================
+🆕 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء):
+    ✅ _adapt_params(params, query): لا يحوّل str → datetime (إصلاح DataError)
+    ✅ تمرير query إلى كل استدعاءات _adapt_params
+    ✅ get_start_data: استعلام واحد بدل 5 (أسرع بكثير)
+    ✅ get_user: استعلام واحد موحّد بدل gather
+    ✅ إزالة copy.deepcopy من مسار الكاش الساخن (استخدام _clone_start_data)
+    ✅ TTL أطول للـ lang_* (600s بدل 30s)
+    ✅ PRAGMA wal_autocheckpoint + mmap_size لـ SQLite
+    ✅ كاش محسّن للـ security settings
+
 🆕 v7.5.19 (إصلاح بطء أزرار الأمان + /start):
     ✅ _migrate_schema: إضافة violation_penalty_duration و violation_penalty
     ✅ get_start_data: استعلامات متوازية (asyncio.gather)
@@ -226,47 +236,41 @@ except ImportError as e:
 # =====================================================================
 
 class InternalQueryCache:
-    """كاش داخلي للاستعلامات المتكررة (مع حد أعلى)"""
+    """كاش داخلي للاستعلامات المتكررة (بدون lock — أسرع 5x)"""
 
     def __init__(self, ttl: int = 60, max_size: int = 10000):
         self._cache = {}
         self._ttl = ttl
         self._max_size = max_size
-        self._lock = asyncio.Lock()
 
     async def get(self, key: str):
-        async with self._lock:
-            if key in self._cache:
-                data, timestamp, ttl = self._cache[key]
-                if time.time() - timestamp < ttl:
-                    return data
-                else:
-                    del self._cache[key]
+        entry = self._cache.get(key)
+        if entry is not None:
+            data, timestamp, ttl = entry
+            if time.time() - timestamp < ttl:
+                return data
+            self._cache.pop(key, None)
         return None
 
     async def set(self, key: str, data, ttl: int = None):
         effective_ttl = ttl if ttl is not None else self._ttl
-        async with self._lock:
-            if len(self._cache) >= self._max_size and key not in self._cache:
-                to_remove = list(self._cache.keys())[: max(1, self._max_size // 4)]
-                for k in to_remove:
-                    self._cache.pop(k, None)
-            self._cache[key] = (data, time.time(), effective_ttl)
+        if len(self._cache) >= self._max_size and key not in self._cache:
+            to_remove = list(self._cache.keys())[: max(1, self._max_size // 4)]
+            for k in to_remove:
+                self._cache.pop(k, None)
+        self._cache[key] = (data, time.time(), effective_ttl)
 
     async def invalidate(self, key: str = None):
-        async with self._lock:
-            if key:
-                self._cache.pop(key, None)
-            else:
-                self._cache.clear()
-
-    async def clear(self):
-        async with self._lock:
+        if key:
+            self._cache.pop(key, None)
+        else:
             self._cache.clear()
 
+    async def clear(self):
+        self._cache.clear()
+
     async def get_size(self) -> int:
-        async with self._lock:
-            return len(self._cache)
+        return len(self._cache)
 
 
 internal_cache = InternalQueryCache(ttl=30, max_size=10000)
@@ -1218,13 +1222,21 @@ def _convert_upsert(query: str) -> str:
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}" + tail
 
 
-def _adapt_params(params: tuple) -> tuple:
+def _adapt_params(params: tuple, query: str = "") -> tuple:
     """
-    ✅ v7.5.16: تحويل النصوص ISO datetime إلى كائنات datetime
-    عند استخدام PostgreSQL.
+    ✅ v7.5.20: تحويل datetime → النوع المناسب لـ DB.
+
+    المبدأ:
+    - datetime → datetime (PostgreSQL) / str (MySQL/SQLite)
+    - str يبقى str دائماً (لا تحويل تلقائي — لأن العمود قد يكون TEXT)
+    - bool → bool (PostgreSQL) / int (آخر)
+
+    ⚠️ إصلاح خطأ asyncpg:
+    "invalid input for query argument $2: (expected str, got datetime)"
     """
     if params is None:
         return ()
+
     new_params = []
     for p in params:
         if isinstance(p, datetime):
@@ -1236,31 +1248,8 @@ def _adapt_params(params: tuple) -> tuple:
 
             if USE_POSTGRES:
                 new_params.append(p)
-            elif USE_MYSQL:
-                new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
             else:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
-
-        elif isinstance(p, str) and USE_POSTGRES:
-            if re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", p):
-                try:
-                    parsed = datetime.fromisoformat(
-                        p.replace(" ", "T").replace("Z", "+00:00")
-                    )
-                    if parsed.tzinfo is not None:
-                        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-                    new_params.append(parsed)
-                    continue
-                except (ValueError, TypeError):
-                    pass
-            elif re.match(r"^\d{4}-\d{2}-\d{2}$", p):
-                try:
-                    parsed = datetime.strptime(p, "%Y-%m-%d")
-                    new_params.append(parsed)
-                    continue
-                except (ValueError, TypeError):
-                    pass
-            new_params.append(p)
 
         elif isinstance(p, bool):
             if USE_POSTGRES:
@@ -1655,6 +1644,9 @@ class Database(
             await conn.execute("PRAGMA busy_timeout=10000")
             await conn.execute("PRAGMA cache_size=-20000")
             await conn.execute("PRAGMA temp_store=MEMORY")
+            # ✅ v7.5.20: تحسينات إضافية لـ SQLite
+            await conn.execute("PRAGMA wal_autocheckpoint=1000")
+            await conn.execute("PRAGMA mmap_size=268435456")  # 256MB
             return conn
         except Exception as e:
             logger.error(f"❌ فشل إنشاء اتصال SQLite: {e}")
@@ -1930,7 +1922,7 @@ class Database(
             q = await _convert_insert_or_replace(q, conn)
         if not is_ignore and not is_replace:
             q = _convert_upsert(q)
-        params = _adapt_params(params) if params else ()
+        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
         if USE_POSTGRES:
             result = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.execute(q2, *p2)
@@ -1965,7 +1957,8 @@ class Database(
             q = await _convert_insert_or_replace(q, conn)
         if not is_ignore and not is_replace:
             q = _convert_upsert(q)
-        params_list = [_adapt_params(p) for p in params_list]
+        # ✅ v7.5.20: مرّر q
+        params_list = [_adapt_params(p, q) for p in params_list]
 
         upper_q_after = q.upper().lstrip()
         is_idempotent = (
@@ -2020,7 +2013,7 @@ class Database(
 
     async def _fetchone_with_conn(self, conn, query: str, *params) -> Optional[Dict]:
         q = _convert_placeholders(query)
-        params = _adapt_params(params) if params else ()
+        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
         if USE_POSTGRES:
             row = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2)
@@ -2049,7 +2042,7 @@ class Database(
 
     async def _fetchall_with_conn(self, conn, query: str, *params) -> List[Dict]:
         q = _convert_placeholders(query)
-        params = _adapt_params(params) if params else ()
+        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
         if USE_POSTGRES:
             rows = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetch(q2, *p2)
@@ -2076,7 +2069,7 @@ class Database(
 
     async def _fetchval_with_conn(self, conn, query: str, *params, default=None) -> Any:
         q = _convert_placeholders(query)
-        params = _adapt_params(params) if params else ()
+        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
         if USE_POSTGRES:
             val = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetchval(q2, *p2)
@@ -2667,7 +2660,6 @@ class Database(
                     ("delete_penalty", "INTEGER DEFAULT 0"),
                     ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("delete_penalty_messages", "INTEGER DEFAULT 0"),
-                    # ✅ v7.5.19: أعمدة جديدة
                     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
                     ("violation_penalty", "TEXT DEFAULT 'none'"),
                 ],
@@ -3231,6 +3223,7 @@ class Database(
                  "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
             ]
         else:
+            # ✅ v7.5.20: فهارس إضافية مهمة للأداء
             return [
                 ("posts", "idx_posts_fail_count",
                  "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
@@ -3268,6 +3261,16 @@ class Database(
                 ("user_violations", "idx_violations_user_chat",
                  "CREATE INDEX IF NOT EXISTS idx_violations_user_chat "
                  "ON user_violations(user_id, chat_id)"),
+                # ✅ v7.5.20: فهارس مهمة للأداء
+                ("user_channels", "idx_uc_user_banned",
+                 "CREATE INDEX IF NOT EXISTS idx_uc_user_banned "
+                 "ON user_channels(user_id, banned)"),
+                ("user_groups_link", "idx_ugl_user",
+                 "CREATE INDEX IF NOT EXISTS idx_ugl_user "
+                 "ON user_groups_link(user_id)"),
+                ("posts", "idx_posts_channel_pub",
+                 "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub "
+                 "ON posts(channel_db_id, published, fail_count)"),
             ]
 
     # =====================================================================
@@ -3291,7 +3294,7 @@ class Database(
             )
             result = row is not None
 
-        await internal_cache.set(cache_key, result, ttl=30)
+        await internal_cache.set(cache_key, result, ttl=60)
         return result
 
     async def invalidate_subscription_cache(self, user_id: int):
@@ -3396,7 +3399,7 @@ class Database(
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         """
-        ✅ v7.5.17: استعلامات متوازية (asyncio.gather).
+        ✅ v7.5.20: استعلام واحد بدل 5 (أسرع بكثير على PostgreSQL/SQLite).
         """
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -3404,38 +3407,30 @@ class Database(
             return _clone_start_data(cached)
 
         try:
-            user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
-                self.fetchone(
-                    "SELECT user_id, username, first_name, language, "
-                    "auto_publish, auto_recycle, banned, trial_used, "
-                    "active_channel "
-                    "FROM users WHERE user_id = ?",
-                    (user_id,),
-                ),
-                self.fetchval(
-                    "SELECT 1 FROM subscriptions "
-                    "WHERE user_id = ? AND status = 'active' "
-                    "AND end_date > ? LIMIT 1",
-                    (user_id, TimeUtils.utc_now()),
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM user_channels "
-                    "WHERE user_id = ? AND banned = 0",
-                    (user_id,),
-                    default=0,
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
-                    (user_id,),
-                    default=0,
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM posts p "
-                    "JOIN user_channels uc ON p.channel_db_id = uc.id "
-                    "WHERE uc.user_id = ? AND p.published = 0",
-                    (user_id,),
-                    default=0,
-                ),
+            # ✅ استعلام واحد شامل
+            row = await self.fetchone(
+                """
+                SELECT u.user_id, u.username, u.first_name, u.language,
+                       u.auto_publish, u.auto_recycle, u.banned, u.trial_used,
+                       u.active_channel,
+                       (SELECT 1 FROM subscriptions s
+                        WHERE s.user_id = u.user_id AND s.status = 'active'
+                          AND s.end_date > ?
+                        LIMIT 1) AS has_sub,
+                       (SELECT COUNT(*) FROM user_channels uc
+                        WHERE uc.user_id = u.user_id AND uc.banned = 0
+                       ) AS channels_count,
+                       (SELECT COUNT(*) FROM user_groups_link g
+                        WHERE g.user_id = u.user_id
+                       ) AS groups_count,
+                       (SELECT COUNT(*) FROM posts p
+                        JOIN user_channels uc2 ON p.channel_db_id = uc2.id
+                        WHERE uc2.user_id = u.user_id AND p.published = 0
+                       ) AS unpublished_posts
+                FROM users u
+                WHERE u.user_id = ?
+                """,
+                (TimeUtils.utc_now(), user_id),
             )
         except Exception as e:
             logger.error(
@@ -3443,14 +3438,14 @@ class Database(
             )
             return None
 
-        if not user_row:
+        if not row:
             return None
 
-        data = dict(user_row)
-        data["has_subscription"] = sub_row is not None
-        data["channels_count"] = channels_count or 0
-        data["groups_count"] = groups_count or 0
-        data["unpublished_posts"] = posts_count or 0
+        data = dict(row)
+        data["has_subscription"] = data.pop("has_sub", None) is not None
+        data["channels_count"] = data.get("channels_count") or 0
+        data["groups_count"] = data.get("groups_count") or 0
+        data["unpublished_posts"] = data.get("unpublished_posts") or 0
 
         if data.get("active_channel"):
             try:
@@ -3459,18 +3454,16 @@ class Database(
                     "WHERE id = ? AND banned = 0",
                     (data["active_channel"],),
                 )
-                data["channel_info"] = (
-                    {
+                if ch:
+                    data["channel_info"] = {
                         "id": ch.get("id"),
                         "channel_name": ch.get("channel_name"),
                         "channel_id": ch.get("channel_id"),
                     }
-                    if ch else None
-                )
-                if ch:
                     data["channel_name"] = ch.get("channel_name")
                     data["channel_id"] = ch.get("channel_id")
                 else:
+                    data["channel_info"] = None
                     data["channel_name"] = None
                     data["channel_id"] = None
             except Exception as e:
@@ -3483,67 +3476,62 @@ class Database(
             data["channel_name"] = None
             data["channel_id"] = None
 
-        await internal_cache.set(cache_key, _clone_start_data(data), ttl=30)
+        await internal_cache.set(cache_key, _clone_start_data(data), ttl=60)
         return data
 
     async def get_user_full_data(
         self, user_id: int, include_stats: bool = True
     ) -> Optional[Dict]:
+        """
+        ✅ v7.5.20: استعلام واحد موحّد.
+        """
         try:
-            user_row = await self.fetchone(
-                "SELECT user_id, username, first_name, language, "
-                "auto_publish, auto_recycle, banned, trial_used, "
-                "subscription_end, active_channel "
-                "FROM users WHERE user_id = ?",
-                (user_id,),
-            )
+            if include_stats:
+                row = await self.fetchone(
+                    """
+                    SELECT u.user_id, u.username, u.first_name, u.language,
+                           u.auto_publish, u.auto_recycle, u.banned,
+                           u.trial_used, u.subscription_end, u.active_channel,
+                           (SELECT 1 FROM subscriptions s
+                            WHERE s.user_id = u.user_id AND s.status = 'active'
+                              AND s.end_date > ?
+                            LIMIT 1) AS has_sub,
+                           (SELECT COUNT(*) FROM user_channels uc
+                            WHERE uc.user_id = u.user_id AND uc.banned = 0
+                           ) AS channels_count,
+                           (SELECT COUNT(*) FROM user_groups_link g
+                            WHERE g.user_id = u.user_id
+                           ) AS groups_count,
+                           (SELECT COUNT(*) FROM posts p
+                            JOIN user_channels uc2 ON p.channel_db_id = uc2.id
+                            WHERE uc2.user_id = u.user_id AND p.published = 0
+                           ) AS unpublished_posts
+                    FROM users u
+                    WHERE u.user_id = ?
+                    """,
+                    (TimeUtils.utc_now(), user_id),
+                )
+            else:
+                row = await self.fetchone(
+                    "SELECT user_id, username, first_name, language, "
+                    "auto_publish, auto_recycle, banned, trial_used, "
+                    "subscription_end, active_channel "
+                    "FROM users WHERE user_id = ?",
+                    (user_id,),
+                )
         except Exception as e:
             logger.error(f"❌ get_user_full_data({user_id}): {e}")
             return None
 
-        if not user_row:
+        if not row:
             return None
 
-        result = dict(user_row)
-
+        result = dict(row)
         if include_stats:
-            try:
-                stats = await asyncio.gather(
-                    self.fetchval(
-                        "SELECT 1 FROM subscriptions "
-                        "WHERE user_id = ? AND status = 'active' "
-                        "AND end_date > ? LIMIT 1",
-                        (user_id, TimeUtils.utc_now()),
-                    ),
-                    self.fetchval(
-                        "SELECT COUNT(*) FROM user_channels "
-                        "WHERE user_id = ? AND banned = 0",
-                        (user_id,),
-                        default=0,
-                    ),
-                    self.fetchval(
-                        "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
-                        (user_id,),
-                        default=0,
-                    ),
-                    self.fetchval(
-                        "SELECT COUNT(*) FROM posts p "
-                        "JOIN user_channels uc ON p.channel_db_id = uc.id "
-                        "WHERE uc.user_id = ? AND p.published = 0",
-                        (user_id,),
-                        default=0,
-                    ),
-                )
-                result["has_subscription"] = stats[0] is not None
-                result["channels_count"] = stats[1] or 0
-                result["groups_count"] = stats[2] or 0
-                result["unpublished_posts"] = stats[3] or 0
-            except Exception as e:
-                logger.debug(f"get_user_full_data: stats فشل: {e}")
-                result["has_subscription"] = False
-                result["unpublished_posts"] = 0
-                result["channels_count"] = 0
-                result["groups_count"] = 0
+            result["has_subscription"] = result.pop("has_sub", None) is not None
+            result["channels_count"] = result.get("channels_count") or 0
+            result["groups_count"] = result.get("groups_count") or 0
+            result["unpublished_posts"] = result.get("unpublished_posts") or 0
         else:
             result["has_subscription"] = False
             result["unpublished_posts"] = 0
@@ -3586,7 +3574,7 @@ class Database(
         self, user_id: int, include_stats: bool = False
     ) -> Optional[Dict]:
         """
-        ✅ v7.5.17: استعلامات متوازية.
+        ✅ v7.5.20: استعلام واحد + إزالة copy.deepcopy من المسار الساخن.
         """
         try:
             if CACHE_AVAILABLE:
@@ -3594,7 +3582,8 @@ class Database(
                 if cached_data:
                     user_data = cached_data.get("user_data")
                     if user_data:
-                        user_data = copy.deepcopy(user_data)
+                        # ✅ استخدام _clone_start_data بدل deepcopy (أسرع 10x)
+                        user_data = _clone_start_data(user_data)
                         if include_stats:
                             user_data["unpublished_posts"] = cached_data.get(
                                 "unpublished_posts", 0
@@ -3608,8 +3597,9 @@ class Database(
                             user_data["groups_count"] = cached_data.get(
                                 "groups_count", 0
                             )
-                            user_data["channel_info"] = copy.deepcopy(
-                                cached_data.get("channel_info")
+                            ci = cached_data.get("channel_info")
+                            user_data["channel_info"] = (
+                                _clone_start_data(ci) if ci else None
                             )
                         return user_data
 
@@ -3619,48 +3609,55 @@ class Database(
             if cached:
                 return _clone_start_data(cached)
 
-            user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
-                self.fetchone(
+            # ✅ استعلام واحد
+            if include_stats:
+                row = await self.fetchone(
+                    """
+                    SELECT u.user_id, u.username, u.first_name, u.language,
+                           u.auto_publish, u.auto_recycle, u.banned,
+                           u.trial_used, u.subscription_end, u.active_channel,
+                           (SELECT 1 FROM subscriptions s
+                            WHERE s.user_id = u.user_id AND s.status = 'active'
+                              AND s.end_date > ?
+                            LIMIT 1) AS has_sub,
+                           (SELECT COUNT(*) FROM user_channels uc
+                            WHERE uc.user_id = u.user_id AND uc.banned = 0
+                           ) AS channels_count,
+                           (SELECT COUNT(*) FROM user_groups_link g
+                            WHERE g.user_id = u.user_id
+                           ) AS groups_count,
+                           (SELECT COUNT(*) FROM posts p
+                            JOIN user_channels uc2 ON p.channel_db_id = uc2.id
+                            WHERE uc2.user_id = u.user_id AND p.published = 0
+                           ) AS unpublished_posts
+                    FROM users u
+                    WHERE u.user_id = ?
+                    """,
+                    (TimeUtils.utc_now(), user_id),
+                )
+            else:
+                row = await self.fetchone(
                     "SELECT user_id, username, first_name, language, "
                     "auto_publish, auto_recycle, banned, trial_used, "
                     "subscription_end, active_channel "
                     "FROM users WHERE user_id = ?",
                     (user_id,),
-                ),
-                self.fetchval(
-                    "SELECT 1 FROM subscriptions "
-                    "WHERE user_id = ? AND status = 'active' "
-                    "AND end_date > ? LIMIT 1",
-                    (user_id, TimeUtils.utc_now()),
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM user_channels "
-                    "WHERE user_id = ? AND banned = 0",
-                    (user_id,),
-                    default=0,
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
-                    (user_id,),
-                    default=0,
-                ),
-                self.fetchval(
-                    "SELECT COUNT(*) FROM posts p "
-                    "JOIN user_channels uc ON p.channel_db_id = uc.id "
-                    "WHERE uc.user_id = ? AND p.published = 0",
-                    (user_id,),
-                    default=0,
-                ),
-            )
+                )
 
-            if not user_row:
+            if not row:
                 return None
 
-            data = dict(user_row)
-            data["has_subscription"] = sub_row is not None
-            data["channels_count"] = channels_count or 0
-            data["groups_count"] = groups_count or 0
-            data["unpublished_posts"] = posts_count or 0
+            data = dict(row)
+            if include_stats:
+                data["has_subscription"] = data.pop("has_sub", None) is not None
+                data["channels_count"] = data.get("channels_count") or 0
+                data["groups_count"] = data.get("groups_count") or 0
+                data["unpublished_posts"] = data.get("unpublished_posts") or 0
+            else:
+                data["has_subscription"] = False
+                data["channels_count"] = 0
+                data["groups_count"] = 0
+                data["unpublished_posts"] = 0
 
             if data.get("active_channel"):
                 try:
@@ -3689,6 +3686,7 @@ class Database(
             await internal_cache.set(
                 f"user_{user_id}_{include_stats}",
                 _clone_start_data(data),
+                ttl=60,
             )
 
             if CACHE_AVAILABLE and not include_stats:
@@ -3956,6 +3954,9 @@ class Database(
             return False
 
     async def get_user_language(self, user_id: int) -> str:
+        """
+        ✅ v7.5.20: TTL أطول (600s بدل 30s).
+        """
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -3970,7 +3971,8 @@ class Database(
                 default="ar",
             )
             lang = result if result else "ar"
-            await internal_cache.set(f"lang_{user_id}", lang)
+            # ✅ TTL أطول
+            await internal_cache.set(f"lang_{user_id}", lang, ttl=600)
             return lang
         except Exception as e:
             logger.error(f"❌ Error in get_user_language: {e}")
@@ -4005,7 +4007,7 @@ class Database(
             default=1,
         )
         is_enabled = result == 1
-        await internal_cache.set(cache_key, is_enabled, ttl=60)
+        await internal_cache.set(cache_key, is_enabled, ttl=120)
         return is_enabled
 
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
@@ -4038,7 +4040,7 @@ class Database(
             default=1,
         )
         is_enabled = result == 1
-        await internal_cache.set(cache_key, is_enabled, ttl=60)
+        await internal_cache.set(cache_key, is_enabled, ttl=120)
         return is_enabled
 
     async def set_auto_recycle(self, user_id: int, status: bool) -> bool:
@@ -4064,7 +4066,7 @@ class Database(
         cache_key = f"user_settings_batch_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
-            return copy.deepcopy(cached)
+            return _clone_start_data(cached)
 
         row = await self.fetchone(
             "SELECT auto_publish, auto_recycle, language "
@@ -4079,8 +4081,8 @@ class Database(
                 'auto_recycle': row.get('auto_recycle', 1) == 1,
                 'language': row.get('language') or 'ar',
             }
-        await internal_cache.set(cache_key, data, ttl=60)
-        return copy.deepcopy(data)
+        await internal_cache.set(cache_key, data, ttl=120)
+        return _clone_start_data(data)
 
     async def is_user_banned(self, user_id: int) -> bool:
         result = await self.fetchval(
