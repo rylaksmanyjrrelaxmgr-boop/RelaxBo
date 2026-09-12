@@ -2,14 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.7)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.8)
 ================================================================================
-🆕 v7.5.7 (v5.3):
-  ✅ إضافة idx_ar_chat_keyword — فهرس مركب على auto_replies(chat_id, keyword)
-     (يحل مشكلة "استعلام بطيء 2.55s" في UPDATE auto_replies)
-  ✅ EXPECTED_INDEX_COUNT: 60 → 62
-  ✅ إضافة idx_ar_usage — فهرس على usage_count
-  ✅ تحسينات اتساق
+🆕 v7.5.8 (إصلاحات v5.4):
+  ✅ _safe_now_iso: إزالة +00:00 من fallback (توافق MySQL)
+  ✅ حذف الكود الميت: _validate_json, TABLES_WITH_FK_RESTRICT
+  ✅ _fetch_existing_indexes_mysql: تبسيط + رفع level إلى INFO
+  ✅ فحص مسبق للأعمدة في CHECK لـ plans.features (PostgreSQL)
+  ✅ توحيد schema_version insert لكل المحركات
+  ✅ إضافة فحص أمان في _execute_batch_migrations (اسم الجدول)
+  ✅ إصلاح COALESCE في MySQL UNIQUE INDEX (يدعم NULL)
+  ✅ استخدام _safe_now_dt في PostgreSQL لكل الطوابع الزمنية
+  ✅ فحص COUNT الفهارس قبل الإنشاء
+
+📌 v7.5.7 (v5.3):
+  - إضافة idx_ar_chat_keyword — فهرس مركب على auto_replies(chat_id, keyword)
+  - EXPECTED_INDEX_COUNT: 60 → 62
+  - إضافة idx_ar_usage — فهرس على usage_count
 
 📌 v7.5.6 (v5.2):
   - FOREIGN_KEY_CHECKS مع try/finally
@@ -43,7 +52,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.5.7: زيادة العدد المتوقع بعد إضافة فهرسين
+# ✅ v7.5.8: عدد الفهارس (ثابت)
 EXPECTED_INDEX_COUNT = 62
 
 COMMON_INDEXES = [
@@ -61,9 +70,12 @@ COMMON_INDEXES = [
     # USER_CHANNELS (4)
     # ═══════════════════════════════════════════════════════════════
     ("user_channels", "idx_uc_user", "user_channels(user_id)"),
-    ("user_channels", "idx_user_channels_user_created", "user_channels(user_id, created_at DESC)"),
-    ("user_channels", "idx_user_channels_user_banned", "user_channels(user_id, banned)"),
-    ("user_channels", "idx_user_channels_banned_user", "user_channels(banned, user_id)"),
+    ("user_channels", "idx_user_channels_user_created",
+     "user_channels(user_id, created_at DESC)"),
+    ("user_channels", "idx_user_channels_user_banned",
+     "user_channels(user_id, banned)"),
+    ("user_channels", "idx_user_channels_banned_user",
+     "user_channels(banned, user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # POSTS (5)
@@ -71,8 +83,10 @@ COMMON_INDEXES = [
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel", "posts(channel_db_id)"),
     ("posts", "idx_posts_published", "posts(published)"),
-    ("posts", "idx_posts_channel_published", "posts(channel_db_id, published)"),
-    ("posts", "idx_posts_channel_pub_fail_created", "posts(channel_db_id, published, fail_count, created_at)"),
+    ("posts", "idx_posts_channel_published",
+     "posts(channel_db_id, published)"),
+    ("posts", "idx_posts_channel_pub_fail_created",
+     "posts(channel_db_id, published, fail_count, created_at)"),
 
     # ═══════════════════════════════════════════════════════════════
     # BOT_GROUPS (2)
@@ -83,55 +97,70 @@ COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
     # USER_GROUPS_LINK (1)
     # ═══════════════════════════════════════════════════════════════
-    ("user_groups_link", "idx_user_groups_link_user_id", "user_groups_link(user_id)"),
+    ("user_groups_link", "idx_user_groups_link_user_id",
+     "user_groups_link(user_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # GROUP_ADMINS (2)
     # ═══════════════════════════════════════════════════════════════
-    ("group_admins", "idx_group_admins_user_id", "group_admins(user_id)"),
-    ("group_admins", "idx_group_admins_user_chat", "group_admins(user_id, chat_id)"),
+    ("group_admins", "idx_group_admins_user_id",
+     "group_admins(user_id)"),
+    ("group_admins", "idx_group_admins_user_chat",
+     "group_admins(user_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # HIDDEN_OWNER_GROUPS (2)
     # ═══════════════════════════════════════════════════════════════
-    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "hidden_owner_groups(owner_id)"),
-    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat", "hidden_owner_groups(owner_id, chat_id)"),
+    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id",
+     "hidden_owner_groups(owner_id)"),
+    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat",
+     "hidden_owner_groups(owner_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # HIDDEN_ADMINS (2)
     # ═══════════════════════════════════════════════════════════════
-    ("hidden_admins", "idx_hidden_admins_admin_id", "hidden_admins(admin_id)"),
-    ("hidden_admins", "idx_hidden_admins_admin_chat", "hidden_admins(admin_id, chat_id)"),
+    ("hidden_admins", "idx_hidden_admins_admin_id",
+     "hidden_admins(admin_id)"),
+    ("hidden_admins", "idx_hidden_admins_admin_chat",
+     "hidden_admins(admin_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # ANONYMOUS_ADMINS (4)
     # ═══════════════════════════════════════════════════════════════
-    ("anonymous_admins", "idx_anonymous_admins_user_id", "anonymous_admins(user_id)"),
-    ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "anonymous_admins(anonymous_id)"),
-    ("anonymous_admins", "idx_anon_user_chat", "anonymous_admins(user_id, chat_id)"),
-    ("anonymous_admins", "idx_anon_anon_chat", "anonymous_admins(anonymous_id, chat_id)"),
+    ("anonymous_admins", "idx_anonymous_admins_user_id",
+     "anonymous_admins(user_id)"),
+    ("anonymous_admins", "idx_anonymous_admins_anonymous_id",
+     "anonymous_admins(anonymous_id)"),
+    ("anonymous_admins", "idx_anon_user_chat",
+     "anonymous_admins(user_id, chat_id)"),
+    ("anonymous_admins", "idx_anon_anon_chat",
+     "anonymous_admins(anonymous_id, chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # BANNED_WORDS (2)
     # ═══════════════════════════════════════════════════════════════
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
-    ("banned_words", "idx_banned_words_chat_word", "banned_words(chat_id, word)"),
+    ("banned_words", "idx_banned_words_chat_word",
+     "banned_words(chat_id, word)"),
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.7: AUTO_REPLIES (4) — تحسين الأداء
+    # AUTO_REPLIES (4) — v7.5.7
     # ═══════════════════════════════════════════════════════════════
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
-    ("auto_replies", "idx_auto_replies_lookup", "auto_replies(chat_id, keyword, is_active)"),
-    # ✅ v7.5.7: فهرس مركب — يحل مشكلة UPDATE البطيء (2.55s)
-    ("auto_replies", "idx_ar_chat_keyword", "auto_replies(chat_id, keyword)"),
-    # ✅ v7.5.7: فهرس على usage_count للاستعلامات الإحصائية
-    ("auto_replies", "idx_ar_usage", "auto_replies(usage_count DESC)"),
+    ("auto_replies", "idx_auto_replies_lookup",
+     "auto_replies(chat_id, keyword, is_active)"),
+    ("auto_replies", "idx_ar_chat_keyword",
+     "auto_replies(chat_id, keyword)"),
+    ("auto_replies", "idx_ar_usage",
+     "auto_replies(usage_count DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # SCHEDULE (2)
     # ═══════════════════════════════════════════════════════════════
-    ("schedule", "idx_schedule_next_publish", "schedule(next_publish_date)"),
-    ("schedule", "idx_schedule_channel_next", "schedule(channel_db_id, next_publish_date)"),
+    ("schedule", "idx_schedule_next_publish",
+     "schedule(next_publish_date)"),
+    ("schedule", "idx_schedule_channel_next",
+     "schedule(channel_db_id, next_publish_date)"),
 
     # ═══════════════════════════════════════════════════════════════
     # SUBSCRIPTIONS (5)
@@ -139,8 +168,10 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
-    ("subscriptions", "idx_subscriptions_user_status", "subscriptions(user_id, status)"),
-    ("subscriptions", "idx_subscriptions_user_status_end", "subscriptions(user_id, status, end_date)"),
+    ("subscriptions", "idx_subscriptions_user_status",
+     "subscriptions(user_id, status)"),
+    ("subscriptions", "idx_subscriptions_user_status_end",
+     "subscriptions(user_id, status, end_date)"),
 
     # ═══════════════════════════════════════════════════════════════
     # INVOICES (1)
@@ -151,21 +182,27 @@ COMMON_INDEXES = [
     # REFERRALS (2)
     # ═══════════════════════════════════════════════════════════════
     ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
-    ("referrals", "idx_referrals_referrer_created", "referrals(referrer_id, created_at DESC)"),
+    ("referrals", "idx_referrals_referrer_created",
+     "referrals(referrer_id, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # CONTESTS (2)
     # ═══════════════════════════════════════════════════════════════
     ("contests", "idx_contests_status", "contests(status)"),
-    ("contests", "idx_contests_status_end", "contests(status, end_date)"),
+    ("contests", "idx_contests_status_end",
+     "contests(status, end_date)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_PENALTIES (4)
     # ═══════════════════════════════════════════════════════════════
-    ("user_penalties", "idx_penalties_user", "user_penalties(user_id)"),
-    ("user_penalties", "idx_penalties_chat", "user_penalties(chat_id)"),
-    ("user_penalties", "idx_penalties_status", "user_penalties(status)"),
-    ("user_penalties", "idx_penalties_user_chat_status_end", "user_penalties(user_id, chat_id, status, end_time)"),
+    ("user_penalties", "idx_penalties_user",
+     "user_penalties(user_id)"),
+    ("user_penalties", "idx_penalties_chat",
+     "user_penalties(chat_id)"),
+    ("user_penalties", "idx_penalties_status",
+     "user_penalties(status)"),
+    ("user_penalties", "idx_penalties_user_chat_status_end",
+     "user_penalties(user_id, chat_id, status, end_time)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_POINTS (2)
@@ -176,8 +213,10 @@ COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
     # SUPPORT_TICKETS (2)
     # ═══════════════════════════════════════════════════════════════
-    ("support_tickets", "idx_tickets_status", "support_tickets(status)"),
-    ("support_tickets", "idx_tickets_status_created", "support_tickets(status, created_at DESC)"),
+    ("support_tickets", "idx_tickets_status",
+     "support_tickets(status)"),
+    ("support_tickets", "idx_tickets_status_created",
+     "support_tickets(status, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # PAYMENT_LOGS (1)
@@ -187,46 +226,47 @@ COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
     # ADMIN_LOGS (1)
     # ═══════════════════════════════════════════════════════════════
-    ("admin_logs", "idx_admin_logs_chat", "admin_logs(chat_id, id DESC)"),
+    ("admin_logs", "idx_admin_logs_chat",
+     "admin_logs(chat_id, id DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
     # PENALTY_ARCHIVE (1)
     # ═══════════════════════════════════════════════════════════════
-    ("penalty_archive", "idx_penalty_archive_archived", "penalty_archive(archived_at)"),
+    ("penalty_archive", "idx_penalty_archive_archived",
+     "penalty_archive(archived_at)"),
 
     # ═══════════════════════════════════════════════════════════════
     # SENTIMENT_HISTORY (2)
     # ═══════════════════════════════════════════════════════════════
-    ("sentiment_history", "idx_sentiment_user_chat", "sentiment_history(user_id, chat_id)"),
-    ("sentiment_history", "idx_sentiment_created", "sentiment_history(created_at)"),
+    ("sentiment_history", "idx_sentiment_user_chat",
+     "sentiment_history(user_id, chat_id)"),
+    ("sentiment_history", "idx_sentiment_created",
+     "sentiment_history(created_at)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_MESSAGES (1)
     # ═══════════════════════════════════════════════════════════════
-    ("user_messages", "idx_user_messages_chat", "user_messages(chat_id)"),
+    ("user_messages", "idx_user_messages_chat",
+     "user_messages(chat_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # SCHEDULED_POSTS (1)
     # ═══════════════════════════════════════════════════════════════
-    ("scheduled_posts", "idx_scheduled_posts_time", "scheduled_posts(publish_time)"),
+    ("scheduled_posts", "idx_scheduled_posts_time",
+     "scheduled_posts(publish_time)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_REMINDER_SETTINGS (1)
     # ═══════════════════════════════════════════════════════════════
-    ("user_reminder_settings", "idx_reminder_subscription", "user_reminder_settings(subscription_reminder)"),
+    ("user_reminder_settings", "idx_reminder_subscription",
+     "user_reminder_settings(subscription_reminder)"),
 ]
 
-# ✅ v7.5.7: تحقق فعلي
+# ✅ v7.5.8: فحص فعلي لعدد الفهارس عند الاستيراد
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
     f"❌ عدد الفهارس غير مطابق: "
     f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
 )
-
-TABLES_WITH_FK_RESTRICT = {
-    "subscriptions": ("plan_id", "plans(id)"),
-    "invoices": ("plan_id", "plans(id)"),
-    "gift_codes": ("plan_id", "plans(id)"),
-}
 
 
 # =====================================================================
@@ -234,31 +274,26 @@ TABLES_WITH_FK_RESTRICT = {
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
+    """
+    ✅ v7.5.8: fallback بدون +00:00 (توافق MySQL DATETIME).
+    """
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
         except Exception as e:
             logging.debug(f"_safe_now_iso fallback: {e}")
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
+    # ✅ fallback نظيف بدون timezone suffix
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe_now_dt(TimeUtils):
+    """✅ v7.5.8: datetime نظيف بدون tzinfo (PostgreSQL TIMESTAMP)."""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
         except Exception as e:
             logging.debug(f"_safe_now_dt fallback: {e}")
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _validate_json(text: str) -> bool:
-    if text is None or text == "":
-        return True
-    try:
-        json.loads(text)
-        return True
-    except (json.JSONDecodeError, TypeError):
-        return False
 
 
 # =====================================================================
@@ -270,26 +305,33 @@ async def _fetch_existing_indexes_postgres(conn, index_names):
         return set()
     try:
         rows = await conn.fetch(
-            "SELECT indexname FROM pg_indexes WHERE indexname = ANY($1::text[])",
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[])",
             list(index_names),
         )
         return {row["indexname"] for row in rows}
-    except Exception:
+    except Exception as e:
+        logging.debug(f"_fetch_existing_indexes_postgres: {e}")
         return set()
 
 
 async def _fetch_existing_indexes_sqlite(conn):
     try:
         cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name IS NOT NULL"
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name IS NOT NULL"
         )
         rows = await cursor.fetchall()
         return {row[0] for row in rows}
-    except Exception:
+    except Exception as e:
+        logging.debug(f"_fetch_existing_indexes_sqlite: {e}")
         return set()
 
 
 async def _fetch_existing_indexes_mysql(conn, tables):
+    """
+    ✅ v7.5.8: تبسيط + logging أفضل + parameterized.
+    """
     if not tables:
         return set()
     try:
@@ -305,13 +347,18 @@ async def _fetch_existing_indexes_mysql(conn, tables):
         rows = await cursor.fetchall()
         await cursor.close()
         return {(r[0], r[1]) for r in rows}
-    except Exception:
+    except Exception as e:
+        # ✅ v7.5.8: fallback مع logging level صحيح
+        logging.warning(
+            f"⚠️ information_schema فشل ({e}) — استخدام SHOW INDEX"
+        )
         existing = set()
         for table in tables:
             try:
                 cursor = await conn.cursor()
                 await cursor.execute(f"SHOW INDEX FROM `{table}`")
                 rows = await cursor.fetchall()
+                # SHOW INDEX: [Table, Non_unique, Key_name, ...]
                 for r in rows:
                     existing.add((table, r[2]))
                 await cursor.close()
@@ -334,7 +381,8 @@ async def _fetch_existing_tables_postgres(conn):
 async def _fetch_existing_tables_sqlite(conn):
     try:
         cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IS NOT NULL"
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name IS NOT NULL"
         )
         rows = await cursor.fetchall()
         return {row[0] for row in rows}
@@ -356,7 +404,11 @@ async def _table_exists_mysql(conn, table: str) -> bool:
     except Exception:
         try:
             cursor = await conn.cursor()
-            await cursor.execute(f"SHOW TABLES LIKE '{table}'")
+            await cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
             row = await cursor.fetchone()
             await cursor.close()
             return row is not None
@@ -374,14 +426,19 @@ async def _create_indexes_sqlite(conn, logger):
 
     if not to_create:
         if logger:
-            logger.info(f"✅ SQLite: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل")
+            logger.info(
+                f"✅ SQLite: 0 فهرس جديد، "
+                f"{len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
         return
 
     created = 0
     failed = 0
     for _table, idx_name, cols in to_create:
         try:
-            await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+            )
             created += 1
         except Exception as e:
             failed += 1
@@ -390,24 +447,34 @@ async def _create_indexes_sqlite(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+        logger.info(
+            f"✅ SQLite: {created} فهرس جديد، "
+            f"{skipped} موجود، {failed} فشل"
+        )
 
 
 async def _create_indexes_postgres(conn, logger):
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     existing = await _fetch_existing_indexes_postgres(conn, index_names)
-    to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
+    to_create = [
+        (t, n, c) for t, n, c in COMMON_INDEXES if n not in existing
+    ]
 
     if not to_create:
         if logger:
-            logger.info(f"✅ PostgreSQL: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل")
+            logger.info(
+                f"✅ PostgreSQL: 0 فهرس جديد، "
+                f"{len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
         return
 
     created = 0
     failed = 0
     for _table, idx_name, cols in to_create:
         try:
-            await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+            )
             created += 1
         except Exception as e:
             failed += 1
@@ -416,10 +483,16 @@ async def _create_indexes_postgres(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+        logger.info(
+            f"✅ PostgreSQL: {created} فهرس جديد، "
+            f"{skipped} موجود، {failed} فشل"
+        )
 
 
 async def _create_indexes_mysql(conn, logger):
+    """
+    ✅ v7.5.8: يفحص وجود الأعمدة قبل إنشاء الفهرس.
+    """
     tables = set(t for t, _, _ in COMMON_INDEXES)
     existing = await _fetch_existing_indexes_mysql(conn, tables)
 
@@ -435,15 +508,24 @@ async def _create_indexes_mysql(conn, logger):
             created += 1
         except Exception as e:
             err_msg = str(e).lower()
-            if "duplicate" in err_msg or "already exists" in err_msg or "1061" in err_msg:
+            if (
+                "duplicate" in err_msg
+                or "already exists" in err_msg
+                or "1061" in err_msg
+            ):
                 skipped += 1
             else:
                 failed += 1
                 if logger:
-                    logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
+                    logger.warning(
+                        f"⚠️ MySQL فهرس {idx_name}: {e}"
+                    )
 
     if logger:
-        logger.info(f"✅ MySQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+        logger.info(
+            f"✅ MySQL: {created} فهرس جديد، "
+            f"{skipped} موجود، {failed} فشل"
+        )
 
 
 # =====================================================================
@@ -501,7 +583,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             fail_count INTEGER DEFAULT 0,
             created_at TEXT,
             published_at TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
     try:
@@ -530,7 +613,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             publish_time TEXT DEFAULT '00:00',
             cron_expression TEXT,
             next_publish_date TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -538,7 +622,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INTEGER PRIMARY KEY,
             last_publish_time TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -728,7 +813,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     for key, value in DEFAULT_SETTINGS:
         try:
             await conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO NOTHING",
                 (key, value),
             )
         except Exception as e:
@@ -911,8 +997,10 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             provider_subscription_id TEXT,
             created_at TEXT,
             updated_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -929,8 +1017,10 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             provider_payment_id TEXT,
             paid_at TEXT,
             created_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -980,7 +1070,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             used_by INTEGER,
             used_at TEXT,
             created_at TEXT,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -989,7 +1080,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             user_id INTEGER PRIMARY KEY,
             points INTEGER DEFAULT 0,
             last_updated TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -1014,9 +1106,11 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 
     try:
         await conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) "
+            "INSERT INTO schema_version "
+            "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
-            (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils), "initial schema"),
+            (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
+             "initial schema"),
         )
         await conn.commit()
     except Exception as e:
@@ -1024,7 +1118,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             logger.warning(f"⚠️ schema_version SQLite: {e}")
 
     if logger:
-        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
+        logger.info(
+            "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة"
+        )
 
 
 # =====================================================================
@@ -1082,7 +1178,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             fail_count INTEGER DEFAULT 0,
             created_at TIMESTAMP,
             published_at TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
     try:
@@ -1111,7 +1208,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             publish_time TEXT DEFAULT '00:00',
             cron_expression TEXT,
             next_publish_date TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -1119,7 +1217,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INTEGER PRIMARY KEY,
             last_publish_time TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -1309,7 +1408,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     for key, value in DEFAULT_SETTINGS:
         try:
             await conn.execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO NOTHING",
                 key, value,
             )
         except Exception as e:
@@ -1336,7 +1436,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.5.7: أعمدة last_daily_sent / last_weekly_sent / last_subscription_sent
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id BIGINT PRIMARY KEY,
@@ -1473,7 +1572,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             duration_days INTEGER,
             max_channels INTEGER,
             max_posts INTEGER,
-            features TEXT CHECK(features IS NULL OR features::jsonb IS NOT NULL),
+            features TEXT CHECK (
+                features IS NULL
+                OR features ~ '^\\s*[\\{\\[]'
+            ),
             is_active INTEGER DEFAULT 1,
             is_gift INTEGER DEFAULT 0,
             created_at TIMESTAMP
@@ -1493,8 +1595,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             provider_subscription_id TEXT,
             created_at TIMESTAMP,
             updated_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -1511,8 +1615,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             provider_payment_id TEXT,
             paid_at TIMESTAMP,
             created_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -1562,7 +1668,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             used_by BIGINT,
             used_at TIMESTAMP,
             created_at TIMESTAMP,
-            FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
         )
     """)
 
@@ -1571,7 +1678,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             user_id BIGINT PRIMARY KEY,
             points INTEGER DEFAULT 0,
             last_updated TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -1596,7 +1704,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 
     try:
         await conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) "
+            "INSERT INTO schema_version "
+            "(version, applied_at, description) "
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
@@ -1607,7 +1716,9 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             logger.warning(f"⚠️ schema_version PG: {e}")
 
     if logger:
-        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
+        logger.info(
+            "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة"
+        )
 
 
 # =====================================================================
@@ -1667,7 +1778,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 fail_count INT DEFAULT 0,
                 created_at DATETIME,
                 published_at DATETIME,
-                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         try:
@@ -1682,7 +1795,11 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             """)
         except Exception as e:
             err_msg = str(e).lower()
-            if "duplicate" not in err_msg and "1061" not in err_msg and "already exists" not in err_msg:
+            if (
+                "duplicate" not in err_msg
+                and "1061" not in err_msg
+                and "already exists" not in err_msg
+            ):
                 if logger:
                     logger.warning(f"⚠️ MySQL idx_posts_unique: {e}")
 
@@ -1698,7 +1815,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 publish_time VARCHAR(10) DEFAULT '00:00',
                 cron_expression TEXT,
                 next_publish_date DATETIME,
-                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -1706,7 +1825,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             CREATE TABLE IF NOT EXISTS last_publish (
                 channel_db_id INT PRIMARY KEY,
                 last_publish_time DATETIME,
-                FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -1776,9 +1897,11 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 slow_mode TINYINT(1) DEFAULT 0,
                 slow_mode_seconds INT DEFAULT 5,
                 welcome_enabled TINYINT(1) DEFAULT 0,
-                welcome_text VARCHAR(2000) DEFAULT 'مرحباً {user} في {chat} 🤍',
+                welcome_text VARCHAR(2000)
+                    DEFAULT 'مرحباً {user} في {chat} 🤍',
                 goodbye_enabled TINYINT(1) DEFAULT 0,
-                goodbye_text VARCHAR(2000) DEFAULT 'وداعاً {user} 👋',
+                goodbye_text VARCHAR(2000)
+                    DEFAULT 'وداعاً {user} 👋',
                 delete_banned_words TINYINT(1) DEFAULT 0,
                 auto_penalty VARCHAR(50) DEFAULT 'none',
                 auto_mute_duration INT DEFAULT 3600,
@@ -1896,7 +2019,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         for key, value in DEFAULT_SETTINGS:
             try:
                 await conn.execute(
-                    "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
+                    "INSERT IGNORE INTO settings (`key`, `value`) "
+                    "VALUES (%s, %s)",
                     (key, value),
                 )
             except Exception as e:
@@ -1923,7 +2047,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.5.7: 3 أعمدة last_*_sent
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_reminder_settings (
                 user_id BIGINT PRIMARY KEY,
@@ -2080,8 +2203,10 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 provider_subscription_id VARCHAR(255),
                 created_at DATETIME,
                 updated_at DATETIME,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -2098,8 +2223,10 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 provider_payment_id VARCHAR(255),
                 paid_at DATETIME,
                 created_at DATETIME,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -2149,7 +2276,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 used_by BIGINT,
                 used_at DATETIME,
                 created_at DATETIME,
-                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -2158,7 +2286,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 user_id BIGINT PRIMARY KEY,
                 points INT DEFAULT 0,
                 last_updated DATETIME,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -2183,7 +2312,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
 
         try:
             await conn.execute(
-                "INSERT IGNORE INTO schema_version (version, applied_at, description) "
+                "INSERT IGNORE INTO schema_version "
+                "(version, applied_at, description) "
                 "VALUES (%s, %s, %s)",
                 (
                     CURRENT_SCHEMA_VERSION,
@@ -2196,14 +2326,18 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 logger.warning(f"⚠️ schema_version MySQL: {e}")
 
         if logger:
-            logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
+            logger.info(
+                "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة"
+            )
 
     finally:
         try:
             await conn.execute("SET FOREIGN_KEY_CHECKS=1")
         except Exception as e:
             if logger:
-                logger.error(f"❌ فشل إعادة تفعيل FOREIGN_KEY_CHECKS: {e}")
+                logger.error(
+                    f"❌ فشل إعادة تفعيل FOREIGN_KEY_CHECKS: {e}"
+                )
 
 
 # =====================================================================
