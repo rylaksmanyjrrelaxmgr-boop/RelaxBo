@@ -9,18 +9,33 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 - جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
 - يحتوي على جدول schema_version لتتبع الإصدارات
 
-🚀 الإصدار v5 (v7.5.4):
+🚀 الإصدار v6 (v7.5.5):
   - ✅ إصلاح #1: SQLite — إزالة executescript واستخدام حلقة آمنة
-  - ✅ إصلاح #2: PostgreSQL — transaction بدل استعلام متعدد
+  - ✅ إصلاح #2: PostgreSQL — transaction بدل استعلام متعدد (خطأ)
   - ✅ إصلاح #4: MySQL — VARCHAR بدل TEXT لأعمدة DEFAULT
-  - ✅ إصلاح #5: MySQL — media_file_id VARCHAR(255) بدل 4096
+  - ✅ إصلاح #5: MySQL — media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
   - ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
   - ✅ إصلاح #8: SQLite — ON CONFLICT بدل INSERT OR IGNORE
   - ✅ إصلاح #9: schema_version — applied_at fallback آمن
-  - ✅ إضافة 11 فهرس حرج
-  - ✅🆕 v7.5.4: تحسين Cold Start — فحص الفهارس الموجودة في استعلام واحد
-  - ✅🆕 v7.5.4: تحسين Cold Start — فحص الجداول الموجودة في استعلام واحد
-  - ✅🆕 v7.5.11: welcome_text/goodbye_text → VARCHAR(2000) في MySQL
+  - ✅ إضافة 11 فهرس حرج (reverse lookups + leaderboard + publishing)
+  - ✅ فهارس وقائية للتنظيف
+  - ✅ تنظيف الفهارس المكررة
+  - ✅ v7.5.4: تحسين Cold Start — فحص الفهارس الموجودة في استعلام واحد
+    * PostgreSQL: SELECT indexname FROM pg_indexes WHERE indexname = ANY($1)
+    * SQLite    : SELECT name FROM sqlite_master WHERE type='index'
+    * MySQL     : SHOW INDEX لكل جدول مرة واحدة
+    * توفير ~15 ثانية في كل تشغيل
+  - ✅ v7.5.4: تحسين Cold Start — فحص الجداول الموجودة في استعلام واحد
+    * PostgreSQL: SELECT table_name FROM information_schema.tables
+    * SQLite    : SELECT name FROM sqlite_master WHERE type='table'
+  - ✅ v7.5.4: تصحيح عدّاد الفهارس (كان يعرض "60 جديد" عند وجودها جميعاً)
+
+🆕 v6 (v7.5.5) — إصلاحات إضافية:
+  - ✅ إصلاح #10: توحيد عدّاد "موجود" في _create_indexes_sqlite
+    * كان يستخدم len(existing) الذي يتضمن فهارس خارجية → عدّاد مضلّل
+    * الآن يستخدم len(COMMON_INDEXES) دائماً للاتساق مع PG
+  - ✅ إصلاح #11: _create_indexes_mysql — تحقق من وجود الجدول قبل SHOW INDEX
+    * تجنّب خطأ "Table doesn't exist" عند تشغيل أول مرة
 """
 
 import os
@@ -39,6 +54,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
+# أعمدة النص العربي الطويلة (بدون DEFAULT في MySQL)
 LONG_TEXT_COLUMNS = {
     "group_security": ["welcome_text", "goodbye_text"],
 }
@@ -215,6 +231,7 @@ COMMON_INDEXES = [
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
+    """✅ إصلاح #9: fallback آمن للوقت"""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
@@ -224,6 +241,7 @@ def _safe_now_iso(TimeUtils) -> str:
 
 
 def _safe_now_dt(TimeUtils):
+    """يرجع datetime للـ PostgreSQL"""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
@@ -233,10 +251,11 @@ def _safe_now_dt(TimeUtils):
 
 
 # =====================================================================
-# دوال فحص جماعية (Batch Existence Checks)
+# 🆕 v7.5.4 — دوال فحص جماعية (Batch Existence Checks)
 # =====================================================================
 
 async def _fetch_existing_indexes_postgres(conn, index_names):
+    """جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)"""
     if not index_names:
         return set()
     try:
@@ -250,6 +269,7 @@ async def _fetch_existing_indexes_postgres(conn, index_names):
 
 
 async def _fetch_existing_indexes_sqlite(conn):
+    """جلب كل الفهارس الموجودة في SQLite"""
     try:
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name IS NOT NULL"
@@ -261,6 +281,7 @@ async def _fetch_existing_indexes_sqlite(conn):
 
 
 async def _fetch_existing_tables_postgres(conn):
+    """جلب كل الجداول الموجودة في PostgreSQL"""
     try:
         rows = await conn.fetch(
             "SELECT table_name FROM information_schema.tables "
@@ -272,6 +293,7 @@ async def _fetch_existing_tables_postgres(conn):
 
 
 async def _fetch_existing_tables_sqlite(conn):
+    """جلب كل الجداول الموجودة في SQLite"""
     try:
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name IS NOT NULL"
@@ -282,19 +304,41 @@ async def _fetch_existing_tables_sqlite(conn):
         return set()
 
 
+async def _table_exists_mysql(conn, table: str) -> bool:
+    """✅ v7.5.5: تحقق من وجود جدول MySQL قبل SHOW INDEX"""
+    try:
+        cursor = await conn.cursor()
+        await cursor.execute(f"SHOW TABLES LIKE '{table}'")
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row is not None
+    except Exception:
+        return False
+
+
 # =====================================================================
-# دالة مساعدة: إنشاء الفهارس
+# دالة مساعدة: إنشاء الفهارس (لكل نوع DB) — محسّنة في v7.5.5
 # =====================================================================
 
 async def _create_indexes_sqlite(conn, logger):
+    """
+    ✅ v7.5.4: تحسين Cold Start — فحص جماعي للفهارس الموجودة.
+    ✅ v7.5.5: توحيد عدّاد "موجود" = len(COMMON_INDEXES)
+    """
+    # 1) جلب الفهارس الموجودة في استعلام واحد
     existing = await _fetch_existing_indexes_sqlite(conn)
+
+    # 2) تحديد المفقودة
     to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
 
     if not to_create:
         if logger:
-            logger.info(f"✅ SQLite: 0 فهرس جديد، {len(existing)} موجود، 0 فشل")
+            logger.info(
+                f"✅ SQLite: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
         return
 
+    # 3) إنشاء المفقودة فقط
     created = 0
     failed = 0
     for _table, idx_name, cols in to_create:
@@ -308,26 +352,44 @@ async def _create_indexes_sqlite(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+        logger.info(
+            f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
+        )
 
 
 async def _create_indexes_postgres(conn, logger):
+    """
+    ✅ v7.5.4: تحسين Cold Start بشكل كبير.
+    - استعلام واحد لجلب جميع الفهارس الموجودة
+    - إنشاء الفهارس المفقودة فقط
+    - يوفّر ~15 ثانية في كل تشغيل بعد الأول
+    """
+    # 1) جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
     existing = await _fetch_existing_indexes_postgres(conn, index_names)
-    to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
+
+    # 2) تحديد المفقودة فقط
+    to_create = [
+        (t, n, c) for t, n, c in COMMON_INDEXES if n not in existing
+    ]
 
     if not to_create:
         if logger:
-            logger.info(f"✅ PostgreSQL: 0 فهرس جديد، {len(existing)} موجود، 0 فشل")
+            logger.info(
+                f"✅ PostgreSQL: 0 فهرس جديد، {len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
         return
 
+    # 3) إنشاء المفقودة فقط داخل transaction
     created = 0
     failed = 0
     try:
         async with conn.transaction():
             for _table, idx_name, cols in to_create:
                 try:
-                    await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+                    await conn.execute(
+                        f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                    )
                     created += 1
                 except Exception as e:
                     failed += 1
@@ -340,7 +402,9 @@ async def _create_indexes_postgres(conn, logger):
         failed = 0
         for _table, idx_name, cols in to_create:
             try:
-                await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
                 created += 1
             except Exception as e2:
                 failed += 1
@@ -349,19 +413,30 @@ async def _create_indexes_postgres(conn, logger):
 
     skipped = len(COMMON_INDEXES) - len(to_create)
     if logger:
-        logger.info(f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+        logger.info(
+            f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
+        )
 
 
 async def _create_indexes_mysql(conn, logger):
+    """
+    ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
+    ✅ v7.5.5: تحقق من وجود الجدول قبل SHOW INDEX (تجنّب خطأ أول تشغيل)
+    """
+    # جمع الأسماء الفريدة للجداول
     tables = set(t for t, _, _ in COMMON_INDEXES)
 
     existing = set()
     for table in tables:
+        # ✅ v7.5.5: تحقق من وجود الجدول قبل SHOW INDEX
+        if not await _table_exists_mysql(conn, table):
+            continue
         try:
             cursor = await conn.cursor()
             await cursor.execute(f"SHOW INDEX FROM `{table}`")
             rows = await cursor.fetchall()
             for r in rows:
+                # r[2] = Key_name
                 existing.add((table, r[2]))
             await cursor.close()
         except Exception as e:
@@ -380,7 +455,11 @@ async def _create_indexes_mysql(conn, logger):
             created += 1
         except Exception as e:
             err_msg = str(e).lower()
-            if "duplicate" in err_msg or "already exists" in err_msg or "1061" in err_msg:
+            if (
+                "duplicate" in err_msg
+                or "already exists" in err_msg
+                or "1061" in err_msg
+            ):
                 skipped += 1
             else:
                 failed += 1
@@ -396,6 +475,9 @@ async def _create_indexes_mysql(conn, logger):
 # =====================================================================
 
 async def create_tables_sqlite(conn, logger, TimeUtils):
+    """إنشاء جميع جداول SQLite + الفهارس"""
+
+    # ---------- schema_version ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -404,6 +486,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -422,6 +505,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -434,6 +518,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,6 +536,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
             channel_db_id INTEGER PRIMARY KEY,
@@ -467,6 +553,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INTEGER PRIMARY KEY,
@@ -475,6 +562,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id INTEGER PRIMARY KEY,
@@ -487,6 +575,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id INTEGER,
@@ -495,6 +584,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
             chat_id INTEGER,
@@ -503,6 +593,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
             chat_id INTEGER,
@@ -512,6 +603,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
             chat_id INTEGER,
@@ -522,6 +614,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
             chat_id INTEGER NOT NULL,
@@ -533,6 +626,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_SECURITY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -593,6 +687,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id INTEGER PRIMARY KEY,
@@ -602,6 +697,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -613,6 +709,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id INTEGER,
@@ -628,6 +725,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
             chat_id INTEGER PRIMARY KEY,
@@ -638,6 +736,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -653,6 +752,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
             user_id INTEGER PRIMARY KEY,
@@ -661,12 +761,14 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         )
     """)
+    # ✅ إصلاح #8: ON CONFLICT بدل INSERT OR IGNORE
     for key, value in DEFAULT_SETTINGS:
         try:
             await conn.execute(
@@ -677,6 +779,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             if logger:
                 logger.warning(f"⚠️ SQLite settings '{key}': {e}")
 
+    # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -687,6 +790,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
             user_id INTEGER PRIMARY KEY,
@@ -697,6 +801,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id INTEGER PRIMARY KEY,
@@ -709,6 +814,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
             user_id INTEGER PRIMARY KEY,
@@ -716,6 +822,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -749,6 +856,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -761,6 +869,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
             user_id INTEGER,
@@ -770,6 +879,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
             user_id INTEGER,
@@ -780,6 +890,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
             chat_id INTEGER PRIMARY KEY,
@@ -789,6 +900,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
             user_id INTEGER,
@@ -798,6 +910,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -808,6 +921,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -820,6 +934,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -837,6 +952,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -855,6 +971,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -873,6 +990,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -884,6 +1002,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -900,6 +1019,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
             chat_id INTEGER NOT NULL,
@@ -910,6 +1030,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -923,6 +1044,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
             user_id INTEGER PRIMARY KEY,
@@ -932,6 +1054,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -949,8 +1072,10 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ============ 🚀 الفهارس — v7.5.5 فحص جماعي ============
     await _create_indexes_sqlite(conn, logger)
 
+    # تسجيل إصدار المخطط
     try:
         await conn.execute(
             "INSERT INTO schema_version (version, applied_at, description) "
@@ -971,6 +1096,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 # =====================================================================
 
 async def create_tables_postgres(conn, logger, TimeUtils):
+    """إنشاء جميع جداول PostgreSQL + الفهارس"""
+
+    # ---------- schema_version ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -979,6 +1107,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -997,6 +1126,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id SERIAL PRIMARY KEY,
@@ -1009,6 +1139,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
@@ -1029,6 +1160,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         ON posts(channel_db_id, text_hash, media_type, media_file_id)
     """)
 
+    # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
             channel_db_id INTEGER PRIMARY KEY,
@@ -1045,6 +1177,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INTEGER PRIMARY KEY,
@@ -1053,6 +1186,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -1065,6 +1199,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id BIGINT,
@@ -1073,6 +1208,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
             chat_id BIGINT,
@@ -1081,6 +1217,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
             chat_id BIGINT,
@@ -1090,6 +1227,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
             chat_id BIGINT,
@@ -1100,6 +1238,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
             chat_id BIGINT NOT NULL,
@@ -1111,6 +1250,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_SECURITY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -1171,6 +1311,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id BIGINT PRIMARY KEY,
@@ -1180,6 +1321,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id SERIAL PRIMARY KEY,
@@ -1191,6 +1333,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -1206,6 +1349,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
             chat_id BIGINT PRIMARY KEY,
@@ -1216,6 +1360,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
             id SERIAL PRIMARY KEY,
@@ -1231,6 +1376,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
             user_id BIGINT PRIMARY KEY,
@@ -1239,6 +1385,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -1256,6 +1403,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             if logger:
                 logger.warning(f"⚠️ PG settings '{key}': {e}")
 
+    # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id SERIAL PRIMARY KEY,
@@ -1266,6 +1414,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
             user_id BIGINT PRIMARY KEY,
@@ -1276,6 +1425,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id BIGINT PRIMARY KEY,
@@ -1288,6 +1438,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
             user_id BIGINT PRIMARY KEY,
@@ -1295,6 +1446,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id SERIAL PRIMARY KEY,
@@ -1328,6 +1480,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
             id SERIAL PRIMARY KEY,
@@ -1340,6 +1493,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
             user_id BIGINT,
@@ -1349,6 +1503,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
             user_id BIGINT,
@@ -1359,6 +1514,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
             chat_id BIGINT PRIMARY KEY,
@@ -1368,6 +1524,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
             user_id BIGINT,
@@ -1377,6 +1534,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id SERIAL PRIMARY KEY,
@@ -1387,6 +1545,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
             id SERIAL PRIMARY KEY,
@@ -1399,6 +1558,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id SERIAL PRIMARY KEY,
@@ -1416,6 +1576,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id SERIAL PRIMARY KEY,
@@ -1434,6 +1595,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id SERIAL PRIMARY KEY,
@@ -1452,6 +1614,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
             id SERIAL PRIMARY KEY,
@@ -1463,6 +1626,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
             id SERIAL PRIMARY KEY,
@@ -1479,6 +1643,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
             chat_id BIGINT NOT NULL,
@@ -1489,6 +1654,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id SERIAL PRIMARY KEY,
@@ -1502,6 +1668,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
             user_id BIGINT PRIMARY KEY,
@@ -1511,6 +1678,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
             id SERIAL PRIMARY KEY,
@@ -1528,8 +1696,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ============ 🚀 الفهارس — v7.5.5 فحص جماعي ============
     await _create_indexes_postgres(conn, logger)
 
+    # تسجيل إصدار المخطط
     try:
         await conn.execute(
             "INSERT INTO schema_version (version, applied_at, description) "
@@ -1551,8 +1721,11 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 # =====================================================================
 
 async def create_tables_mysql(conn, logger, TimeUtils):
+    """إنشاء جميع جداول MySQL + الفهارس"""
+
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
 
+    # ---------- schema_version ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INT PRIMARY KEY,
@@ -1561,6 +1734,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USERS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -1579,6 +1753,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_CHANNELS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1591,6 +1766,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- POSTS ----------
+    # ✅ إصلاح #5: media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1608,6 +1785,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SCHEDULE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schedule (
             channel_db_id INT PRIMARY KEY,
@@ -1624,6 +1802,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- LAST_PUBLISH ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_publish (
             channel_db_id INT PRIMARY KEY,
@@ -1632,6 +1811,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- BOT_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -1644,6 +1824,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_GROUPS_LINK ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id BIGINT,
@@ -1652,6 +1833,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- GROUP_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_admins (
             chat_id BIGINT,
@@ -1660,6 +1842,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- HIDDEN_OWNER_GROUPS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_owner_groups (
             chat_id BIGINT,
@@ -1669,6 +1852,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- HIDDEN_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS hidden_admins (
             chat_id BIGINT,
@@ -1679,6 +1863,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- ANONYMOUS_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_admins (
             chat_id BIGINT NOT NULL,
@@ -1690,7 +1875,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
-    # ✅ v7.5.11: welcome_text/goodbye_text → VARCHAR(2000)
+    # ---------- GROUP_SECURITY ----------
+    # ✅ إصلاح #4: welcome_text / goodbye_text كـ VARCHAR (TEXT لا يدعم DEFAULT)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -1699,9 +1885,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             slow_mode TINYINT(1) DEFAULT 0,
             slow_mode_seconds INT DEFAULT 5,
             welcome_enabled TINYINT(1) DEFAULT 0,
-            welcome_text VARCHAR(2000) DEFAULT 'مرحباً {user} في {chat} 🤍',
+            welcome_text VARCHAR(500) DEFAULT 'مرحباً {user} في {chat} 🤍',
             goodbye_enabled TINYINT(1) DEFAULT 0,
-            goodbye_text VARCHAR(2000) DEFAULT 'وداعاً {user} 👋',
+            goodbye_text VARCHAR(500) DEFAULT 'وداعاً {user} 👋',
             delete_banned_words TINYINT(1) DEFAULT 0,
             auto_penalty VARCHAR(50) DEFAULT 'none',
             auto_mute_duration INT DEFAULT 3600,
@@ -1751,6 +1937,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- CHAT_LOCKS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id BIGINT PRIMARY KEY,
@@ -1760,6 +1947,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- BANNED_WORDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1771,6 +1959,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- AUTO_REPLIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_replies (
             chat_id BIGINT,
@@ -1786,6 +1975,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- AUTO_REPLY_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS auto_reply_settings (
             chat_id BIGINT PRIMARY KEY,
@@ -1796,6 +1986,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SUPPORT_TICKETS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS support_tickets (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1811,6 +2002,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- BOT_ADMINS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
             user_id BIGINT PRIMARY KEY,
@@ -1819,6 +2011,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             `key` VARCHAR(255) PRIMARY KEY,
@@ -1835,6 +2028,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             if logger:
                 logger.warning(f"⚠️ MySQL settings '{key}': {e}")
 
+    # ---------- REFERRALS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1845,6 +2039,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- REFERRAL_REWARDS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS referral_rewards (
             user_id BIGINT PRIMARY KEY,
@@ -1855,6 +2050,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_REMINDER_SETTINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_reminder_settings (
             user_id BIGINT PRIMARY KEY,
@@ -1867,6 +2063,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_TRANSLATION ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_translation (
             user_id BIGINT PRIMARY KEY,
@@ -1874,6 +2071,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- CONTESTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1907,6 +2105,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- ADMIN_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS admin_logs (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1919,6 +2118,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_WARNINGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_warnings (
             user_id BIGINT,
@@ -1928,6 +2128,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_VIOLATIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_violations (
             user_id BIGINT,
@@ -1938,6 +2139,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- GROUP_RULES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_rules (
             chat_id BIGINT PRIMARY KEY,
@@ -1947,6 +2149,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_MESSAGES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_messages (
             user_id BIGINT,
@@ -1956,6 +2159,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SCHEDULED_POSTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1966,6 +2170,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SENTIMENT_HISTORY ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS sentiment_history (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1978,6 +2183,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- PLANS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1995,6 +2201,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- SUBSCRIPTIONS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2013,6 +2220,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- INVOICES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS invoices (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2031,6 +2239,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- PAYMENT_LOGS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS payment_logs (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2042,6 +2251,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_penalties (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2058,6 +2268,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- VIOLATION_PENALTIES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS violation_penalties (
             chat_id BIGINT NOT NULL,
@@ -2068,6 +2279,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- GIFT_CODES ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS gift_codes (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2081,6 +2293,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- USER_POINTS ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_points (
             user_id BIGINT PRIMARY KEY,
@@ -2090,6 +2303,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
 
+    # ---------- PENALTY_ARCHIVE ----------
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS penalty_archive (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -2109,8 +2323,10 @@ async def create_tables_mysql(conn, logger, TimeUtils):
 
     await conn.execute("SET FOREIGN_KEY_CHECKS=1")
 
+    # ============ 🚀 الفهارس MySQL — SHOW INDEX ============
     await _create_indexes_mysql(conn, logger)
 
+    # تسجيل إصدار المخطط
     try:
         await conn.execute(
             "INSERT IGNORE INTO schema_version (version, applied_at, description) "
