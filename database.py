@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.20)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.21)
 ================================================================================
+🆕 v7.5.21 (إصلاح register_user + TIMESTAMP):
+    ✅ register_user: استبدال TimeUtils.sql_iso() بـ TimeUtils.utc_now() 
+       للأعمدة TIMESTAMP (user_points.last_updated)
+    ✅ register_user (not force): نفس الإصلاح
+    ✅ يمنع خطأ: "expected a datetime.date or datetime.datetime instance, got 'str'"
+
 🆕 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء):
     ✅ _adapt_params(params, query): لا يحوّل str → datetime (إصلاح DataError)
     ✅ تمرير query إلى كل استدعاءات _adapt_params
@@ -1233,6 +1239,10 @@ def _adapt_params(params: tuple, query: str = "") -> tuple:
 
     ⚠️ إصلاح خطأ asyncpg:
     "invalid input for query argument $2: (expected str, got datetime)"
+
+    ⚠️ ملاحظة v7.5.21:
+    لا تمرّر TimeUtils.sql_iso() لعمود TIMESTAMP في PostgreSQL.
+    استخدم TimeUtils.utc_now() بدلاً منه.
     """
     if params is None:
         return ()
@@ -1307,7 +1317,12 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        """✅ v7.5.13: بدون +00:00 لتوافق MySQL DATETIME."""
+        """
+        ✅ v7.5.13: بدون +00:00 لتوافق MySQL DATETIME.
+
+        ⚠️ v7.5.21: لا تستخدم هذه الدالة لعمود TIMESTAMP في PostgreSQL!
+        استخدم TimeUtils.utc_now() بدلاً منها.
+        """
         return TimeUtils.utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
@@ -1644,9 +1659,8 @@ class Database(
             await conn.execute("PRAGMA busy_timeout=10000")
             await conn.execute("PRAGMA cache_size=-20000")
             await conn.execute("PRAGMA temp_store=MEMORY")
-            # ✅ v7.5.20: تحسينات إضافية لـ SQLite
             await conn.execute("PRAGMA wal_autocheckpoint=1000")
-            await conn.execute("PRAGMA mmap_size=268435456")  # 256MB
+            await conn.execute("PRAGMA mmap_size=268435456")
             return conn
         except Exception as e:
             logger.error(f"❌ فشل إنشاء اتصال SQLite: {e}")
@@ -1922,7 +1936,7 @@ class Database(
             q = await _convert_insert_or_replace(q, conn)
         if not is_ignore and not is_replace:
             q = _convert_upsert(q)
-        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
+        params = _adapt_params(params, q) if params else ()
         if USE_POSTGRES:
             result = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.execute(q2, *p2)
@@ -1957,7 +1971,6 @@ class Database(
             q = await _convert_insert_or_replace(q, conn)
         if not is_ignore and not is_replace:
             q = _convert_upsert(q)
-        # ✅ v7.5.20: مرّر q
         params_list = [_adapt_params(p, q) for p in params_list]
 
         upper_q_after = q.upper().lstrip()
@@ -2013,7 +2026,7 @@ class Database(
 
     async def _fetchone_with_conn(self, conn, query: str, *params) -> Optional[Dict]:
         q = _convert_placeholders(query)
-        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
+        params = _adapt_params(params, q) if params else ()
         if USE_POSTGRES:
             row = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2)
@@ -2042,7 +2055,7 @@ class Database(
 
     async def _fetchall_with_conn(self, conn, query: str, *params) -> List[Dict]:
         q = _convert_placeholders(query)
-        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
+        params = _adapt_params(params, q) if params else ()
         if USE_POSTGRES:
             rows = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetch(q2, *p2)
@@ -2069,7 +2082,7 @@ class Database(
 
     async def _fetchval_with_conn(self, conn, query: str, *params, default=None) -> Any:
         q = _convert_placeholders(query)
-        params = _adapt_params(params, q) if params else ()   # ✅ v7.5.20: مرّر q
+        params = _adapt_params(params, q) if params else ()
         if USE_POSTGRES:
             val = await self._execute_with_logging(
                 q, params, conn, lambda q2, p2: conn.fetchval(q2, *p2)
@@ -3223,7 +3236,6 @@ class Database(
                  "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
             ]
         else:
-            # ✅ v7.5.20: فهارس إضافية مهمة للأداء
             return [
                 ("posts", "idx_posts_fail_count",
                  "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
@@ -3261,7 +3273,6 @@ class Database(
                 ("user_violations", "idx_violations_user_chat",
                  "CREATE INDEX IF NOT EXISTS idx_violations_user_chat "
                  "ON user_violations(user_id, chat_id)"),
-                # ✅ v7.5.20: فهارس مهمة للأداء
                 ("user_channels", "idx_uc_user_banned",
                  "CREATE INDEX IF NOT EXISTS idx_uc_user_banned "
                  "ON user_channels(user_id, banned)"),
@@ -3354,8 +3365,7 @@ class Database(
 
         except Exception as e:
             logger.error(
-                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True
-            )
+                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True            )
             return False
 
     async def pre_initialize(self):
@@ -3399,7 +3409,7 @@ class Database(
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         """
-        ✅ v7.5.20: استعلام واحد بدل 5 (أسرع بكثير على PostgreSQL/SQLite).
+        ✅ v7.5.20: استعلام واحد بدل 5 (أسرع بكثير).
         """
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -3407,7 +3417,6 @@ class Database(
             return _clone_start_data(cached)
 
         try:
-            # ✅ استعلام واحد شامل
             row = await self.fetchone(
                 """
                 SELECT u.user_id, u.username, u.first_name, u.language,
@@ -3582,7 +3591,6 @@ class Database(
                 if cached_data:
                     user_data = cached_data.get("user_data")
                     if user_data:
-                        # ✅ استخدام _clone_start_data بدل deepcopy (أسرع 10x)
                         user_data = _clone_start_data(user_data)
                         if include_stats:
                             user_data["unpublished_posts"] = cached_data.get(
@@ -3609,7 +3617,6 @@ class Database(
             if cached:
                 return _clone_start_data(cached)
 
-            # ✅ استعلام واحد
             if include_stats:
                 row = await self.fetchone(
                     """
@@ -3723,6 +3730,9 @@ class Database(
         first_name: str = "",
         force: bool = False,
     ) -> bool:
+        """
+        ✅ v7.5.21: إصلاح TIMESTAMP — استخدام TimeUtils.utc_now() بدل TimeUtils.sql_iso()
+        """
         try:
             async with await self._get_user_lock(user_id):
                 if not force:
@@ -3738,7 +3748,7 @@ class Database(
                                        updated_at = ?
                                    WHERE user_id = ?""",
                                 username, username, first_name, first_name,
-                                TimeUtils.sql_iso(), user_id,
+                                TimeUtils.utc_now(), user_id,
                             )
                             logger.debug(
                                 f"ℹ️ تم تحديث بيانات المستخدم الموجود {user_id}"
@@ -3747,13 +3757,14 @@ class Database(
                             logger.debug(
                                 f"تحديث مستخدم موجود {user_id}: {e}"
                             )
+                        # ✅ v7.5.21: استخدام utc_now() بدل sql_iso() للأعمدة TIMESTAMP
                         try:
                             if USE_MYSQL:
                                 await self.execute(
                                     "INSERT IGNORE INTO user_points "
                                     "(user_id, points, last_updated) "
                                     "VALUES (%s, 0, %s)",
-                                    (user_id, TimeUtils.sql_iso()),
+                                    (user_id, TimeUtils.utc_now()),
                                 )
                                 await self.execute(
                                     "INSERT IGNORE INTO referral_rewards "
@@ -3768,7 +3779,7 @@ class Database(
                                     "INSERT OR IGNORE INTO user_points "
                                     "(user_id, points, last_updated) "
                                     "VALUES (?, 0, ?)",
-                                    (user_id, TimeUtils.sql_iso()),
+                                    (user_id, TimeUtils.utc_now()),
                                 )
                                 await self.execute(
                                     "INSERT OR IGNORE INTO referral_rewards "
@@ -3824,9 +3835,9 @@ class Database(
                                                         ELSE users.first_name END,
                                            updated_at = %s""",
                                     user_id, username, first_name, code,
-                                    TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                    TimeUtils.utc_now(), TimeUtils.utc_now(),
                                     username, username, first_name, first_name,
-                                    TimeUtils.sql_iso(),
+                                    TimeUtils.utc_now(),
                                 )
                             else:
                                 await self._execute_with_conn(
@@ -3843,9 +3854,9 @@ class Database(
                                                         ELSE users.first_name END,
                                            updated_at = ?""",
                                     user_id, username, first_name, code,
-                                    TimeUtils.sql_iso(), TimeUtils.sql_iso(),
+                                    TimeUtils.utc_now(), TimeUtils.utc_now(),
                                     username, username, first_name, first_name,
-                                    TimeUtils.sql_iso(),
+                                    TimeUtils.utc_now(),
                                 )
                         user_inserted = True
                         break
@@ -3873,6 +3884,7 @@ class Database(
                     )
                     return False
 
+                # ✅ v7.5.21: استخدام utc_now() بدل sql_iso() للأعمدة TIMESTAMP
                 try:
                     async with self.transaction() as conn:
                         if USE_POSTGRES:
@@ -3903,7 +3915,7 @@ class Database(
                                 "VALUES (%s, 0, %s) "
                                 "ON DUPLICATE KEY UPDATE "
                                 "last_updated = VALUES(last_updated)",
-                                user_id, TimeUtils.sql_iso(),
+                                user_id, TimeUtils.utc_now(),
                             )
                             await self._execute_with_conn(
                                 conn,
@@ -3922,7 +3934,7 @@ class Database(
                                 "VALUES (?, 0, ?) "
                                 "ON CONFLICT(user_id) DO UPDATE SET "
                                 "last_updated = excluded.last_updated",
-                                user_id, TimeUtils.sql_iso(),
+                                user_id, TimeUtils.utc_now(),
                             )
                             await self._execute_with_conn(
                                 conn,
@@ -3971,7 +3983,6 @@ class Database(
                 default="ar",
             )
             lang = result if result else "ar"
-            # ✅ TTL أطول
             await internal_cache.set(f"lang_{user_id}", lang, ttl=600)
             return lang
         except Exception as e:
