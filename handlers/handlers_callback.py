@@ -4,23 +4,28 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.12 (مُصحَّح ومحسّن)
+الإصدار: v7.5.13 (مُصحَّح ومحسّن)
 =====================================================================
+🆕 v7.5.13 (إصلاح بطء الأزرار أثناء النشر):
+    ✅ MAX_CONCURRENT_PUBLISH = 2 (بدل 3)
+    ✅ PUBLISH_DELAY_SECONDS = 0.2 (بدل 0.5)
+    ✅ استخدام PUBLISH_RATE_LIMITER المنفصل في _publish_all
+       (يمنع تأثير النشر على استجابة الأزرار)
+
 🆕 v7.5.12:
     ✅ handle(): query.answer() في البداية — استجابة فورية للأزرار (< 100ms)
     ✅ _safe_answer: يتجاهل "already been answered" و "query is too old"
-    ✅ _handle_language_change: يستخدم _show_main_menu_inline بدل CommandHandlers.start
+    ✅ _handle_language_change: يستخدم _show_main_menu_inline
     ✅ _show_main_menu_inline: يستخدم KeyboardFactory.build("main_menu", ...)
     ✅ Semaphore مشترك للنشر الجماعي (_publish_semaphore)
-    ✅ _do_backup: يحفظ last_backup بأمان (try/except)
+    ✅ _do_backup: يحفظ last_backup بأمان
     ✅ تحويل التنبيهات الحرجة من show_alert=True إلى safe_edit
-    ✅ حماية كاملة ضد None في query.message و effective_chat
+    ✅ حماية كاملة ضد None
 
 🆕 v7.5.11:
     ✅ _show_main_menu_inline: عرض القائمة الرئيسية بتعديل الرسالة (أسرع 10x)
     ✅ CB.MAIN/CB.BACK: استخدام العرض السريع بدل CommandHandlers.start
     ✅ CB.CHECK_SUB: استخدام العرض السريع
-    ✅ _hide_keyboard_safely: حذف الردود الآمن
 
 🆕 v7.5.10:
     ✅ إصلاح جذري: إضافة return بعد كل فرع في _handle_advanced_actions
@@ -66,14 +71,33 @@ from telegram.error import BadRequest, RetryAfter, Forbidden
 
 from config import CONFIG, PATHS
 from database import DB, TimeUtils
-from utils import (
-    safe_send, is_authorized_in_group,
-    get_text, StateManager, UserState,
-    KeyboardFactory, CB, get_ram_usage,
-    invalidate_auth_cache, apply_penalty,
-    export_auto_replies, import_auto_replies,
-    fetch_json_from_url
-)
+
+# ✅ v7.5.13: استيراد PUBLISH_RATE_LIMITER المنفصل
+try:
+    from utils import (
+        safe_send, is_authorized_in_group,
+        get_text, StateManager, UserState,
+        KeyboardFactory, CB, get_ram_usage,
+        invalidate_auth_cache, apply_penalty,
+        export_auto_replies, import_auto_replies,
+        fetch_json_from_url,
+        PUBLISH_RATE_LIMITER,
+    )
+except ImportError:
+    # fallback: إذا لم يكن PUBLISH_RATE_LIMITER موجوداً بعد
+    from utils import (
+        safe_send, is_authorized_in_group,
+        get_text, StateManager, UserState,
+        KeyboardFactory, CB, get_ram_usage,
+        invalidate_auth_cache, apply_penalty,
+        export_auto_replies, import_auto_replies,
+        fetch_json_from_url,
+        RATE_LIMITER,
+    )
+    PUBLISH_RATE_LIMITER = RATE_LIMITER
+    logging.getLogger(__name__).warning(
+        "⚠️ PUBLISH_RATE_LIMITER غير موجود في utils.py — استخدام RATE_LIMITER"
+    )
 
 try:
     from cache import user_cache, invalidate_user_cache
@@ -95,13 +119,14 @@ logger = logging.getLogger(__name__)
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 MAX_BACKUPS = getattr(CONFIG, "MAX_BACKUPS", 10)
-MAX_CONCURRENT_PUBLISH = 3
+
+# ✅ v7.5.13: خفض من 3 إلى 2 لتقليل الحجز
+MAX_CONCURRENT_PUBLISH = 2
 MAX_PUBLISH_DELAY_SECONDS = 60
 
 ACTIVE_TASKS: weakref.WeakSet = weakref.WeakSet()
 
 # ✅ v7.5.12: Semaphore مشترك للنشر الجماعي
-# يمنع أكثر من MAX_CONCURRENT_PUBLISH مهمة نشر متزامنة عبر كل المستخدمين
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
 # ✅ v7.5.9: مفاتيح السياق التي تُمحى عند الرجوع للرئيسية
@@ -122,7 +147,7 @@ async def _safe_answer(query, text=None, show_alert=False) -> bool:
     """
     ✅ v7.5.12: دالة مساعدة للإجابة على الاستعلامات بأمان.
 
-    - يتجاهل "already been answered" و "query is too old" (لكي لا يظهر خطأ عند الاستدعاء المتكرر)
+    - يتجاهل "already been answered" و "query is too old"
     - يُرجع True إذا نجح أو إذا كان الاستعلام قد أُجيب مسبقاً
     """
     if not query:
@@ -135,7 +160,6 @@ async def _safe_answer(query, text=None, show_alert=False) -> bool:
         return True
     except BadRequest as e:
         err = str(e).lower()
-        # ✅ v7.5.12: تجاهل الاستدعاء الثاني
         if "query is too old" in err or "already been answered" in err:
             return True
         logger.debug(f"Query answer error: {e}")
@@ -161,7 +185,7 @@ async def _trans(key, lang, default_ar) -> str:
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -> bool:
     """
     تعديل الرسالة بأمان مع معالجة الأخطاء.
-    ✅ v7.5.12: لا يستدعي _safe_answer تلقائياً (الاستدعاء الآن في handle).
+    ✅ v7.5.12: لا يستدعي _safe_answer تلقائياً.
     """
     if not query or not query.message:
         # إذا لم يكن هناك رسالة قابلة للتعديل، نحاول الإرسال عبر bot
@@ -276,8 +300,8 @@ class CallbackHandlers:
 
     # ✅ v7.5.2: حد ضغطات الأزرار لكل مستخدم في الدقيقة
     RATE_LIMIT_PER_MINUTE = 30
-    # ✅ v7.5.2: تأخير بين كل عملية نشر جماعي (ثواني)
-    PUBLISH_DELAY_SECONDS = 0.5
+    # ✅ v7.5.13: خفض من 0.5 إلى 0.2 لتسريع النشر
+    PUBLISH_DELAY_SECONDS = 0.2
     # ✅ v7.5.2: حجم الدفعة في النشر الجماعي
     PUBLISH_BATCH_SIZE = 10
 
@@ -308,7 +332,6 @@ class CallbackHandlers:
 
         # ============================================================
         # ✅ v7.5.12: الإجابة الفورية — قبل أي عمل آخر
-        # استجابة Telegram الفورية (< 100ms) — أهم إصلاح للأداء
         # ============================================================
         await _safe_answer(query)
 
@@ -320,8 +343,6 @@ class CallbackHandlers:
         rate_data['count'] = rate_data.get('count', 0) + 1
         context.user_data[rate_key] = rate_data
         if rate_data['count'] > CallbackHandlers.RATE_LIMIT_PER_MINUTE:
-            # لا نُرسل تنبيهاً لأن answer استُدعي — نُعدّل الرسالة بدلاً منه
-            # (أو نتجاهل بصمت حسب التصميم)
             return
 
         lang = await DB.get_user_language(user_id) or 'ar'
@@ -366,7 +387,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # ✅ v7.5.11: CB.MAIN / CB.BACK — عرض سريع بتعديل الرسالة
             if base_data in (CB.MAIN, CB.BACK):
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
@@ -378,7 +398,6 @@ class CallbackHandlers:
                     await CommandHandlers.start(update, context)
                 return
 
-            # ✅ v7.5.9: CB.CANCEL
             if base_data == CB.CANCEL:
                 StateManager.clear(user_id)
                 _clear_context_keys(context, extra_keys=list(_CANCEL_EXTRA_KEYS))
@@ -428,7 +447,6 @@ class CallbackHandlers:
                 await CommandHandlers.language(update, context)
                 return
 
-            # ✅ v7.5.11: CHECK_SUB — عرض سريع
             if base_data == CB.CHECK_SUB:
                 try:
                     _invalidate_force_sub_cache(user_id)
@@ -738,7 +756,7 @@ class CallbackHandlers:
                 logger.warning(f"🐢 زر بطيء {data[:30]} — {elapsed:.2f}s")
 
     # =================================================================
-    # ✅ v7.5.11: عرض القائمة الرئيسية بتعديل الرسالة (أسرع 10x)
+    # ✅ v7.5.11: عرض القائمة الرئيسية بتعديل الرسالة
     # ✅ v7.5.12: يستخدم KeyboardFactory.build("main_menu", ...)
     # =================================================================
 
@@ -755,13 +773,11 @@ class CallbackHandlers:
         الوقت المتوقع: < 500ms بدل 2-4s
         """
         try:
-            # ✅ استخدام الكاش مباشرة
             user_data = await user_cache.get(user_id)
             if not user_data:
                 try:
                     user_data = await user_cache.get_or_load(user_id, DB)
                 except AttributeError:
-                    # fallback إذا لم تكن get_or_load موجودة
                     user_data = await DB.get_start_data(user_id) or {}
 
             lang = user_data.get('language', 'ar') or 'ar'
@@ -796,12 +812,11 @@ class CallbackHandlers:
                 else await _trans('disabled', lang, "معطل")
             )
 
-            # ✅ v7.5.12: استخدام KeyboardFactory.build بدل البناء اليدوي
+            # ✅ v7.5.12: استخدام KeyboardFactory.build
             try:
                 kb = KeyboardFactory.build("main_menu", lang=lang)
             except Exception as e:
                 logger.warning(f"⚠️ KeyboardFactory.build('main_menu') فشل: {e}")
-                # fallback: بناء بسيط
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)
                 ]])
@@ -809,7 +824,6 @@ class CallbackHandlers:
             # ✅ إضافة زر الأدمن إن لزم
             if CONFIG.is_developer(user_id):
                 admin_text = KeyboardFactory.get_text("admin_panel_btn", lang)
-                # التحقق من وجود زر الأدمن
                 existing_callbacks = set()
                 for row in kb.inline_keyboard:
                     for btn in row:
@@ -834,7 +848,6 @@ class CallbackHandlers:
                 subscription_status=sub_text,
             )
 
-            # ✅ تعديل الرسالة الحالية بدل إرسال جديدة
             await safe_edit(
                 query, title, reply_markup=kb, bot=context.bot
             )
@@ -1482,7 +1495,6 @@ class CallbackHandlers:
     async def _handle_language_change(update, context, query, user_id):
         """
         ✅ v7.5.12: تغيير اللغة + عرض القائمة الرئيسية بتعديل الرسالة.
-        بدل CommandHandlers.start الذي يرسل رسالة جديدة.
         """
         data = query.data
         lang_set = data.split("_")[-1]
@@ -1493,12 +1505,10 @@ class CallbackHandlers:
         if lang_set in valid_langs:
             await DB.set_user_language(user_id, lang_set)
             await invalidate_user_cache(user_id)
-            # ✅ v7.5.12: تعديل الرسالة الحالية بدل إرسال جديدة
             ok = await CallbackHandlers._show_main_menu_inline(
                 query, context, user_id
             )
             if not ok:
-                # fallback: إرسال رسالة جديدة
                 await CommandHandlers.start(update, context)
         else:
             await safe_edit(query, "❌ لغة غير مدعومة", bot=context.bot)
@@ -1785,7 +1795,6 @@ class CallbackHandlers:
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
         """
         ✅ v7.5.10: get_next_post تُرجع (dict, was_recycled) أو None أو dict.
-        تفكها بأمان وتُرجع دائماً (dict_or_None, bool).
         """
         if result is None:
             return None, False
@@ -1890,7 +1899,8 @@ class CallbackHandlers:
     async def _publish_all(bot, user_id, channels):
         """
         نشر جماعي لكل القنوات.
-        ✅ v7.5.12: يستخدم _publish_semaphore المشترك (يمنع Rate limit).
+        ✅ v7.5.12: يستخدم _publish_semaphore المشترك
+        ✅ v7.5.13: يستخدم PUBLISH_RATE_LIMITER المنفصل
         """
         published = 0
         failed = 0
@@ -1922,9 +1932,10 @@ class CallbackHandlers:
                 await safe_send(bot, user_id, msg)
                 return
 
-            # ✅ v7.5.12: استخدام _publish_semaphore المشترك
+            # ✅ v7.5.13: استخدام _publish_semaphore + PUBLISH_RATE_LIMITER
             async def run(task):
                 async with _publish_semaphore:
+                    await PUBLISH_RATE_LIMITER.acquire()
                     result = await CallbackHandlers._publish_single(
                         bot, task[0], task[1], task[2]
                     )
@@ -2100,7 +2111,6 @@ class CallbackHandlers:
             return
 
         try:
-            # تفعيل/تعطيل جماعي
             if action in ("activate_all", "deactivate_all"):
                 confirm_action = "activate_all_confirm" if action == "activate_all" else "deactivate_all_confirm"
                 if action == "activate_all":
@@ -2185,7 +2195,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # خريطة toggle
             toggle_map = {
                 "links": "delete_links", "mentions": "mentions", "slow": "slow_mode",
                 "video": "delete_videos", "audio": "delete_audio",
@@ -2390,7 +2399,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # ⚠️ Fallback للـ security actions غير المعروفة
             logger.debug(f"⚠️ sec action غير معروف: {action}")
             return
 
@@ -2450,7 +2458,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_all_penalty_durations_menu(query, context, chat_id):
-        """عرض قائمة موحّدة لاختيار نوع العقوبة لتعديل مدتها"""
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏱️ مدة الكتم", callback_data=f"sec_set_mute_duration:{chat_id}"),
              InlineKeyboardButton("⏱️ مدة الحظر", callback_data=f"sec_set_ban_duration:{chat_id}")],
@@ -3393,7 +3400,6 @@ class CallbackHandlers:
     async def _handle_advanced_actions(update, context, query, user_id):
         """
         ✅ v7.5.10: معالج الإجراءات المتقدمة والعقوبات.
-        كل فرع ينتهي بـ return صريح لتفادي الوصول إلى "غير معروف".
         """
         data = query.data
         parts = data.split(":")
@@ -3414,7 +3420,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ معرف غير صالح", bot=context.bot)
             return
 
-        # التحقق من الصلاحيات
         if chat_id != -1:
             if not await is_authorized_in_group(context.bot, chat_id, user_id):
                 await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
@@ -3425,7 +3430,6 @@ class CallbackHandlers:
                 return
 
         try:
-            # ========== ban_add / ban_list / ban_rem ==========
             if prefix.startswith("ban_"):
                 if action == "add":
                     state = (
@@ -3458,7 +3462,6 @@ class CallbackHandlers:
                 await safe_edit(query, "⚠️ غير معروف", bot=context.bot)
                 return
 
-            # ========== act_* ==========
             if prefix.startswith("act_"):
                 user_actions = {
                     "ban": (UserState.WAIT_BAN, "🚫 أرسل معرف المستخدم:"),
@@ -3495,7 +3498,6 @@ class CallbackHandlers:
                 await safe_edit(query, "⚠️ غير معروف", bot=context.bot)
                 return
 
-            # ========== pen_* ==========
             if prefix.startswith("pen_"):
                 penalty_types = {'ban', 'mute', 'kick', 'restrict', 'none'}
                 if action in penalty_types:
@@ -3523,8 +3525,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data):
-        """✅ v7.5.0: ChatPermissions جديدة متوافقة مع PTB v22
-        ✅ v7.5.2: حماية effective_chat من None"""
+        """✅ v7.5.2: حماية effective_chat من None"""
         if not update.effective_chat:
             await safe_edit(query, "❌ لا يمكن تحديد المجموعة", bot=context.bot)
             return
@@ -3701,13 +3702,11 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id, "❌ فشل النسخ الاحتياطي")
                 return
 
-            # ✅ v7.5.12: حفظ last_backup بأمان
             try:
                 await DB.set_setting('last_backup', TimeUtils.sql_iso())
             except Exception as e:
                 logger.warning(f"⚠️ فشل حفظ last_backup: {e}")
 
-            # حذف النسخ القديمة
             backups = sorted(
                 PATHS.BACKUPS.glob("backup_*.db"),
                 key=lambda p: p.stat().st_mtime, reverse=True,
@@ -3718,7 +3717,6 @@ class CallbackHandlers:
                 except OSError as e:
                     logger.debug(f"فشل حذف نسخة قديمة {old}: {e}")
 
-            # إرسال الملف للمستخدم
             with open(backup_file, 'rb') as f:
                 await context.bot.send_document(
                     chat_id=user_id, document=f, filename=backup_file.name
