@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class ChannelsPostsMixin:
     """
     Mixin يجمع دوال القنوات والمنشورات.
-    
+
     يفترض أن الفئة الأم (Database) تحتوي على:
     - _get_user_lock, _get_channel_lock
     - transaction, connection
@@ -44,13 +44,13 @@ class ChannelsPostsMixin:
     ) -> Optional[Dict]:
         """
         إضافة قناة جديدة للمستخدم.
-        
+
         يتحقق من:
         - حدود الباقة (max_channels)
         - عدم وجود القناة مسبقاً
         - إعداد الجدولة تلقائياً (12 دقيقة)
         - منح 10 نقاط للقناة الجديدة
-        
+
         Returns:
             dict: {id, channel_id, channel_name, posts_count}
             None: في حال الفشل
@@ -451,13 +451,13 @@ class ChannelsPostsMixin:
     ) -> int:
         """
         إضافة منشورات للقناة.
-        
+
         - إزالة التكرار المحلي (seen_local)
         - إزالة التكرار في DB (text_hash)
         - فحص حدود الباقة (max_posts)
         - إدراج بدفعات (batch_size)
         - منح نقاط تلقائية (عبر user_points)
-        
+
         Returns:
             عدد المنشورات المُضافة فعلياً
         """
@@ -617,7 +617,7 @@ class ChannelsPostsMixin:
     async def get_next_post(self, channel_db_id: int) -> Tuple[Optional[Dict], bool]:
         """
         جلب المنشور التالي للنشر.
-        
+
         Returns:
             (post_dict, was_recycled):
             - post_dict: بيانات المنشور أو None
