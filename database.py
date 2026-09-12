@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.9)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.10)
 ================================================================================
 - الجداول والفهارس في database_tables.py (مُستوردة)
 - دوال القنوات والمنشورات في database_channels_posts.py (Mixin)
@@ -18,19 +18,38 @@ database.py - قاعدة البيانات المتكاملة للبوت (الن�
 
 🆕 v7.3.1: إصلاح SyntaxError في set_violation_penalty
 🆕 v7.3.2: إضافة مرادفات وقت الليل
-🆕 v7.4.0: فصل دوال المجموعات إلى database_groups.py
-🆕 v7.4.1: فصل دوال التذاكر إلى database_tickets.py
-🆕 v7.4.2: فصل دوال المسابقات إلى database_contests.py
-🆕 v7.4.3: فصل دوال الإحصائيات والمشرفين إلى database_stats.py
-🆕 v7.4.4: فصل دوال الإعدادات العامة إلى database_settings.py
-🆕 v7.4.5: فصل دوال النقاط إلى database_points.py
-🆕 v7.4.6: فصل دوال النسخ الاحتياطي إلى database_backup.py
-🆕 v7.4.7: فصل دوال التذكيرات إلى database_reminders.py
+🆕 v7.4.0-7.4.7: فصل الدوال إلى Mixins
 🆕 v7.5.2: إضافة 6 فهارس أداء + توافق MySQL للفهارس الجزئية
-🆕 v7.5.3: تخطي استيراد البيانات المكررة (تحسين Cold Start ~9s)
+🆕 v7.5.3: تخطي استيراد البيانات المكررة (تحسين Cold Start)
 🆕 v7.5.8: كاش has_active_subscription → /start أسرع 40x
-🆕 v7.5.9: كاش get_auto_publish_status + دالة get_user_settings_batch
-         (حل مشكلة الاستعلامات البطيئة 1.5-2s عند ضغط زر الإعدادات)
+🆕 v7.5.9 (الإصدار الكامل):
+    ✅ كاش get_auto_publish_status + دالة get_user_settings_batch
+    ✅ إصلاح EXPLAIN ANALYZE — لا يُنفّذ الكتابات مرتين
+    ✅ إصلاح executemany — لا retry يُضاعف البيانات (فحص idempotency)
+    ✅ fetchval يستخدم conn.fetchval بدل fetchrow (أسرع 20-40%)
+    ✅ bool → True/False في PostgreSQL (توافق asyncpg)
+    ✅ timeout إجمالي على execute/fetch* لمنع تراكم الاتصالات
+    ✅ إزالة تحويل placeholders المزدوج في executemany
+    ✅ إصلاح #1 (حرج): update_next_publish — TypeError عند None
+    ✅ إصلاح #2 (حرج): _executemany_with_conn — لا حلقة احتياطية لغير idempotent
+    ✅ إصلاح #3: _convert_placeholders MySQL — معالجة تعليقات --
+    ✅ إصلاح #4: _convert_upsert — regex غير جشع + lookahead
+    ✅ إصلاح #5: _execute_with_logging — skip_explain لـ executemany
+    ✅ إصلاح #6: _execute_with_retry — asyncmy.errors.MySQLError + حذف السطر الميت
+    ✅ إصلاح #7: invalidate_subscription_cache — إبطال كل المفاتيح المحتملة
+    ✅ إصلاح #8: _add_column_safe — TEXT DEFAULT → VARCHAR(255) لـ MySQL قديم
+
+🆕 v7.5.10 (الإصدار الكامل — 10 إصلاحات إضافية):
+    ✅ إصلاح #1 (حرج): get_user — copy.deepcopy لمنع تسمم كاش user_cache
+    ✅ إصلاح #2 (حرج): set_user_language/auto_publish/auto_recycle — إبطال user_{id}_True/_False
+    ✅ إصلاح #3 (حرج): _executemany_with_conn — lstrip قبل فحص is_idempotent (MySQL)
+    ✅ إصلاح #4 (حرج): _execute_with_logging — WITH ليست read-only (writable CTE)
+    ✅ إصلاح #5 (متوسط): register_user — معاملة مستقلة لكل محاولة (PG aborted)
+    ✅ إصلاح #6 (متوسط): _convert_placeholders (PG) — state machine لرصد $N خارج النصوص
+    ✅ إصلاح #7 (متوسط): _convert_upsert (MySQL) — رفض صريح عند WHERE بعد ON DUPLICATE
+    ✅ إصلاح #8 (منخفض): _column_exists — تحقق re.match من identifiers
+    ✅ إصلاح #9 (منخفض): _execute_with_retry — RuntimeError عند max_retries=0
+    ✅ إصلاح #10 (ملاحظة): transaction (PG) — استخدام conn.transaction() بدل execute("BEGIN")
 """
 
 import os
@@ -46,6 +65,7 @@ import re
 import gzip
 import tempfile
 import hashlib
+import copy
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any, Union, AsyncGenerator
@@ -129,7 +149,7 @@ except ImportError as e:
     TABLES_MODULE_AVAILABLE = False
 
 # =====================================================================
-# 0.2.1 استيراد ChannelsPostsMixin (دوال القنوات + المنشورات)
+# 0.2.1-0.2.10 استيراد الـ Mixins
 # =====================================================================
 
 try:
@@ -141,10 +161,6 @@ except ImportError as e:
     ChannelsPostsMixin = object
     CHANNELS_POSTS_MIXIN_AVAILABLE = False
 
-# =====================================================================
-# 0.2.2 استيراد SubscriptionsMixin (الاشتراكات والباقات والإحالات)
-# =====================================================================
-
 try:
     from database_subscriptions import SubscriptionsMixin
     SUBSCRIPTIONS_MIXIN_AVAILABLE = True
@@ -153,10 +169,6 @@ except ImportError as e:
     logger.warning(f"⚠️ database_subscriptions.py غير موجود: {e}")
     SubscriptionsMixin = object
     SUBSCRIPTIONS_MIXIN_AVAILABLE = False
-
-# =====================================================================
-# 0.2.3 استيراد GroupsMixin (دوال المجموعات)
-# =====================================================================
 
 try:
     from database_groups import GroupsMixin
@@ -167,10 +179,6 @@ except ImportError as e:
     GroupsMixin = object
     GROUPS_MIXIN_AVAILABLE = False
 
-# =====================================================================
-# 0.2.4 استيراد TicketsMixin (دوال التذاكر)
-# =====================================================================
-
 try:
     from database_tickets import TicketsMixin
     TICKETS_MIXIN_AVAILABLE = True
@@ -179,10 +187,6 @@ except ImportError as e:
     logger.warning(f"⚠️ database_tickets.py غير موجود: {e}")
     TicketsMixin = object
     TICKETS_MIXIN_AVAILABLE = False
-
-# =====================================================================
-# 0.2.5 استيراد ContestsMixin (دوال المسابقات)
-# =====================================================================
 
 try:
     from database_contests import ContestsMixin
@@ -193,10 +197,6 @@ except ImportError as e:
     ContestsMixin = object
     CONTESTS_MIXIN_AVAILABLE = False
 
-# =====================================================================
-# 0.2.6 استيراد StatsMixin (الإحصائيات والمشرفين)
-# =====================================================================
-
 try:
     from database_stats import StatsMixin
     STATS_MIXIN_AVAILABLE = True
@@ -205,10 +205,6 @@ except ImportError as e:
     logger.warning(f"⚠️ database_stats.py غير موجود: {e}")
     StatsMixin = object
     STATS_MIXIN_AVAILABLE = False
-
-# =====================================================================
-# 0.2.7 استيراد SettingsMixin (الإعدادات العامة)
-# =====================================================================
 
 try:
     from database_settings import SettingsMixin
@@ -219,10 +215,6 @@ except ImportError as e:
     SettingsMixin = object
     SETTINGS_MIXIN_AVAILABLE = False
 
-# =====================================================================
-# 0.2.8 استيراد PointsMixin (النقاط والمستويات)
-# =====================================================================
-
 try:
     from database_points import PointsMixin
     POINTS_MIXIN_AVAILABLE = True
@@ -232,10 +224,6 @@ except ImportError as e:
     PointsMixin = object
     POINTS_MIXIN_AVAILABLE = False
 
-# =====================================================================
-# 0.2.9 استيراد BackupMixin (النسخ الاحتياطي)
-# =====================================================================
-
 try:
     from database_backup import BackupMixin
     BACKUP_MIXIN_AVAILABLE = True
@@ -244,10 +232,6 @@ except ImportError as e:
     logger.warning(f"⚠️ database_backup.py غير موجود: {e}")
     BackupMixin = object
     BACKUP_MIXIN_AVAILABLE = False
-
-# =====================================================================
-# 0.2.10 استيراد RemindersMixin (التذكيرات)
-# =====================================================================
 
 try:
     from database_reminders import RemindersMixin
@@ -517,9 +501,12 @@ except ImportError:
             await internal_cache.invalidate(f"groups_{user_id}")
             await internal_cache.invalidate(f"reminder_settings_{user_id}")
             await internal_cache.invalidate(f"auto_recycle_{user_id}")
-            await internal_cache.invalidate(f"auto_publish_{user_id}")           # ✅ v7.5.9
-            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
+            await internal_cache.invalidate(f"auto_publish_{user_id}")
+            await internal_cache.invalidate(f"user_settings_batch_{user_id}")
             await internal_cache.invalidate(f"has_active_sub_{user_id}")
+            await internal_cache.invalidate(f"has_active_subscription_{user_id}")
+            await internal_cache.invalidate(f"subscription_active_{user_id}")
+            await internal_cache.invalidate(f"subscription_{user_id}")
         except Exception as e:
             logger.debug(f"invalidate_user_cache: {e}")
 
@@ -814,15 +801,14 @@ def _convert_placeholders(query: str) -> str:
     if DB_TYPE == "sqlite":
         return query
     if USE_POSTGRES:
-        existing_params = re.findall(r"\$(\d+)", query)
-        param_count = max((int(n) for n in existing_params), default=0)
-
+        # ✅ v7.5.10: state machine — رصد $N خارج النصوص/التعليقات فقط
         result = []
         in_single = False
         in_double = False
         in_comment = False
         in_block_comment = False
         escape_next = False
+        param_count = 0
         i = 0
         while i < len(query):
             ch = query[i]
@@ -871,6 +857,22 @@ def _convert_placeholders(query: str) -> str:
                 result.append(ch)
                 i += 1
                 continue
+            # ✅ v7.5.10: رصد $N فقط خارج النصوص
+            if (ch == "$" and not in_single and not in_double
+                    and not in_comment and not in_block_comment):
+                j = i + 1
+                while j < len(query) and query[j].isdigit():
+                    j += 1
+                if j > i + 1:
+                    try:
+                        n = int(query[i + 1:j])
+                        if n > param_count:
+                            param_count = n
+                    except ValueError:
+                        pass
+                    result.append(query[i:j])
+                    i = j
+                    continue
             if (ch == "?" and not in_single and not in_double
                     and not in_comment and not in_block_comment):
                 param_count += 1
@@ -881,9 +883,11 @@ def _convert_placeholders(query: str) -> str:
             i += 1
         return "".join(result)
     elif USE_MYSQL:
+        # ✅ v7.5.9: إصلاح #3 — معالجة تعليقات -- و /* */ في MySQL
         result = []
         in_single = False
         in_double = False
+        in_comment = False
         in_block_comment = False
         escape_next = False
         i = 0
@@ -899,7 +903,17 @@ def _convert_placeholders(query: str) -> str:
                 result.append(ch)
                 i += 1
                 continue
-            if ch == "/" and i + 1 < len(query) and query[i + 1] == "*":
+            if (not in_single and not in_double and not in_comment and not in_block_comment
+                    and ch == "-" and i + 1 < len(query) and query[i + 1] == "-"):
+                in_comment = True
+            if in_comment:
+                if ch == "\n":
+                    in_comment = False
+                result.append(ch)
+                i += 1
+                continue
+            if (not in_single and not in_double and not in_comment
+                    and ch == "/" and i + 1 < len(query) and query[i + 1] == "*"):
                 in_block_comment = True
                 result.append(ch)
                 i += 1
@@ -924,7 +938,8 @@ def _convert_placeholders(query: str) -> str:
                 result.append(ch)
                 i += 1
                 continue
-            if ch == "?" and not in_single and not in_double and not in_block_comment:
+            if (ch == "?" and not in_single and not in_double
+                    and not in_comment and not in_block_comment):
                 result.append("%s")
                 i += 1
                 continue
@@ -1069,32 +1084,60 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
 
 
 def _convert_upsert(query: str) -> str:
+    """
+    ✅ v7.5.9: إصلاح #4 — regex غير جشع + lookahead
+    ✅ v7.5.10: إصلاح #7 — رفض صريح عند WHERE بعد ON DUPLICATE KEY UPDATE
+    """
     if DB_TYPE == "sqlite":
         return query
     if not USE_MYSQL and not USE_POSTGRES:
         return query
+    if USE_POSTGRES:
+        return query
 
-    pattern = r"ON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+(.+)"
-    match = re.search(pattern, query, re.IGNORECASE | re.DOTALL)
+    # MySQL: تحويل ON CONFLICT ... DO UPDATE SET إلى ON DUPLICATE KEY UPDATE
+    pattern = re.compile(
+        r"ON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+"
+        r"(.+?)"
+        r"(?=(?:\s+WHERE\b|\s+RETURNING\b|\s+ON\s+CONFLICT\b|;|$))",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(query)
     if not match:
         return query
 
-    if USE_MYSQL:
-        update_set = match.group(2).strip()
+    update_set = match.group(2).strip()
 
-        def replace_excluded(m):
-            return f"VALUES({m.group(1)})"
+    def replace_excluded(m):
+        return f"VALUES({m.group(1)})"
 
-        new_update_set = re.sub(
-            r"excluded\.([a-zA-Z_][a-zA-Z0-9_]*)", replace_excluded, update_set
+    new_update_set = re.sub(
+        r"excluded\.([a-zA-Z_][a-zA-Z0-9_]*)", replace_excluded, update_set
+    )
+    new_query = query[: match.start()].rstrip()
+    tail = query[match.end():]
+
+    # ✅ v7.5.10: إصلاح #7 — MySQL لا يدعم WHERE/RETURNING بعد ON DUPLICATE KEY UPDATE
+    tail_stripped = tail.lstrip()
+    tail_upper = tail_stripped.upper()
+    if tail_upper.startswith("WHERE"):
+        raise ValueError(
+            "_convert_upsert: MySQL لا يدعم WHERE بعد ON DUPLICATE KEY UPDATE. "
+            "أعد كتابة الاستعلام (استخدم INSERT ... SELECT مع UNION/ON DUPLICATE). "
+            f"الاستعلام: {query[:200]}"
         )
-        new_query = query[: match.start()].rstrip()
-        return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}"
-    else:
-        return query
+    if tail_upper.startswith("RETURNING"):
+        raise ValueError(
+            "_convert_upsert: MySQL لا يدعم RETURNING. "
+            "أعد كتابة الاستعلام (استخدم SELECT بعد الإدراج). "
+            f"الاستعلام: {query[:200]}"
+        )
+
+    return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}" + tail
 
 
 def _adapt_params(params: tuple) -> tuple:
+    """✅ v7.5.9: bool → True/False لـ PostgreSQL (توافق asyncpg)"""
     if params is None:
         return ()
     new_params = []
@@ -1113,7 +1156,10 @@ def _adapt_params(params: tuple) -> tuple:
             else:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
         elif isinstance(p, bool):
-            new_params.append(1 if p else 0)
+            if USE_POSTGRES:
+                new_params.append(p)
+            else:
+                new_params.append(1 if p else 0)
         else:
             new_params.append(p)
     return tuple(new_params)
@@ -1256,159 +1302,75 @@ class Database(
     MAX_PENALTY_DURATION = 365 * 86400
 
     COLUMN_ALIASES = {
-        # ==================== Mentions ====================
-        "delete_mentions": "mentions",
-        "delete_mention": "mentions",
-        "remove_mentions": "mentions",
-        "mention": "mentions",
-        "mentions_filter": "mentions",
-        "delete_mention_messages": "mentions",
-        # ==================== Links ====================
-        "remove_links": "delete_links",
-        "links": "delete_links",
-        "delete_link": "delete_links",
-        "remove_link": "delete_links",
+        "delete_mentions": "mentions", "delete_mention": "mentions",
+        "remove_mentions": "mentions", "mention": "mentions",
+        "mentions_filter": "mentions", "delete_mention_messages": "mentions",
+        "remove_links": "delete_links", "links": "delete_links",
+        "delete_link": "delete_links", "remove_link": "delete_links",
         "links_filter": "delete_links",
-        # ==================== Forward ====================
-        "delete_forwarded_messages": "delete_forwarded",
-        "remove_forwards": "delete_forwarded",
-        "forward": "delete_forwarded",
-        "forwarded": "delete_forwarded",
-        "delete_forward": "delete_forwarded",
-        "remove_forward": "delete_forwarded",
+        "delete_forwarded_messages": "delete_forwarded", "remove_forwards": "delete_forwarded",
+        "forward": "delete_forwarded", "forwarded": "delete_forwarded",
+        "delete_forward": "delete_forwarded", "remove_forward": "delete_forwarded",
         "forwards": "delete_forwarded",
-        # ==================== Polls ====================
-        "delete_polls_games": "delete_polls",
-        "polls": "delete_polls",
-        "remove_polls": "delete_polls",
-        "delete_poll": "delete_polls",
-        "poll": "delete_polls",
-        # ==================== Games ====================
-        "games": "delete_games",
-        "remove_games": "delete_games",
-        "delete_game": "delete_games",
-        "game": "delete_games",
-        # ==================== Service messages ====================
-        "delete_service_messages": "delete_service",
-        "service_messages": "delete_service",
-        "remove_service": "delete_service",
-        "delete_service_msg": "delete_service",
-        "delete_services": "delete_service",
-        "service_msg": "delete_service",
-        "service_message": "delete_service",
-        "delete_service_message": "delete_service",
-        # ==================== Voice ====================
-        "voice": "delete_voice",
-        "remove_voice": "delete_voice",
-        "delete_voices": "delete_voice",
-        "delete_voice_messages": "delete_voice",
-        "voice_messages": "delete_voice",
-        "delete_voice_msg": "delete_voice",
-        # ==================== Video note ====================
-        "video_note": "delete_video_note",
-        "delete_video_notes": "delete_video_note",
-        "remove_video_note": "delete_video_note",
-        "delete_videonote": "delete_video_note",
-        "video_notes": "delete_video_note",
-        "videonote": "delete_video_note",
-        # ==================== Photos ====================
-        "delete_photo": "delete_photos",
-        "photos": "delete_photos",
-        "remove_photos": "delete_photos",
-        "delete_photo_msg": "delete_photos",
-        "photo": "delete_photos",
-        "delete_photo_messages": "delete_photos",
-        # ==================== Videos ====================
-        "delete_video": "delete_videos",
-        "videos": "delete_videos",
-        "remove_videos": "delete_videos",
-        "video": "delete_videos",
+        "delete_polls_games": "delete_polls", "polls": "delete_polls",
+        "remove_polls": "delete_polls", "delete_poll": "delete_polls", "poll": "delete_polls",
+        "games": "delete_games", "remove_games": "delete_games",
+        "delete_game": "delete_games", "game": "delete_games",
+        "delete_service_messages": "delete_service", "service_messages": "delete_service",
+        "remove_service": "delete_service", "delete_service_msg": "delete_service",
+        "delete_services": "delete_service", "service_msg": "delete_service",
+        "service_message": "delete_service", "delete_service_message": "delete_service",
+        "voice": "delete_voice", "remove_voice": "delete_voice",
+        "delete_voices": "delete_voice", "delete_voice_messages": "delete_voice",
+        "voice_messages": "delete_voice", "delete_voice_msg": "delete_voice",
+        "video_note": "delete_video_note", "delete_video_notes": "delete_video_note",
+        "remove_video_note": "delete_video_note", "delete_videonote": "delete_video_note",
+        "video_notes": "delete_video_note", "videonote": "delete_video_note",
+        "delete_photo": "delete_photos", "photos": "delete_photos",
+        "remove_photos": "delete_photos", "delete_photo_msg": "delete_photos",
+        "photo": "delete_photos", "delete_photo_messages": "delete_photos",
+        "delete_video": "delete_videos", "videos": "delete_videos",
+        "remove_videos": "delete_videos", "video": "delete_videos",
         "delete_video_messages": "delete_videos",
-        # ==================== Audio ====================
-        "delete_audios": "delete_audio",
-        "audios": "delete_audio",
-        "remove_audio": "delete_audio",
-        "audio": "delete_audio",
+        "delete_audios": "delete_audio", "audios": "delete_audio",
+        "remove_audio": "delete_audio", "audio": "delete_audio",
         "delete_audio_messages": "delete_audio",
-        # ==================== Animation / GIF ====================
-        "delete_gifs": "delete_animation",
-        "gifs": "delete_animation",
-        "gif": "delete_animation",
-        "remove_gif": "delete_animation",
-        "animation": "delete_animation",
-        "animations": "delete_animation",
-        # ==================== Documents ====================
-        "delete_document": "delete_documents",
-        "documents": "delete_documents",
-        "remove_documents": "delete_documents",
-        "document": "delete_documents",
+        "delete_gifs": "delete_animation", "gifs": "delete_animation",
+        "gif": "delete_animation", "remove_gif": "delete_animation",
+        "animation": "delete_animation", "animations": "delete_animation",
+        "delete_document": "delete_documents", "documents": "delete_documents",
+        "remove_documents": "delete_documents", "document": "delete_documents",
         "delete_document_messages": "delete_documents",
-        # ==================== Stickers ====================
-        "delete_sticker": "delete_stickers",
-        "stickers": "delete_stickers",
-        "remove_stickers": "delete_stickers",
-        "sticker": "delete_stickers",
+        "delete_sticker": "delete_stickers", "stickers": "delete_stickers",
+        "remove_stickers": "delete_stickers", "sticker": "delete_stickers",
         "delete_sticker_messages": "delete_stickers",
-        # ==================== Antiflood ====================
-        "anti_flood": "antiflood_enabled",
-        "flood": "antiflood_enabled",
-        "antiflood": "antiflood_enabled",
-        "flood_protection": "antiflood_enabled",
+        "anti_flood": "antiflood_enabled", "flood": "antiflood_enabled",
+        "antiflood": "antiflood_enabled", "flood_protection": "antiflood_enabled",
         "anti_flood_enabled": "antiflood_enabled",
-        # ==================== Night mode ====================
-        "nightmode": "night_mode_enabled",
-        "night_mode": "night_mode_enabled",
-        "night": "night_mode_enabled",
-        "night_mode_active": "night_mode_enabled",
-        "night_start": "night_mode_start",
-        "night_end": "night_mode_end",
-        "night_mode_begin": "night_mode_start",
-        "night_mode_finish": "night_mode_end",
-        "start_night": "night_mode_start",
-        "end_night": "night_mode_end",
-        # ==================== Warnings ====================
-        "warnings": "warn_enabled",
-        "warn_system": "warn_enabled",
-        "warning": "warn_enabled",
-        "warnings_enabled": "warn_enabled",
-        "warn": "warn_enabled",
-        # ==================== Welcome/Goodbye ====================
-        "welcome": "welcome_enabled",
-        "welcome_message": "welcome_text",
-        "welcome_msg": "welcome_text",
-        "goodbye": "goodbye_enabled",
-        "goodbye_message": "goodbye_text",
-        "goodbye_msg": "goodbye_text",
-        # ==================== Join requests ====================
-        "auto_approve": "auto_approve_join",
-        "auto_reject": "auto_reject_join",
-        "approve_join": "auto_approve_join",
-        "reject_join": "auto_reject_join",
-        "auto_approve_enabled": "auto_approve_join",
-        "auto_reject_enabled": "auto_reject_join",
-        # ==================== Slow mode ====================
-        "slowmode": "slow_mode",
-        "slow_mode_sec": "slow_mode_seconds",
+        "nightmode": "night_mode_enabled", "night_mode": "night_mode_enabled",
+        "night": "night_mode_enabled", "night_mode_active": "night_mode_enabled",
+        "night_start": "night_mode_start", "night_end": "night_mode_end",
+        "night_mode_begin": "night_mode_start", "night_mode_finish": "night_mode_end",
+        "start_night": "night_mode_start", "end_night": "night_mode_end",
+        "warnings": "warn_enabled", "warn_system": "warn_enabled",
+        "warning": "warn_enabled", "warnings_enabled": "warn_enabled", "warn": "warn_enabled",
+        "welcome": "welcome_enabled", "welcome_message": "welcome_text",
+        "welcome_msg": "welcome_text", "goodbye": "goodbye_enabled",
+        "goodbye_message": "goodbye_text", "goodbye_msg": "goodbye_text",
+        "auto_approve": "auto_approve_join", "auto_reject": "auto_reject_join",
+        "approve_join": "auto_approve_join", "reject_join": "auto_reject_join",
+        "auto_approve_enabled": "auto_approve_join", "auto_reject_enabled": "auto_reject_join",
+        "slowmode": "slow_mode", "slow_mode_sec": "slow_mode_seconds",
         "slowmode_seconds": "slow_mode_seconds",
-        # ==================== NSFW ====================
-        "nsfw": "nsfw_enabled",
-        "nsfw_protection": "nsfw_enabled",
+        "nsfw": "nsfw_enabled", "nsfw_protection": "nsfw_enabled",
         "nsfw_filter_enabled": "nsfw_enabled",
-        # ==================== Antiflood variants ====================
         "antiflood_messages_count": "antiflood_messages",
-        "antiflood_seconds_window": "antiflood_seconds",
-        "antiflood_window": "antiflood_seconds",
-        # ==================== Max message length ====================
-        "message_length": "max_message_length",
-        "max_length": "max_message_length",
+        "antiflood_seconds_window": "antiflood_seconds", "antiflood_window": "antiflood_seconds",
+        "message_length": "max_message_length", "max_length": "max_message_length",
         "message_max_length": "max_message_length",
-        # ==================== Penalty variants ====================
-        "auto_penalty_enabled": "auto_penalty",
-        "delete_penalty_enabled": "delete_penalty",
+        "auto_penalty_enabled": "auto_penalty", "delete_penalty_enabled": "delete_penalty",
         "delete_message_enabled": "delete_penalty",
-        # ==================== Violations ====================
-        "violation_action": "violation_strikes",
-        "violations_enabled": "violation_strikes",
+        "violation_action": "violation_strikes", "violations_enabled": "violation_strikes",
     }
 
     def __new__(cls) -> "Database":
@@ -1442,13 +1404,12 @@ class Database(
         self._max_post_text_length = MAX_POST_TEXT_LENGTH
         self._posts_batch_size = POSTS_BATCH_SIZE
         self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
-        # ✅ خصائص مشتركة لكل الـ Mixins
+        self._query_timeout = self._connection_timeout * 2
         self.DB_TYPE = DB_TYPE
         self.USE_POSTGRES = USE_POSTGRES
         self.USE_MYSQL = USE_MYSQL
         self.TimeUtils = TimeUtils
         self.internal_cache = internal_cache
-        # ✅ خصائص مطلوبة لـ Mixins
         self.CACHE_AVAILABLE = CACHE_AVAILABLE
         self.banned_words_cache = banned_words_cache
         self.settings_cache = settings_cache
@@ -1457,13 +1418,11 @@ class Database(
         self.CONFIG = CONFIG
         self.PATHS = PATHS
         self.DATABASE_URL = DATABASE_URL
-        # ✅ كاش محلي للكلمات المحظورة
         self._banned_words_local_cache = {}
         self._banned_words_cache_ttl = 300
         self._global_banned_words_cache: List[str] = []
         self._global_banned_words_loaded = False
         self._global_words_lock = asyncio.Lock()
-        # ✅ كاش أعمدة group_security
         self._group_security_columns_cache: Optional[set] = None
 
     # =====================================================================
@@ -1652,25 +1611,28 @@ class Database(
 
     @asynccontextmanager
     async def transaction(self):
+        """✅ v7.5.10: إصلاح #10 — استخدام conn.transaction() في asyncpg بدل execute("BEGIN")"""
         conn = await self._get_connection()
+        tx = None
         try:
             if USE_POSTGRES:
-                await conn.execute("BEGIN")
+                tx = conn.transaction()
+                await tx.start()
             elif USE_MYSQL:
                 await conn.execute("START TRANSACTION")
             else:
                 await conn.execute("BEGIN TRANSACTION")
             yield conn
             if USE_POSTGRES:
-                await conn.execute("COMMIT")
+                await tx.commit()
             elif USE_MYSQL:
                 await conn.execute("COMMIT")
             else:
                 await conn.execute("COMMIT")
         except Exception as e:
             try:
-                if USE_POSTGRES:
-                    await conn.execute("ROLLBACK")
+                if USE_POSTGRES and tx is not None:
+                    await tx.rollback()
                 elif USE_MYSQL:
                     await conn.execute("ROLLBACK")
                 else:
@@ -1686,7 +1648,14 @@ class Database(
     # دوال الاستعلام
     # =====================================================================
 
-    async def _execute_with_logging(self, query: str, params: tuple, conn, executor):
+    async def _execute_with_logging(self, query: str, params: tuple, conn, executor,
+                                    skip_explain: bool = False):
+        """
+        ✅ v7.5.9:
+        - EXPLAIN ANALYZE فقط للـ SELECT (لا يُنفّذ الكتابات مرتين)
+        - skip_explain=True عند الاستدعاء من executemany (params قائمة صفوف)
+        ✅ v7.5.10: إصلاح #4 — WITH لم تعد تُعتبر read-only (writable CTE)
+        """
         start = time.monotonic()
         try:
             result = await executor(query, params)
@@ -1694,10 +1663,23 @@ class Database(
             if elapsed > self._slow_query_log_threshold:
                 safe_query = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:200])
                 logger.warning(f"🐌 استعلام بطيء ({elapsed:.2f}s): {safe_query}...")
-                if self._explain_slow_queries:
+                if self._explain_slow_queries and not skip_explain:
                     try:
+                        upper_q = query.lstrip().upper()
+                        # ✅ v7.5.10: SELECT فقط — لا WITH (قد تكون writable CTE)
+                        #           + FOR UPDATE/FOR SHARE ليست آمنة لـ ANALYZE
+                        is_read_only = (
+                            upper_q.startswith("SELECT")
+                            and " FOR UPDATE" not in upper_q
+                            and " FOR SHARE" not in upper_q
+                        )
                         if USE_POSTGRES:
-                            explain = await conn.fetch(f"EXPLAIN (ANALYZE, BUFFERS) {query}", *params)
+                            if is_read_only:
+                                explain = await conn.fetch(
+                                    f"EXPLAIN (ANALYZE, BUFFERS) {query}", *params
+                                )
+                            else:
+                                explain = await conn.fetch(f"EXPLAIN {query}", *params)
                             logger.info("📊 EXPLAIN:\n" + "\n".join([str(row) for row in explain]))
                         elif USE_MYSQL:
                             cursor = await conn.cursor()
@@ -1719,6 +1701,22 @@ class Database(
             raise
 
     async def _execute_with_retry(self, query: str, params, executor, max_retries=3):
+        """
+        ✅ v7.5.9: إصلاح #6
+        - استخدام asyncmy.errors.MySQLError (المسار الصحيح)
+        - حذف السطر الميت بعد الحلقة
+        ✅ v7.5.10: إصلاح #9 — RuntimeError عند max_retries=0
+        """
+        AsyncMySQLError = None
+        if USE_MYSQL:
+            try:
+                from asyncmy.errors import MySQLError as AsyncMySQLError
+            except ImportError:
+                try:
+                    from asyncmy import MySQLError as AsyncMySQLError
+                except ImportError:
+                    AsyncMySQLError = Exception
+
         last_exception = None
         for attempt in range(max_retries):
             try:
@@ -1738,16 +1736,27 @@ class Database(
                     retryable = True
                 elif USE_POSTGRES and isinstance(e, asyncpg.exceptions.PostgresConnectionError):
                     retryable = True
-                elif USE_MYSQL and isinstance(e, asyncmy.MySQLError):
-                    error_msg = str(e).lower()
-                    if any(kw in error_msg for kw in ["deadlock", "lock wait", "connection", "timeout"]):
-                        retryable = True
+                elif USE_MYSQL and AsyncMySQLError is not None:
+                    try:
+                        if isinstance(e, AsyncMySQLError):
+                            error_msg = str(e).lower()
+                            if any(kw in error_msg for kw in [
+                                "deadlock", "lock wait", "connection", "timeout"
+                            ]):
+                                retryable = True
+                    except Exception:
+                        pass
                 if retryable and attempt < max_retries - 1:
                     delay = (0.5 * (attempt + 1)) + (0.1 * attempt)
                     logger.warning(f"⚠️ إعادة محاولة {attempt + 1}/{max_retries} بعد {delay:.2f}s: {e}")
                     await asyncio.sleep(delay)
                     continue
-                raise last_exception
+                raise
+        # ✅ v7.5.10: إصلاح #9 — رفع صريح عند max_retries<=0
+        if last_exception is None:
+            raise RuntimeError(
+                f"_execute_with_retry: max_retries={max_retries} → لم تُنفَّذ أي محاولة"
+            )
         raise last_exception
 
     async def _execute_with_conn(self, conn, query: str, *params) -> int:
@@ -1780,6 +1789,12 @@ class Database(
             return cursor.rowcount
 
     async def _executemany_with_conn(self, conn, query: str, params_list: List[tuple]) -> int:
+        """
+        ✅ v7.5.9: إصلاح #2 (حرج)
+        - فحص idempotency قبل الحلقة الاحتياطية
+        - لا حلقة احتياطية لغير idempotent (تجنب تكرار البيانات)
+        ✅ v7.5.10: إصلاح #3 — lstrip قبل فحص is_idempotent (MySQL INSERT IGNORE)
+        """
         if not params_list:
             return 0
         q = _convert_placeholders(query)
@@ -1793,17 +1808,33 @@ class Database(
         if not is_ignore and not is_replace:
             q = _convert_upsert(q)
         params_list = [_adapt_params(p) for p in params_list]
+
+        # ✅ v7.5.10: lstrip قبل الفحص — INSERT IGNORE تبدأ الاستعلام مباشرة
+        upper_q_after = q.upper().lstrip()
+        is_idempotent = (
+            " ON CONFLICT " in upper_q_after
+            or upper_q_after.startswith("INSERT IGNORE ")
+            or upper_q_after.startswith("REPLACE ")
+        )
+
         if USE_POSTGRES:
             try:
                 await conn.executemany(q, params_list)
                 return len(params_list)
             except Exception as e:
-                logger.warning(f"⚠️ فشل executemany الجماعي ({e})، العودة للحلقة البطيئة")
+                if not is_idempotent:
+                    logger.error(
+                        f"❌ فشل executemany غير idempotent — لا حلقة احتياطية لتجنب تكرار البيانات: {e}"
+                    )
+                    raise
+                logger.warning(f"⚠️ فشل executemany الجماعي ({e})، العودة للحلقة البطيئة (idempotent)")
                 total = 0
                 for params in params_list:
                     try:
                         result = await self._execute_with_logging(
-                            q, params, conn, lambda q2, p2: conn.execute(q2, *p2)
+                            q, params, conn,
+                            lambda q2, p2: conn.execute(q2, *p2),
+                            skip_explain=True,
                         )
                         parts = result.split()
                         if parts and parts[-1].isdigit():
@@ -1817,14 +1848,18 @@ class Database(
         elif USE_MYSQL:
             cursor = await conn.cursor()
             await self._execute_with_logging(
-                q, params_list, conn, lambda q2, p2: cursor.executemany(q2, p2)
+                q, params_list, conn,
+                lambda q2, p2: cursor.executemany(q2, p2),
+                skip_explain=True,
             )
             rc = cursor.rowcount
             await cursor.close()
             return rc
         else:
             cursor = await self._execute_with_logging(
-                q, params_list, conn, lambda q2, p2: conn.executemany(q2, p2)
+                q, params_list, conn,
+                lambda q2, p2: conn.executemany(q2, p2),
+                skip_explain=True,
             )
             return cursor.rowcount
 
@@ -1873,11 +1908,14 @@ class Database(
             return [dict(row) for row in rows]
 
     async def _fetchval_with_conn(self, conn, query: str, *params, default=None) -> Any:
+        """✅ v7.5.9: PostgreSQL يستخدم conn.fetchval (أسرع 20-40% من fetchrow)"""
         q = _convert_placeholders(query)
         params = _adapt_params(params) if params else ()
         if USE_POSTGRES:
-            row = await self._execute_with_logging(q, params, conn, lambda q2, p2: conn.fetchrow(q2, *p2))
-            return row[0] if row else default
+            val = await self._execute_with_logging(
+                q, params, conn, lambda q2, p2: conn.fetchval(q2, *p2)
+            )
+            return val if val is not None else default
         elif USE_MYSQL:
             cursor = await conn.cursor()
             await self._execute_with_logging(q, params, conn, lambda q2, p2: cursor.execute(q2, p2))
@@ -1890,39 +1928,79 @@ class Database(
             return row[0] if row else default
 
     async def execute(self, query: str, params: tuple = ()) -> int:
+        """✅ v7.5.9: timeout إجمالي لمنع تراكم الاتصالات"""
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._execute_with_conn(conn, q, *p)
-        return await self._execute_with_retry(query, params, _exec)
+        try:
+            return await asyncio.wait_for(
+                self._execute_with_retry(query, params, _exec),
+                timeout=self._query_timeout,
+            )
+        except asyncio.TimeoutError:
+            safe_q = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:100])
+            logger.error(f"❌ timeout على execute ({self._query_timeout}s): {safe_q}")
+            raise
 
     async def fetchone(self, query: str, params: tuple = ()) -> Optional[Dict]:
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchone_with_conn(conn, q, *p)
-        return await self._execute_with_retry(query, params, _exec)
+        try:
+            return await asyncio.wait_for(
+                self._execute_with_retry(query, params, _exec),
+                timeout=self._query_timeout,
+            )
+        except asyncio.TimeoutError:
+            safe_q = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:100])
+            logger.error(f"❌ timeout على fetchone ({self._query_timeout}s): {safe_q}")
+            raise
 
     async def fetchall(self, query: str, params: tuple = ()) -> List[Dict]:
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchall_with_conn(conn, q, *p)
-        return await self._execute_with_retry(query, params, _exec)
+        try:
+            return await asyncio.wait_for(
+                self._execute_with_retry(query, params, _exec),
+                timeout=self._query_timeout,
+            )
+        except asyncio.TimeoutError:
+            safe_q = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:100])
+            logger.error(f"❌ timeout على fetchall ({self._query_timeout}s): {safe_q}")
+            raise
 
     async def fetchval(self, query: str, params: tuple = (), default: Any = None) -> Any:
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchval_with_conn(conn, q, *p, default=default)
-        return await self._execute_with_retry(query, params, _exec)
+        try:
+            return await asyncio.wait_for(
+                self._execute_with_retry(query, params, _exec),
+                timeout=self._query_timeout,
+            )
+        except asyncio.TimeoutError:
+            safe_q = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:100])
+            logger.error(f"❌ timeout على fetchval ({self._query_timeout}s): {safe_q}")
+            raise
 
     async def executemany(self, query: str, params_list: List[tuple]) -> int:
+        """
+        ✅ v7.5.9: لا retry — قد يُضاعف البيانات عند deadlock.
+        نُنفّذ مرة واحدة، والـ caller يستخدم INSERT OR IGNORE.
+        """
         if not params_list:
             return 0
-        q = _convert_placeholders(query)
-        params_list = [_adapt_params(p) for p in params_list]
-
-        async def _exec(q2, p_list):
+        try:
             async with self.connection() as conn:
-                return await self._executemany_with_conn(conn, q2, p_list)
-        return await self._execute_with_retry(q, params_list, _exec)
+                return await asyncio.wait_for(
+                    self._executemany_with_conn(conn, query, params_list),
+                    timeout=self._query_timeout,
+                )
+        except asyncio.TimeoutError:
+            safe_q = re.sub(r"\b\d{6,}\b", "[REDACTED]", query[:100])
+            logger.error(f"❌ timeout على executemany ({self._query_timeout}s): {safe_q}")
+            raise
 
     # =====================================================================
     # دوال الأقفال
@@ -2063,10 +2141,15 @@ class Database(
     # =====================================================================
 
     async def _add_column_safe(self, conn, table: str, col_name: str, col_def: str):
+        """✅ v7.5.9: إصلاح #8 — MySQL قديم لا يدعم DEFAULT على TEXT → تحويله إلى VARCHAR(255)"""
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or not re.match(
             r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name
         ):
             return
+        if USE_MYSQL and "TEXT DEFAULT" in col_def.upper():
+            col_def = re.sub(
+                r"\bTEXT\s+DEFAULT\b", "VARCHAR(255) DEFAULT", col_def, flags=re.IGNORECASE
+            )
         try:
             if USE_POSTGRES:
                 exists = await conn.fetchval(
@@ -2102,6 +2185,11 @@ class Database(
                 logger.warning(f"⚠️ فشل إضافة العمود {col_name} إلى {table}: {e}")
 
     async def _column_exists(self, conn, table: str, column: str) -> bool:
+        """✅ v7.5.10: إصلاح #8 — تحقق re.match من identifiers"""
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or \
+           not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", column):
+            logger.error(f"❌ اسم جدول/عمود غير صالح: {table}.{column}")
+            return False
         try:
             if USE_POSTGRES:
                 row = await conn.fetchval(
@@ -2111,7 +2199,7 @@ class Database(
                 return row is not None
             elif USE_MYSQL:
                 cursor = await conn.cursor()
-                await cursor.execute(f"SHOW COLUMNS FROM `{table}` LIKE '{column}'")
+                await cursor.execute(f"SHOW COLUMNS FROM `{table}` LIKE %s", (column,))
                 row = await cursor.fetchone()
                 await cursor.close()
                 return row is not None
@@ -2393,9 +2481,6 @@ class Database(
                     )
 
     async def _import_banned_words(self, conn):
-        """
-        ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الكلمات موجودة.
-        """
         try:
             existing_count = await self._fetchval_with_conn(
                 conn,
@@ -2442,9 +2527,6 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الكلمات المحظورة: {e}")
 
     async def _import_auto_replies(self, conn):
-        """
-        ✅ v7.5.3: تحسين Cold Start - تخطي الاستيراد إذا كانت الردود موجودة.
-        """
         try:
             existing_count = await self._fetchval_with_conn(
                 conn,
@@ -2532,11 +2614,10 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     # =====================================================================
-    # ✅ v7.5.2 — دوال الفهارس الثانوية (متوافقة مع SQLite / PostgreSQL / MySQL)
+    # الفهارس الثانوية
     # =====================================================================
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """يُرجع قائمة الفهارس الثانوية المناسبة لنوع قاعدة البيانات."""
         if USE_MYSQL:
             return [
                 ("posts", "idx_posts_fail_count",
@@ -2610,24 +2691,18 @@ class Database(
             ]
 
     # =====================================================================
-    # ✅ v7.5.8 — كاش has_active_subscription (لتقليل استعلامات /start)
+    # كاش has_active_subscription
     # =====================================================================
 
     async def has_active_subscription(self, user_id: int) -> bool:
-        """
-        ✅ v7.5.8: كاش 30 ثانية — يُستدعى كثيراً عند /start
-        يقلل الضغط على DB بنسبة ~90% ويحل مشكلة البطء عند /start.
-        """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        # محاولة استخدام النسخة الأصلية من الـ Mixin
         try:
             result = await super().has_active_subscription(user_id)
         except AttributeError:
-            # Fallback: استعلام مباشر (لو الدالة غير موجودة في Mixin)
             row = await self.fetchval(
                 "SELECT 1 FROM subscriptions "
                 "WHERE user_id = ? AND status = 'active' AND end_date > ? LIMIT 1",
@@ -2639,15 +2714,30 @@ class Database(
         return result
 
     async def invalidate_subscription_cache(self, user_id: int):
-        """✅ v7.5.8: للاستدعاء عند تفعيل/إلغاء اشتراك"""
-        await internal_cache.invalidate(f"has_active_sub_{user_id}")
+        """
+        ✅ v7.5.9: إصلاح #7 — إبطال كل المفاتيح المحتملة للاشتراك
+        """
+        for key in (
+            f"has_active_sub_{user_id}",
+            f"has_active_subscription_{user_id}",
+            f"subscription_active_{user_id}",
+            f"subscription_{user_id}",
+        ):
+            try:
+                await internal_cache.invalidate(key)
+            except Exception:
+                pass
+        if CACHE_AVAILABLE:
+            try:
+                await invalidate_user_cache(user_id)
+            except Exception as e:
+                logger.debug(f"invalidate_subscription_cache: {e}")
 
     # =====================================================================
     # التهيئة الكاملة
     # =====================================================================
 
     async def initialize_db(self) -> bool:
-        """التهيئة الكاملة لقاعدة البيانات."""
         try:
             await self.initialize()
 
@@ -2682,7 +2772,6 @@ class Database(
             return False
 
     async def pre_initialize(self):
-        """تهيئة مبكرة (تستخدم عادةً من startup hook أو preload)."""
         try:
             await self.initialize()
 
@@ -2711,18 +2800,6 @@ class Database(
         except Exception as e:
             logger.error(f"❌ فشل التهيئة المبكرة: {e}", exc_info=True)
             return False
-
-    # ═══════════════════════════════════════════════════════════════════
-    # 📌 الدوال المنقولة إلى Mixins (متاحة عبر الوراثة):
-    #   → database_groups.py (GroupsMixin)        : 48 دالة
-    #   → database_tickets.py (TicketsMixin)      : 4 دوال
-    #   → database_contests.py (ContestsMixin)    : 8 دوال
-    #   → database_stats.py (StatsMixin)          : 6 دوال
-    #   → database_settings.py (SettingsMixin)    : 7 دوال
-    #   → database_points.py (PointsMixin)        : 4 دوال
-    #   → database_backup.py (BackupMixin)        : 6 دوال
-    #   → database_reminders.py (RemindersMixin)  : 9 دوال
-    # ═══════════════════════════════════════════════════════════════════
 
     # =====================================================================
     # دوال المستخدمين
@@ -2772,23 +2849,26 @@ class Database(
         return result
 
     async def get_user(self, user_id: int, include_stats: bool = False) -> Optional[Dict]:
+        """✅ v7.5.10: إصلاح #1 — deepcopy لمنع تسمم الكاش"""
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
                 if cached_data:
                     user_data = cached_data.get("user_data")
                     if user_data:
+                        # ✅ v7.5.10: نسخة عميقة — لا تُعدّل الكائن المخزَّن في الكاش
+                        user_data = copy.deepcopy(user_data)
                         if include_stats:
                             user_data["unpublished_posts"] = cached_data.get("unpublished_posts", 0)
                             user_data["has_subscription"] = cached_data.get("has_subscription", False)
                             user_data["channels_count"] = cached_data.get("channels_count", 0)
                             user_data["groups_count"] = cached_data.get("groups_count", 0)
-                            user_data["channel_info"] = cached_data.get("channel_info")
+                            user_data["channel_info"] = copy.deepcopy(cached_data.get("channel_info"))
                         return user_data
 
             cached = await internal_cache.get(f"user_{user_id}_{include_stats}")
             if cached:
-                return cached
+                return copy.deepcopy(cached)
 
             query = """
                 SELECT u.user_id, u.username, u.first_name, u.language, u.auto_publish, u.auto_recycle,
@@ -2817,7 +2897,7 @@ class Database(
             await internal_cache.set(f"user_{user_id}_{include_stats}", data)
             if CACHE_AVAILABLE and not include_stats:
                 full_data = {
-                    "user_data": data,
+                    "user_data": copy.deepcopy(data),
                     "language": data.get("language", "ar"),
                     "active_channel": data.get("active_channel"),
                     "channel_info": {
@@ -2839,13 +2919,18 @@ class Database(
             return None
 
     async def register_user(self, user_id: int, username: str = "", first_name: str = "") -> bool:
+        """
+        ✅ v7.5.10: إصلاح #5 — معاملة مستقلة لكل محاولة
+        يتفادى PostgreSQL "current transaction is aborted" بعد فشل UNIQUE
+        """
         try:
             async with await self._get_user_lock(user_id):
-                async with self.transaction() as conn:
-                    user_inserted = False
-                    for attempt in range(5):
-                        code = secrets.token_urlsafe(9)
-                        try:
+                user_inserted = False
+                for attempt in range(5):
+                    code = secrets.token_urlsafe(9)
+                    try:
+                        # ✅ v7.5.10: transaction جديدة لكل محاولة
+                        async with self.transaction() as conn:
                             if USE_POSTGRES:
                                 await self._execute_with_conn(
                                     conn,
@@ -2884,22 +2969,26 @@ class Database(
                                     TimeUtils.sql_iso(), TimeUtils.sql_iso(),
                                     username, username, first_name, first_name, TimeUtils.sql_iso(),
                                 )
+                        user_inserted = True
+                        break
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "referral_code" in err:
+                            logger.warning(
+                                f"⚠️ تصادم referral_code للمستخدم {user_id}، محاولة {attempt + 1}/5"
+                            )
+                            continue
+                        if "unique" in err or "duplicate" in err:
                             user_inserted = True
                             break
-                        except Exception as e:
-                            err = str(e).lower()
-                            if "referral_code" in err:
-                                logger.warning(f"⚠️ تصادم referral_code للمستخدم {user_id}، محاولة {attempt + 1}/5")
-                                continue
-                            if "unique" in err or "duplicate" in err:
-                                user_inserted = True
-                                break
-                            raise
+                        raise
 
-                    if not user_inserted:
-                        logger.error(f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات")
-                        return False
+                if not user_inserted:
+                    logger.error(f"❌ فشل إدراج المستخدم {user_id} بعد 5 محاولات")
+                    return False
 
+                # ✅ v7.5.10: معاملة ثانية للجداول المرتبطة (idempotent)
+                async with self.transaction() as conn:
                     if USE_POSTGRES:
                         await self._execute_with_conn(
                             conn,
@@ -2933,7 +3022,10 @@ class Database(
                             "INSERT OR IGNORE INTO referral_rewards (user_id, referral_count, total_reward_days, claimed_reward_days, last_referral_date) VALUES (?, 0, 0, 0, NULL)",
                             user_id,
                         )
+
             await internal_cache.invalidate(f"user_{user_id}")
+            await internal_cache.invalidate(f"user_{user_id}_True")
+            await internal_cache.invalidate(f"user_{user_id}_False")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
             return True
@@ -2959,20 +3051,22 @@ class Database(
             return "ar"
 
     async def set_user_language(self, user_id: int, lang: str) -> bool:
+        """✅ v7.5.10: إصلاح #2 — إبطال user_{id}_True و _False"""
         result = await self.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id)) > 0
         if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"lang_{user_id}")
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+                f"lang_{user_id}",
+            ):
+                await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
 
-    # ✅ v7.5.9: get_auto_publish_status مع كاش (كان بدون كاش — سبب البطء)
     async def get_auto_publish_status(self, user_id: int) -> bool:
-        """
-        ✅ v7.5.9: كاش 60 ثانية — كان يستدعي DB في كل ضغطة زر.
-        يحل مشكلة الاستعلامات البطيئة (1.5-2s) عند فتح الإعدادات.
-        """
+        """✅ v7.5.9: كاش 60 ثانية"""
         cache_key = f"auto_publish_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
@@ -2986,16 +3080,21 @@ class Database(
         await internal_cache.set(cache_key, is_enabled, ttl=60)
         return is_enabled
 
-    # ✅ v7.5.9: set_auto_publish يُبطل الكاش الجديد
     async def set_auto_publish(self, user_id: int, status: bool) -> bool:
+        """✅ v7.5.10: إصلاح #2 — إبطال user_{id}_True و _False"""
         result = await self.execute(
             "UPDATE users SET auto_publish = ? WHERE user_id = ?",
             (1 if status else 0, user_id),
         ) > 0
         if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"auto_publish_{user_id}")           # ✅ v7.5.9
-            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+                f"auto_publish_{user_id}",
+                f"user_settings_batch_{user_id}",
+            ):
+                await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -3011,29 +3110,30 @@ class Database(
         return is_enabled
 
     async def set_auto_recycle(self, user_id: int, status: bool) -> bool:
+        """✅ v7.5.10: إصلاح #2 — إبطال user_{id}_True و _False"""
         result = await self.execute(
             "UPDATE users SET auto_recycle = ? WHERE user_id = ?",
             (1 if status else 0, user_id),
         ) > 0
         if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"auto_recycle_{user_id}")
-            await internal_cache.invalidate(f"user_settings_batch_{user_id}")    # ✅ v7.5.9
+            for k in (
+                f"user_{user_id}",
+                f"user_{user_id}_True",
+                f"user_{user_id}_False",
+                f"auto_recycle_{user_id}",
+                f"user_settings_batch_{user_id}",
+            ):
+                await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
 
-    # ✅ v7.5.9: دالة batch — استعلام واحد بدل اثنين
     async def get_user_settings_batch(self, user_id: int) -> Dict[str, Any]:
-        """
-        ✅ v7.5.9: جلب auto_publish + auto_recycle + language في استعلام واحد.
-        تُستخدم في CB.SETTINGS و CB.TOGGLE_AUTO و CB.TOGGLE_REC
-        لتقليل عدد الاستعلامات من 2 إلى 1 + كاش 60 ثانية.
-        """
+        """✅ v7.5.9: استعلام واحد بدل اثنين + كاش 60 ثانية"""
         cache_key = f"user_settings_batch_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return copy.deepcopy(cached)
 
         row = await self.fetchone(
             "SELECT auto_publish, auto_recycle, language FROM users WHERE user_id = ?",
@@ -3048,7 +3148,7 @@ class Database(
                 'language': row.get('language') or 'ar',
             }
         await internal_cache.set(cache_key, data, ttl=60)
-        return data
+        return copy.deepcopy(data)
 
     async def is_user_banned(self, user_id: int) -> bool:
         result = await self.fetchval("SELECT banned FROM users WHERE user_id = ?", (user_id,), default=0)
@@ -3057,9 +3157,8 @@ class Database(
     async def ban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (user_id,)) > 0
         if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"user_{user_id}_True")
-            await internal_cache.invalidate(f"user_{user_id}_False")
+            for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False"):
+                await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -3067,9 +3166,8 @@ class Database(
     async def unban_user(self, user_id: int) -> bool:
         result = await self.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (user_id,)) > 0
         if result:
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"user_{user_id}_True")
-            await internal_cache.invalidate(f"user_{user_id}_False")
+            for k in (f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False"):
+                await internal_cache.invalidate(k)
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
         return result
@@ -3153,6 +3251,10 @@ class Database(
         return await self.execute(query, tuple(values)) > 0
 
     async def update_next_publish(self, channel_db_id: int) -> bool:
+        """
+        ✅ v7.5.9: إصلاح #1 (حرج) — safe_parse_iso قد تُرجع None
+        نستخدم if last_time is None بدل isinstance(str) لتجنب TypeError
+        """
         async with self.transaction() as conn:
             schedule = await self._fetchone_with_conn(
                 conn, "SELECT * FROM schedule WHERE channel_db_id = ?", channel_db_id
@@ -3169,9 +3271,9 @@ class Database(
             last_publish = await self._fetchval_with_conn(
                 conn, "SELECT last_publish_time FROM last_publish WHERE channel_db_id = ?", channel_db_id
             )
-            last_time = TimeUtils.safe_parse_iso(last_publish) if last_publish else TimeUtils.utc_now()
-            if isinstance(last_time, str):
-                last_time = TimeUtils.safe_parse_iso(last_time) or TimeUtils.utc_now()
+            last_time = TimeUtils.safe_parse_iso(last_publish)
+            if last_time is None:
+                last_time = TimeUtils.utc_now()
 
             schedule_type = schedule.get("schedule_type", "interval_minutes")
             if schedule_type == "interval_minutes":
@@ -3280,7 +3382,7 @@ class Database(
             return await self.fetchall(query, (now, now, limit))
 
     # =====================================================================
-    # دوال العقوبات (User Penalties)
+    # دوال العقوبات
     # =====================================================================
 
     async def add_penalty(self, user_id: int, chat_id: int, penalty_type: str,
