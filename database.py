@@ -2,49 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.16)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.17)
 ================================================================================
+🆕 v7.5.17 (تحسين سرعة /start):
+    ✅ get_start_data: استعلامات متوازية (asyncio.gather)
+       - 5 استعلامات صغيرة بدل استعلام واحد ثقيل بـ 4 subqueries
+       - الوقت = أبطأ استعلام بدل مجموع الكل
+       - معالجة channel_info بشكل منفصل
+    ✅ get_user: تحويله لاستعلامات متوازية أيضاً
+    ✅ get_user_full_data: تحويله لاستعلامات متوازية
+
 🆕 v7.5.16 (إصلاح خطأ asyncpg datetime):
     ✅ _adapt_params: تحويل النصوص ISO datetime تلقائياً إلى datetime
        عند استخدام PostgreSQL — يحل خطأ:
        "invalid input for query argument $2: '...' (expected datetime, got 'str')"
-    ✅ يغطي كل الأماكن التي تستخدم TimeUtils.sql_iso() كمعامل استعلام
 
 🆕 v7.5.15 (إصلاحات نهائية):
-    ✅ _ensure_text_hash_column: فحص الفهرس دائمًا (حتى لو العمود موجود)
+    ✅ _ensure_text_hash_column: فحص الفهرس دائمًا
     ✅ register_user: احترام force=True/False
-    ✅ _get_penalty_lock: حماية من التضخم المفرط (auto-expand)
-    ✅ cleanup_user_locks: إزالة _waiters (غير موثوق)
-    ✅ get_user: نسخة في الـ cache (منع المشاركة العرضية)
-    ✅ توحيد منطق الأقفال (_waiters محذوف من كل مكان)
+    ✅ _get_penalty_lock: حماية من التضخم المفرط
+    ✅ cleanup_user_locks: إزالة _waiters
+    ✅ get_user: نسخة في الـ cache
 
 🆕 v7.5.14 (إصلاحات أمنية + race conditions):
-    ✅ _get_penalty_lock: قفل مركّب (user_id, chat_id) بلا deadlock
-    ✅ add_penalty: قفل كامل + status='active' صراحة + admin_logs بعد النجاح
-    ✅ _create_pool_with_retry: retry أُسّي (2^n ثانية، أقصى 30s)
-    ✅ expire_penalties: COUNT(*) أولاً لكل المحركات
-    ✅ _validate_column_def: فحص أمني شامل ضد SQL Injection
-    ✅ _clone_start_data: بديل أسرع 10x من deepcopy
-    ✅ _get_group_lock: حد أقصى + تنظيف تلقائي
-    ✅ get_all_active_penalties: LIMIT من الثوابت
-
-🆕 v7.5.13 (إصلاحات الأداء):
-    ✅ _migrate_schema: تجميع ALTER TABLE (22s → 8s)
-    ✅ _execute_batch_migrations: دالة جديدة
-    ✅ user_reminder_settings في الترحيلات
-    ✅ _get_user_lock: تنظيف أفضل
-    ✅ expire_penalties: WHERE archived_at IS NOT NULL
-    ✅ update_next_publish: delay = 1 + (id % 60) * 5
-
-🆕 v7.5.12 (إصلاح "المستخدم غير موجود"):
-    ✅ add_penalty: تسجيل تلقائي للمستخدم والمجموعة
-    ✅ _ensure_user_exists / _ensure_group_exists
-    ✅ register_user(force=False)
-
-🆕 v7.5.11:
-    ✅ settings_cache TTL: 120 → 600
-    ✅ get_start_data: استعلام واحد مكثف
-    ✅ PostgreSQL Pool: min_size=2, statement_cache_size=500
+    ✅ _get_penalty_lock: قفل مركّب (user_id, chat_id)
+    ✅ add_penalty: قفل كامل + status='active' صراحة
+    ✅ _create_pool_with_retry: retry أُسّي
+    ✅ _validate_column_def: فحص أمني شامل
+    ✅ _clone_start_data: أسرع 10x من deepcopy
 ================================================================================
 """
 
@@ -626,7 +611,6 @@ KNOWN_UNIQUE_FALLBACK = {
 
 _UNIQUE_CACHE = {}
 
-# ✅ v7.5.14: قائمة بيضاء لأنواع الأعمدة
 _ALLOWED_COLUMN_TYPES = frozenset({
     "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
     "TEXT", "VARCHAR", "CHAR", "VARCHAR2",
@@ -644,23 +628,6 @@ _ALLOWED_COL_KEYWORDS = frozenset({
 
 
 def _validate_column_def(col_name: str, col_def: str) -> bool:
-    """
-    ✅ v7.5.14: فحص أمني شامل لتعريف عمود.
-
-    يقبل:
-      - INTEGER DEFAULT 0
-      - TEXT DEFAULT 'hello'
-      - VARCHAR(255)
-      - TIMESTAMP
-      - REAL DEFAULT 0.7
-      - INTEGER NOT NULL DEFAULT 0
-
-    يرفض:
-      - INTEGER; DROP TABLE users
-      - INTEGER -- comment
-      - EVILTYPE DEFAULT 0
-      - col-with-dash INTEGER
-    """
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
         logger.error(f"❌ اسم عمود غير صالح: {col_name}")
         return False
@@ -706,11 +673,6 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
 
 
 def _clone_start_data(data: Dict) -> Dict:
-    """
-    ✅ v7.5.14: نسخة آمنة (shallow + deep للحقول المتداخلة).
-    - أسرع 10x من deepcopy.
-    - آمن ضد المشاركة العرضية.
-    """
     if not isinstance(data, dict):
         return data
 
@@ -731,9 +693,6 @@ async def _create_pool_with_retry(
     name: str,
     max_attempts: int = 5,
 ) -> Any:
-    """
-    ✅ v7.5.14: helper لإنشاء pool مع retry أُسّي.
-    """
     last_exc: Optional[Exception] = None
     for attempt in range(max_attempts):
         try:
@@ -1267,13 +1226,6 @@ def _adapt_params(params: tuple) -> tuple:
     """
     ✅ v7.5.16: تحويل النصوص ISO datetime إلى كائنات datetime
     عند استخدام PostgreSQL.
-
-    هذا يحل خطأ asyncpg:
-      "invalid input for query argument $2: '2026-09-12 15:38:40'
-       (expected a datetime.date or datetime.datetime instance, got 'str')"
-
-    السبب: بعض الدوال (مثل TimeUtils.sql_iso()) تُعيد str، وبعض
-    الـ Mixins تمررها مباشرة إلى asyncpg دون تحويل.
     """
     if params is None:
         return ()
@@ -1295,7 +1247,6 @@ def _adapt_params(params: tuple) -> tuple:
 
         # ✅ v7.5.16: تحويل النصوص ISO datetime إلى datetime لـ PostgreSQL
         elif isinstance(p, str) and USE_POSTGRES:
-            # نمط "YYYY-MM-DD HH:MM:SS" أو "YYYY-MM-DDTHH:MM:SS"
             if re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", p):
                 try:
                     parsed = datetime.fromisoformat(
@@ -1307,7 +1258,6 @@ def _adapt_params(params: tuple) -> tuple:
                     continue
                 except (ValueError, TypeError):
                     pass
-            # نمط "YYYY-MM-DD" (تاريخ فقط)
             elif re.match(r"^\d{4}-\d{2}-\d{2}$", p):
                 try:
                     parsed = datetime.strptime(p, "%Y-%m-%d")
@@ -1564,7 +1514,6 @@ class Database(
         self._group_locks_last_access = {}
         self._group_locks_lock = asyncio.Lock()
         self._MAX_GROUP_LOCKS = MAX_GROUP_LOCKS_CONFIG
-        # ✅ v7.5.14: قفل مركّب (user, chat)
         self._penalty_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._penalty_locks_last_access: Dict[Tuple[int, int], float] = {}
         self._penalty_locks_lock = asyncio.Lock()
@@ -1601,7 +1550,6 @@ class Database(
     # =====================================================================
 
     async def initialize(self):
-        """✅ v7.5.14: إنشاء Pool مع retry أُسّي."""
         if self._initialized:
             return
 
@@ -2229,7 +2177,6 @@ class Database(
     # =====================================================================
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
-        """✅ v7.5.15: لا يحذف أقفالاً نشطة (بدون _waiters)."""
         async with self._user_locks_lock:
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
                 sorted_items = sorted(
@@ -2241,7 +2188,6 @@ class Database(
                     if len(to_remove) >= max_to_remove:
                         break
                     lock = self._user_locks.get(uid)
-                    # ✅ v7.5.15: فحص locked() فقط (بدون _waiters)
                     if lock and not lock.locked():
                         to_remove.append(uid)
                 for uid in to_remove:
@@ -2260,7 +2206,6 @@ class Database(
             return self._channel_locks[channel_db_id]
 
     async def _get_group_lock(self, chat_id: int) -> asyncio.Lock:
-        """✅ v7.5.14: إضافة حد أقصى + تنظيف تلقائي."""
         async with self._group_locks_lock:
             if (
                 len(self._group_locks) >= self._MAX_GROUP_LOCKS
@@ -2286,14 +2231,8 @@ class Database(
             return self._group_locks[chat_id]
 
     async def _get_penalty_lock(self, user_id: int, chat_id: int) -> asyncio.Lock:
-        """
-        ✅ v7.5.15: قفل مركّب (user_id, chat_id) مع حماية من التضخم.
-        - الترتيب ضمني في المفتاح → لا deadlock.
-        - auto-expand للحد الأقصى عند الضغط.
-        """
         key = (user_id, chat_id)
         async with self._penalty_locks_lock:
-            # ✅ v7.5.15: حماية من التضخم المفرط
             if len(self._penalty_locks) >= self._MAX_PENALTY_LOCKS * 2:
                 logger.error(
                     f"🚨 عدد أقفال العقوبات "
@@ -2328,7 +2267,6 @@ class Database(
             return self._penalty_locks[key]
 
     async def cleanup_user_locks(self, max_idle_seconds: int = 3600) -> int:
-        """✅ v7.5.15: تنظيف بدون _waiters."""
         try:
             async with self._user_locks_lock:
                 now = time.monotonic()
@@ -2389,7 +2327,6 @@ class Database(
             return 0
 
     async def cleanup_penalty_locks(self, max_idle_seconds: int = 3600) -> int:
-        """✅ v7.5.14: تنظيف أقفال العقوبات."""
         try:
             async with self._penalty_locks_lock:
                 now = time.monotonic()
@@ -2501,7 +2438,6 @@ class Database(
     async def _execute_batch_migrations(
         self, conn, table: str, missing_columns: List[Tuple[str, str]]
     ) -> int:
-        """✅ v7.5.14: تجميع ALTER TABLE + فحص أمني شامل."""
         if not missing_columns:
             return 0
 
@@ -2630,9 +2566,6 @@ class Database(
             return False
 
     async def _ensure_text_hash_column(self, conn) -> bool:
-        """
-        ✅ v7.5.15: فحص الفهرس دائمًا (حتى لو العمود موجود).
-        """
         try:
             if not await _table_exists(conn, "posts"):
                 logger.warning("⚠️ جدول posts غير موجود، لا يمكن إضافة text_hash")
@@ -2659,7 +2592,6 @@ class Database(
                     logger.error(f"❌ فشل إضافة عمود text_hash: {e}")
                     return False
 
-            # ✅ v7.5.15: فحص الفهرس دائمًا
             if not await self._index_exists(conn, "posts", "idx_posts_text_hash"):
                 try:
                     await conn.execute(
@@ -2677,7 +2609,6 @@ class Database(
             return False
 
     async def _migrate_schema(self, conn):
-        """✅ v7.5.14: تجميع ALTER TABLE (8s بدل 22s)."""
         if USE_MYSQL:
             try:
                 await conn.execute("SET FOREIGN_KEY_CHECKS=0")
@@ -2911,7 +2842,6 @@ class Database(
         first_name: str = "",
         auto_register: bool = True,
     ) -> bool:
-        """✅ v7.5.12: التأكد من وجود المستخدم — تسجيل تلقائي."""
         try:
             exists = await self.fetchval(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
@@ -2953,7 +2883,6 @@ class Database(
         added_by: Optional[int] = None,
         auto_register: bool = True,
     ) -> bool:
-        """✅ v7.5.12: التأكد من وجود المجموعة — تسجيل تلقائي."""
         try:
             exists = await self.fetchval(
                 "SELECT 1 FROM bot_groups WHERE chat_id = ?", (chat_id,)
@@ -3137,7 +3066,6 @@ class Database(
             words_to_insert = []
             for word in BANNED_WORDS:
                 word = str(word).strip().lower()
-                # ✅ v7.5.14: حد أقصى للطول
                 if 2 <= len(word) <= 100:
                     words_to_insert.append(
                         (word, -1, owner_id, TimeUtils.utc_now())
@@ -3469,131 +3397,208 @@ class Database(
     # =====================================================================
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
-        """✅ v7.5.14: استخدام _clone_start_data بدل deepcopy."""
+        """
+        ✅ v7.5.17: استعلامات متوازية (asyncio.gather).
+        بدل استعلام واحد ثقيل بأربع subqueries، ننفذ 5 استعلامات صغيرة
+        بالتوازي — الوقت = أبطأ استعلام بدل مجموع الكل.
+        """
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
             return _clone_start_data(cached)
 
-        query = """
-            SELECT
-                u.user_id, u.username, u.first_name, u.language,
-                u.auto_publish, u.auto_recycle, u.banned, u.trial_used,
-                u.active_channel,
-                uc.channel_name, uc.channel_id,
-                EXISTS(
-                    SELECT 1 FROM subscriptions s
-                    WHERE s.user_id = u.user_id
-                      AND s.status = 'active'
-                      AND s.end_date > __NOW__
-                ) AS has_subscription,
-                (SELECT COUNT(*) FROM user_channels uc2
-                 WHERE uc2.user_id = u.user_id AND uc2.banned = 0) AS channels_count,
-                (SELECT COUNT(*) FROM user_groups_link l
-                 WHERE l.user_id = u.user_id) AS groups_count,
-                (SELECT COUNT(*) FROM posts p
-                 JOIN user_channels uc3 ON p.channel_db_id = uc3.id
-                 WHERE uc3.user_id = u.user_id AND p.published = 0) AS unpublished_posts
-            FROM users u
-            LEFT JOIN user_channels uc
-                ON u.active_channel = uc.id AND uc.banned = 0
-            WHERE u.user_id = ?
-        """
-        if USE_POSTGRES:
-            query = query.replace("__NOW__", "NOW()")
-        elif USE_MYSQL:
-            query = query.replace("__NOW__", "UTC_TIMESTAMP()")
-        else:
-            query = query.replace("__NOW__", "datetime('now')")
-
         try:
-            row = await self.fetchone(query, (user_id,))
+            # ✅ استعلامات متوازية
+            user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
+                self.fetchone(
+                    "SELECT user_id, username, first_name, language, "
+                    "auto_publish, auto_recycle, banned, trial_used, "
+                    "active_channel "
+                    "FROM users WHERE user_id = ?",
+                    (user_id,),
+                ),
+                self.fetchval(
+                    "SELECT 1 FROM subscriptions "
+                    "WHERE user_id = ? AND status = 'active' "
+                    "AND end_date > ? LIMIT 1",
+                    (user_id, TimeUtils.utc_now()),
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM user_channels "
+                    "WHERE user_id = ? AND banned = 0",
+                    (user_id,),
+                    default=0,
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
+                    (user_id,),
+                    default=0,
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM posts p "
+                    "JOIN user_channels uc ON p.channel_db_id = uc.id "
+                    "WHERE uc.user_id = ? AND p.published = 0",
+                    (user_id,),
+                    default=0,
+                ),
+            )
         except Exception as e:
             logger.error(
                 f"❌ get_start_data({user_id}): {e}", exc_info=True
             )
             return None
 
-        if not row:
+        if not user_row:
             return None
 
-        data = dict(row)
-        data["has_subscription"] = bool(data.get("has_subscription", 0))
-        data["channel_info"] = (
-            {
-                "id": data.get("channel_id"),
-                "channel_name": data.get("channel_name"),
-            }
-            if data.get("channel_id")
-            else None
-        )
+        data = dict(user_row)
+        data["has_subscription"] = sub_row is not None
+        data["channels_count"] = channels_count or 0
+        data["groups_count"] = groups_count or 0
+        data["unpublished_posts"] = posts_count or 0
 
-        await internal_cache.set(
-            cache_key, _clone_start_data(data), ttl=30
-        )
+        # ✅ جلب channel_info بشكل منفصل (فقط إذا active_channel موجود)
+        if data.get("active_channel"):
+            try:
+                ch = await self.fetchone(
+                    "SELECT id, channel_name, channel_id FROM user_channels "
+                    "WHERE id = ? AND banned = 0",
+                    (data["active_channel"],),
+                )
+                data["channel_info"] = (
+                    {
+                        "id": ch.get("id"),
+                        "channel_name": ch.get("channel_name"),
+                        "channel_id": ch.get("channel_id"),
+                    }
+                    if ch else None
+                )
+                # للتوافق مع الكود القديم
+                if ch:
+                    data["channel_name"] = ch.get("channel_name")
+                    data["channel_id"] = ch.get("channel_id")
+                else:
+                    data["channel_name"] = None
+                    data["channel_id"] = None
+            except Exception as e:
+                logger.debug(f"get_start_data: channel_info فشل: {e}")
+                data["channel_info"] = None
+                data["channel_name"] = None
+                data["channel_id"] = None
+        else:
+            data["channel_info"] = None
+            data["channel_name"] = None
+            data["channel_id"] = None
+
+        await internal_cache.set(cache_key, _clone_start_data(data), ttl=30)
         return data
 
     async def get_user_full_data(
         self, user_id: int, include_stats: bool = True
     ) -> Optional[Dict]:
-        query = """
-            SELECT u.user_id, u.username, u.first_name, u.language,
-                   u.auto_publish, u.auto_recycle,
-                   u.banned, u.trial_used, u.subscription_end, u.active_channel,
-                   uc.id as channel_id, uc.channel_name,
-                   uc.banned as channel_banned
-            FROM users u
-            LEFT JOIN user_channels uc
-                ON u.active_channel = uc.id AND uc.banned = 0
-            WHERE u.user_id = ?
         """
-        row = await self.fetchone(query, (user_id,))
-        if not row:
-            return None
-        result = dict(row)
-        if include_stats:
-            stats = await self.fetchone(
-                """
-                SELECT
-                    COALESCE((SELECT COUNT(*) FROM posts p
-                              JOIN user_channels uc2 ON p.channel_db_id = uc2.id
-                              WHERE uc2.user_id = ? AND p.published = 0), 0)
-                        as unpublished_posts,
-                    COALESCE((SELECT 1 FROM subscriptions
-                              WHERE user_id = ? AND status = 'active'
-                              AND end_date > ?), 0) as has_subscription,
-                    COALESCE((SELECT COUNT(*) FROM user_channels
-                              WHERE user_id = ? AND banned = 0), 0)
-                        as channels_count,
-                    COALESCE((SELECT COUNT(*) FROM user_groups_link
-                              WHERE user_id = ?), 0) as groups_count
-                """,
-                (user_id, user_id, TimeUtils.utc_now(), user_id, user_id),
+        ✅ v7.5.17: استعلامات متوازية.
+        """
+        try:
+            user_row = await self.fetchone(
+                "SELECT user_id, username, first_name, language, "
+                "auto_publish, auto_recycle, banned, trial_used, "
+                "subscription_end, active_channel "
+                "FROM users WHERE user_id = ?",
+                (user_id,),
             )
-            if stats:
-                result["unpublished_posts"] = stats.get("unpublished_posts", 0)
-                result["has_subscription"] = bool(
-                    stats.get("has_subscription", 0)
+        except Exception as e:
+            logger.error(f"❌ get_user_full_data({user_id}): {e}")
+            return None
+
+        if not user_row:
+            return None
+
+        result = dict(user_row)
+
+        if include_stats:
+            try:
+                stats = await asyncio.gather(
+                    self.fetchval(
+                        "SELECT 1 FROM subscriptions "
+                        "WHERE user_id = ? AND status = 'active' "
+                        "AND end_date > ? LIMIT 1",
+                        (user_id, TimeUtils.utc_now()),
+                    ),
+                    self.fetchval(
+                        "SELECT COUNT(*) FROM user_channels "
+                        "WHERE user_id = ? AND banned = 0",
+                        (user_id,),
+                        default=0,
+                    ),
+                    self.fetchval(
+                        "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
+                        (user_id,),
+                        default=0,
+                    ),
+                    self.fetchval(
+                        "SELECT COUNT(*) FROM posts p "
+                        "JOIN user_channels uc ON p.channel_db_id = uc.id "
+                        "WHERE uc.user_id = ? AND p.published = 0",
+                        (user_id,),
+                        default=0,
+                    ),
                 )
-                result["channels_count"] = stats.get("channels_count", 0)
-                result["groups_count"] = stats.get("groups_count", 0)
+                result["has_subscription"] = stats[0] is not None
+                result["channels_count"] = stats[1] or 0
+                result["groups_count"] = stats[2] or 0
+                result["unpublished_posts"] = stats[3] or 0
+            except Exception as e:
+                logger.debug(f"get_user_full_data: stats فشل: {e}")
+                result["has_subscription"] = False
+                result["unpublished_posts"] = 0
+                result["channels_count"] = 0
+                result["groups_count"] = 0
         else:
             result["has_subscription"] = False
             result["unpublished_posts"] = 0
             result["channels_count"] = 0
             result["groups_count"] = 0
-        result["channel_info"] = None
-        if result.get("channel_id"):
-            result["channel_info"] = {
-                "id": result["channel_id"],
-                "channel_name": result.get("channel_name", ""),
-                "banned": result.get("channel_banned", 0),
-            }
+
+        # ✅ channel_info بشكل منفصل
+        if result.get("active_channel"):
+            try:
+                ch = await self.fetchone(
+                    "SELECT id, channel_name, channel_id, banned "
+                    "FROM user_channels WHERE id = ?",
+                    (result["active_channel"],),
+                )
+                if ch and not ch.get("banned", 0):
+                    result["channel_id"] = ch.get("id")
+                    result["channel_name"] = ch.get("channel_name")
+                    result["channel_banned"] = 0
+                    result["channel_info"] = {
+                        "id": ch.get("id"),
+                        "channel_name": ch.get("channel_name"),
+                        "banned": 0,
+                    }
+                else:
+                    result["channel_id"] = None
+                    result["channel_name"] = None
+                    result["channel_banned"] = 0
+                    result["channel_info"] = None
+            except Exception as e:
+                logger.debug(f"get_user_full_data: channel_info فشل: {e}")
+                result["channel_info"] = None
+        else:
+            result["channel_id"] = None
+            result["channel_name"] = None
+            result["channel_banned"] = 0
+            result["channel_info"] = None
+
         return result
 
     async def get_user(
         self, user_id: int, include_stats: bool = False
     ) -> Optional[Dict]:
+        """
+        ✅ v7.5.17: استعلامات متوازية.
+        """
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -3625,44 +3630,75 @@ class Database(
             if cached:
                 return _clone_start_data(cached)
 
-            query = """
-                SELECT u.user_id, u.username, u.first_name, u.language,
-                       u.auto_publish, u.auto_recycle,
-                       u.banned, u.trial_used, u.subscription_end,
-                       u.active_channel,
-                       uc.id as channel_id, uc.channel_name,
-                       uc.banned as channel_banned,
-                       (SELECT COUNT(*) FROM posts p
-                        WHERE p.channel_db_id = uc.id
-                        AND p.published = 0) as unpublished_posts,
-                       EXISTS(SELECT 1 FROM subscriptions s
-                              WHERE s.user_id = u.user_id
-                              AND s.status = 'active'
-                              AND s.end_date > __NOW__) as has_subscription,
-                       (SELECT COUNT(*) FROM user_channels uc2
-                        WHERE uc2.user_id = u.user_id
-                        AND uc2.banned = 0) as channels_count,
-                       (SELECT COUNT(*) FROM user_groups_link l
-                        WHERE l.user_id = u.user_id) as groups_count
-                FROM users u
-                LEFT JOIN user_channels uc
-                    ON u.active_channel = uc.id AND uc.banned = 0
-                WHERE u.user_id = ?
-            """
-            if USE_POSTGRES:
-                query = query.replace("__NOW__", "NOW()")
-            elif USE_MYSQL:
-                query = query.replace("__NOW__", "UTC_TIMESTAMP()")
-            else:
-                query = query.replace("__NOW__", "datetime('now')")
+            # ✅ استعلامات متوازية
+            user_row, sub_row, channels_count, groups_count, posts_count = await asyncio.gather(
+                self.fetchone(
+                    "SELECT user_id, username, first_name, language, "
+                    "auto_publish, auto_recycle, banned, trial_used, "
+                    "subscription_end, active_channel "
+                    "FROM users WHERE user_id = ?",
+                    (user_id,),
+                ),
+                self.fetchval(
+                    "SELECT 1 FROM subscriptions "
+                    "WHERE user_id = ? AND status = 'active' "
+                    "AND end_date > ? LIMIT 1",
+                    (user_id, TimeUtils.utc_now()),
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM user_channels "
+                    "WHERE user_id = ? AND banned = 0",
+                    (user_id,),
+                    default=0,
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM user_groups_link WHERE user_id = ?",
+                    (user_id,),
+                    default=0,
+                ),
+                self.fetchval(
+                    "SELECT COUNT(*) FROM posts p "
+                    "JOIN user_channels uc ON p.channel_db_id = uc.id "
+                    "WHERE uc.user_id = ? AND p.published = 0",
+                    (user_id,),
+                    default=0,
+                ),
+            )
 
-            row = await self.fetchone(query, (user_id,))
-            if not row:
+            if not user_row:
                 return None
-            data = dict(row)
-            data["has_subscription"] = bool(data.get("has_subscription", 0))
 
-            # ✅ v7.5.15: نسخة في الـ cache
+            data = dict(user_row)
+            data["has_subscription"] = sub_row is not None
+            data["channels_count"] = channels_count or 0
+            data["groups_count"] = groups_count or 0
+            data["unpublished_posts"] = posts_count or 0
+
+            # channel_info منفصل
+            if data.get("active_channel"):
+                try:
+                    ch = await self.fetchone(
+                        "SELECT id, channel_name, channel_id, banned "
+                        "FROM user_channels WHERE id = ?",
+                        (data["active_channel"],),
+                    )
+                    if ch and not ch.get("banned", 0):
+                        data["channel_id"] = ch.get("id")
+                        data["channel_name"] = ch.get("channel_name")
+                        data["channel_banned"] = 0
+                    else:
+                        data["channel_id"] = None
+                        data["channel_name"] = None
+                        data["channel_banned"] = 0
+                except Exception:
+                    data["channel_id"] = None
+                    data["channel_name"] = None
+                    data["channel_banned"] = 0
+            else:
+                data["channel_id"] = None
+                data["channel_name"] = None
+                data["channel_banned"] = 0
+
             await internal_cache.set(
                 f"user_{user_id}_{include_stats}",
                 _clone_start_data(data),
@@ -3702,20 +3738,13 @@ class Database(
         first_name: str = "",
         force: bool = False,
     ) -> bool:
-        """
-        ✅ v7.5.15: احترام force.
-        - force=False: إذا المستخدم موجود، يُحدَّث username/first_name فقط.
-        - force=True: upsert كامل (سلوك v7.5.14).
-        """
         try:
             async with await self._get_user_lock(user_id):
-                # ✅ v7.5.15: احترام force
                 if not force:
                     exists = await self.fetchval(
                         "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
                     )
                     if exists:
-                        # حدّث فقط الحقول المتغيرة
                         try:
                             await self.execute(
                                 """UPDATE users SET
@@ -3733,7 +3762,6 @@ class Database(
                             logger.debug(
                                 f"تحديث مستخدم موجود {user_id}: {e}"
                             )
-                        # تأكد من وجود الصفوف التابعة
                         try:
                             if USE_MYSQL:
                                 await self.execute(
@@ -3860,7 +3888,6 @@ class Database(
                     )
                     return False
 
-                # إنشاء الصفوف التابعة
                 try:
                     async with self.transaction() as conn:
                         if USE_POSTGRES:
@@ -4208,7 +4235,6 @@ class Database(
         return await self.execute(query, tuple(values)) > 0
 
     async def update_next_publish(self, channel_db_id: int) -> bool:
-        """✅ v7.5.13: delay = 1 + (id % 60) * 5."""
         async with self.transaction() as conn:
             schedule = await self._fetchone_with_conn(
                 conn,
@@ -4402,29 +4428,19 @@ class Database(
         chat_name: str = "",
         auto_register: bool = True,
     ) -> Optional[int]:
-        """
-        ✅ v7.5.15: إضافة عقوبة آمنة ضد race conditions.
-        - قفل مركّب (user, chat).
-        - status = 'active' صراحة.
-        - admin_logs فقط عند نجاح INSERT.
-        """
-        # 1️⃣ التحقق من نوع العقوبة
         if penalty_type not in self.VALID_PENALTY_TYPES:
             logger.error(f"❌ Invalid penalty_type: {penalty_type}")
             return None
 
-        # 2️⃣ ضبط المدة
         if duration < 0:
             duration = 0
         if duration > self.MAX_PENALTY_DURATION:
             duration = self.MAX_PENALTY_DURATION
 
-        # 3️⃣ قفل مركّب
         penalty_lock = await self._get_penalty_lock(user_id, chat_id)
 
         async with penalty_lock:
             try:
-                # 4️⃣ التأكد من المستخدم
                 user_ok = await self._ensure_user_exists(
                     user_id=user_id,
                     username=username,
@@ -4438,7 +4454,6 @@ class Database(
                     )
                     return None
 
-                # 5️⃣ التأكد من المجموعة
                 group_ok = await self._ensure_group_exists(
                     chat_id=chat_id,
                     chat_name=chat_name,
@@ -4452,7 +4467,6 @@ class Database(
                     )
                     return None
 
-                # 6️⃣ تنفيذ داخل transaction
                 async with self.transaction() as conn:
                     if penalty_type != "warn":
                         await self._execute_with_conn(
@@ -4510,7 +4524,6 @@ class Database(
                         )
                         penalty_id = cursor.lastrowid
 
-                    # admin_logs فقط عند نجاح INSERT
                     if issued_by and penalty_id:
                         try:
                             await self._execute_with_conn(
@@ -4587,7 +4600,6 @@ class Database(
         return await self.fetchall(query, tuple(params))
 
     async def expire_penalties(self) -> int:
-        """✅ v7.5.14: COUNT(*) أولاً لكل المحركات."""
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
@@ -4734,7 +4746,6 @@ class Database(
         return await self.fetchval(query, tuple(params), default=0)
 
     async def get_all_active_penalties(self) -> List[Dict]:
-        """✅ v7.5.14: LIMIT من الثوابت."""
         return await self.fetchall(
             "SELECT * FROM user_penalties WHERE status = 'active' "
             f"LIMIT {MAX_ACTIVE_PENALTIES_FETCH}"
