@@ -1,2322 +1,639 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (نسخة كاملة)
+database_reminders.py - دوال التذكيرات (Mixin)
 ================================================================================
-- مستقل تماماً عن database.py (لتفادي circular imports)
-- يستقبل (conn, logger, TimeUtils) كمعاملات
-- جميع الجداول + جميع الفهارس موحّدة عبر SQLite / PostgreSQL / MySQL
-- يحتوي على جدول schema_version لتتبع الإصدارات
+Mixin يُضاف إلى فئة Database في database.py
 
-🚀 الإصدار v5 (v7.5.4):
-  - ✅ إصلاح #1: SQLite — إزالة executescript واستخدام حلقة آمنة
-  - ✅ إصلاح #2: PostgreSQL — transaction بدل استعلام متعدد (خطأ)
-  - ✅ إصلاح #4: MySQL — VARCHAR بدل TEXT لأعمدة DEFAULT
-  - ✅ إصلاح #5: MySQL — media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
-  - ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
-  - ✅ إصلاح #8: SQLite — ON CONFLICT بدل INSERT OR IGNORE
-  - ✅ إصلاح #9: schema_version — applied_at fallback آمن
-  - ✅ إضافة 11 فهرس حرج (reverse lookups + leaderboard + publishing)
-  - ✅ فهارس وقائية للتنظيف
-  - ✅ تنظيف الفهارس المكررة
-  - ✅🆕 v7.5.4: تحسين Cold Start — فحص الفهارس الموجودة في استعلام واحد
-    * PostgreSQL: SELECT indexname FROM pg_indexes WHERE indexname = ANY($1)
-    * SQLite    : SELECT name FROM sqlite_master WHERE type='index'
-    * MySQL     : SHOW INDEX لكل جدول مرة واحدة
-    * توفير ~15 ثانية في كل تشغيل
-  - ✅🆕 v7.5.4: تحسين Cold Start — فحص الجداول الموجودة في استعلام واحد
-    * PostgreSQL: SELECT table_name FROM information_schema.tables
-    * SQLite    : SELECT name FROM sqlite_master WHERE type='table'
-  - ✅🆕 v7.5.4: تصحيح عدّاد الفهارس (كان يعرض "60 جديد" عند وجودها جميعاً)
+المجموعات:
+  1️⃣  إعدادات التذكيرات (Reminder Settings)
+  2️⃣  دوال الاستعلام للتذكيرات (Query Reminders)
+  3️⃣  دوال الإرسال (Send Reminders)
+
+⚠️ المتطلبات (يجب توفرها في الفئة الأم Database):
+  - self.DB_TYPE, self.USE_POSTGRES, self.USE_MYSQL
+  - self.TimeUtils
+  - self.internal_cache
+  - self.fetchone, self.fetchall, self.fetchval, self.execute
+  - self.connection, self.transaction
+  - self._get_user_lock
+  - self._fetchval_with_conn, self._fetchone_with_conn, self._fetchall_with_conn
+  - self._execute_with_conn, self._executemany_with_conn
+
+🆕 v1.0 (متوافق مع database.py v7.5.8):
+  - ✅ إدارة إعدادات التذكيرات لكل مستخدم
+  - ✅ دوال إرسال التذكيرات (daily/weekly/subscription)
+  - ✅ جلب الاشتراكات المنتهية قريباً
+  - ✅ كاش 60 ثانية لتحسين الأداء
+  - ✅ دعم SQLite / PostgreSQL / MySQL
 """
 
-import os
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
 
-# =====================================================================
-# 0. ثوابت مشتركة
-# =====================================================================
-
-CURRENT_SCHEMA_VERSION = 1
-
-DEFAULT_SETTINGS = (
-    ("publish_interval", "12"),
-    ("auto_backup", "1"),
-    ("last_ticket_number", "0"),
-    ("last_backup", ""),
-)
-
-# أعمدة النص العربي الطويلة (بدون DEFAULT في MySQL)
-LONG_TEXT_COLUMNS = {
-    "group_security": ["welcome_text", "goodbye_text"],
-}
-
-COMMON_INDEXES = [
-    # ═══════════════════════════════════════════════════════════════
-    # USERS
-    # ═══════════════════════════════════════════════════════════════
-    ("users", "idx_users_banned", "users(banned)"),
-    ("users", "idx_users_active_channel", "users(active_channel)"),
-    ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
-    ("users", "idx_users_language", "users(language)"),
-    ("users", "idx_users_subscription_end", "users(subscription_end)"),
-    ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_CHANNELS
-    # ═══════════════════════════════════════════════════════════════
-    ("user_channels", "idx_uc_user", "user_channels(user_id)"),
-    ("user_channels", "idx_user_channels_user_created", "user_channels(user_id, created_at DESC)"),
-    ("user_channels", "idx_user_channels_user_banned", "user_channels(user_id, banned)"),
-    ("user_channels", "idx_user_channels_banned_user", "user_channels(banned, user_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # POSTS
-    # ═══════════════════════════════════════════════════════════════
-    ("posts", "idx_posts_text_hash", "posts(text_hash)"),
-    ("posts", "idx_posts_channel", "posts(channel_db_id)"),
-    ("posts", "idx_posts_published", "posts(published)"),
-    ("posts", "idx_posts_channel_published", "posts(channel_db_id, published)"),
-    ("posts", "idx_posts_channel_pub_fail_created", "posts(channel_db_id, published, fail_count, created_at)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # BOT_GROUPS
-    # ═══════════════════════════════════════════════════════════════
-    ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
-    ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_GROUPS_LINK
-    # ═══════════════════════════════════════════════════════════════
-    ("user_groups_link", "idx_user_groups_link_user_id", "user_groups_link(user_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # GROUP_ADMINS
-    # ═══════════════════════════════════════════════════════════════
-    ("group_admins", "idx_group_admins_user_id", "group_admins(user_id)"),
-    ("group_admins", "idx_group_admins_user_chat", "group_admins(user_id, chat_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_OWNER_GROUPS
-    # ═══════════════════════════════════════════════════════════════
-    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id", "hidden_owner_groups(owner_id)"),
-    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat", "hidden_owner_groups(owner_id, chat_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_ADMINS
-    # ═══════════════════════════════════════════════════════════════
-    ("hidden_admins", "idx_hidden_admins_admin_id", "hidden_admins(admin_id)"),
-    ("hidden_admins", "idx_hidden_admins_admin_chat", "hidden_admins(admin_id, chat_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # ANONYMOUS_ADMINS
-    # ═══════════════════════════════════════════════════════════════
-    ("anonymous_admins", "idx_anonymous_admins_user_id", "anonymous_admins(user_id)"),
-    ("anonymous_admins", "idx_anonymous_admins_anonymous_id", "anonymous_admins(anonymous_id)"),
-    ("anonymous_admins", "idx_anon_user_chat", "anonymous_admins(user_id, chat_id)"),
-    ("anonymous_admins", "idx_anon_anon_chat", "anonymous_admins(anonymous_id, chat_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # BANNED_WORDS
-    # ═══════════════════════════════════════════════════════════════
-    ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
-    ("banned_words", "idx_banned_words_chat_word", "banned_words(chat_id, word)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # AUTO_REPLIES
-    # ═══════════════════════════════════════════════════════════════
-    ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
-    ("auto_replies", "idx_auto_replies_lookup", "auto_replies(chat_id, keyword, is_active)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # SCHEDULE
-    # ═══════════════════════════════════════════════════════════════
-    ("schedule", "idx_schedule_next_publish", "schedule(next_publish_date)"),
-    ("schedule", "idx_schedule_channel_next", "schedule(channel_db_id, next_publish_date)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # SUBSCRIPTIONS
-    # ═══════════════════════════════════════════════════════════════
-    ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
-    ("subscriptions", "idx_sub_status", "subscriptions(status)"),
-    ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
-    ("subscriptions", "idx_subscriptions_user_status", "subscriptions(user_id, status)"),
-    ("subscriptions", "idx_subscriptions_user_status_end", "subscriptions(user_id, status, end_date)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # INVOICES
-    # ═══════════════════════════════════════════════════════════════
-    ("invoices", "idx_inv_user", "invoices(user_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # REFERRALS
-    # ═══════════════════════════════════════════════════════════════
-    ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
-    ("referrals", "idx_referrals_referrer_created", "referrals(referrer_id, created_at DESC)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # CONTESTS
-    # ═══════════════════════════════════════════════════════════════
-    ("contests", "idx_contests_status", "contests(status)"),
-    ("contests", "idx_contests_status_end", "contests(status, end_date)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_PENALTIES
-    # ═══════════════════════════════════════════════════════════════
-    ("user_penalties", "idx_penalties_user", "user_penalties(user_id)"),
-    ("user_penalties", "idx_penalties_chat", "user_penalties(chat_id)"),
-    ("user_penalties", "idx_penalties_status", "user_penalties(status)"),
-    ("user_penalties", "idx_penalties_user_chat_status_end", "user_penalties(user_id, chat_id, status, end_time)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_POINTS
-    # ═══════════════════════════════════════════════════════════════
-    ("user_points", "idx_points_user", "user_points(user_id)"),
-    ("user_points", "idx_user_points_value", "user_points(points DESC)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # SUPPORT_TICKETS
-    # ═══════════════════════════════════════════════════════════════
-    ("support_tickets", "idx_tickets_status", "support_tickets(status)"),
-    ("support_tickets", "idx_tickets_status_created", "support_tickets(status, created_at DESC)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # PAYMENT_LOGS
-    # ═══════════════════════════════════════════════════════════════
-    ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # ADMIN_LOGS
-    # ═══════════════════════════════════════════════════════════════
-    ("admin_logs", "idx_admin_logs_chat", "admin_logs(chat_id, id DESC)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # PENALTY_ARCHIVE
-    # ═══════════════════════════════════════════════════════════════
-    ("penalty_archive", "idx_penalty_archive_archived", "penalty_archive(archived_at)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # SENTIMENT_HISTORY
-    # ═══════════════════════════════════════════════════════════════
-    ("sentiment_history", "idx_sentiment_user_chat", "sentiment_history(user_id, chat_id)"),
-    ("sentiment_history", "idx_sentiment_created", "sentiment_history(created_at)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_MESSAGES
-    # ═══════════════════════════════════════════════════════════════
-    ("user_messages", "idx_user_messages_chat", "user_messages(chat_id)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # SCHEDULED_POSTS
-    # ═══════════════════════════════════════════════════════════════
-    ("scheduled_posts", "idx_scheduled_posts_time", "scheduled_posts(publish_time)"),
-
-    # ═══════════════════════════════════════════════════════════════
-    # USER_REMINDER_SETTINGS
-    # ═══════════════════════════════════════════════════════════════
-    ("user_reminder_settings", "idx_reminder_subscription", "user_reminder_settings(subscription_reminder)"),
-]
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# دوال مساعدة
+# استيراد التكوينات (بحماية)
 # =====================================================================
 
-def _safe_now_iso(TimeUtils) -> str:
-    """✅ إصلاح #9: fallback آمن للوقت"""
-    if TimeUtils:
-        try:
-            return TimeUtils.sql_iso()
-        except Exception:
-            pass
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
-
-
-def _safe_now_dt(TimeUtils):
-    """يرجع datetime للـ PostgreSQL"""
-    if TimeUtils:
-        try:
-            return TimeUtils.utc_now()
-        except Exception:
-            pass
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+try:
+    from config import CONFIG
+except ImportError:
+    class CONFIG:
+        DEFAULT_REMINDER_DAYS_BEFORE = 3
 
 
 # =====================================================================
-# 🆕 v7.5.4 — دوال فحص جماعية (Batch Existence Checks)
+# RemindersMixin
 # =====================================================================
 
-async def _fetch_existing_indexes_postgres(conn, index_names):
-    """جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)"""
-    if not index_names:
-        return set()
-    try:
-        rows = await conn.fetch(
-            "SELECT indexname FROM pg_indexes WHERE indexname = ANY($1::text[])",
-            list(index_names),
-        )
-        return {row["indexname"] for row in rows}
-    except Exception:
-        return set()
-
-
-async def _fetch_existing_indexes_sqlite(conn):
-    """جلب كل الفهارس الموجودة في SQLite"""
-    try:
-        cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name IS NOT NULL"
-        )
-        rows = await cursor.fetchall()
-        return {row[0] for row in rows}
-    except Exception:
-        return set()
-
-
-async def _fetch_existing_tables_postgres(conn):
-    """جلب كل الجداول الموجودة في PostgreSQL"""
-    try:
-        rows = await conn.fetch(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ANY(current_schemas(false))"
-        )
-        return {row["table_name"] for row in rows}
-    except Exception:
-        return set()
-
-
-async def _fetch_existing_tables_sqlite(conn):
-    """جلب كل الجداول الموجودة في SQLite"""
-    try:
-        cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IS NOT NULL"
-        )
-        rows = await cursor.fetchall()
-        return {row[0] for row in rows}
-    except Exception:
-        return set()
-
-
-# =====================================================================
-# دالة مساعدة: إنشاء الفهارس (لكل نوع DB) — محسّنة في v7.5.4
-# =====================================================================
-
-async def _create_indexes_sqlite(conn, logger):
+class RemindersMixin:
     """
-    ✅ v7.5.4: تحسين Cold Start — فحص جماعي للفهارس الموجودة.
+    Mixin لدوال التذكيرات.
+
+    يعتمد على الخصائص التالية في الفئة الأم:
+      - self.DB_TYPE          : "sqlite" | "postgres" | "mysql"
+      - self.TimeUtils        : فئة TimeUtils
+      - self.internal_cache   : InternalQueryCache
+      - دوال fetchone/fetchall/fetchval/execute
+      - دوال connection/transaction
     """
-    # 1) جلب الفهارس الموجودة في استعلام واحد
-    existing = await _fetch_existing_indexes_sqlite(conn)
 
-    # 2) تحديد المفقودة
-    to_create = [(t, n, c) for t, n, c in COMMON_INDEXES if n not in existing]
+    # =================================================================
+    # دوال داخلية مساعدة
+    # =================================================================
 
-    if not to_create:
-        if logger:
-            logger.info(
-                f"✅ SQLite: 0 فهرس جديد، {len(existing)} موجود، 0 فشل"
+    def _is_postgres_reminders(self) -> bool:
+        return getattr(self, "DB_TYPE", "sqlite") == "postgres"
+
+    def _is_mysql_reminders(self) -> bool:
+        return getattr(self, "DB_TYPE", "sqlite") == "mysql"
+
+    # =================================================================
+    # 1️⃣  إعدادات التذكيرات (Reminder Settings)
+    # =================================================================
+
+    async def get_reminder_settings(self, user_id: int) -> Dict:
+        """
+        جلب إعدادات التذكير للمستخدم (مع إنشاء افتراضي إن لم يوجد).
+
+        Returns:
+            {
+                "user_id": int,
+                "subscription_reminder": int (0/1),
+                "daily_stats_reminder": int (0/1),
+                "weekly_report": int (0/1),
+                "reminder_days_before": int,
+                "last_reminder_sent": datetime | None,
+                "notification_lang": str,
+            }
+        """
+        try:
+            # ✅ كاش 60 ثانية
+            cache_key = f"reminder_settings_{user_id}"
+            cached = await self.internal_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            row = await self.fetchone(
+                "SELECT * FROM user_reminder_settings WHERE user_id = ?",
+                (user_id,),
             )
-        return
 
-    # 3) إنشاء المفقودة فقط
-    created = 0
-    failed = 0
-    for _table, idx_name, cols in to_create:
-        try:
-            await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}")
-            created += 1
-        except Exception as e:
-            failed += 1
-            if logger:
-                logger.warning(f"⚠️ SQLite فهرس {idx_name}: {e}")
-
-    skipped = len(COMMON_INDEXES) - len(to_create)
-    if logger:
-        logger.info(
-            f"✅ SQLite: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
-        )
-
-
-async def _create_indexes_postgres(conn, logger):
-    """
-    ✅ v7.5.4: تحسين Cold Start بشكل كبير.
-    - استعلام واحد لجلب جميع الفهارس الموجودة
-    - إنشاء الفهارس المفقودة فقط
-    - يوفّر ~15 ثانية في كل تشغيل بعد الأول
-    """
-    # 1) جلب الفهارس الموجودة في استعلام واحد (بدلاً من 60 CREATE INDEX)
-    index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
-    existing = await _fetch_existing_indexes_postgres(conn, index_names)
-
-    # 2) تحديد المفقودة فقط
-    to_create = [
-        (t, n, c) for t, n, c in COMMON_INDEXES if n not in existing
-    ]
-
-    if not to_create:
-        if logger:
-            logger.info(
-                f"✅ PostgreSQL: 0 فهرس جديد، {len(existing)} موجود، 0 فشل"
-            )
-        return
-
-    # 3) إنشاء المفقودة فقط داخل transaction
-    created = 0
-    failed = 0
-    try:
-        async with conn.transaction():
-            for _table, idx_name, cols in to_create:
-                try:
-                    await conn.execute(
-                        f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                    )
-                    created += 1
-                except Exception as e:
-                    failed += 1
-                    if logger:
-                        logger.warning(f"⚠️ PG فهرس {idx_name}: {e}")
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ PG transaction فشل ({e})، محاولة فردية...")
-        created = 0
-        failed = 0
-        for _table, idx_name, cols in to_create:
-            try:
-                await conn.execute(
-                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
-                )
-                created += 1
-            except Exception as e2:
-                failed += 1
-                if logger:
-                    logger.warning(f"⚠️ PG فهرس {idx_name}: {e2}")
-
-    skipped = len(COMMON_INDEXES) - len(to_create)
-    if logger:
-        logger.info(
-            f"✅ PostgreSQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل"
-        )
-
-
-async def _create_indexes_mysql(conn, logger):
-    """
-    ✅ إصلاح #6: MySQL — SHOW INDEX بدل information_schema.STATISTICS
-    """
-    # جمع الأسماء الفريدة للجداول
-    tables = set(t for t, _, _ in COMMON_INDEXES)
-
-    existing = set()
-    for table in tables:
-        try:
-            cursor = await conn.cursor()
-            await cursor.execute(f"SHOW INDEX FROM `{table}`")
-            rows = await cursor.fetchall()
-            for r in rows:
-                # r[2] = Key_name
-                existing.add((table, r[2]))
-            await cursor.close()
-        except Exception as e:
-            if logger:
-                logger.debug(f"⚠️ SHOW INDEX لـ {table}: {e}")
-
-    created = 0
-    skipped = 0
-    failed = 0
-    for table, idx_name, cols in COMMON_INDEXES:
-        if (table, idx_name) in existing:
-            skipped += 1
-            continue
-        try:
-            await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
-            created += 1
-        except Exception as e:
-            err_msg = str(e).lower()
-            if (
-                "duplicate" in err_msg
-                or "already exists" in err_msg
-                or "1061" in err_msg
-            ):
-                skipped += 1
+            if row:
+                settings = dict(row)
             else:
-                failed += 1
-                if logger:
-                    logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
+                # إنشاء صف افتراضي
+                await self.execute(
+                    """INSERT OR IGNORE INTO user_reminder_settings
+                       (user_id, subscription_reminder, daily_stats_reminder,
+                        weekly_report, reminder_days_before, notification_lang)
+                       VALUES (?, 1, 0, 1, 3, 'ar')""",
+                    (user_id,),
+                )
+                settings = {
+                    "user_id": user_id,
+                    "subscription_reminder": 1,
+                    "daily_stats_reminder": 0,
+                    "weekly_report": 1,
+                    "reminder_days_before": 3,
+                    "last_reminder_sent": None,
+                    "notification_lang": "ar",
+                }
 
-    if logger:
-        logger.info(f"✅ MySQL: {created} فهرس جديد، {skipped} موجود، {failed} فشل")
+            await self.internal_cache.set(cache_key, settings, ttl=60)
+            return settings
 
-
-# =====================================================================
-# 1. إنشاء جداول SQLite
-# =====================================================================
-
-async def create_tables_sqlite(conn, logger, TimeUtils):
-    """إنشاء جميع جداول SQLite + الفهارس"""
-
-    # ---------- schema_version ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL,
-            description TEXT
-        )
-    """)
-
-    # ---------- USERS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language TEXT DEFAULT 'ar',
-            auto_publish INTEGER DEFAULT 1,
-            auto_recycle INTEGER DEFAULT 1,
-            banned INTEGER DEFAULT 0,
-            trial_used INTEGER DEFAULT 0,
-            subscription_end TEXT,
-            referral_code TEXT UNIQUE,
-            created_at TEXT,
-            updated_at TEXT,
-            active_channel INTEGER
-        )
-    """)
-
-    # ---------- USER_CHANNELS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            channel_id INTEGER,
-            channel_name TEXT,
-            banned INTEGER DEFAULT 0,
-            created_at TEXT,
-            UNIQUE(user_id, channel_id)
-        )
-    """)
-
-    # ---------- POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_db_id INTEGER,
-            text TEXT,
-            text_hash TEXT,
-            media_type TEXT,
-            media_file_id TEXT,
-            published INTEGER DEFAULT 0,
-            fail_count INTEGER DEFAULT 0,
-            created_at TEXT,
-            published_at TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
-            UNIQUE(channel_db_id, text_hash, media_type, media_file_id)
-        )
-    """)
-
-    # ---------- SCHEDULE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schedule (
-            channel_db_id INTEGER PRIMARY KEY,
-            schedule_type TEXT DEFAULT 'interval_minutes',
-            interval_minutes INTEGER DEFAULT 12,
-            interval_hours INTEGER DEFAULT 0,
-            interval_days INTEGER DEFAULT 0,
-            days_of_week TEXT DEFAULT '[]',
-            specific_dates TEXT DEFAULT '[]',
-            publish_time TEXT DEFAULT '00:00',
-            cron_expression TEXT,
-            next_publish_date TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- LAST_PUBLISH ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS last_publish (
-            channel_db_id INTEGER PRIMARY KEY,
-            last_publish_time TEXT,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- BOT_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_groups (
-            chat_id INTEGER PRIMARY KEY,
-            chat_name TEXT,
-            username TEXT,
-            added_by INTEGER,
-            added_at TEXT,
-            updated_at TEXT,
-            banned INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- USER_GROUPS_LINK ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_groups_link (
-            user_id INTEGER,
-            chat_id INTEGER,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- GROUP_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_admins (
-            chat_id INTEGER,
-            user_id INTEGER,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    """)
-
-    # ---------- HIDDEN_OWNER_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
-            chat_id INTEGER,
-            owner_id INTEGER,
-            is_hidden INTEGER DEFAULT 1,
-            PRIMARY KEY (chat_id, owner_id)
-        )
-    """)
-
-    # ---------- HIDDEN_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_admins (
-            chat_id INTEGER,
-            admin_id INTEGER,
-            added_by INTEGER,
-            added_at TEXT,
-            PRIMARY KEY (chat_id, admin_id)
-        )
-    """)
-
-    # ---------- ANONYMOUS_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS anonymous_admins (
-            chat_id INTEGER NOT NULL,
-            anonymous_id INTEGER NOT NULL,
-            added_by INTEGER,
-            user_id INTEGER,
-            added_at TEXT,
-            PRIMARY KEY (chat_id, anonymous_id)
-        )
-    """)
-
-    # ---------- GROUP_SECURITY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_security (
-            chat_id INTEGER PRIMARY KEY,
-            delete_links INTEGER DEFAULT 0,
-            mentions INTEGER DEFAULT 0,
-            slow_mode INTEGER DEFAULT 0,
-            slow_mode_seconds INTEGER DEFAULT 5,
-            welcome_enabled INTEGER DEFAULT 0,
-            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
-            goodbye_enabled INTEGER DEFAULT 0,
-            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
-            delete_banned_words INTEGER DEFAULT 0,
-            auto_penalty TEXT DEFAULT 'none',
-            auto_mute_duration INTEGER DEFAULT 3600,
-            delete_videos INTEGER DEFAULT 0,
-            delete_audio INTEGER DEFAULT 0,
-            delete_animation INTEGER DEFAULT 0,
-            delete_service INTEGER DEFAULT 0,
-            delete_documents INTEGER DEFAULT 0,
-            delete_stickers INTEGER DEFAULT 0,
-            delete_forwarded INTEGER DEFAULT 0,
-            delete_polls INTEGER DEFAULT 0,
-            delete_games INTEGER DEFAULT 0,
-            delete_voice INTEGER DEFAULT 0,
-            delete_video_note INTEGER DEFAULT 0,
-            delete_photos INTEGER DEFAULT 0,
-            delete_penalty TEXT DEFAULT 'none',
-            delete_penalty_duration INTEGER DEFAULT 0,
-            delete_penalty_messages INTEGER DEFAULT 0,
-            antiflood_enabled INTEGER DEFAULT 0,
-            antiflood_messages INTEGER DEFAULT 5,
-            antiflood_seconds INTEGER DEFAULT 10,
-            antiflood_penalty TEXT DEFAULT 'mute',
-            antiflood_penalty_duration INTEGER DEFAULT 3600,
-            max_warnings INTEGER DEFAULT 3,
-            warn_penalty TEXT DEFAULT 'ban',
-            warn_penalty_duration INTEGER DEFAULT 3600,
-            warn_enabled INTEGER DEFAULT 0,
-            max_message_length INTEGER DEFAULT 0,
-            night_mode_enabled INTEGER DEFAULT 0,
-            night_mode_start TEXT DEFAULT '23:00',
-            night_mode_end TEXT DEFAULT '06:00',
-            night_mode_action TEXT DEFAULT 'mute',
-            night_mode_action_duration INTEGER DEFAULT 3600,
-            nsfw_enabled INTEGER DEFAULT 0,
-            nsfw_threshold REAL DEFAULT 0.7,
-            nsfw_filter INTEGER DEFAULT 0,
-            auto_approve_join INTEGER DEFAULT 0,
-            auto_reject_join INTEGER DEFAULT 0,
-            mute_default_duration INTEGER DEFAULT 3600,
-            ban_default_duration INTEGER DEFAULT 0,
-            warn_default_duration INTEGER DEFAULT 0,
-            restrict_default_duration INTEGER DEFAULT 1800,
-            enable_timed_penalties INTEGER DEFAULT 1,
-            auto_remove_penalties INTEGER DEFAULT 1,
-            violation_strikes INTEGER DEFAULT 3,
-            violation_duration INTEGER DEFAULT 60
-        )
-    """)
-
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id INTEGER PRIMARY KEY,
-            locked INTEGER DEFAULT 0,
-            locked_at TEXT,
-            locked_by INTEGER
-        )
-    """)
-
-    # ---------- BANNED_WORDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT,
-            chat_id INTEGER,
-            added_by INTEGER,
-            added_at TEXT,
-            UNIQUE(word, chat_id)
-        )
-    """)
-
-    # ---------- AUTO_REPLIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_replies (
-            chat_id INTEGER,
-            keyword TEXT,
-            reply TEXT,
-            reply_type TEXT DEFAULT 'text',
-            reply_media_id TEXT,
-            reply_buttons TEXT,
-            created_at TEXT,
-            is_active INTEGER DEFAULT 1,
-            usage_count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, keyword)
-        )
-    """)
-
-    # ---------- AUTO_REPLY_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_reply_settings (
-            chat_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 0,
-            only_admins INTEGER DEFAULT 0,
-            ignore_bots INTEGER DEFAULT 1,
-            updated_at TEXT
-        )
-    """)
-
-    # ---------- SUPPORT_TICKETS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS support_tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            message TEXT,
-            media_type TEXT,
-            media_file_id TEXT,
-            ticket_number INTEGER,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT,
-            replied INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- BOT_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_admins (
-            user_id INTEGER PRIMARY KEY,
-            added_by INTEGER,
-            added_at TEXT
-        )
-    """)
-
-    # ---------- SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    # ✅ إصلاح #8: ON CONFLICT بدل INSERT OR IGNORE
-    for key, value in DEFAULT_SETTINGS:
-        try:
-            await conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
-                (key, value),
-            )
         except Exception as e:
-            if logger:
-                logger.warning(f"⚠️ SQLite settings '{key}': {e}")
+            logger.error(f"❌ Error in get_reminder_settings: {e}", exc_info=True)
+            return {
+                "user_id": user_id,
+                "subscription_reminder": 1,
+                "daily_stats_reminder": 0,
+                "weekly_report": 1,
+                "reminder_days_before": 3,
+                "last_reminder_sent": None,
+                "notification_lang": "ar",
+            }
 
-    # ---------- REFERRALS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id INTEGER,
-            referred_id INTEGER,
-            created_at TEXT,
-            UNIQUE(referrer_id, referred_id)
-        )
-    """)
+    async def update_reminder_settings(self, user_id: int, **kwargs) -> bool:
+        """
+        تحديث إعدادات التذكير.
 
-    # ---------- REFERRAL_REWARDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referral_rewards (
-            user_id INTEGER PRIMARY KEY,
-            referral_count INTEGER DEFAULT 0,
-            total_reward_days INTEGER DEFAULT 0,
-            claimed_reward_days INTEGER DEFAULT 0,
-            last_referral_date TEXT
-        )
-    """)
+        Allowed columns:
+          - subscription_reminder (bool/int)
+          - daily_stats_reminder (bool/int)
+          - weekly_report (bool/int)
+          - reminder_days_before (int)
+          - notification_lang (str)
 
-    # ---------- USER_REMINDER_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_reminder_settings (
-            user_id INTEGER PRIMARY KEY,
-            subscription_reminder INTEGER DEFAULT 1,
-            daily_stats_reminder INTEGER DEFAULT 0,
-            weekly_report INTEGER DEFAULT 1,
-            reminder_days_before INTEGER DEFAULT 3,
-            last_reminder_sent TEXT,
-            notification_lang TEXT DEFAULT 'ar'
-        )
-    """)
-
-    # ---------- USER_TRANSLATION ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_translation (
-            user_id INTEGER PRIMARY KEY,
-            lang TEXT DEFAULT 'off'
-        )
-    """)
-
-    # ---------- CONTESTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER,
-            title TEXT,
-            description TEXT,
-            prize TEXT,
-            end_date TEXT,
-            status TEXT DEFAULT 'active',
-            winner_id INTEGER,
-            created_at TEXT,
-            contest_type TEXT DEFAULT 'raffle'
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_participants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            contest_id INTEGER,
-            answer TEXT,
-            joined_at TEXT,
-            UNIQUE(user_id, contest_id)
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_winners (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            contest_id INTEGER,
-            winner_id INTEGER,
-            announced_at TEXT
-        )
-    """)
-
-    # ---------- ADMIN_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            admin_id INTEGER,
-            action TEXT,
-            target_id INTEGER,
-            reason TEXT,
-            created_at TEXT
-        )
-    """)
-
-    # ---------- USER_WARNINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_warnings (
-            user_id INTEGER,
-            chat_id INTEGER,
-            warnings INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- USER_VIOLATIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_violations (
-            user_id INTEGER,
-            chat_id INTEGER,
-            violation_count INTEGER DEFAULT 0,
-            last_violation_time TEXT,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- GROUP_RULES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_rules (
-            chat_id INTEGER PRIMARY KEY,
-            rules_text TEXT,
-            updated_by INTEGER,
-            updated_at TEXT
-        )
-    """)
-
-    # ---------- USER_MESSAGES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_messages (
-            user_id INTEGER,
-            chat_id INTEGER,
-            message_time TEXT,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- SCHEDULED_POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            text TEXT,
-            publish_time TEXT,
-            fail_count INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- SENTIMENT_HISTORY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS sentiment_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            chat_id INTEGER,
-            text_encrypted BLOB,
-            sentiment TEXT,
-            score REAL,
-            created_at TEXT
-        )
-    """)
-
-    # ---------- PLANS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            description TEXT,
-            price INTEGER,
-            currency TEXT DEFAULT 'XTR',
-            duration_days INTEGER,
-            max_channels INTEGER,
-            max_posts INTEGER,
-            features TEXT,
-            is_active INTEGER DEFAULT 1,
-            is_gift INTEGER DEFAULT 0,
-            created_at TEXT
-        )
-    """)
-
-    # ---------- SUBSCRIPTIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            plan_id INTEGER,
-            status TEXT DEFAULT 'active',
-            start_date TEXT,
-            end_date TEXT,
-            auto_renew INTEGER DEFAULT 0,
-            provider TEXT DEFAULT 'xtr',
-            provider_subscription_id TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- INVOICES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            number TEXT UNIQUE,
-            user_id INTEGER,
-            plan_id INTEGER,
-            amount INTEGER,
-            currency TEXT DEFAULT 'XTR',
-            status TEXT DEFAULT 'pending',
-            provider TEXT DEFAULT 'xtr',
-            provider_payment_id TEXT,
-            paid_at TEXT,
-            created_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- PAYMENT_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS payment_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            provider TEXT DEFAULT 'xtr',
-            event_type TEXT,
-            data TEXT,
-            created_at TEXT
-        )
-    """)
-
-    # ---------- USER_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_penalties (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            chat_id INTEGER,
-            penalty_type TEXT,
-            duration INTEGER,
-            start_time TEXT,
-            end_time TEXT,
-            reason TEXT,
-            issued_by INTEGER,
-            status TEXT DEFAULT 'active',
-            created_at TEXT
-        )
-    """)
-
-    # ---------- VIOLATION_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS violation_penalties (
-            chat_id INTEGER NOT NULL,
-            violation_type TEXT NOT NULL,
-            penalty_type TEXT NOT NULL DEFAULT 'mute',
-            duration_seconds INTEGER DEFAULT 3600,
-            PRIMARY KEY (chat_id, violation_type)
-        )
-    """)
-
-    # ---------- GIFT_CODES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS gift_codes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE,
-            plan_id INTEGER,
-            creator_id INTEGER,
-            used_by INTEGER,
-            used_at TEXT,
-            created_at TEXT,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- USER_POINTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_points (
-            user_id INTEGER PRIMARY KEY,
-            points INTEGER DEFAULT 0,
-            last_updated TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- PENALTY_ARCHIVE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS penalty_archive (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            chat_id INTEGER,
-            penalty_type TEXT,
-            duration INTEGER,
-            start_time TEXT,
-            end_time TEXT,
-            reason TEXT,
-            issued_by INTEGER,
-            status TEXT,
-            created_at TEXT,
-            archived_at TEXT
-        )
-    """)
-
-    # ============ 🚀 الفهارس — v7.5.4 فحص جماعي ============
-    await _create_indexes_sqlite(conn, logger)
-
-    # تسجيل إصدار المخطط
-    try:
-        await conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) "
-            "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
-            (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils), "initial schema"),
-        )
-        await conn.commit()
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ schema_version SQLite: {e}")
-
-    if logger:
-        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
-
-
-# =====================================================================
-# 2. إنشاء جداول PostgreSQL
-# =====================================================================
-
-async def create_tables_postgres(conn, logger, TimeUtils):
-    """إنشاء جميع جداول PostgreSQL + الفهارس"""
-
-    # ---------- schema_version ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            applied_at TIMESTAMP NOT NULL,
-            description TEXT
-        )
-    """)
-
-    # ---------- USERS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language TEXT DEFAULT 'ar',
-            auto_publish INTEGER DEFAULT 1,
-            auto_recycle INTEGER DEFAULT 1,
-            banned INTEGER DEFAULT 0,
-            trial_used INTEGER DEFAULT 0,
-            subscription_end TIMESTAMP,
-            referral_code TEXT UNIQUE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            active_channel INTEGER
-        )
-    """)
-
-    # ---------- USER_CHANNELS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_channels (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            channel_id BIGINT,
-            channel_name TEXT,
-            banned INTEGER DEFAULT 0,
-            created_at TIMESTAMP,
-            UNIQUE(user_id, channel_id)
-        )
-    """)
-
-    # ---------- POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id SERIAL PRIMARY KEY,
-            channel_db_id INTEGER,
-            text TEXT,
-            text_hash TEXT,
-            media_type TEXT,
-            media_file_id TEXT,
-            published INTEGER DEFAULT 0,
-            fail_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP,
-            published_at TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        )
-    """)
-    await conn.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
-        ON posts(channel_db_id, text_hash, media_type, media_file_id)
-    """)
-
-    # ---------- SCHEDULE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schedule (
-            channel_db_id INTEGER PRIMARY KEY,
-            schedule_type TEXT DEFAULT 'interval_minutes',
-            interval_minutes INTEGER DEFAULT 12,
-            interval_hours INTEGER DEFAULT 0,
-            interval_days INTEGER DEFAULT 0,
-            days_of_week TEXT DEFAULT '[]',
-            specific_dates TEXT DEFAULT '[]',
-            publish_time TEXT DEFAULT '00:00',
-            cron_expression TEXT,
-            next_publish_date TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- LAST_PUBLISH ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS last_publish (
-            channel_db_id INTEGER PRIMARY KEY,
-            last_publish_time TIMESTAMP,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- BOT_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_groups (
-            chat_id BIGINT PRIMARY KEY,
-            chat_name TEXT,
-            username TEXT,
-            added_by BIGINT,
-            added_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            banned INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- USER_GROUPS_LINK ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_groups_link (
-            user_id BIGINT,
-            chat_id BIGINT,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- GROUP_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_admins (
-            chat_id BIGINT,
-            user_id BIGINT,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    """)
-
-    # ---------- HIDDEN_OWNER_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
-            chat_id BIGINT,
-            owner_id BIGINT,
-            is_hidden INTEGER DEFAULT 1,
-            PRIMARY KEY (chat_id, owner_id)
-        )
-    """)
-
-    # ---------- HIDDEN_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_admins (
-            chat_id BIGINT,
-            admin_id BIGINT,
-            added_by BIGINT,
-            added_at TIMESTAMP,
-            PRIMARY KEY (chat_id, admin_id)
-        )
-    """)
-
-    # ---------- ANONYMOUS_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS anonymous_admins (
-            chat_id BIGINT NOT NULL,
-            anonymous_id BIGINT NOT NULL,
-            added_by BIGINT,
-            user_id BIGINT,
-            added_at TIMESTAMP,
-            PRIMARY KEY (chat_id, anonymous_id)
-        )
-    """)
-
-    # ---------- GROUP_SECURITY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_security (
-            chat_id BIGINT PRIMARY KEY,
-            delete_links INTEGER DEFAULT 0,
-            mentions INTEGER DEFAULT 0,
-            slow_mode INTEGER DEFAULT 0,
-            slow_mode_seconds INTEGER DEFAULT 5,
-            welcome_enabled INTEGER DEFAULT 0,
-            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
-            goodbye_enabled INTEGER DEFAULT 0,
-            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
-            delete_banned_words INTEGER DEFAULT 0,
-            auto_penalty TEXT DEFAULT 'none',
-            auto_mute_duration INTEGER DEFAULT 3600,
-            delete_videos INTEGER DEFAULT 0,
-            delete_audio INTEGER DEFAULT 0,
-            delete_animation INTEGER DEFAULT 0,
-            delete_service INTEGER DEFAULT 0,
-            delete_documents INTEGER DEFAULT 0,
-            delete_stickers INTEGER DEFAULT 0,
-            delete_forwarded INTEGER DEFAULT 0,
-            delete_polls INTEGER DEFAULT 0,
-            delete_games INTEGER DEFAULT 0,
-            delete_voice INTEGER DEFAULT 0,
-            delete_video_note INTEGER DEFAULT 0,
-            delete_photos INTEGER DEFAULT 0,
-            delete_penalty TEXT DEFAULT 'none',
-            delete_penalty_duration INTEGER DEFAULT 0,
-            delete_penalty_messages INTEGER DEFAULT 0,
-            antiflood_enabled INTEGER DEFAULT 0,
-            antiflood_messages INTEGER DEFAULT 5,
-            antiflood_seconds INTEGER DEFAULT 10,
-            antiflood_penalty TEXT DEFAULT 'mute',
-            antiflood_penalty_duration INTEGER DEFAULT 3600,
-            max_warnings INTEGER DEFAULT 3,
-            warn_penalty TEXT DEFAULT 'ban',
-            warn_penalty_duration INTEGER DEFAULT 3600,
-            warn_enabled INTEGER DEFAULT 0,
-            max_message_length INTEGER DEFAULT 0,
-            night_mode_enabled INTEGER DEFAULT 0,
-            night_mode_start TEXT DEFAULT '23:00',
-            night_mode_end TEXT DEFAULT '06:00',
-            night_mode_action TEXT DEFAULT 'mute',
-            night_mode_action_duration INTEGER DEFAULT 3600,
-            nsfw_enabled INTEGER DEFAULT 0,
-            nsfw_threshold REAL DEFAULT 0.7,
-            nsfw_filter INTEGER DEFAULT 0,
-            auto_approve_join INTEGER DEFAULT 0,
-            auto_reject_join INTEGER DEFAULT 0,
-            mute_default_duration INTEGER DEFAULT 3600,
-            ban_default_duration INTEGER DEFAULT 0,
-            warn_default_duration INTEGER DEFAULT 0,
-            restrict_default_duration INTEGER DEFAULT 1800,
-            enable_timed_penalties INTEGER DEFAULT 1,
-            auto_remove_penalties INTEGER DEFAULT 1,
-            violation_strikes INTEGER DEFAULT 3,
-            violation_duration INTEGER DEFAULT 60
-        )
-    """)
-
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id BIGINT PRIMARY KEY,
-            locked INTEGER DEFAULT 0,
-            locked_at TIMESTAMP,
-            locked_by BIGINT
-        )
-    """)
-
-    # ---------- BANNED_WORDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words (
-            id SERIAL PRIMARY KEY,
-            word TEXT,
-            chat_id BIGINT,
-            added_by BIGINT,
-            added_at TIMESTAMP,
-            UNIQUE(word, chat_id)
-        )
-    """)
-
-    # ---------- AUTO_REPLIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_replies (
-            chat_id BIGINT,
-            keyword TEXT,
-            reply TEXT,
-            reply_type TEXT DEFAULT 'text',
-            reply_media_id TEXT,
-            reply_buttons TEXT,
-            created_at TIMESTAMP,
-            is_active INTEGER DEFAULT 1,
-            usage_count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, keyword)
-        )
-    """)
-
-    # ---------- AUTO_REPLY_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_reply_settings (
-            chat_id BIGINT PRIMARY KEY,
-            enabled INTEGER DEFAULT 0,
-            only_admins INTEGER DEFAULT 0,
-            ignore_bots INTEGER DEFAULT 1,
-            updated_at TIMESTAMP
-        )
-    """)
-
-    # ---------- SUPPORT_TICKETS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS support_tickets (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            username TEXT,
-            message TEXT,
-            media_type TEXT,
-            media_file_id TEXT,
-            ticket_number INTEGER,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP,
-            replied INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- BOT_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_admins (
-            user_id BIGINT PRIMARY KEY,
-            added_by BIGINT,
-            added_at TIMESTAMP
-        )
-    """)
-
-    # ---------- SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    for key, value in DEFAULT_SETTINGS:
+        Returns:
+            True عند النجاح
+        """
         try:
-            await conn.execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
-                key,
-                value,
+            allowed = {
+                "subscription_reminder",
+                "daily_stats_reminder",
+                "weekly_report",
+                "reminder_days_before",
+                "notification_lang",
+            }
+            # تحقق من الأعمدة
+            invalid = [k for k in kwargs if k not in allowed]
+            if invalid:
+                logger.error(f"❌ Invalid columns: {invalid}")
+                return False
+
+            if not kwargs:
+                return False
+
+            # تحويل bool إلى int
+            params_dict = {}
+            for k, v in kwargs.items():
+                if isinstance(v, bool):
+                    params_dict[k] = 1 if v else 0
+                else:
+                    params_dict[k] = v
+
+            # ضمان وجود الصف
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_reminder_settings WHERE user_id = ?",
+                (user_id,),
             )
+            if not exists:
+                await self.execute(
+                    """INSERT INTO user_reminder_settings
+                       (user_id, subscription_reminder, daily_stats_reminder,
+                        weekly_report, reminder_days_before, notification_lang)
+                       VALUES (?, 1, 0, 1, 3, 'ar')""",
+                    (user_id,),
+                )
+
+            # بناء UPDATE ديناميكي
+            updates = ", ".join([f"{k} = ?" for k in params_dict.keys()])
+            values = list(params_dict.values()) + [user_id]
+            query = f"UPDATE user_reminder_settings SET {updates} WHERE user_id = ?"
+
+            result = await self.execute(query, tuple(values)) > 0
+
+            if result:
+                await self.internal_cache.invalidate(f"reminder_settings_{user_id}")
+                await self.internal_cache.invalidate(f"user_{user_id}")
+            return result
+
         except Exception as e:
-            if logger:
-                logger.warning(f"⚠️ PG settings '{key}': {e}")
+            logger.error(f"❌ Error in update_reminder_settings: {e}", exc_info=True)
+            return False
 
-    # ---------- REFERRALS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id SERIAL PRIMARY KEY,
-            referrer_id BIGINT,
-            referred_id BIGINT,
-            created_at TIMESTAMP,
-            UNIQUE(referrer_id, referred_id)
-        )
-    """)
-
-    # ---------- REFERRAL_REWARDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referral_rewards (
-            user_id BIGINT PRIMARY KEY,
-            referral_count INTEGER DEFAULT 0,
-            total_reward_days INTEGER DEFAULT 0,
-            claimed_reward_days INTEGER DEFAULT 0,
-            last_referral_date TIMESTAMP
-        )
-    """)
-
-    # ---------- USER_REMINDER_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_reminder_settings (
-            user_id BIGINT PRIMARY KEY,
-            subscription_reminder INTEGER DEFAULT 1,
-            daily_stats_reminder INTEGER DEFAULT 0,
-            weekly_report INTEGER DEFAULT 1,
-            reminder_days_before INTEGER DEFAULT 3,
-            last_reminder_sent TIMESTAMP,
-            notification_lang TEXT DEFAULT 'ar'
-        )
-    """)
-
-    # ---------- USER_TRANSLATION ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_translation (
-            user_id BIGINT PRIMARY KEY,
-            lang TEXT DEFAULT 'off'
-        )
-    """)
-
-    # ---------- CONTESTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contests (
-            id SERIAL PRIMARY KEY,
-            creator_id BIGINT,
-            title TEXT,
-            description TEXT,
-            prize TEXT,
-            end_date TIMESTAMP,
-            status TEXT DEFAULT 'active',
-            winner_id BIGINT,
-            created_at TIMESTAMP,
-            contest_type TEXT DEFAULT 'raffle'
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_participants (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            contest_id INTEGER,
-            answer TEXT,
-            joined_at TIMESTAMP,
-            UNIQUE(user_id, contest_id)
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_winners (
-            id SERIAL PRIMARY KEY,
-            contest_id INTEGER,
-            winner_id BIGINT,
-            announced_at TIMESTAMP
-        )
-    """)
-
-    # ---------- ADMIN_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id SERIAL PRIMARY KEY,
-            chat_id BIGINT,
-            admin_id BIGINT,
-            action TEXT,
-            target_id BIGINT,
-            reason TEXT,
-            created_at TIMESTAMP
-        )
-    """)
-
-    # ---------- USER_WARNINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_warnings (
-            user_id BIGINT,
-            chat_id BIGINT,
-            warnings INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- USER_VIOLATIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_violations (
-            user_id BIGINT,
-            chat_id BIGINT,
-            violation_count INTEGER DEFAULT 0,
-            last_violation_time TIMESTAMP,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- GROUP_RULES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_rules (
-            chat_id BIGINT PRIMARY KEY,
-            rules_text TEXT,
-            updated_by BIGINT,
-            updated_at TIMESTAMP
-        )
-    """)
-
-    # ---------- USER_MESSAGES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_messages (
-            user_id BIGINT,
-            chat_id BIGINT,
-            message_time TIMESTAMP,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    """)
-
-    # ---------- SCHEDULED_POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_posts (
-            id SERIAL PRIMARY KEY,
-            chat_id BIGINT,
-            text TEXT,
-            publish_time TIMESTAMP,
-            fail_count INTEGER DEFAULT 0
-        )
-    """)
-
-    # ---------- SENTIMENT_HISTORY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS sentiment_history (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            chat_id BIGINT,
-            text_encrypted BYTEA,
-            sentiment TEXT,
-            score REAL,
-            created_at TIMESTAMP
-        )
-    """)
-
-    # ---------- PLANS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE,
-            description TEXT,
-            price INTEGER,
-            currency TEXT DEFAULT 'XTR',
-            duration_days INTEGER,
-            max_channels INTEGER,
-            max_posts INTEGER,
-            features TEXT,
-            is_active INTEGER DEFAULT 1,
-            is_gift INTEGER DEFAULT 0,
-            created_at TIMESTAMP
-        )
-    """)
-
-    # ---------- SUBSCRIPTIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            plan_id INTEGER,
-            status TEXT DEFAULT 'active',
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
-            auto_renew INTEGER DEFAULT 0,
-            provider TEXT DEFAULT 'xtr',
-            provider_subscription_id TEXT,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- INVOICES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id SERIAL PRIMARY KEY,
-            number TEXT UNIQUE,
-            user_id BIGINT,
-            plan_id INTEGER,
-            amount INTEGER,
-            currency TEXT DEFAULT 'XTR',
-            status TEXT DEFAULT 'pending',
-            provider TEXT DEFAULT 'xtr',
-            provider_payment_id TEXT,
-            paid_at TIMESTAMP,
-            created_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- PAYMENT_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS payment_logs (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            provider TEXT DEFAULT 'xtr',
-            event_type TEXT,
-            data TEXT,
-            created_at TIMESTAMP
-        )
-    """)
-
-    # ---------- USER_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_penalties (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type TEXT,
-            duration INTEGER,
-            start_time TIMESTAMP,
-            end_time TIMESTAMP,
-            reason TEXT,
-            issued_by BIGINT,
-            status TEXT DEFAULT 'active',
-            created_at TIMESTAMP
-        )
-    """)
-
-    # ---------- VIOLATION_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS violation_penalties (
-            chat_id BIGINT NOT NULL,
-            violation_type TEXT NOT NULL,
-            penalty_type TEXT NOT NULL DEFAULT 'mute',
-            duration_seconds INTEGER DEFAULT 3600,
-            PRIMARY KEY (chat_id, violation_type)
-        )
-    """)
-
-    # ---------- GIFT_CODES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS gift_codes (
-            id SERIAL PRIMARY KEY,
-            code TEXT UNIQUE,
-            plan_id INTEGER,
-            creator_id BIGINT,
-            used_by BIGINT,
-            used_at TIMESTAMP,
-            created_at TIMESTAMP,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        )
-    """)
-
-    # ---------- USER_POINTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_points (
-            user_id BIGINT PRIMARY KEY,
-            points INTEGER DEFAULT 0,
-            last_updated TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-        )
-    """)
-
-    # ---------- PENALTY_ARCHIVE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS penalty_archive (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type TEXT,
-            duration INTEGER,
-            start_time TIMESTAMP,
-            end_time TIMESTAMP,
-            reason TEXT,
-            issued_by BIGINT,
-            status TEXT,
-            created_at TIMESTAMP,
-            archived_at TIMESTAMP
-        )
-    """)
-
-    # ============ 🚀 الفهارس — v7.5.4 فحص جماعي ============
-    await _create_indexes_postgres(conn, logger)
-
-    # تسجيل إصدار المخطط
-    try:
-        await conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) "
-            "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
-            CURRENT_SCHEMA_VERSION,
-            _safe_now_dt(TimeUtils),
-            "initial schema",
-        )
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ schema_version PG: {e}")
-
-    if logger:
-        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
-
-
-# =====================================================================
-# 3. إنشاء جداول MySQL
-# =====================================================================
-
-async def create_tables_mysql(conn, logger, TimeUtils):
-    """إنشاء جميع جداول MySQL + الفهارس"""
-
-    await conn.execute("SET FOREIGN_KEY_CHECKS=0")
-
-    # ---------- schema_version ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INT PRIMARY KEY,
-            applied_at DATETIME NOT NULL,
-            description TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USERS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language VARCHAR(10) DEFAULT 'ar',
-            auto_publish TINYINT(1) DEFAULT 1,
-            auto_recycle TINYINT(1) DEFAULT 1,
-            banned TINYINT(1) DEFAULT 0,
-            trial_used TINYINT(1) DEFAULT 0,
-            subscription_end DATETIME,
-            referral_code VARCHAR(255) UNIQUE,
-            created_at DATETIME,
-            updated_at DATETIME,
-            active_channel INT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_CHANNELS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_channels (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            channel_id BIGINT,
-            channel_name VARCHAR(255),
-            banned TINYINT(1) DEFAULT 0,
-            created_at DATETIME,
-            UNIQUE KEY (user_id, channel_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- POSTS ----------
-    # ✅ إصلاح #5: media_file_id VARCHAR(255) بدل 4096 (تجاوز حد الفهرس)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            channel_db_id INT,
-            text TEXT NOT NULL,
-            text_hash CHAR(64) DEFAULT '',
-            media_type VARCHAR(50),
-            media_file_id VARCHAR(255),
-            published TINYINT(1) DEFAULT 0,
-            fail_count INT DEFAULT 0,
-            created_at DATETIME,
-            published_at DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE,
-            UNIQUE KEY idx_posts_unique (channel_db_id, text_hash, media_type, media_file_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SCHEDULE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schedule (
-            channel_db_id INT PRIMARY KEY,
-            schedule_type VARCHAR(50) DEFAULT 'interval_minutes',
-            interval_minutes INT DEFAULT 12,
-            interval_hours INT DEFAULT 0,
-            interval_days INT DEFAULT 0,
-            days_of_week TEXT,
-            specific_dates TEXT,
-            publish_time VARCHAR(10) DEFAULT '00:00',
-            cron_expression TEXT,
-            next_publish_date DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- LAST_PUBLISH ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS last_publish (
-            channel_db_id INT PRIMARY KEY,
-            last_publish_time DATETIME,
-            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- BOT_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_groups (
-            chat_id BIGINT PRIMARY KEY,
-            chat_name VARCHAR(255),
-            username VARCHAR(255),
-            added_by BIGINT,
-            added_at DATETIME,
-            updated_at DATETIME,
-            banned TINYINT(1) DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- USER_GROUPS_LINK ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_groups_link (
-            user_id BIGINT,
-            chat_id BIGINT,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- GROUP_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_admins (
-            chat_id BIGINT,
-            user_id BIGINT,
-            PRIMARY KEY (chat_id, user_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- HIDDEN_OWNER_GROUPS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
-            chat_id BIGINT,
-            owner_id BIGINT,
-            is_hidden TINYINT(1) DEFAULT 1,
-            PRIMARY KEY (chat_id, owner_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- HIDDEN_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS hidden_admins (
-            chat_id BIGINT,
-            admin_id BIGINT,
-            added_by BIGINT,
-            added_at DATETIME,
-            PRIMARY KEY (chat_id, admin_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- ANONYMOUS_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS anonymous_admins (
-            chat_id BIGINT NOT NULL,
-            anonymous_id BIGINT NOT NULL,
-            added_by BIGINT,
-            user_id BIGINT,
-            added_at DATETIME,
-            PRIMARY KEY (chat_id, anonymous_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- GROUP_SECURITY ----------
-    # ✅ إصلاح #4: welcome_text / goodbye_text كـ VARCHAR (TEXT لا يدعم DEFAULT)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_security (
-            chat_id BIGINT PRIMARY KEY,
-            delete_links TINYINT(1) DEFAULT 0,
-            mentions TINYINT(1) DEFAULT 0,
-            slow_mode TINYINT(1) DEFAULT 0,
-            slow_mode_seconds INT DEFAULT 5,
-            welcome_enabled TINYINT(1) DEFAULT 0,
-            welcome_text VARCHAR(500) DEFAULT 'مرحباً {user} في {chat} 🤍',
-            goodbye_enabled TINYINT(1) DEFAULT 0,
-            goodbye_text VARCHAR(500) DEFAULT 'وداعاً {user} 👋',
-            delete_banned_words TINYINT(1) DEFAULT 0,
-            auto_penalty VARCHAR(50) DEFAULT 'none',
-            auto_mute_duration INT DEFAULT 3600,
-            delete_videos TINYINT(1) DEFAULT 0,
-            delete_audio TINYINT(1) DEFAULT 0,
-            delete_animation TINYINT(1) DEFAULT 0,
-            delete_service TINYINT(1) DEFAULT 0,
-            delete_documents TINYINT(1) DEFAULT 0,
-            delete_stickers TINYINT(1) DEFAULT 0,
-            delete_forwarded TINYINT(1) DEFAULT 0,
-            delete_polls TINYINT(1) DEFAULT 0,
-            delete_games TINYINT(1) DEFAULT 0,
-            delete_voice TINYINT(1) DEFAULT 0,
-            delete_video_note TINYINT(1) DEFAULT 0,
-            delete_photos TINYINT(1) DEFAULT 0,
-            delete_penalty VARCHAR(50) DEFAULT 'none',
-            delete_penalty_duration INT DEFAULT 0,
-            delete_penalty_messages INT DEFAULT 0,
-            antiflood_enabled TINYINT(1) DEFAULT 0,
-            antiflood_messages INT DEFAULT 5,
-            antiflood_seconds INT DEFAULT 10,
-            antiflood_penalty VARCHAR(50) DEFAULT 'mute',
-            antiflood_penalty_duration INT DEFAULT 3600,
-            max_warnings INT DEFAULT 3,
-            warn_penalty VARCHAR(50) DEFAULT 'ban',
-            warn_penalty_duration INT DEFAULT 3600,
-            warn_enabled TINYINT(1) DEFAULT 0,
-            max_message_length INT DEFAULT 0,
-            night_mode_enabled TINYINT(1) DEFAULT 0,
-            night_mode_start VARCHAR(10) DEFAULT '23:00',
-            night_mode_end VARCHAR(10) DEFAULT '06:00',
-            night_mode_action VARCHAR(50) DEFAULT 'mute',
-            night_mode_action_duration INT DEFAULT 3600,
-            nsfw_enabled TINYINT(1) DEFAULT 0,
-            nsfw_threshold FLOAT DEFAULT 0.7,
-            nsfw_filter TINYINT(1) DEFAULT 0,
-            auto_approve_join TINYINT(1) DEFAULT 0,
-            auto_reject_join TINYINT(1) DEFAULT 0,
-            mute_default_duration INT DEFAULT 3600,
-            ban_default_duration INT DEFAULT 0,
-            warn_default_duration INT DEFAULT 0,
-            restrict_default_duration INT DEFAULT 1800,
-            enable_timed_penalties TINYINT(1) DEFAULT 1,
-            auto_remove_penalties TINYINT(1) DEFAULT 1,
-            violation_strikes INT DEFAULT 3,
-            violation_duration INT DEFAULT 60
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- CHAT_LOCKS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_locks (
-            chat_id BIGINT PRIMARY KEY,
-            locked TINYINT(1) DEFAULT 0,
-            locked_at DATETIME,
-            locked_by BIGINT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- BANNED_WORDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS banned_words (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            word VARCHAR(255),
-            chat_id BIGINT,
-            added_by BIGINT,
-            added_at DATETIME,
-            UNIQUE KEY (word, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- AUTO_REPLIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_replies (
-            chat_id BIGINT,
-            keyword VARCHAR(255),
-            reply TEXT,
-            reply_type VARCHAR(50) DEFAULT 'text',
-            reply_media_id TEXT,
-            reply_buttons TEXT,
-            created_at DATETIME,
-            is_active TINYINT(1) DEFAULT 1,
-            usage_count INT DEFAULT 0,
-            PRIMARY KEY (chat_id, keyword)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- AUTO_REPLY_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS auto_reply_settings (
-            chat_id BIGINT PRIMARY KEY,
-            enabled TINYINT(1) DEFAULT 0,
-            only_admins TINYINT(1) DEFAULT 0,
-            ignore_bots TINYINT(1) DEFAULT 1,
-            updated_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SUPPORT_TICKETS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS support_tickets (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            username VARCHAR(255),
-            message TEXT,
-            media_type VARCHAR(50),
-            media_file_id TEXT,
-            ticket_number INT,
-            status VARCHAR(50) DEFAULT 'pending',
-            created_at DATETIME,
-            replied TINYINT(1) DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- BOT_ADMINS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bot_admins (
-            user_id BIGINT PRIMARY KEY,
-            added_by BIGINT,
-            added_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-
-    # ---------- SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            `key` VARCHAR(255) PRIMARY KEY,
-            `value` TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    for key, value in DEFAULT_SETTINGS:
+    async def reset_reminder_settings(self, user_id: int) -> bool:
+        """إعادة تعيين الإعدادات للافتراضي"""
         try:
-            await conn.execute(
-                "INSERT IGNORE INTO settings (`key`, `value`) VALUES (%s, %s)",
-                (key, value),
-            )
+            result = await self.execute(
+                """UPDATE user_reminder_settings SET
+                   subscription_reminder = 1,
+                   daily_stats_reminder = 0,
+                   weekly_report = 1,
+                   reminder_days_before = 3,
+                   notification_lang = 'ar'
+                   WHERE user_id = ?""",
+                (user_id,),
+            ) > 0
+            if result:
+                await self.internal_cache.invalidate(f"reminder_settings_{user_id}")
+            return result
         except Exception as e:
-            if logger:
-                logger.warning(f"⚠️ MySQL settings '{key}': {e}")
+            logger.error(f"❌ Error in reset_reminder_settings: {e}", exc_info=True)
+            return False
 
-    # ---------- REFERRALS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            referrer_id BIGINT,
-            referred_id BIGINT,
-            created_at DATETIME,
-            UNIQUE KEY (referrer_id, referred_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    # =================================================================
+    # 2️⃣  دوال الاستعلام للتذكيرات (Query Reminders)
+    # =================================================================
 
-    # ---------- REFERRAL_REWARDS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS referral_rewards (
-            user_id BIGINT PRIMARY KEY,
-            referral_count INT DEFAULT 0,
-            total_reward_days INT DEFAULT 0,
-            claimed_reward_days INT DEFAULT 0,
-            last_referral_date DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def get_users_for_daily_reminder(self, limit: int = 500) -> List[Dict]:
+        """
+        جلب المستخدمين الذين يريدون تذكيراً يومياً.
+        يتحقق من مرور 20 ساعة على الأقل منذ آخر تذكير.
+        """
+        try:
+            if self._is_postgres_reminders():
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.daily_stats_reminder = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < NOW() - INTERVAL '20 hours'
+                      )
+                    ORDER BY u.user_id LIMIT $1
+                """
+                return await self.fetchall(query, (limit,))
+            elif self._is_mysql_reminders():
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.daily_stats_reminder = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < UTC_TIMESTAMP() - INTERVAL 20 HOUR
+                      )
+                    ORDER BY u.user_id LIMIT %s
+                """
+                return await self.fetchall(query, (limit,))
+            else:
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.daily_stats_reminder = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < datetime('now', '-20 hours')
+                      )
+                    ORDER BY u.user_id LIMIT ?
+                """
+                return await self.fetchall(query, (limit,))
+        except Exception as e:
+            logger.error(f"❌ Error in get_users_for_daily_reminder: {e}", exc_info=True)
+            return []
 
-    # ---------- USER_REMINDER_SETTINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_reminder_settings (
-            user_id BIGINT PRIMARY KEY,
-            subscription_reminder TINYINT(1) DEFAULT 1,
-            daily_stats_reminder TINYINT(1) DEFAULT 0,
-            weekly_report TINYINT(1) DEFAULT 1,
-            reminder_days_before INT DEFAULT 3,
-            last_reminder_sent DATETIME,
-            notification_lang VARCHAR(10) DEFAULT 'ar'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def get_users_for_weekly_reminder(self, limit: int = 500) -> List[Dict]:
+        """
+        جلب المستخدمين الذين يريدون تقريراً أسبوعياً.
+        يتحقق من مرور 6 أيام على الأقل منذ آخر تذكير.
+        """
+        try:
+            if self._is_postgres_reminders():
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.weekly_report = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < NOW() - INTERVAL '6 days'
+                      )
+                    ORDER BY u.user_id LIMIT $1
+                """
+                return await self.fetchall(query, (limit,))
+            elif self._is_mysql_reminders():
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.weekly_report = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < UTC_TIMESTAMP() - INTERVAL 6 DAY
+                      )
+                    ORDER BY u.user_id LIMIT %s
+                """
+                return await self.fetchall(query, (limit,))
+            else:
+                query = """
+                    SELECT u.user_id, u.first_name, u.language,
+                           urs.notification_lang
+                    FROM users u
+                    JOIN user_reminder_settings urs ON u.user_id = urs.user_id
+                    WHERE urs.weekly_report = 1
+                      AND u.banned = 0
+                      AND (
+                        urs.last_reminder_sent IS NULL
+                        OR urs.last_reminder_sent < datetime('now', '-6 days')
+                      )
+                    ORDER BY u.user_id LIMIT ?
+                """
+                return await self.fetchall(query, (limit,))
+        except Exception as e:
+            logger.error(f"❌ Error in get_users_for_weekly_reminder: {e}", exc_info=True)
+            return []
 
-    # ---------- USER_TRANSLATION ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_translation (
-            user_id BIGINT PRIMARY KEY,
-            lang VARCHAR(10) DEFAULT 'off'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def get_subscriptions_ending_soon(self, limit: int = 500) -> List[Dict]:
+        """
+        جلب الاشتراكات التي تنتهي قريباً (خلال reminder_days_before).
 
-    # ---------- CONTESTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contests (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            creator_id BIGINT,
-            title VARCHAR(255),
-            description TEXT,
-            prize VARCHAR(255),
-            end_date DATETIME,
-            status VARCHAR(50) DEFAULT 'active',
-            winner_id BIGINT,
-            created_at DATETIME,
-            contest_type VARCHAR(50) DEFAULT 'raffle'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_participants (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            contest_id INT,
-            answer TEXT,
-            joined_at DATETIME,
-            UNIQUE KEY (user_id, contest_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS contest_winners (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            contest_id INT,
-            winner_id BIGINT,
-            announced_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        Returns:
+            قائمة من {user_id, end_date, days_remaining, notification_lang}
+        """
+        try:
+            if self._is_postgres_reminders():
+                query = """
+                    SELECT s.user_id,
+                           MAX(s.end_date) AS end_date,
+                           EXTRACT(DAY FROM MAX(s.end_date) - NOW())::int
+                               AS days_remaining,
+                           COALESCE(urs.notification_lang, 'ar')
+                               AS notification_lang
+                    FROM subscriptions s
+                    LEFT JOIN user_reminder_settings urs
+                        ON urs.user_id = s.user_id
+                    WHERE s.status = 'active'
+                      AND s.end_date > NOW()
+                      AND s.end_date <= NOW() + INTERVAL '7 days'
+                      AND (urs.subscription_reminder IS NULL
+                           OR urs.subscription_reminder = 1)
+                    GROUP BY s.user_id, urs.notification_lang
+                    ORDER BY end_date ASC
+                    LIMIT $1
+                """
+                return await self.fetchall(query, (limit,))
+            elif self._is_mysql_reminders():
+                query = """
+                    SELECT s.user_id,
+                           MAX(s.end_date) AS end_date,
+                           DATEDIFF(MAX(s.end_date), UTC_TIMESTAMP())
+                               AS days_remaining,
+                           COALESCE(urs.notification_lang, 'ar')
+                               AS notification_lang
+                    FROM subscriptions s
+                    LEFT JOIN user_reminder_settings urs
+                        ON urs.user_id = s.user_id
+                    WHERE s.status = 'active'
+                      AND s.end_date > UTC_TIMESTAMP()
+                      AND s.end_date <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 7 DAY)
+                      AND (urs.subscription_reminder IS NULL
+                           OR urs.subscription_reminder = 1)
+                    GROUP BY s.user_id, urs.notification_lang
+                    ORDER BY end_date ASC
+                    LIMIT %s
+                """
+                return await self.fetchall(query, (limit,))
+            else:
+                query = """
+                    SELECT s.user_id,
+                           MAX(s.end_date) AS end_date,
+                           CAST(julianday(MAX(s.end_date)) - julianday('now')
+                                AS INTEGER) AS days_remaining,
+                           COALESCE(urs.notification_lang, 'ar')
+                               AS notification_lang
+                    FROM subscriptions s
+                    LEFT JOIN user_reminder_settings urs
+                        ON urs.user_id = s.user_id
+                    WHERE s.status = 'active'
+                      AND s.end_date > datetime('now')
+                      AND s.end_date <= datetime('now', '+7 days')
+                      AND (urs.subscription_reminder IS NULL
+                           OR urs.subscription_reminder = 1)
+                    GROUP BY s.user_id, urs.notification_lang
+                    ORDER BY end_date ASC
+                    LIMIT ?
+                """
+                return await self.fetchall(query, (limit,))
+        except Exception as e:
+            logger.error(f"❌ Error in get_subscriptions_ending_soon: {e}", exc_info=True)
+            return []
 
-    # ---------- ADMIN_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            chat_id BIGINT,
-            admin_id BIGINT,
-            action VARCHAR(255),
-            target_id BIGINT,
-            reason TEXT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    # =================================================================
+    # 3️⃣  دوال الإرسال (Send Reminders)
+    # =================================================================
 
-    # ---------- USER_WARNINGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_warnings (
-            user_id BIGINT,
-            chat_id BIGINT,
-            warnings INT DEFAULT 0,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def mark_reminder_sent(self, user_id: int) -> bool:
+        """تحديث last_reminder_sent لمستخدم واحد"""
+        try:
+            now_iso = self.TimeUtils.sql_iso() if hasattr(self.TimeUtils, "sql_iso") else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            result = await self.execute(
+                "UPDATE user_reminder_settings "
+                "SET last_reminder_sent = ? WHERE user_id = ?",
+                (now_iso, user_id),
+            ) > 0
+            if result:
+                await self.internal_cache.invalidate(f"reminder_settings_{user_id}")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error in mark_reminder_sent: {e}", exc_info=True)
+            return False
 
-    # ---------- USER_VIOLATIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_violations (
-            user_id BIGINT,
-            chat_id BIGINT,
-            violation_count INT DEFAULT 0,
-            last_violation_time DATETIME,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def mark_reminders_sent_bulk(self, user_ids: List[int]) -> int:
+        """تحديث last_reminder_sent لمجموعة مستخدمين (batch)"""
+        if not user_ids:
+            return 0
+        try:
+            now_iso = self.TimeUtils.sql_iso() if hasattr(self.TimeUtils, "sql_iso") else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            total = 0
+            BATCH = 500
+            for i in range(0, len(user_ids), BATCH):
+                batch = user_ids[i : i + BATCH]
+                placeholders = ",".join(["?"] * len(batch))
+                updated = await self.execute(
+                    f"UPDATE user_reminder_settings "
+                    f"SET last_reminder_sent = ? "
+                    f"WHERE user_id IN ({placeholders})",
+                    (now_iso, *batch),
+                )
+                total += updated or 0
+                for uid in batch:
+                    await self.internal_cache.invalidate(f"reminder_settings_{uid}")
+            return total
+        except Exception as e:
+            logger.error(f"❌ Error in mark_reminders_sent_bulk: {e}", exc_info=True)
+            return 0
 
-    # ---------- GROUP_RULES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS group_rules (
-            chat_id BIGINT PRIMARY KEY,
-            rules_text TEXT,
-            updated_by BIGINT,
-            updated_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def send_subscription_reminders(self, reminder_func) -> int:
+        """
+        إرسال تذكيرات الاشتراك لجميع المستخدمين المؤهلين.
 
-    # ---------- USER_MESSAGES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_messages (
-            user_id BIGINT,
-            chat_id BIGINT,
-            message_time DATETIME,
-            PRIMARY KEY (user_id, chat_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        Args:
+            reminder_func: دالة async تُستدعى لكل مستخدم
+                           signature: async def f(user_id, days_left, lang) -> bool
 
-    # ---------- SCHEDULED_POSTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_posts (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            chat_id BIGINT,
-            text TEXT,
-            publish_time DATETIME,
-            fail_count INT DEFAULT 0
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        Returns:
+            عدد التذكيرات المُرسلة بنجاح
+        """
+        try:
+            users = await self.get_subscriptions_ending_soon(limit=500)
+            if not users:
+                return 0
 
-    # ---------- SENTIMENT_HISTORY ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS sentiment_history (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            text_encrypted BLOB,
-            sentiment VARCHAR(50),
-            score FLOAT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+            sent = 0
+            sent_ids = []
+            for row in users:
+                try:
+                    user_id = row["user_id"]
+                    days_left = int(row.get("days_remaining") or 0)
+                    lang = row.get("notification_lang") or "ar"
 
-    # ---------- PLANS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(100) UNIQUE,
-            description TEXT,
-            price INT,
-            currency VARCHAR(10) DEFAULT 'XTR',
-            duration_days INT,
-            max_channels INT,
-            max_posts INT,
-            features TEXT,
-            is_active TINYINT(1) DEFAULT 1,
-            is_gift TINYINT(1) DEFAULT 0,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+                    if days_left <= 0:
+                        continue
+                    # نرسل فقط عندما يتبقى X أيام حسب إعدادات المستخدم
+                    settings = await self.get_reminder_settings(user_id)
+                    days_before = settings.get("reminder_days_before", 3)
+                    if days_left > days_before:
+                        continue
 
-    # ---------- SUBSCRIPTIONS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            plan_id INT,
-            status VARCHAR(50) DEFAULT 'active',
-            start_date DATETIME,
-            end_date DATETIME,
-            auto_renew TINYINT(1) DEFAULT 0,
-            provider VARCHAR(50) DEFAULT 'xtr',
-            provider_subscription_id VARCHAR(255),
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+                    ok = await reminder_func(user_id, days_left, lang)
+                    if ok:
+                        sent += 1
+                        sent_ids.append(user_id)
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل إرسال تذكير لـ {row.get('user_id')}: {e}")
 
-    # ---------- INVOICES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            number VARCHAR(50) UNIQUE,
-            user_id BIGINT,
-            plan_id INT,
-            amount INT,
-            currency VARCHAR(10) DEFAULT 'XTR',
-            status VARCHAR(50) DEFAULT 'pending',
-            provider VARCHAR(50) DEFAULT 'xtr',
-            provider_payment_id VARCHAR(255),
-            paid_at DATETIME,
-            created_at DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+            if sent_ids:
+                await self.mark_reminders_sent_bulk(sent_ids)
 
-    # ---------- PAYMENT_LOGS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS payment_logs (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            provider VARCHAR(50) DEFAULT 'xtr',
-            event_type VARCHAR(100),
-            data TEXT,
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+            return sent
+        except Exception as e:
+            logger.error(f"❌ Error in send_subscription_reminders: {e}", exc_info=True)
+            return 0
 
-    # ---------- USER_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_penalties (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type VARCHAR(50),
-            duration INT,
-            start_time DATETIME,
-            end_time DATETIME,
-            reason TEXT,
-            issued_by BIGINT,
-            status VARCHAR(50) DEFAULT 'active',
-            created_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+    async def send_daily_reminders(self, reminder_func) -> int:
+        """
+        إرسال تذكيرات يومية.
 
-    # ---------- VIOLATION_PENALTIES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS violation_penalties (
-            chat_id BIGINT NOT NULL,
-            violation_type VARCHAR(50) NOT NULL,
-            penalty_type VARCHAR(50) NOT NULL DEFAULT 'mute',
-            duration_seconds INT DEFAULT 3600,
-            PRIMARY KEY (chat_id, violation_type)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        Args:
+            reminder_func: async def f(user_id, lang) -> bool
 
-    # ---------- GIFT_CODES ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS gift_codes (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            code VARCHAR(50) UNIQUE,
-            plan_id INT,
-            creator_id BIGINT,
-            used_by BIGINT,
-            used_at DATETIME,
-            created_at DATETIME,
-            FOREIGN KEY (plan_id) REFERENCES plans(id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        Returns:
+            عدد التذكيرات المُرسلة
+        """
+        try:
+            users = await self.get_users_for_daily_reminder(limit=500)
+            if not users:
+                return 0
 
-    # ---------- USER_POINTS ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_points (
-            user_id BIGINT PRIMARY KEY,
-            points INT DEFAULT 0,
-            last_updated DATETIME,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+            sent = 0
+            sent_ids = []
+            for row in users:
+                try:
+                    user_id = row["user_id"]
+                    lang = row.get("notification_lang") or row.get("language") or "ar"
+                    ok = await reminder_func(user_id, lang)
+                    if ok:
+                        sent += 1
+                        sent_ids.append(user_id)
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل إرسال تذكير يومي لـ {row.get('user_id')}: {e}")
 
-    # ---------- PENALTY_ARCHIVE ----------
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS penalty_archive (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            user_id BIGINT,
-            chat_id BIGINT,
-            penalty_type VARCHAR(50),
-            duration INT,
-            start_time DATETIME,
-            end_time DATETIME,
-            reason TEXT,
-            issued_by BIGINT,
-            status VARCHAR(50),
-            created_at DATETIME,
-            archived_at DATETIME
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+            if sent_ids:
+                await self.mark_reminders_sent_bulk(sent_ids)
 
-    await conn.execute("SET FOREIGN_KEY_CHECKS=1")
+            return sent
+        except Exception as e:
+            logger.error(f"❌ Error in send_daily_reminders: {e}", exc_info=True)
+            return 0
 
-    # ============ 🚀 الفهارس MySQL — SHOW INDEX ============
-    await _create_indexes_mysql(conn, logger)
+    async def send_weekly_reminders(self, reminder_func) -> int:
+        """
+        إرسال تقارير أسبوعية.
 
-    # تسجيل إصدار المخطط
-    try:
-        await conn.execute(
-            "INSERT IGNORE INTO schema_version (version, applied_at, description) "
-            "VALUES (%s, %s, %s)",
-            (
-                CURRENT_SCHEMA_VERSION,
-                _safe_now_iso(TimeUtils),
-                "initial schema",
-            ),
-        )
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ schema_version MySQL: {e}")
+        Args:
+            reminder_func: async def f(user_id, lang) -> bool
 
-    if logger:
-        logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
+        Returns:
+            عدد التقارير المُرسلة
+        """
+        try:
+            users = await self.get_users_for_weekly_reminder(limit=500)
+            if not users:
+                return 0
+
+            sent = 0
+            sent_ids = []
+            for row in users:
+                try:
+                    user_id = row["user_id"]
+                    lang = row.get("notification_lang") or row.get("language") or "ar"
+                    ok = await reminder_func(user_id, lang)
+                    if ok:
+                        sent += 1
+                        sent_ids.append(user_id)
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل إرسال تقرير أسبوعي لـ {row.get('user_id')}: {e}")
+
+            if sent_ids:
+                await self.mark_reminders_sent_bulk(sent_ids)
+
+            return sent
+        except Exception as e:
+            logger.error(f"❌ Error in send_weekly_reminders: {e}", exc_info=True)
+            return 0
+
+    # =================================================================
+    # 4️⃣  إحصائيات
+    # =================================================================
+
+    async def get_reminder_stats(self) -> Dict:
+        """
+        إحصائيات إعدادات التذكيرات.
+
+        Returns:
+            {
+                "total_users": int,
+                "subscription_reminder": int,
+                "daily_stats_reminder": int,
+                "weekly_report": int,
+            }
+        """
+        try:
+            async with self.connection() as conn:
+                total = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT COUNT(*) FROM user_reminder_settings",
+                    default=0,
+                )
+                sub = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT COUNT(*) FROM user_reminder_settings "
+                    "WHERE subscription_reminder = 1",
+                    default=0,
+                )
+                daily = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT COUNT(*) FROM user_reminder_settings "
+                    "WHERE daily_stats_reminder = 1",
+                    default=0,
+                )
+                weekly = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT COUNT(*) FROM user_reminder_settings "
+                    "WHERE weekly_report = 1",
+                    default=0,
+                )
+            return {
+                "total_users": total,
+                "subscription_reminder": sub,
+                "daily_stats_reminder": daily,
+                "weekly_report": weekly,
+            }
+        except Exception as e:
+            logger.error(f"❌ Error in get_reminder_stats: {e}", exc_info=True)
+            return {
+                "total_users": 0,
+                "subscription_reminder": 0,
+                "daily_stats_reminder": 0,
+                "weekly_report": 0,
+            }
