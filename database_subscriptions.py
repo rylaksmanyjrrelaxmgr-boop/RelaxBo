@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database_subscriptions.py - دوال الاشتراكات والباقات والإحالات (v1.0)
+database_subscriptions.py - دوال الاشتراكات والباقات والإحالات (v1.1)
 ================================================================================
 Mixin يُضاف إلى فئة Database في database.py
 
@@ -29,6 +29,10 @@ Mixin يُضاف إلى فئة Database في database.py
   - ON CONFLICT مع target صريح
   - حماية من الاشتراكات المكررة
   - استخدام self.DB_TYPE بدل الاستيراد المباشر
+
+🆕 v1.1 (متوافق مع database.py v7.5.8):
+  - ✅ إبطال كاش has_active_sub_* (30s TTL) عند تغيير الاشتراك
+  - الآن /start يعكس التغييرات فوراً بدلاً من انتظار 30 ثانية
 """
 
 import os
@@ -106,6 +110,8 @@ class SubscriptionsMixin:
             await self.internal_cache.invalidate(f"user_{user_id}_True")
             await self.internal_cache.invalidate(f"user_{user_id}_False")
             await self.internal_cache.invalidate(f"subscription_{user_id}")
+            # ✅ v1.1: إبطال كاش has_active_sub_* (متوافق مع database.py v7.5.8)
+            await self.internal_cache.invalidate(f"has_active_sub_{user_id}")
         except Exception as e:
             logger.debug(f"invalidate_subscription_caches: {e}")
 
