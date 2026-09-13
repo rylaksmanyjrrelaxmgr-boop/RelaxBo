@@ -4,8 +4,13 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.21 (مُحسَّن — أزرار تحذيرات + تأكيدات + حماية شاملة)
+الإصدار: v7.5.22 (مُحسَّن — ترقيم المجموعات + رموز مميزة)
 =====================================================================
+🆕 v7.5.22:
+    ✅ _show_groups_list → ترقيم (1️⃣ 2️⃣ 3️⃣...) لكل مجموعة
+    ✅ تمييز بصري واضح للأسماء المتشابهة
+    ✅ الرقم يظهر في النص وفي الأزرار
+
 🆕 v7.5.21:
     ✅ warn_count → أزرار (1, 2, 3, 4, 5, 10)
     ✅ POST_CLEAR → تأكيد قبل الحذف
@@ -107,6 +112,22 @@ _CONTEXT_KEYS_TO_CLEAR = (
 )
 
 _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
+
+# =====================================================================
+# رموز ترقيم المجموعات (يُستخدم في _show_groups_list)
+# =====================================================================
+
+GROUP_NUMBER_EMOJIS = [
+    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
+    "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
+]
+
+
+def _group_number(index: int) -> str:
+    """إرجاع رمز الرقم التسلسلي للمجموعة (1-based)."""
+    if 1 <= index <= len(GROUP_NUMBER_EMOJIS):
+        return GROUP_NUMBER_EMOJIS[index - 1]
+    return f"{index}."
 
 
 # =====================================================================
@@ -1796,9 +1817,13 @@ class CallbackHandlers:
         task.add_done_callback(ACTIVE_TASKS.discard)
         await safe_edit(query, "✅ بدأ النشر الجماعي", bot=context.bot)
 
+    # =================================================================
+    # ✅✅✅ الدالة المعدّلة: _show_groups_list مع ترقيم ✅✅✅
+    # =================================================================
+
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
-        """عرض قائمة المجموعات"""
+        """عرض قائمة المجموعات مع ترقيم مميز (1️⃣ 2️⃣ 3️⃣ ...) لتمييز الأسماء المتشابهة."""
         groups = await DB.get_user_groups(user_id)
         if not groups:
             kb = InlineKeyboardMarkup([
@@ -1813,16 +1838,28 @@ class CallbackHandlers:
 
         text = "👥 مجموعاتي\n\n"
         kb = []
-        for g in groups:
-            text += f"{'✅' if not g['banned'] else '⛔'} {g['chat_name']}\n"
+
+        for i, g in enumerate(groups, 1):
+            gid = g['chat_id']
+            name = g.get('chat_name') or f"Group {gid}"
+            status = "⛔" if g.get('banned') else "✅"
+            number = _group_number(i)
+
+            # نص القائمة: ✅ 1️⃣ اسم المجموعة
+            text += f"{status} {number} {name}\n"
+
+            # زر الأمان
             kb.append([InlineKeyboardButton(
-                f"⚙️ أمان {g['chat_name'][:15]}",
-                callback_data=f"{CB.GRP_SET}:{g['chat_id']}"
+                f"{number} ⚙️ أمان — {name[:18]}",
+                callback_data=f"{CB.GRP_SET}:{gid}"
             )])
+
+            # زر الحذف
             kb.append([InlineKeyboardButton(
-                "🗑️ حذف",
-                callback_data=f"grp_del:{g['chat_id']}"
+                f"{number} 🗑️ حذف — {name[:18]}",
+                callback_data=f"grp_del:{gid}"
             )])
+
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
@@ -3834,7 +3871,6 @@ class CallbackHandlers:
                 await safe_send(context.bot, user_id, f"❌ فشل النسخ: {str(e)[:100]}")
             except Exception:
                 pass
-
 
 # =====================================================================
 # تصدير
