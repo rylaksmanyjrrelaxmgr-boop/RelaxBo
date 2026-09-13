@@ -5,9 +5,9 @@
 utils.py - الأدوات المساعدة للبوت (v7.8.0 — Stateful Buttons)
 =================================================================================
 🆕 v7.8.0:
-    ✅ _STATE_MAP: خريطة callback → settings_key
+    ✅ _STATE_MAP: خريطة callback → settings_key (24 عنصر)
     ✅ build(): يعرض 🟢/⚫ على الأزرار ذات الحالة
-    ✅ تكامل كامل مع extra_data
+    ✅ extra_data يُمرَّر من handlers_callback
 
 🆕 v7.7.0:
     ✅ _get_security_stats: إحصائيات شاملة
@@ -15,6 +15,9 @@ utils.py - الأدوات المساعدة للبوت (v7.8.0 — Stateful Butto
 
 🆕 v7.5.6:
     ✅ _dot / _fmt_dur
+
+🆕 v7.5.4:
+    ✅ CB.ADMIN_BAN_USER / CB.ADMIN_UNBAN_USER
 =================================================================================
 """
 
@@ -641,7 +644,7 @@ class KeyboardFactory:
     # 🆕 v7.8.0: خريطة الأزرار ذات الحالة (callback → settings_key)
     # ═════════════════════════════════════════════════════════════════
     _STATE_MAP = {
-        # الحماية التلقائية
+        # 🗑️ الحماية التلقائية
         "sec_links": "delete_links",
         "sec_mentions": "mentions",
         "sec_video": "delete_videos",
@@ -656,17 +659,17 @@ class KeyboardFactory:
         "sec_voice": "delete_voice",
         "sec_videonote": "delete_video_note",
         "sec_banned_words": "delete_banned_words",
-        # الأمان المتقدم
+        # ⚙️ الأمان المتقدم
         "sec_flood": "antiflood_enabled",
         "sec_night": "night_mode_enabled",
         "sec_slow": "slow_mode",
         "sec_nsfw": "nsfw_enabled",
-        # الترحيب والانضمام
+        # 👋 الترحيب والانضمام
         "sec_welcome": "welcome_enabled",
         "sec_goodbye": "goodbye_enabled",
         "sec_approve_join": "auto_approve_join",
         "sec_reject_join": "auto_reject_join",
-        # التحذيرات
+        # ⚠️ التحذيرات
         "sec_warn": "warn_enabled",
     }
 
