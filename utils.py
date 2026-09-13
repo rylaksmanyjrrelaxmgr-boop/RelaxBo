@@ -2,32 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.5.6 — توفير مساحة حقيقي)
+utils.py - الأدوات المساعدة للبوت (v7.7.0 — إحصائيات شاملة)
 =================================================================================
-🆕 v7.5.6 (توفير حقيقي):
-    ✅ _format_security_text: 10 أسطر فقط (بدل 34)
-    ✅ رموز بدون مسافات + كلمات مختصرة
-    ✅ إلغاء إطارات ASCII المهدورة
-    ✅ الحفاظ على كل المعلومات
+🆕 v7.7.0:
+    ✅ _get_security_stats: إحصائيات شاملة (اليوم + إجمالي)
+    ✅ _format_security_text: يعرض الإحصائيات أسفل الإعدادات
+    ✅ إصلاح: expires_at IS NULL (يشمل الحظر/الكتم الدائم)
+    ✅ إصلاح: today_start بدون تلاعب timezone
+    ✅ إصلاح: action = 'violation_photo' دقيق
+
+🆕 v7.5.6:
+    ✅ _format_security_text: مضغوط
+    ✅ _dot (🟢/⚫)
+    ✅ _fmt_dur (1س بدل 3600ث)
 
 🆕 v7.5.5:
     ✅ _dot (🟢/⚫)
-    ✅ _fmt_dur (1س بدل 3600ث)
-    ✅ أزرار security مضغوطة
+    ✅ _fmt_dur
 
 🆕 v7.5.4:
     ✅ CB.ADMIN_BAN_USER / CB.ADMIN_UNBAN_USER
-    ✅ UserState.WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
     ✅ ban_user_by_id() / unban_user_by_id()
 
 🆕 v7.5.3 (إصلاح بطء الأزرار):
     ✅ PUBLISH_RATE_LIMITER منفصل
     ✅ safe_send: timeout 2s
-    ✅ _do_backup آمن
 
 🆕 v7.5.2 (إصلاحات أداء):
     ✅ is_authorized_in_group: كاش 600s
-    ✅ RateLimiter: لا حجب متسلسل
 =================================================================================
 """
 
@@ -426,7 +428,6 @@ class UserState(Enum):
     WAIT_MOOD = auto()
     WAIT_RESTORE = auto()
     WAIT_BACKUP_FILE = auto()
-    # 🆕 v7.5.4
     WAIT_BAN_USER_ID = auto()
     WAIT_UNBAN_USER_ID = auto()
 
@@ -619,7 +620,6 @@ class CB:
     ADMIN_GRANT_FREE = "admin_grant_free"
     ADMIN_UPLOAD_BACKUP = "admin_upload_backup"
     ADMIN_DISABLE_FORCE = "admin_disable_force"
-    # 🆕 v7.5.4
     ADMIN_BAN_USER = "admin_ban_user"
     ADMIN_UNBAN_USER = "admin_unban_user"
 
@@ -653,7 +653,6 @@ class KeyboardFactory:
         "invoices", "groups", "admin", "panel_close",
         "pub_all", "post_add", "post_pub", "post_list", "post_rec",
         "admin_uptime",
-        # 🆕 v7.5.4
         "admin_ban_user", "admin_unban_user",
     }
 
@@ -730,7 +729,6 @@ class KeyboardFactory:
         "redeem_gift": "🎟️ استبدال",
         "panel_close": "🔒 إغلاق",
         "sec_links_on": "🔗 روابط ✅",
-        # 🆕 v7.5.4
         "admin_ban_user": "🚫 حظر مستخدم",
         "admin_unban_user": "✅ فك حظر مستخدم",
     }
@@ -810,39 +808,12 @@ class KeyboardFactory:
                     ["auto_reply_list", "auto_reply_stats"],
                     ["auto_reply_reset"], ["back"]
                 ],
-                # 🆕 v7.5.6: قائمة أمان مضغوطة (3 أزرار لكل صف)
+                # 🆕 v7.7.0: قائمة أمان منظمة (5 صفوف رئيسية)
                 "security": [
-                    # 🛡️ الحماية التلقائية (3×4)
-                    ["sec_links", "sec_mentions", "sec_forward"],
-                    ["sec_video", "sec_audio", "sec_anim"],
-                    ["sec_doc", "sec_sticker", "sec_service"],
-                    ["sec_poll", "sec_game", "sec_videonote"],
-
-                    # ⚙️ الأمان المتقدم
-                    ["sec_flood", "sec_slow", "sec_night"],
-
-                    # 👋 الترحيب والانضمام
-                    ["sec_welcome", "sec_goodbye"],
-                    ["sec_approve_join", "sec_reject_join"],
-                    ["sec_banned_words", "sec_nsfw"],
-
-                    # ⚠️ الحدود والتحذيرات
-                    ["sec_maxlen", "sec_warn"],
-                    ["sec_violation_penalties"],
-
-                    # 🚫 العقوبات
-                    ["sec_penalty", "sec_del_pen"],
-                    ["sec_penalty_durations"],
-
-                    # 🛠️ إجراءات
-                    ["sec_adv_act", "sec_act_log"],
-                    ["sec_auto_reply_menu"],
-                    ["sec_antiflood_settings", "sec_night_settings"],
-
-                    # ⚡ تحكم عام
-                    ["sec_enable_all", "sec_disable_all"],
-
-                    # 🔒 إغلاق
+                    ["sec_menu_auto", "sec_menu_advanced"],
+                    ["sec_menu_welcome", "sec_menu_penalties"],
+                    ["sec_menu_actions", "sec_menu_stats"],
+                    ["sec_activate_all", "sec_deactivate_all"],
                     ["sec_close"]
                 ],
                 "penalty": [["pen_ban", "pen_mute"], ["pen_kick", "pen_warn"], ["back"]],
@@ -859,7 +830,6 @@ class KeyboardFactory:
                 "admin": [
                     ["admin_users", "admin_stats"], ["admin_banned", "admin_unban_all"],
                     ["admin_channels", "admin_groups"],
-                    # 🆕 v7.5.4
                     ["admin_ban_user", "admin_unban_user"],
                     ["admin_grant_free", "admin_add_admin"],
                     ["admin_broadcast", "admin_invoices"], ["admin_backup", "admin_restore"],
@@ -900,7 +870,7 @@ class KeyboardFactory:
         return "✅" if value else "❌"
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.5.6: دوال مساعدة للعرض الموفّر
+    # دوال مساعدة للعرض الموفّر
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
@@ -910,7 +880,7 @@ class KeyboardFactory:
 
     @classmethod
     def _fmt_dur(cls, seconds: int) -> str:
-        """🆕 v7.5.6: تحويل الثواني لصيغة مختصرة جداً."""
+        """تحويل الثواني لصيغة مختصرة جداً."""
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
@@ -932,16 +902,190 @@ class KeyboardFactory:
         return f"{seconds // 2592000}ش"
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.5.6: عرض الأمان الموفّر (10 أسطر)
+    # 🆕 v7.7.0: جلب إحصائيات الأمان الشاملة
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
-    def _format_security_text(cls, settings: dict) -> str:
-        """🆕 v7.5.6: عرض موفّر — 10 أسطر فقط مع كل المعلومات."""
+    async def _get_security_stats(cls, chat_id: int) -> dict:
+        """🆕 v7.7.0: إحصائيات شاملة (اليوم + إجمالي)."""
+        from datetime import datetime
+
+        stats = {
+            # === اليوم ===
+            'penalties_today': 0,
+            'mutes_today': 0,
+            'bans_today': 0,
+            'kicks_today': 0,
+            'warns_today': 0,
+            # === الوسائط (اليوم) ===
+            'photos_deleted': 0,
+            'videos_deleted': 0,
+            'stickers_deleted': 0,
+            'files_deleted': 0,
+            'links_deleted': 0,
+            'forwards_deleted': 0,
+            # === إجمالي ===
+            'active_warnings': 0,
+            'total_violations': 0,
+            'banned_words': 0,
+            'auto_replies': 0,
+            # === الأعضاء ===
+            'banned_members': 0,
+            'muted_members': 0,
+        }
+
+        try:
+            # ✅ اليوم: بدون timezone (يفترض أن DB يخزن بالتوقيت المحلي/UTC متسق)
+            now = datetime.now()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # للإحصاء على penalties مع expires_at قد يكون UTC
+            now_utc_naive = datetime.utcnow()
+
+            # ═══════════════════════════════════════
+            # العقوبات حسب النوع (اليوم)
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT "
+                    "  SUM(CASE WHEN penalty_type='mute' THEN 1 ELSE 0 END) as mutes, "
+                    "  SUM(CASE WHEN penalty_type='ban' THEN 1 ELSE 0 END) as bans, "
+                    "  SUM(CASE WHEN penalty_type='kick' THEN 1 ELSE 0 END) as kicks, "
+                    "  SUM(CASE WHEN penalty_type='warn' THEN 1 ELSE 0 END) as warns, "
+                    "  COUNT(*) as total "
+                    "FROM user_penalties "
+                    "WHERE chat_id = ? AND created_at >= ?",
+                    (chat_id, today_start)
+                )
+                if row:
+                    stats['mutes_today'] = row.get('mutes', 0) or 0
+                    stats['bans_today'] = row.get('bans', 0) or 0
+                    stats['kicks_today'] = row.get('kicks', 0) or 0
+                    stats['warns_today'] = row.get('warns', 0) or 0
+                    stats['penalties_today'] = row.get('total', 0) or 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # الوسائط المحذوفة (اليوم) — action دقيق
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT "
+                    "  SUM(CASE WHEN action = 'violation_photo' THEN 1 ELSE 0 END) as photos, "
+                    "  SUM(CASE WHEN action = 'violation_video' THEN 1 ELSE 0 END) as videos, "
+                    "  SUM(CASE WHEN action = 'violation_sticker' THEN 1 ELSE 0 END) as stickers, "
+                    "  SUM(CASE WHEN action = 'violation_document' THEN 1 ELSE 0 END) as files, "
+                    "  SUM(CASE WHEN action = 'violation_link' THEN 1 ELSE 0 END) as links, "
+                    "  SUM(CASE WHEN action = 'violation_forward' THEN 1 ELSE 0 END) as forwards "
+                    "FROM admin_logs "
+                    "WHERE chat_id = ? AND created_at >= ? "
+                    "  AND action LIKE 'violation_%'",
+                    (chat_id, today_start)
+                )
+                if row:
+                    stats['photos_deleted'] = row.get('photos', 0) or 0
+                    stats['videos_deleted'] = row.get('videos', 0) or 0
+                    stats['stickers_deleted'] = row.get('stickers', 0) or 0
+                    stats['files_deleted'] = row.get('files', 0) or 0
+                    stats['links_deleted'] = row.get('links', 0) or 0
+                    stats['forwards_deleted'] = row.get('forwards', 0) or 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # التحذيرات النشطة (إجمالي)
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT COUNT(*) as cnt FROM user_warnings WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                stats['active_warnings'] = row['cnt'] if row else 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # إجمالي المخالفات
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT SUM(violation_count) as total FROM user_violations "
+                    "WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                stats['total_violations'] = (row['total'] or 0) if row else 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # الكلمات المحظورة
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT COUNT(*) as cnt FROM banned_words WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                stats['banned_words'] = row['cnt'] if row else 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # الردود التلقائية
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT COUNT(*) as cnt FROM auto_replies "
+                    "WHERE chat_id = ? AND is_active = 1",
+                    (chat_id,)
+                )
+                stats['auto_replies'] = row['cnt'] if row else 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # ✅ الأعضاء المحظورين (يشمل الدائم: expires_at IS NULL)
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT COUNT(*) as cnt FROM user_penalties "
+                    "WHERE chat_id = ? AND penalty_type='ban' "
+                    "  AND (expires_at IS NULL OR expires_at > ?)",
+                    (chat_id, now_utc_naive)
+                )
+                stats['banned_members'] = row['cnt'] if row else 0
+            except Exception:
+                pass
+
+            # ═══════════════════════════════════════
+            # ✅ الأعضاء المكتومين (يشمل الدائم: expires_at IS NULL)
+            # ═══════════════════════════════════════
+            try:
+                row = await DB.fetchone(
+                    "SELECT COUNT(*) as cnt FROM user_penalties "
+                    "WHERE chat_id = ? AND penalty_type='mute' "
+                    "  AND (expires_at IS NULL OR expires_at > ?)",
+                    (chat_id, now_utc_naive)
+                )
+                stats['muted_members'] = row['cnt'] if row else 0
+            except Exception:
+                pass
+
+        except Exception as e:
+            logging.getLogger(__name__).debug(f"_get_security_stats: {e}")
+
+        return stats
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.7.0: عرض الأمان المضغوط + الإحصائيات
+    # ═════════════════════════════════════════════════════════════════
+
+    @classmethod
+    def _format_security_text(cls, settings: dict, stats: dict = None) -> str:
+        """🆕 v7.7.0: إعدادات مضغوطة + إحصائيات شاملة."""
         d = cls._dot
         f = cls._fmt_dur
 
-        # === الحماية التلقائية (رموز بدون نص) ===
+        # === الحماية التلقائية ===
         links = d(settings.get('delete_links', 0))
         mentions = d(settings.get('mentions', 0))
         video = d(settings.get('delete_videos', 0))
@@ -986,10 +1130,47 @@ class KeyboardFactory:
         night_pd = f(settings.get('night_mode_action_duration', 3600))
 
         # ═══════════════════════════════════════
-        # تجميع الرسالة (10 أسطر)
+        # قسم الإحصائيات (اختياري)
+        # ═══════════════════════════════════════
+        stats_section = ""
+        if stats:
+            mutes = stats.get('mutes_today', 0)
+            bans = stats.get('bans_today', 0)
+            kicks = stats.get('kicks_today', 0)
+            warns_c = stats.get('warns_today', 0)
+
+            photos = stats.get('photos_deleted', 0)
+            videos = stats.get('videos_deleted', 0)
+            sticks = stats.get('stickers_deleted', 0)
+            files_del = stats.get('files_deleted', 0)
+            links_del = stats.get('links_deleted', 0)
+            fwds = stats.get('forwards_deleted', 0)
+
+            warns_active = stats.get('active_warnings', 0)
+            viols = stats.get('total_violations', 0)
+            words = stats.get('banned_words', 0)
+            replies = stats.get('auto_replies', 0)
+
+            banned_m = stats.get('banned_members', 0)
+            muted_m = stats.get('muted_members', 0)
+
+            stats_section = (
+                f"\n"
+                f"📊 <b>اليوم</b>\n"
+                f"  🔇{mutes} 🚫{bans} 👢{kicks} ⚠️{warns_c}\n"
+                f"  🖼️{photos} 🎬{videos} 🖼️{sticks}\n"
+                f"  📄{files_del} 🔗{links_del} 📨{fwds}\n"
+                f"📈 <b>إجمالي</b>\n"
+                f"  ⚠️{warns_active} 🚨{viols} 🔒{words} 💬{replies}\n"
+                f"👥 🚫{banned_m} 🔇{muted_m}\n"
+            )
+
+        # ═══════════════════════════════════════
+        # ✨ الرسالة النهائية
         # ═══════════════════════════════════════
         return (
             f"🔐 <b>الأمان</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🗑️ {links}🔗 {mentions}👤 {video}🎬 {audio}🎤 {stickers}🖼️\n"
             f"   {files}📄 {anim}🎞️ {fwd}📨 {polls}📊 {service}🗑️\n"
             f"🌊{flood_on} {flood_n}ر/{flood_s}ث  ⋮  🌙{night_on} {night_a}←{night_b}\n"
@@ -997,7 +1178,9 @@ class KeyboardFactory:
             f"🎯{welcome}ترحيب {goodbye}وداع  ⋮  ✅{approve}❌{reject}\n"
             f"⏱️ 🔇{mute_d}  🚫{ban_d}  🔒{restrict_d}\n"
             f"   ⚠️{warn_pd}  🌊{flood_pd}  🌙{night_pd}\n"
-            f"<i>🟢مفعّل ⚫معطّل</i>"
+            f"{stats_section}"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>🟢 مفعّل  •  ⚫ معطّل</i>"
         )
 
 # =====================================================================
@@ -1273,11 +1456,11 @@ def get_ram_usage() -> dict:
         return {'total': 0, 'used': 0, 'percent': 0}
 
 # =====================================================================
-# 13. 🆕 v7.5.4: دوال حظر / فك حظر المستخدمين
+# 13. دوال حظر / فك حظر المستخدمين
 # =====================================================================
 
 async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """🆕 v7.5.4: حظر مستخدم من استخدام البوت (بواسطة ID)."""
+    """حظر مستخدم من استخدام البوت (بواسطة ID)."""
     try:
         try:
             if CONFIG.is_developer(user_id):
@@ -1319,7 +1502,7 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """🆕 v7.5.4: فك حظر مستخدم (بواسطة ID)."""
+    """فك حظر مستخدم (بواسطة ID)."""
     try:
         row = await DB.fetchone(
             "SELECT user_id FROM users WHERE user_id=?",
