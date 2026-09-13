@@ -4,51 +4,22 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.14 (مُصحَّح ومحسّن)
+الإصدار: v7.5.15 (مُحسَّن — رجوع ذكي)
 =====================================================================
+🆕 v7.5.15 (تحسين التنقل):
+    ✅ sec_close / grp_close → ترجع لقائمة المجموعات
+    ✅ sec_back → ترجع لقائمة المجموعات
+    ✅ زر "إغلاق" في الأمان لا يُخرج للقائمة الرئيسية
+    ✅ عرض قائمة المجموعات مباشرة (بدون CommandHandlers.groups)
+
 🆕 v7.5.14 (إصلاح 400 Bad Request + KeyError):
     ✅ safe_edit: معالجة شاملة لكل حالات 400 Bad Request
-        - "message is not modified" → تجاهل بهدوء
-        - "message is too long" → إرسال رسالة جديدة
-        - "can't parse entities" → fallback بدون parse_mode
-        - "message to edit not found" → تجاهل
-        - نص فارغ → إرسال "..."
-    ✅ admin_stats: يستخدم .get() بدل [] (منع KeyError)
-    ✅ admin_metrics: يستخدم .get() بدل []
-    ✅ admin_users: يستخدم .get() بدل []
+    ✅ admin_stats/admin_metrics/admin_users: .get() بدل []
     ✅ admin_channels/groups: حماية من None
 
-🆕 v7.5.13 (إصلاح بطء الأزرار أثناء النشر):
-    ✅ MAX_CONCURRENT_PUBLISH = 2 (بدل 3)
-    ✅ PUBLISH_DELAY_SECONDS = 0.2 (بدل 0.5)
-    ✅ استخدام PUBLISH_RATE_LIMITER المنفصل في _publish_all
-
-🆕 v7.5.12:
-    ✅ handle(): query.answer() في البداية — استجابة فورية للأزرار (< 100ms)
-    ✅ _safe_answer: يتجاهل "already been answered" و "query is too old"
-    ✅ _handle_language_change: يستخدم _show_main_menu_inline
-    ✅ _show_main_menu_inline: يستخدم KeyboardFactory.build("main_menu", ...)
-    ✅ Semaphore مشترك للنشر الجماعي (_publish_semaphore)
-
-🆕 v7.5.11:
-    ✅ _show_main_menu_inline: عرض القائمة الرئيسية بتعديل الرسالة (أسرع 10x)
-    ✅ CB.MAIN/CB.BACK: استخدام العرض السريع بدل CommandHandlers.start
-    ✅ CB.CHECK_SUB: استخدام العرض السريع
-
-🆕 v7.5.10:
-    ✅ إصلاح جذري: إضافة return بعد كل فرع في _handle_advanced_actions
-    ✅ إصلاح: return في _handle_contests و _handle_auto_reply
-    ✅ إضافة Dispatch Table مساعد لتوجيه أسرع
-    ✅ _clear_context_keys يدعم extra_keys بشكل صحيح
-    ✅ معالجة asyncio.CancelledError في كل المهام الخلفية
-    ✅ تحسين _unwrap_get_next_post لدعم كل الحالات
-    ✅ حماية start_time في context.bot_data
-    ✅ إصلاح استعلامات admin_logs (created_at بدل timestamp)
-
-🆕 v7.5.9:
-    ✅ CB.CANCEL يحذف لوحة المفاتيح
-    ✅ CB.MAIN/CB.BACK لا يمسح debounce/rate limiting
-    ✅ استخدام DB.get_user_settings_batch (استعلام واحد)
+🆕 v7.5.13 (إصلاح بطء الأزرار):
+    ✅ MAX_CONCURRENT_PUBLISH = 2
+    ✅ PUBLISH_DELAY_SECONDS = 0.2
 =====================================================================
 """
 
@@ -84,7 +55,6 @@ try:
         PUBLISH_RATE_LIMITER,
     )
 except ImportError:
-    # fallback: إذا لم يكن PUBLISH_RATE_LIMITER موجوداً بعد
     from utils import (
         safe_send, is_authorized_in_group,
         get_text, StateManager, UserState,
@@ -120,22 +90,18 @@ MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 MAX_BACKUPS = getattr(CONFIG, "MAX_BACKUPS", 10)
 
-# ✅ v7.5.13: خفض من 3 إلى 2 لتقليل الحجز
 MAX_CONCURRENT_PUBLISH = 2
 MAX_PUBLISH_DELAY_SECONDS = 60
 
 ACTIVE_TASKS: weakref.WeakSet = weakref.WeakSet()
 
-# ✅ v7.5.12: Semaphore مشترك للنشر الجماعي
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
-# ✅ v7.5.9: مفاتيح السياق التي تُمحى عند الرجوع للرئيسية
 _CONTEXT_KEYS_TO_CLEAR = (
     'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
     'ban_chat', 'contest_join', 'channel_page', 'post_page', 'sec_chat',
 )
 
-# ✅ v7.5.10: المفاتيح الإضافية التي تُمحى عند CANCEL
 _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 
 
@@ -144,9 +110,7 @@ _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 # =====================================================================
 
 async def _safe_answer(query, text=None, show_alert=False) -> bool:
-    """
-    ✅ v7.5.12: دالة مساعدة للإجابة على الاستعلامات بأمان.
-    """
+    """الإجابة على الاستعلامات بأمان."""
     if not query:
         return False
     try:
@@ -180,19 +144,8 @@ async def _trans(key, lang, default_ar) -> str:
 
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -> bool:
-    """
-    ✅ v7.5.14: تعديل الرسالة بأمان مع معالجة شاملة لكل حالات 400 Bad Request.
-
-    الحالات المعالجة:
-    - "message is not modified" → تجاهل بهدوء
-    - "message is too long" → إرسال رسالة جديدة
-    - "can't parse entities" → fallback بدون parse_mode
-    - "message to edit not found" → تجاهل
-    - "query is too old" → تجاهل
-    - نص فارغ → استبداله بـ "..."
-    """
+    """تعديل الرسالة بأمان مع معالجة شاملة لكل حالات 400 Bad Request."""
     if not query or not query.message:
-        # fallback: إرسال رسالة جديدة
         if bot and query and query.from_user:
             try:
                 await bot.send_message(
@@ -206,7 +159,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
                 logger.debug(f"safe_edit fallback send: {e}")
         return False
 
-    # ✅ v7.5.14: حماية: لا تعدّل رسالة بنص فارغ
     if not text or not str(text).strip():
         text = "..."
     else:
@@ -220,12 +172,10 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
     except BadRequest as e:
         error_msg = str(e).lower()
 
-        # ✅ الحالة 1: الرسالة لم تتغير
         if "message is not modified" in error_msg:
             logger.debug("ℹ️ safe_edit: الرسالة لم تتغير")
             return True
 
-        # ✅ الحالة 2: الرسالة طويلة جداً
         elif "message is too long" in error_msg:
             chat_id = query.message.chat_id
             try:
@@ -247,12 +197,10 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
                 logger.error(f"فشل إرسال رسالة جديدة بعد الطول الزائد: {e2}")
                 return False
 
-        # ✅ الحالة 3: query قديمة أو الرسالة غير موجودة
         elif "query is too old" in error_msg or "message to edit not found" in error_msg:
             logger.debug(f"ℹ️ safe_edit: {error_msg[:60]}")
             return False
 
-        # ✅ الحالة 4: مشكلة في parse_mode
         elif "can't parse entities" in error_msg or "parse" in error_msg:
             logger.debug(f"⚠️ safe_edit: مشكلة parse_mode — إعادة بدون parse_mode")
             try:
@@ -264,7 +212,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
                 logger.debug(f"safe_edit fallback (no parse_mode): {e2}")
                 return False
 
-        # ✅ الحالة 5: نص فارغ (احتياطي)
         elif "message text is empty" in error_msg:
             logger.debug("ℹ️ safe_edit: نص فارغ — تجاهل")
             try:
@@ -275,7 +222,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
             except Exception:
                 return False
 
-        # ✅ أي خطأ آخر
         else:
             logger.warning(
                 f"safe_edit BadRequest: {e} | text[:80]={text[:80]!r}"
@@ -318,11 +264,7 @@ async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
 
 
 def _clear_context_keys(context, extra_keys=None) -> None:
-    """
-    ✅ v7.5.9: تمسح مفاتيح السياق فقط، وتُبقي:
-    - last_cb_* (debounce)
-    - rate_* (rate limiting)
-    """
+    """تمسح مفاتيح السياق فقط، وتُبقي: last_cb_* (debounce) و rate_* (rate limiting)"""
     for k in _CONTEXT_KEYS_TO_CLEAR:
         context.user_data.pop(k, None)
     if extra_keys:
@@ -331,7 +273,7 @@ def _clear_context_keys(context, extra_keys=None) -> None:
 
 
 def _ensure_bot_start_time(context) -> None:
-    """✅ v7.5.10: التأكد من وجود start_time في bot_data"""
+    """التأكد من وجود start_time في bot_data"""
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
 
@@ -343,11 +285,8 @@ def _ensure_bot_start_time(context) -> None:
 class CallbackHandlers:
     """جميع معالجات الأزرار"""
 
-    # ✅ v7.5.2: حد ضغطات الأزرار لكل مستخدم في الدقيقة
     RATE_LIMIT_PER_MINUTE = 30
-    # ✅ v7.5.13: خفض من 0.5 إلى 0.2 لتسريع النشر
     PUBLISH_DELAY_SECONDS = 0.2
-    # ✅ v7.5.2: حجم الدفعة في النشر الجماعي
     PUBLISH_BATCH_SIZE = 10
 
     # =================================================================
@@ -367,7 +306,7 @@ class CallbackHandlers:
         user_id = query.from_user.id
         now_time = time.monotonic()
 
-        # ✅ v7.5.2: Debounce بمفتاح واحد لكل مستخدم
+        # Debounce
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < 1.5:
@@ -375,12 +314,9 @@ class CallbackHandlers:
             return
         context.user_data[last_cb_key] = now_time
 
-        # ============================================================
-        # ✅ v7.5.12: الإجابة الفورية — قبل أي عمل آخر
-        # ============================================================
         await _safe_answer(query)
 
-        # ✅ v7.5.2: Rate Limiting (بدون show_alert — لأن answer استُدعي)
+        # Rate Limiting
         rate_key = f"rate_{user_id}"
         rate_data = context.user_data.get(rate_key)
         if not rate_data or now_time - rate_data.get('reset', 0) > 60:
@@ -394,7 +330,7 @@ class CallbackHandlers:
         start_time = time.monotonic()
         _ensure_bot_start_time(context)
 
-        # ✅ v7.5.10: معالجة الأزرار ذات الصيغة الخاصة (تتضمن ":")
+        # معالجة الأزرار ذات الصيغة الخاصة (تتضمن ":")
         handled = await CallbackHandlers._handle_parameterized(
             update, context, query, user_id, lang, data
         )
@@ -404,7 +340,7 @@ class CallbackHandlers:
                 logger.warning(f"🐢 زر بطيء (param) {data[:30]} — {elapsed:.2f}s")
             return
 
-        # ✅ v7.5.10: تحديد base_data للتوافق
+        # تحديد base_data
         base_data = data
         if ':' in data:
             parts = data.split(':')
@@ -801,14 +737,12 @@ class CallbackHandlers:
                 logger.warning(f"🐢 زر بطيء {data[:30]} — {elapsed:.2f}s")
 
     # =================================================================
-    # ✅ v7.5.11: عرض القائمة الرئيسية بتعديل الرسالة
+    # عرض القائمة الرئيسية بتعديل الرسالة
     # =================================================================
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id) -> bool:
-        """
-        عرض القائمة الرئيسية عبر safe_edit بدل CommandHandlers.start.
-        """
+        """عرض القائمة الرئيسية عبر safe_edit بدل CommandHandlers.start."""
         try:
             user_data = await user_cache.get(user_id)
             if not user_data:
@@ -857,7 +791,6 @@ class CallbackHandlers:
                     InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)
                 ]])
 
-            # ✅ إضافة زر الأدمن إن لزم
             if CONFIG.is_developer(user_id):
                 admin_text = KeyboardFactory.get_text("admin_panel_btn", lang)
                 existing_callbacks = set()
@@ -903,11 +836,28 @@ class CallbackHandlers:
     async def _handle_parameterized(
         update, context, query, user_id, lang, data
     ) -> bool:
-        """
-        ✅ v7.5.10: معالجة موحّدة للأزرار ذات الصيغة الخاصة.
-        تُرجع True إذا تمت المعالجة، False إذا لا تنطبق.
-        """
+        """معالجة موحّدة للأزرار ذات الصيغة الخاصة."""
         try:
+            # ========== 🆕 v7.5.15: الرجوع لقائمة المجموعات ==========
+            if data in ("sec_close", "grp_close", "security_close",
+                        "back_to_groups", "sec_back"):
+                await CallbackHandlers._show_groups_list(
+                    update, context, query, user_id, lang
+                )
+                return True
+
+            if data.startswith("sec_close:") or data.startswith("grp_close:"):
+                await CallbackHandlers._show_groups_list(
+                    update, context, query, user_id, lang
+                )
+                return True
+
+            if data.startswith("back_to_groups:") or data.startswith("sec_back:"):
+                await CallbackHandlers._show_groups_list(
+                    update, context, query, user_id, lang
+                )
+                return True
+
             # ========== set_warn_penalty ==========
             if data.startswith("set_warn_penalty:"):
                 parts = data.split(":")
@@ -1410,15 +1360,12 @@ class CallbackHandlers:
             if data.startswith("admin_toggle_ch:") or data.startswith("admin_toggle_gr:"):
                 return False
 
-            # ========== admin_restore_file ==========
             if data.startswith("admin_restore_file:"):
                 return False
 
-            # ========== admin_delete_contest ==========
             if data.startswith("admin_delete_contest:"):
                 return False
 
-            # ========== lang_ ==========
             if data.startswith("lang_"):
                 return False
 
@@ -1529,7 +1476,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
-        """✅ v7.5.12: تغيير اللغة + عرض القائمة الرئيسية بتعديل الرسالة."""
+        """تغيير اللغة + عرض القائمة الرئيسية بتعديل الرسالة."""
         data = query.data
         lang_set = data.split("_")[-1]
         valid_langs = {
@@ -1928,10 +1875,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _publish_all(bot, user_id, channels):
-        """
-        نشر جماعي لكل القنوات.
-        ✅ v7.5.13: يستخدم _publish_semaphore + PUBLISH_RATE_LIMITER
-        """
+        """نشر جماعي لكل القنوات."""
         published = 0
         failed = 0
         tasks = []
@@ -2325,10 +2269,22 @@ class CallbackHandlers:
                 await CallbackHandlers._show_banned_words_menu(update, context, query, chat_id, lang)
                 return
 
+            # 🆕 v7.5.15: زر الإغلاق → قائمة المجموعات
             if action == "close":
-                await safe_delete_message(query)
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
+                await CallbackHandlers._show_groups_list(
+                    update, context, query, user_id, lang
+                )
+                return
+
+            # 🆕 v7.5.15: زر الرجوع → قائمة المجموعات
+            if action == "back":
+                StateManager.clear(user_id)
+                _clear_context_keys(context)
+                await CallbackHandlers._show_groups_list(
+                    update, context, query, user_id, lang
+                )
                 return
 
             if action == "antiflood_settings":
@@ -2633,7 +2589,6 @@ class CallbackHandlers:
 
     # =================================================================
     # معالجات الأدمن
-    # ✅ v7.5.14: حماية من KeyError باستخدام .get()
     # =================================================================
 
     @staticmethod
@@ -2654,7 +2609,6 @@ class CallbackHandlers:
                 return
 
             if data == CB.ADMIN_USERS:
-                # ✅ v7.5.14: حماية من KeyError
                 try:
                     stats = await DB.get_user_stats() or {}
                 except Exception as e:
@@ -2693,7 +2647,6 @@ class CallbackHandlers:
                 return
 
             if data == CB.ADMIN_STATS:
-                # ✅ v7.5.14: حماية كاملة من KeyError
                 try:
                     stats = await DB.get_general_stats() or {}
                 except Exception as e:
@@ -2855,7 +2808,6 @@ class CallbackHandlers:
                 return
 
             if data == CB.ADMIN_METRICS:
-                # ✅ v7.5.14: حماية كاملة
                 try:
                     stats = await DB.get_general_stats() or {}
                 except Exception as e:
@@ -3641,7 +3593,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_contests(update, context, query, user_id):
-        """معالجات المسابقات مع returns صحيحة"""
+        """معالجات المسابقات"""
         data = query.data
         try:
             if data.startswith(CB.CONTEST_JOIN + ":"):
