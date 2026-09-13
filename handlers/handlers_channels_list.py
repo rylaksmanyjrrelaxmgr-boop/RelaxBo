@@ -10,7 +10,8 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - إعادة تدوير المنشورات
 - تعديل الجدولة
 - عرض تفاصيل قناة
-- رجوع للقائمة الرئيسية (مع حذف الرسالة الحالية)
+- رجوع للقائمة الرئيسية
+- إضافة قناة (redirect)
 
 الاستخدام في bot.py:
     from handlers.handlers_channels_list import register_channels_list_handlers
@@ -70,7 +71,6 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text = _build_channels_text(channels, active_channel_id)
         keyboard = _build_channels_keyboard(channels, active_channel_id)
 
-    # إرسال أو تعديل
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -639,7 +639,7 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. الرجوع للقائمة الرئيسية (✅ مُصلَح)
+# 7. ✅ الرجوع للقائمة الرئيسية
 # =====================================================================
 
 async def back_to_main_menu_callback(
@@ -647,11 +647,11 @@ async def back_to_main_menu_callback(
 ):
     """
     الرجوع للقائمة الرئيسية.
-
+    
     الخطوات:
-    1. الإجابة على الـ callback (لإخفاء مؤشر التحميل)
-    2. حذف الرسالة الحالية (قائمة القنوات)
-    3. استدعاء CommandHandlers.start لعرض القائمة الرئيسية
+    1. الإجابة على الـ callback
+    2. حذف الرسالة الحالية
+    3. استدعاء القائمة الرئيسية
     """
     query = update.callback_query
 
@@ -665,36 +665,32 @@ async def back_to_main_menu_callback(
         await query.message.delete()
     except Exception as e:
         logger.debug(f"حذف الرسالة: {e}")
-        # إذا فشل الحذف، جرّب تعديل الرسالة إلى "جاري الرجوع..."
-        try:
-            await query.edit_message_text("🏠 جاري الرجوع للقائمة الرئيسية...")
-        except Exception:
-            pass
 
     # استدعاء القائمة الرئيسية
     try:
         from handlers.handlers_command import CommandHandlers
 
-        # إنشاء update وهمي للرسالة
-        # (CommandHandlers.start عادةً يستخدم update.effective_user و update.message)
-        # لكن عند الاستدعاء من callback، update.message = None
-        # لذلك نستخدم message الخاص بالـ callback
-        if update.message is None and query.message:
-            # نمرر الرسالة الجديدة إلى CommandHandlers.start
-            # عبر chat_id الخاص بالمستخدم
-            try:
-                await CommandHandlers.start(update, context)
-            except (AttributeError, TypeError):
-                # fallback: أرسل رسالة جديدة
-                from handlers.handlers_command import CommandHandlers
-                # إنشاء رسالة نصية للقائمة الرئيسية
-                await _send_main_menu_fallback(context, query.from_user.id)
-        else:
+        # إنشاء كائن update وهمي مع message
+        class _FakeMessage:
+            def __init__(self, query_message):
+                self.chat_id = query_message.chat_id
+                self.chat = query_message.chat
+                self._message = query_message
+                self.from_user = query.from_user
+                self.text = "/start"
+
+            async def reply_text(self, *args, **kwargs):
+                return await self._message.chat.send_message(*args, **kwargs)
+
+        # جرّب استدعاء CommandHandlers.start
+        try:
             await CommandHandlers.start(update, context)
+        except (AttributeError, TypeError):
+            # إذا فشل → أرسل القائمة الرئيسية يدوياً
+            await _send_main_menu_fallback(context, query.from_user.id)
 
     except Exception as e:
         logger.error(f"❌ back_to_main_menu: {e}", exc_info=True)
-        # fallback نهائي
         try:
             await _send_main_menu_fallback(context, query.from_user.id)
         except Exception as e2:
@@ -711,9 +707,18 @@ async def back_to_main_menu_callback(
 async def _send_main_menu_fallback(context, user_id: int):
     """إرسال القائمة الرئيسية بطريقة احتياطية"""
     try:
-        # جرّب استخدام KeyboardFactory
         from utils import KeyboardFactory
-        keyboard = KeyboardFactory.main_menu() if hasattr(KeyboardFactory, "main_menu") else None
+
+        # جرّب الحصول على القائمة الرئيسية
+        keyboard = None
+        for method_name in ("main_menu", "start_keyboard", "get_main_menu"):
+            if hasattr(KeyboardFactory, method_name):
+                try:
+                    method = getattr(KeyboardFactory, method_name)
+                    keyboard = method() if callable(method) else method
+                    break
+                except Exception:
+                    continue
 
         text = "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:"
 
@@ -726,7 +731,6 @@ async def _send_main_menu_fallback(context, user_id: int):
             )
         else:
             # أزرار افتراضية
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
                 [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
@@ -746,7 +750,72 @@ async def _send_main_menu_fallback(context, user_id: int):
 
 
 # =====================================================================
-# 8. تسجيل كل الـ handlers
+# 8. ✅ إضافة قناة (redirect)
+# =====================================================================
+
+async def add_channel_redirect_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    توجيه المستخدم لإضافة قناة.
+    
+    يحاول استدعاء CommandHandlers.channels الموجود في بوتك.
+    إذا فشل، يعرض تعليمات.
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    # محاولة 1: استدعاء CommandHandlers.channels (إن وجد)
+    try:
+        from handlers.handlers_command import CommandHandlers
+
+        if hasattr(CommandHandlers, "channels"):
+            await CommandHandlers.channels(update, context)
+            return
+
+    except Exception as e:
+        logger.warning(f"CommandHandlers.channels فشل: {e}")
+
+    # محاولة 2: عرض تعليمات للمستخدم
+    try:
+        text = (
+            "➕ <b>إضافة قناة جديدة</b>\n\n"
+            "لإضافة قناة، اختر إحدى الطرق:\n\n"
+            "1️⃣ <b>أرسل معرف القناة</b> مباشرة\n"
+            "   مثال: <code>@my_channel</code>\n\n"
+            "2️⃣ <b>أعد توجيه رسالة</b> من القناة\n\n"
+            "3️⃣ استخدم أمر <b>/channels</b>\n\n"
+            "<i>⚠️ تأكد من أن البوت مشرف في القناة!</i>"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")],
+            [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+        ])
+
+        await query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ add_channel_redirect: {e}", exc_info=True)
+        try:
+            await query.answer(
+                "⚠️ أرسل /channels لإضافة قناة",
+                show_alert=True
+            )
+        except Exception:
+            pass
+
+
+# =====================================================================
+# 9. تسجيل كل الـ handlers
 # =====================================================================
 
 def register_channels_list_handlers(application):
@@ -755,11 +824,19 @@ def register_channels_list_handlers(application):
     استدعِ هذه الدالة في bot.py بعد تهيئة التطبيق.
     """
     try:
-        # ═══ الرجوع للقائمة الرئيسية (مهم: يسجل أولاً) ═══
+        # ═══ الرجوع للقائمة الرئيسية ═══
         application.add_handler(
             CallbackQueryHandler(
                 back_to_main_menu_callback,
                 pattern=r"^(main_menu|back_to_main|back_to_main_menu|home)$"
+            )
+        )
+
+        # ═══ ✅ إضافة قناة ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                add_channel_redirect_callback,
+                pattern=r"^add_channel$"
             )
         )
 
