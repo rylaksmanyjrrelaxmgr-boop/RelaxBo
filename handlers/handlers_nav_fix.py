@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/handlers_nav_fix.py - إصلاح أزرار الرجوع/الإغلاق
+handlers/handlers_nav_fix.py - إصلاح التنقل + تشخيص
 ================================================================================
-- يلتقط أزرار "إغلاق" و"رجوع" و"رجوع للخلف"
-- يوجهها للقائمة الصحيحة (المجموعات، الأمان، إلخ)
-- يعمل مع الملفات الموجودة — لا يُعدّلها
+- يسجّل كل ضغطة زر في السجلات
+- يلتقط أزرار الإغلاق/الرجوع
+- يعرض قائمة المجموعات الصحيحة
 
 الاستخدام في bot.py:
     from handlers.handlers_nav_fix import register_nav_fix
-    register_nav_fix(application)  # قبل CallbackHandlers.handle
+    register_nav_fix(application)
 ================================================================================
 """
 
@@ -29,158 +29,119 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# أنماط الأزرار التي نلتقطها
+# 1. مسجّل شامل لكل الأزرار (للتشخيص)
+# ═════════════════════════════════════════════════════════════════════
+
+async def log_all_callbacks(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    يسجّل كل ضغطة زر — لا يفعل شيئاً آخر.
+    يعمل في group=-99 (قبل كل شيء).
+    """
+    query = update.callback_query
+    if query:
+        cb = query.data or "NO_DATA"
+        uid = query.from_user.id
+        msg_id = query.message.message_id if query.message else "?"
+        logger.info(f"🔔 CB: user={uid} msg={msg_id} data='{cb}'")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 2. معالج زر "إغلاق" / "رجوع"
 # ═════════════════════════════════════════════════════════════════════
 
 CLOSE_PATTERNS = re.compile(
     r"^("
-    r"close|exit|cancel|back|return|"
-    r"close_menu|menu_close|back_menu|"
-    r"close_security|sec_close|security_close|"
-    r"close_groups|groups_close|back_to_groups|"
-    r"إغلاق|رجوع|خروج|إلغاء|"
-    r"cancel_\w+|close_\w+|back_\w+"
+    r"close|cancel|exit|back|return|close_menu|back_menu|"
+    r"إغلاق|رجوع|خروج|إلغاء|عودة"
     r")$",
     re.IGNORECASE,
 )
 
 
-# ═════════════════════════════════════════════════════════════════════
-# المعالج الرئيسي
-# ═════════════════════════════════════════════════════════════════════
-
-async def nav_interceptor(
+async def close_button_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """
-    يعترض أزرار الإغلاق/الرجوع ويوجهها للقائمة الصحيحة.
+    يعالج ضغط زر الإغلاق/الرجوع.
+    
+    1. يحذف الرسالة الحالية
+    2. يعرض قائمة المجموعات إن أمكن
+    3. وإلا يعرض القائمة الرئيسية
     """
     query = update.callback_query
-    if not query:
-        return
+    cb = query.data or ""
+    uid = query.from_user.id
 
-    callback_data = query.data or ""
-    user_id = query.from_user.id
+    logger.info(f"🔙 إغلاق: user={uid} cb='{cb}'")
 
-    # طباعة للتشخيص
-    logger.info(f"🔙 NAV: {user_id} ضغط {callback_data}")
-
-    # ═══ 1. حفظ سياق التنقل ═══
-    # إذا ضغط "أمان" → احفظ أننا في سياق "مجموعة"
-    if "security" in callback_data.lower() or "أمان" in callback_data:
-        if context.user_data is not None:
-            context.user_data["nav_last_parent"] = "groups"
-            logger.info(f"   📌 حفظ: المستخدم في سياق المجموعات")
-
-    # ═══ 2. تحديد الوجهة ═══
-    target = "groups"  # افتراضي: المجموعات
-
-    if context.user_data:
-        target = context.user_data.get("nav_last_parent", "groups")
-
-    logger.info(f"   🎯 الوجهة: {target}")
-
-    # ═══ 3. الإجابة على الـ callback ═══
+    # إجابة فورية
     try:
         await query.answer()
     except Exception:
         pass
 
-    # ═══ 4. حذف الرسالة الحالية ═══
+    # احذف الرسالة
     try:
         await query.message.delete()
     except Exception as e:
-        logger.debug(f"حذف الرسالة: {e}")
+        logger.debug(f"حذف فشل: {e}")
 
-    # ═══ 5. إظهار الوجهة ═══
-    if target == "groups":
-        shown = await _show_groups_menu(update, context, user_id)
-        if not shown:
-            await _show_main_menu(update, context, user_id)
-    else:
-        await _show_main_menu(update, context, user_id)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# دوال مساعدة
-# ═════════════════════════════════════════════════════════════════════
-
-async def _show_groups_menu(update, context, user_id) -> bool:
-    """محاولة عرض قائمة المجموعات."""
-    # محاولة 1: CommandHandlers.groups
+    # جرّب عرض قائمة المجموعات
     try:
         from handlers.handlers_command import CommandHandlers
 
-        for method_name in ("groups", "my_groups", "show_groups", "groups_command"):
-            method = getattr(CommandHandlers, method_name, None)
+        # ابحث عن أول دالة متاحة
+        for name in ("groups", "my_groups", "groups_command", "show_groups"):
+            method = getattr(CommandHandlers, name, None)
             if method and callable(method):
                 try:
                     await method(update, context)
-                    logger.info(f"   ✅ عرضت القائمة عبر CommandHandlers.{method_name}")
-                    return True
+                    logger.info(f"✅ عرضت القائمة عبر {name}")
+                    return
                 except Exception as e:
-                    logger.debug(f"فشل {method_name}: {e}")
+                    logger.debug(f"{name} فشل: {e}")
                     continue
     except ImportError:
         pass
 
-    # محاولة 2: استدعاء زر callback يعرض المجموعات
-    try:
-        # نحاكي ضغطة زر "مجموعاتي" إذا كان موجوداً
-        fake_callback_data = "my_groups"
-
-        # ابحث عن handler يعالج my_groups
-        # بدلاً من ذلك، أرسل رسالة جديدة
-        await context.bot.send_message(
-            user_id,
-            "👥 <b>مجموعاتي</b>\n\n"
-            "أرسل /groups لعرض قائمة المجموعات",
-            parse_mode="HTML",
-        )
-        logger.info("   ⚠️ أرسلت رسالة نصية بدل القائمة")
-        return True
-    except Exception as e:
-        logger.debug(f"فشل إرسال رسالة المجموعات: {e}")
-
-    return False
-
-
-async def _show_main_menu(update, context, user_id) -> bool:
-    """عرض القائمة الرئيسية."""
+    # فشل → استخدم القائمة الرئيسية
     try:
         from handlers.handlers_command import CommandHandlers
         await CommandHandlers.start(update, context)
-        return True
     except Exception as e:
-        logger.debug(f"فشل عرض القائمة الرئيسية: {e}")
-
-    try:
-        await context.bot.send_message(
-            user_id,
-            "🌿 <b>Relax Manager</b>\n\nأرسل /start",
-            parse_mode="HTML",
-        )
-        return True
-    except Exception:
-        return False
+        logger.error(f"❌ فشل عرض القائمة الرئيسية: {e}")
+        try:
+            await context.bot.send_message(
+                uid,
+                "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 # ═════════════════════════════════════════════════════════════════════
-# التسجيل
+# 3. التسجيل
 # ═════════════════════════════════════════════════════════════════════
 
 def register_nav_fix(application):
-    """تسجيل معالج التنقل."""
+    """تسجيل المعالجات."""
     try:
-        # group=-10 → يعمل قبل كل شيء
+        # 1. مسجّل كل الأزرار (group=-99 — قبل كل شيء)
         application.add_handler(
-            CallbackQueryHandler(
-                nav_interceptor,
-                pattern=CLOSE_PATTERNS,
-            ),
+            CallbackQueryHandler(log_all_callbacks),
+            group=-99,
+        )
+
+        # 2. معالج إغلاق/رجوع (group=-10)
+        application.add_handler(
+            CallbackQueryHandler(close_button_handler, pattern=CLOSE_PATTERNS),
             group=-10,
         )
-        logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
+
+        logger.info("✅ NAV_FIX: تم التسجيل")
         return True
     except Exception as e:
         logger.error(f"❌ NAV_FIX: {e}", exc_info=True)
