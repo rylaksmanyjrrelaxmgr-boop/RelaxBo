@@ -11,7 +11,7 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - تعديل الجدولة
 - عرض تفاصيل قناة
 - رجوع للقائمة الرئيسية
-- إضافة قناة (redirect)
+- إضافة قناة (عرض تعليمات)
 
 الاستخدام في bot.py:
     from handlers.handlers_channels_list import register_channels_list_handlers
@@ -639,7 +639,7 @@ async def channel_schedule_set_callback(
 
 
 # =====================================================================
-# 7. ✅ الرجوع للقائمة الرئيسية
+# 7. الرجوع للقائمة الرئيسية
 # =====================================================================
 
 async def back_to_main_menu_callback(
@@ -647,11 +647,7 @@ async def back_to_main_menu_callback(
 ):
     """
     الرجوع للقائمة الرئيسية.
-    
-    الخطوات:
-    1. الإجابة على الـ callback
-    2. حذف الرسالة الحالية
-    3. استدعاء القائمة الرئيسية
+    يحذف الرسالة الحالية ثم يفتح القائمة الرئيسية.
     """
     query = update.callback_query
 
@@ -670,23 +666,9 @@ async def back_to_main_menu_callback(
     try:
         from handlers.handlers_command import CommandHandlers
 
-        # إنشاء كائن update وهمي مع message
-        class _FakeMessage:
-            def __init__(self, query_message):
-                self.chat_id = query_message.chat_id
-                self.chat = query_message.chat
-                self._message = query_message
-                self.from_user = query.from_user
-                self.text = "/start"
-
-            async def reply_text(self, *args, **kwargs):
-                return await self._message.chat.send_message(*args, **kwargs)
-
-        # جرّب استدعاء CommandHandlers.start
         try:
             await CommandHandlers.start(update, context)
         except (AttributeError, TypeError):
-            # إذا فشل → أرسل القائمة الرئيسية يدوياً
             await _send_main_menu_fallback(context, query.from_user.id)
 
     except Exception as e:
@@ -709,7 +691,6 @@ async def _send_main_menu_fallback(context, user_id: int):
     try:
         from utils import KeyboardFactory
 
-        # جرّب الحصول على القائمة الرئيسية
         keyboard = None
         for method_name in ("main_menu", "start_keyboard", "get_main_menu"):
             if hasattr(KeyboardFactory, method_name):
@@ -730,7 +711,6 @@ async def _send_main_menu_fallback(context, user_id: int):
                 parse_mode="HTML",
             )
         else:
-            # أزرار افتراضية
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
                 [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
@@ -750,17 +730,19 @@ async def _send_main_menu_fallback(context, user_id: int):
 
 
 # =====================================================================
-# 8. ✅ إضافة قناة (redirect)
+# 8. ✅ إضافة قناة (النسخة المصححة — تعرض تعليمات)
 # =====================================================================
 
 async def add_channel_redirect_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """
-    توجيه المستخدم لإضافة قناة.
+    عرض تعليمات إضافة قناة.
     
-    يحاول استدعاء CommandHandlers.channels الموجود في بوتك.
-    إذا فشل، يعرض تعليمات.
+    ✅ النسخة المصححة:
+    - لا تستدعي CommandHandlers.channels (التي تعرض قائمة القنوات)
+    - تعرض تعليمات واضحة للمستخدم
+    - المستخدم يرسل @channel مباشرة
     """
     query = update.callback_query
     user_id = query.from_user.id
@@ -770,27 +752,18 @@ async def add_channel_redirect_callback(
     except Exception:
         pass
 
-    # محاولة 1: استدعاء CommandHandlers.channels (إن وجد)
-    try:
-        from handlers.handlers_command import CommandHandlers
-
-        if hasattr(CommandHandlers, "channels"):
-            await CommandHandlers.channels(update, context)
-            return
-
-    except Exception as e:
-        logger.warning(f"CommandHandlers.channels فشل: {e}")
-
-    # محاولة 2: عرض تعليمات للمستخدم
     try:
         text = (
             "➕ <b>إضافة قناة جديدة</b>\n\n"
-            "لإضافة قناة، اختر إحدى الطرق:\n\n"
-            "1️⃣ <b>أرسل معرف القناة</b> مباشرة\n"
+            "لإضافة قناة، اختر إحدى الطرق التالية:\n\n"
+            "1️⃣ <b>أرسل معرف القناة</b> في المحادثة\n"
             "   مثال: <code>@my_channel</code>\n\n"
-            "2️⃣ <b>أعد توجيه رسالة</b> من القناة\n\n"
-            "3️⃣ استخدم أمر <b>/channels</b>\n\n"
-            "<i>⚠️ تأكد من أن البوت مشرف في القناة!</i>"
+            "2️⃣ <b>أعد توجيه رسالة</b> من القناة إلى البوت\n\n"
+            "3️⃣ <b>أرسل رابط القناة</b>\n"
+            "   مثال: <code>https://t.me/my_channel</code>\n\n"
+            "⚠️ <b>مهم:</b> تأكد من أن البوت <b>مشرف</b> في القناة!\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "💡 <i>أرسل الآن اسم القناة أو رابطها للبدء</i>"
         )
 
         keyboard = InlineKeyboardMarkup([
@@ -807,7 +780,7 @@ async def add_channel_redirect_callback(
         logger.error(f"❌ add_channel_redirect: {e}", exc_info=True)
         try:
             await query.answer(
-                "⚠️ أرسل /channels لإضافة قناة",
+                "أرسل @channel_name لإضافة قناة",
                 show_alert=True
             )
         except Exception:
