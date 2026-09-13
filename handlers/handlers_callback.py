@@ -4,13 +4,13 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.7.0 (قوائم فرعية للأمان)
+الإصدار: v7.7.0 (إحصائيات شاملة + قوائم فرعية)
 =====================================================================
 🆕 v7.7.0:
-    ✅ تقسيم صفحة الأمان إلى 8 قوائم فرعية
-    ✅ sec_menu_auto / advanced / welcome / warns / penalties
-    ✅ sec_menu_violations / actions / stats
-    ✅ sec_back_main للرجوع للرئيسية
+    ✅ _render_security_panel: عرض موحد (إعدادات + إحصائيات)
+    ✅ جميع القوائم الفرعية تعرض الإحصائيات
+    ✅ parse_mode HTML لضمان التنسيق
+    ✅ تكامل مع KeyboardFactory._get_security_stats
 
 🆕 v7.5.25:
     ✅ إصلاح SyntaxError في _handle_admin
@@ -255,6 +255,26 @@ class CallbackHandlers:
     RATE_LIMIT_PER_MINUTE = 30
     PUBLISH_DELAY_SECONDS = 0.2
     PUBLISH_BATCH_SIZE = 10
+
+    # =================================================================
+    # 🆕 v7.7.0: عارض موحد للوحة الأمان (إعدادات + إحصائيات)
+    # =================================================================
+
+    @staticmethod
+    async def _render_security_panel(query, context, chat_id, menu_name="security",
+                                      lang="ar", title=None):
+        """🆕 v7.7.0: عرض موحد للأمان مع الإحصائيات الشاملة."""
+        try:
+            settings = await DB.get_security_settings(chat_id)
+            stats = await KeyboardFactory._get_security_stats(chat_id)
+            text = KeyboardFactory._format_security_text(settings, stats)
+            if title:
+                text = f"{title}\n\n{text}"
+            kb = KeyboardFactory.build(menu_name, chat_id=chat_id, lang=lang)
+            await safe_edit(query, text, reply_markup=kb, parse_mode='HTML', bot=context.bot)
+        except Exception as e:
+            logger.error(f"_render_security_panel: {e}", exc_info=True)
+            await safe_edit(query, "❌ حدث خطأ في العرض", bot=context.bot)
 
     # =================================================================
     # المعالج الرئيسي
@@ -735,12 +755,9 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ العدد يجب أن يكون 1-100", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, max_warnings=count)
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(
-                    query,
-                    KeyboardFactory._format_security_text(settings),
-                    reply_markup=KeyboardFactory.build("sec_warns_menu", chat_id=chat_id, lang=lang),
-                    bot=context.bot,
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
                 )
                 return True
 
@@ -774,10 +791,10 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, warn_penalty=penalty_type)
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                reply_markup=KeyboardFactory.build("sec_warns_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
+                )
                 return True
 
             if data.startswith("set_warn_duration:"):
@@ -792,10 +809,10 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, warn_penalty_duration=duration)
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                reply_markup=KeyboardFactory.build("sec_warns_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
+                )
                 return True
 
             if data.startswith("set_duration:"):
@@ -821,10 +838,10 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, **{col: duration})
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_penalties_menu", lang,
+                    title="⚖️ <b>العقوبات</b>"
+                )
                 return True
 
             if data.startswith("sec_set_del_penalty:"):
@@ -845,10 +862,10 @@ class CallbackHandlers:
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_penalties_menu", lang,
+                    title="⚖️ <b>العقوبات</b>"
+                )
                 return True
 
             if data.startswith("sec_set_del_penalty_duration:"):
@@ -939,10 +956,10 @@ class CallbackHandlers:
                 action = parts[0].replace("sec_penalty_", "")
                 if action in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, auto_penalty=action)
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                    reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang=lang),
-                                    bot=context.bot)
+                    await CallbackHandlers._render_security_panel(
+                        query, context, chat_id, "sec_penalties_menu", lang,
+                        title="⚖️ <b>العقوبات</b>"
+                    )
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
@@ -1003,10 +1020,10 @@ class CallbackHandlers:
                 penalty_type = parts[2]
                 if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, antiflood_penalty=penalty_type)
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                    reply_markup=KeyboardFactory.build("sec_advanced_menu", chat_id=chat_id, lang=lang),
-                                    bot=context.bot)
+                    await CallbackHandlers._render_security_panel(
+                        query, context, chat_id, "sec_advanced_menu", lang,
+                        title="⚙️ <b>الأمان المتقدم</b>"
+                    )
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
@@ -1067,10 +1084,10 @@ class CallbackHandlers:
                 action_type = parts[2]
                 if action_type in ('ban', 'mute', 'kick', 'restrict'):
                     await DB.update_security_settings(chat_id, night_mode_action=action_type)
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                    reply_markup=KeyboardFactory.build("sec_advanced_menu", chat_id=chat_id, lang=lang),
-                                    bot=context.bot)
+                    await CallbackHandlers._render_security_panel(
+                        query, context, chat_id, "sec_advanced_menu", lang,
+                        title="⚙️ <b>الأمان المتقدم</b>"
+                    )
                 else:
                     await safe_edit(query, "❌ نوع إجراء غير صالح", bot=context.bot)
                 return True
@@ -1129,10 +1146,10 @@ class CallbackHandlers:
                 penalty_type = parts[2]
                 if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, violation_penalty=penalty_type)
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                    reply_markup=KeyboardFactory.build("sec_violations_menu", chat_id=chat_id, lang=lang),
-                                    bot=context.bot)
+                    await CallbackHandlers._render_security_panel(
+                        query, context, chat_id, "sec_violations_menu", lang,
+                        title="🚨 <b>المخالفات</b>"
+                    )
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
@@ -1366,10 +1383,7 @@ class CallbackHandlers:
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
-        settings = await DB.get_security_settings(chat_id)
-        await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                        reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                        bot=context.bot)
+        await CallbackHandlers._render_security_panel(query, context, chat_id, "security", lang)
 
     @staticmethod
     async def _handle_channel_select(update, context, query, user_id, data):
@@ -1722,7 +1736,7 @@ class CallbackHandlers:
         await safe_edit(query, display_text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # =================================================================
-    # معالجات الأمان (مع القوائم الفرعية)
+    # معالجات الأمان (مع القوائم الفرعية + الإحصائيات)
     # =================================================================
 
     @staticmethod
@@ -1748,51 +1762,59 @@ class CallbackHandlers:
 
         try:
             # ═══════════════════════════════════════════════
-            # 🆕 القوائم الفرعية
+            # 🆕 القوائم الفرعية (تعرض الإحصائيات)
             # ═══════════════════════════════════════════════
             if action == "menu_auto":
-                await safe_edit(query, "🗑️ <b>الحذف التلقائي</b>\n\nاختر ما تريد حذفه تلقائياً:",
-                                reply_markup=KeyboardFactory.build("sec_auto_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_auto_menu", lang,
+                    title="🗑️ <b>الحذف التلقائي</b>"
+                )
                 return
 
             if action == "menu_advanced":
-                await safe_edit(query, "⚙️ <b>الأمان المتقدم</b>\n\nإعدادات الفيضان، الليل، الوضع البطيء...",
-                                reply_markup=KeyboardFactory.build("sec_advanced_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_advanced_menu", lang,
+                    title="⚙️ <b>الأمان المتقدم</b>"
+                )
                 return
 
             if action == "menu_welcome":
-                await safe_edit(query, "👋 <b>الترحيب والانضمام</b>\n\nإعدادات الترحيب والوداع والانضمام:",
-                                reply_markup=KeyboardFactory.build("sec_welcome_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_welcome_menu", lang,
+                    title="👋 <b>الترحيب والانضمام</b>"
+                )
                 return
 
             if action == "menu_warns":
-                await safe_edit(query, "⚠️ <b>التحذيرات</b>\n\nإعدادات التحذيرات والعقوبات:",
-                                reply_markup=KeyboardFactory.build("sec_warns_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
+                )
                 return
 
             if action == "menu_penalties":
-                await safe_edit(query, "🚫 <b>العقوبات</b>\n\nأنواع العقوبات ومددها:",
-                                reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_penalties_menu", lang,
+                    title="⚖️ <b>العقوبات</b>"
+                )
                 return
 
             if action == "menu_violations":
-                await safe_edit(query, "🚨 <b>المخالفات</b>\n\nإعدادات المخالفات والعقوبات التلقائية:",
-                                reply_markup=KeyboardFactory.build("sec_violations_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_violations_menu", lang,
+                    title="🚨 <b>المخالفات</b>"
+                )
                 return
 
             if action == "menu_actions":
-                await safe_edit(query, "🛠️ <b>الإجراءات</b>\n\nالإجراءات المتقدمة والسجل:",
-                                reply_markup=KeyboardFactory.build("sec_actions_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_actions_menu", lang,
+                    title="🛠️ <b>الإجراءات</b>"
+                )
                 return
 
             if action == "menu_stats":
+                # الإحصائيات فقط بدون أزرار التعديل
                 settings = await DB.get_security_settings(chat_id)
                 stats = await KeyboardFactory._get_security_stats(chat_id)
                 await safe_edit(
@@ -1801,6 +1823,7 @@ class CallbackHandlers:
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 رجوع", callback_data=f"sec_back_main:{chat_id}")]
                     ]),
+                    parse_mode='HTML',
                     bot=context.bot,
                 )
                 return
@@ -1808,12 +1831,9 @@ class CallbackHandlers:
             if action == "back_main":
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(
-                    query,
-                    KeyboardFactory._format_security_text(settings),
-                    reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                    bot=context.bot,
+                context.user_data['security_chat_id'] = chat_id
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "security", lang
                 )
                 return
 
@@ -1880,10 +1900,9 @@ class CallbackHandlers:
                          chat_id, TimeUtils.utc_now()))
                 except Exception:
                     pass
-                settings = await DB.get_security_settings(chat_id)
-                await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "security", lang
+                )
                 return
 
             toggle_map = {
@@ -1911,13 +1930,8 @@ class CallbackHandlers:
                 elif action == "reject_join" and new_val:
                     update_data['auto_approve_join'] = 0
                 await DB.update_security_settings(chat_id, **update_data)
-                settings[col] = new_val
-                if action == "approve_join" and new_val:
-                    settings['auto_reject_join'] = 0
-                elif action == "reject_join" and new_val:
-                    settings['auto_approve_join'] = 0
 
-                # اختيار القائمة الفرعية
+                # اختيار القائمة الفرعية الصحيحة
                 auto_actions = ('links', 'mentions', 'video', 'audio', 'anim',
                                 'service', 'doc', 'sticker', 'forward', 'poll',
                                 'game', 'voice', 'videonote')
@@ -1935,24 +1949,19 @@ class CallbackHandlers:
                     menu_title = "👋 <b>الترحيب والانضمام</b>"
                 else:
                     menu_name = "security"
-                    menu_title = "🔐 <b>الأمان</b>"
+                    menu_title = None
 
-                text_with_state = (f"{menu_title}\n\n"
-                                   f"آخر تعديل: <b>{action}</b> = {'✅ مفعّل' if new_val else '❌ معطّل'}")
-                await safe_edit(query, text_with_state,
-                                reply_markup=KeyboardFactory.build(menu_name, chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, menu_name, lang,
+                    title=menu_title
+                )
                 return
 
             if action == "warn":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تفعيل/تعطيل", callback_data=f"sec_warn_toggle:{chat_id}")],
-                    [InlineKeyboardButton("🔢 عدد التحذيرات", callback_data=f"sec_warn_count:{chat_id}")],
-                    [InlineKeyboardButton("⚖️ عقوبة التحذير", callback_data=f"sec_warn_penalty:{chat_id}")],
-                    [InlineKeyboardButton("⏱️ مدة العقوبة", callback_data=f"sec_warn_penalty_duration:{chat_id}")],
-                    [InlineKeyboardButton("🔙 رجوع", callback_data=f"sec_menu_warns:{chat_id}")],
-                ])
-                await safe_edit(query, "⚠️ إدارة التحذيرات:", reply_markup=kb, bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
+                )
                 return
 
             if action == "warn_penalty":
@@ -1963,12 +1972,10 @@ class CallbackHandlers:
                 settings = await DB.get_security_settings(chat_id)
                 new_val = 1 - settings.get('warn_enabled', 0)
                 await DB.update_security_settings(chat_id, warn_enabled=new_val)
-                settings['warn_enabled'] = new_val
-                await safe_edit(query,
-                                "⚠️ <b>التحذيرات</b>\n\n"
-                                f"آخر تعديل: تحذيرات = {'✅ مفعّل' if new_val else '❌ معطّل'}",
-                                reply_markup=KeyboardFactory.build("sec_warns_menu", chat_id=chat_id, lang=lang),
-                                bot=context.bot)
+                await CallbackHandlers._render_security_panel(
+                    query, context, chat_id, "sec_warns_menu", lang,
+                    title="⚠️ <b>التحذيرات</b>"
+                )
                 return
 
             if action == "warn_count":
@@ -2000,7 +2007,6 @@ class CallbackHandlers:
                 settings = await DB.get_security_settings(chat_id)
                 new_val = 1 - settings.get('delete_banned_words', 0)
                 await DB.update_security_settings(chat_id, delete_banned_words=new_val)
-                settings['delete_banned_words'] = new_val
                 await CallbackHandlers._show_banned_words_menu(update, context, query, chat_id, lang)
                 return
 
@@ -2132,7 +2138,7 @@ class CallbackHandlers:
         if row:
             kb.append(row)
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"sec_warn:{chat_id}")])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML', bot=context.bot)
 
     @staticmethod
     async def _show_warn_penalty_types(update, context, query, chat_id, lang):
@@ -2191,10 +2197,10 @@ class CallbackHandlers:
     @staticmethod
     async def _show_penalty_durations(update, context, query, chat_id, lang, penalty_type='mute'):
         if penalty_type == 'kick':
-            settings = await DB.get_security_settings(chat_id)
-            await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                            reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang=lang),
-                            bot=context.bot)
+            await CallbackHandlers._render_security_panel(
+                query, context, chat_id, "sec_penalties_menu", lang,
+                title="⚖️ <b>العقوبات</b>"
+            )
             return
         durations = [
             ("دائم", 0), ("نصف ساعة", 1800), ("ساعة", 3600),
@@ -2316,14 +2322,14 @@ class CallbackHandlers:
                 StateManager.set(user_id, UserState.WAIT_BAN_USER_ID)
                 await safe_edit(query,
                                 "🚫 <b>حظر مستخدم</b>\n\nأرسل معرف المستخدم (ID) لحظره:\n<i>مثال: 123456789</i>",
-                                bot=context.bot)
+                                parse_mode='HTML', bot=context.bot)
                 return
 
             if data == "admin_unban_user":
                 StateManager.set(user_id, UserState.WAIT_UNBAN_USER_ID)
                 await safe_edit(query,
                                 "✅ <b>فك حظر مستخدم</b>\n\nأرسل معرف المستخدم (ID) لفك حظره:\n<i>مثال: 123456789</i>",
-                                bot=context.bot)
+                                parse_mode='HTML', bot=context.bot)
                 return
 
             if data == CB.ADMIN_USERS:
@@ -3049,10 +3055,10 @@ class CallbackHandlers:
                 penalty_types = {'ban', 'mute', 'kick', 'restrict', 'none'}
                 if action in penalty_types:
                     await DB.update_security_settings(chat_id, auto_penalty=action)
-                    settings = await DB.get_security_settings(chat_id)
-                    await safe_edit(query, KeyboardFactory._format_security_text(settings),
-                                    reply_markup=KeyboardFactory.build("sec_penalties_menu", chat_id=chat_id, lang='ar'),
-                                    bot=context.bot)
+                    await CallbackHandlers._render_security_panel(
+                        query, context, chat_id, "sec_penalties_menu", "ar",
+                        title="⚖️ <b>العقوبات</b>"
+                    )
                     return
                 await safe_edit(query, "⚠️ غير معروف", bot=context.bot)
                 return
