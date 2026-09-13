@@ -2,31 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.5.3 — مُصلَّح ومحسّن نهائياً)
+utils.py - الأدوات المساعدة للبوت (v7.5.5 — عصري + حظر مستخدمين)
 =================================================================================
+🆕 v7.5.5 (عصري):
+    ✅ _format_security_text: بطاقات ASCII أنيقة + دوائر ملونة 🟢/⚫
+    ✅ _fmt_dur: صيغة مختصرة للمدد (1س بدل 3600ث)
+    ✅ قائمة أزرار security مضغوطة (3 أزرار/صف)
+    ✅ مفتاح الرموز في الأسفل
+
+🆕 v7.5.4:
+    ✅ CB.ADMIN_BAN_USER / CB.ADMIN_UNBAN_USER
+    ✅ UserState.WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
+    ✅ ban_user_by_id() / unban_user_by_id()
+
 🆕 v7.5.3 (إصلاح بطء الأزرار أثناء النشر):
-    ✅ PUBLISH_RATE_LIMITER: RateLimiter منفصل للنشر (يمنع التأثير على الأزرار)
-    ✅ safe_send: timeout قصير (2s) لتفادي البطء عند ازدحام rate limiter
+    ✅ PUBLISH_RATE_LIMITER: RateLimiter منفصل للنشر
+    ✅ safe_send: timeout قصير (2s)
     ✅ _do_backup: معالجة آمنة لـ set_setting
 
-🆕 v7.5.2 (إصلاحات أداء + خطأ asyncpg):
-    ✅ is_authorized_in_group: كاش أطول (600s) + فحص DB أولاً
-    ✅ _do_backup: لا يستخدم SQLite fallback عند PostgreSQL
+🆕 v7.5.2 (إصلاحات أداء):
+    ✅ is_authorized_in_group: كاش أطول (600s)
     ✅ RateLimiter: لا حجب متسلسل
-    ✅ دعم كامل لـ ChatPermissions الجديدة (PTB v22)
-    ✅ تنظيف الاستيرادات غير المستخدمة
-
-🆕 v7.5.1 (إصلاحات جوهرية):
-    * RateLimiter.acquire — نقل sleep خارج القفل (توازٍ حقيقي)
-    * apply_penalty — إضافة username/first_name/chat_name
-    * _do_backup — يستخدم DB.backup_database مع fallback
-    * cleanup_old_data — يستخدم TimeUtils بدل SQLite-specific syntax
-    * reminders — يستخدم RemindersMixin.send_subscription_reminders
-    * _publish_single_channel — فحص tuple + user_id آمن
-    * invalidate_auth_cache — يدعم الاستدعاء من ChatMemberHandler
-    * TimeUtils.sql_iso — توحيد مع database.py
-    * _group_admins_cache — حد أقصى للحجم
-    * ErrorHandler — إشعار log_channel
 =================================================================================
 """
 
@@ -72,20 +68,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
 # =====================================================================
 # 1. أدوات الوقت
 # =====================================================================
 
 class TimeUtils:
-    """
-    أدوات الوقت والتاريخ.
-
-    ✅ v7.5.2: `sql_iso()` متوافقة مع PostgreSQL/MySQL/SQLite (بدون +00:00).
-
-    ⚠️ v7.5.21: لا تستخدم `sql_iso()` لعمود TIMESTAMP في PostgreSQL!
-    استخدم `utc_now()` بدلاً منه.
-    """
+    """أدوات الوقت والتاريخ."""
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -96,7 +84,6 @@ class TimeUtils:
 
     @staticmethod
     def utc_iso() -> str:
-        """صيغة ISO كاملة (مع +00:00) — للاستخدامات العامة."""
         return TimeUtils.utc_now().isoformat() + "+00:00"
 
     @staticmethod
@@ -105,12 +92,6 @@ class TimeUtils:
 
     @staticmethod
     def sql_iso() -> str:
-        """
-        ✅ v7.5.2: صيغة SQL بدون +00:00 (متوافقة مع كل المحركات).
-
-        ⚠️ v7.5.21: للأعمدة TEXT/VARCHAR فقط.
-        للأعمدة TIMESTAMP استخدم utc_now().
-        """
         return TimeUtils.utc_now().strftime('%Y-%m-%d %H:%M:%S')
 
     @staticmethod
@@ -141,7 +122,6 @@ class TimeUtils:
             return datetime.strptime(date_str, '%Y-%m-%d')
         except (ValueError, TypeError):
             return None
-
 
 # =====================================================================
 # 2. أدوات النصوص
@@ -182,17 +162,12 @@ class TextUtils:
     def truncate(text: str, max_len: int = 200) -> str:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
-
 # =====================================================================
 # 3. Rate Limiter
 # =====================================================================
 
 class RateLimiter:
-    """
-    محدد معدل الإرسال.
-
-    ✅ v7.5.2: نقل `sleep` خارج `self._lock` لتوازٍ حقيقي.
-    """
+    """محدد معدل الإرسال."""
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._last_calls = deque(maxlen=max_per_second * 2)
@@ -200,7 +175,6 @@ class RateLimiter:
         self.max_per_second = max_per_second
 
     async def acquire(self, *args, **kwargs):
-        """✅ v7.5.2: اكتساب إذن الإرسال مع احترام الحد الأقصى — بدون حجب متسلسل."""
         async with self.semaphore:
             while True:
                 wait_time = 0.0
@@ -220,13 +194,11 @@ class RateLimiter:
                 else:
                     await asyncio.sleep(0.01)
 
-
-# ✅ v7.5.3: RATE_LIMITER رئيسي (للأزرار والإشعارات العادية)
+# ✅ v7.5.3: RATE_LIMITER رئيسي
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 
-# ✅ v7.5.3: PUBLISH_RATE_LIMITER منفصل للنشر (يمنع تأخير الأزرار)
+# ✅ v7.5.3: PUBLISH_RATE_LIMITER منفصل للنشر
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
-
 
 # =====================================================================
 # 4. مقاييس الأداء
@@ -260,9 +232,7 @@ class MetricsCollector:
     def increment_messages(self):
         self.messages_processed += 1
 
-
 METRICS = MetricsCollector()
-
 
 # =====================================================================
 # 5. كاش الردود
@@ -299,14 +269,12 @@ class AutoReplyCache:
     def clear(self):
         self.cache.clear()
 
-
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 _security_settings_cache = {}
 _security_settings_time = {}
 _auto_reply_settings_cache = {}
 _auto_reply_settings_time = {}
-
 
 # =====================================================================
 # 6. الترجمات
@@ -383,10 +351,8 @@ class TranslationManager:
             "hi": "हिन्दी 🇮🇳"
         }
 
-
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
-
 
 # =====================================================================
 # 7. إدارة الحالات
@@ -455,7 +421,9 @@ class UserState(Enum):
     WAIT_MOOD = auto()
     WAIT_RESTORE = auto()
     WAIT_BACKUP_FILE = auto()
-
+    # 🆕 v7.5.4
+    WAIT_BAN_USER_ID = auto()
+    WAIT_UNBAN_USER_ID = auto()
 
 class StateManager:
     """إدارة حالات المستخدم مع مهلة زمنية."""
@@ -486,7 +454,6 @@ class StateManager:
             return False
         ttl = timeout or cls._timeout
         return time.time() - cls._timestamps[user_id] > ttl
-
 
 # =====================================================================
 # 8. تعريفات الأزرار (CB)
@@ -647,6 +614,9 @@ class CB:
     ADMIN_GRANT_FREE = "admin_grant_free"
     ADMIN_UPLOAD_BACKUP = "admin_upload_backup"
     ADMIN_DISABLE_FORCE = "admin_disable_force"
+    # 🆕 v7.5.4
+    ADMIN_BAN_USER = "admin_ban_user"
+    ADMIN_UNBAN_USER = "admin_unban_user"
 
     AUTO_REPLY_MENU = "auto_reply_menu"
     AUTO_REPLY_TOGGLE = "auto_reply_toggle"
@@ -656,7 +626,6 @@ class CB:
     AUTO_REPLY_ADD = "auto_reply_add"
     AUTO_REPLY_DEL = "auto_reply_del"
     AUTO_REPLY_LIST = "auto_reply_list"
-
 
 # =====================================================================
 # 9. مصنع الكيبوردات
@@ -678,7 +647,9 @@ class KeyboardFactory:
         "rem_weekly", "rem_days", "translation", "trans_off",
         "invoices", "groups", "admin", "panel_close",
         "pub_all", "post_add", "post_pub", "post_list", "post_rec",
-        "admin_uptime"
+        "admin_uptime",
+        # 🆕 v7.5.4
+        "admin_ban_user", "admin_unban_user",
     }
 
     _default_texts = {
@@ -687,14 +658,14 @@ class KeyboardFactory:
         "add_group_button": "➕ أضف البوت لمجموعة",
         "security_button": "⚙️ أمان {name}",
         "ch_add": "➕ إضافة قناة",
-        "sec_links": "🔗 الروابط",
-        "sec_mentions": "👤 المعرفات",
+        "sec_links": "🔗 روابط",
+        "sec_mentions": "👤 معرفات",
         "sec_slow": "🐢 بطيء",
-        "sec_flood": "🌊 الفيضان",
+        "sec_flood": "🌊 فيضان",
         "sec_video": "🎬 فيديو",
-        "sec_audio": "🎵 موسيقى",
+        "sec_audio": "🎵 صوتي",
         "sec_anim": "🎞️ متحرك",
-        "sec_service": "🗑️ رسائل الخدمة",
+        "sec_service": "🗑️ خدمة",
         "sec_doc": "📄 ملفات",
         "sec_sticker": "🖼️ ملصقات",
         "sec_forward": "📨 مُعاد",
@@ -702,34 +673,34 @@ class KeyboardFactory:
         "sec_game": "🎮 ألعاب",
         "sec_voice": "🎤 صوتي",
         "sec_videonote": "🎥 فيديو نوت",
-        "sec_banned_words": "🚫 كلمات محظورة",
+        "sec_banned_words": "🚫 كلمات",
         "sec_welcome": "🎯 ترحيب",
         "sec_goodbye": "👋 وداع",
-        "sec_night": "🌙 وضع ليلي",
-        "sec_approve_join": "✅ موافقة انضمام",
-        "sec_reject_join": "❌ رفض انضمام",
+        "sec_night": "🌙 ليلي",
+        "sec_approve_join": "✅ موافقة",
+        "sec_reject_join": "❌ رفض",
         "sec_nsfw": "🔞 NSFW",
-        "sec_maxlen": "📏 طول الرسالة",
+        "sec_maxlen": "📏 الحد",
         "sec_warn": "⚠️ تحذيرات",
-        "sec_penalty": "🚫 العقوبات",
+        "sec_penalty": "🚫 عقوبات",
         "sec_del_pen": "🗑️ عقوبة الحذف",
-        "sec_adv_act": "🛠️ إجراءات متقدمة",
-        "sec_act_log": "📋 سجل المشرفين",
-        "sec_auto_reply_menu": "🤖 الردود التلقائية",
+        "sec_adv_act": "🛠️ إجراءات",
+        "sec_act_log": "📋 سجل",
+        "sec_auto_reply_menu": "🤖 ردود تلقائية",
         "sec_antiflood_settings": "🌊 إعدادات الفيضان",
         "sec_night_settings": "🌙 إعدادات الليل",
-        "sec_penalty_durations": "⏱️ مدد العقوبات",
-        "sec_violation_penalties": "🚨 المخالفات",
+        "sec_penalty_durations": "⏱️ المدد",
+        "sec_violation_penalties": "🚨 مخالفات",
         "sec_enable_all": "✅ تفعيل الكل",
         "sec_disable_all": "❌ تعطيل الكل",
         "sec_close": "🔒 إغلاق",
         "auto_reply_toggle": "🔘 تفعيل/تعطيل",
-        "auto_reply_admins": "👤 للمشرفين فقط",
+        "auto_reply_admins": "👤 للمشرفين",
         "auto_reply_add": "➕ إضافة",
         "auto_reply_del": "🗑️ حذف",
         "auto_reply_list": "📋 القائمة",
         "auto_reply_stats": "📊 إحصائيات",
-        "auto_reply_reset": "🔄 إعادة تعيين",
+        "auto_reply_reset": "🔄 إعادة",
         "act_ban": "🚫 حظر",
         "act_mute": "🔇 كتم",
         "act_warn": "⚠️ تحذير",
@@ -742,18 +713,21 @@ class KeyboardFactory:
         "pen_mute": "🔇 كتم",
         "pen_kick": "👢 طرد",
         "pen_warn": "⚠️ تحذير",
-        "ban_add": "➕ إضافة كلمة",
+        "ban_add": "➕ إضافة",
         "ban_list": "📋 القائمة",
-        "ban_rem": "🗑️ حذف كلمة",
+        "ban_rem": "🗑️ حذف",
         "buy_sub_1": "1 يوم ⭐",
         "buy_sub_7": "7 أيام ⭐",
         "buy_sub_30": "30 يوم ⭐",
         "buy_sub_90": "90 يوم ⭐",
         "buy_sub_365": "365 يوم ⭐",
         "gift_plans": "🎁 الهدايا",
-        "redeem_gift": "🎟️ استبدال كود",
+        "redeem_gift": "🎟️ استبدال",
         "panel_close": "🔒 إغلاق",
-        "sec_links_on": "🔗 الروابط ✅",
+        "sec_links_on": "🔗 روابط ✅",
+        # 🆕 v7.5.4
+        "admin_ban_user": "🚫 حظر مستخدم",
+        "admin_unban_user": "✅ فك حظر مستخدم",
     }
 
     @classmethod
@@ -831,17 +805,40 @@ class KeyboardFactory:
                     ["auto_reply_list", "auto_reply_stats"],
                     ["auto_reply_reset"], ["back"]
                 ],
+                # 🆕 v7.5.5: قائمة أمان مضغوطة (3 أزرار لكل صف)
                 "security": [
-                    ["sec_links", "sec_mentions"], ["sec_slow", "sec_flood"],
-                    ["sec_video", "sec_audio"], ["sec_anim", "sec_service"],
-                    ["sec_doc", "sec_sticker"], ["sec_forward", "sec_poll"],
-                    ["sec_game", "sec_voice"], ["sec_videonote", "sec_banned_words"],
-                    ["sec_welcome", "sec_goodbye"], ["sec_night", "sec_approve_join"],
-                    ["sec_reject_join", "sec_nsfw"], ["sec_maxlen", "sec_warn"],
-                    ["sec_penalty", "sec_del_pen"], ["sec_adv_act", "sec_act_log"],
-                    ["sec_auto_reply_menu"], ["sec_antiflood_settings", "sec_night_settings"],
-                    ["sec_penalty_durations"], ["sec_violation_penalties"],
-                    ["sec_enable_all", "sec_disable_all"], ["sec_close"]
+                    # 🛡️ الحماية التلقائية (3×4)
+                    ["sec_links", "sec_mentions", "sec_forward"],
+                    ["sec_video", "sec_audio", "sec_anim"],
+                    ["sec_doc", "sec_sticker", "sec_service"],
+                    ["sec_poll", "sec_game", "sec_videonote"],
+
+                    # ⚙️ الأمان المتقدم
+                    ["sec_flood", "sec_slow", "sec_night"],
+
+                    # 👋 الترحيب والانضمام
+                    ["sec_welcome", "sec_goodbye"],
+                    ["sec_approve_join", "sec_reject_join"],
+                    ["sec_banned_words", "sec_nsfw"],
+
+                    # ⚠️ الحدود والتحذيرات
+                    ["sec_maxlen", "sec_warn"],
+                    ["sec_violation_penalties"],
+
+                    # 🚫 العقوبات
+                    ["sec_penalty", "sec_del_pen"],
+                    ["sec_penalty_durations"],
+
+                    # 🛠️ إجراءات
+                    ["sec_adv_act", "sec_act_log"],
+                    ["sec_auto_reply_menu"],
+                    ["sec_antiflood_settings", "sec_night_settings"],
+
+                    # ⚡ تحكم عام
+                    ["sec_enable_all", "sec_disable_all"],
+
+                    # 🔒 إغلاق
+                    ["sec_close"]
                 ],
                 "penalty": [["pen_ban", "pen_mute"], ["pen_kick", "pen_warn"], ["back"]],
                 "advanced_actions": [
@@ -856,7 +853,10 @@ class KeyboardFactory:
                 "channel_settings": [["sched_min", "sched_hour"], ["sched_day", "sched_time"], ["back"]],
                 "admin": [
                     ["admin_users", "admin_stats"], ["admin_banned", "admin_unban_all"],
-                    ["admin_channels", "admin_groups"], ["admin_grant_free", "admin_add_admin"],
+                    ["admin_channels", "admin_groups"],
+                    # 🆕 v7.5.4
+                    ["admin_ban_user", "admin_unban_user"],
+                    ["admin_grant_free", "admin_add_admin"],
                     ["admin_broadcast", "admin_invoices"], ["admin_backup", "admin_restore"],
                     ["admin_ram", "admin_metrics"], ["back"]
                 ]
@@ -891,31 +891,163 @@ class KeyboardFactory:
 
     @classmethod
     def _status_icon(cls, value: bool) -> str:
+        """✅/❌ — للاستخدام العام (يُفضّل dot للأمان)."""
         return "✅" if value else "❌"
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.5.5: دوال مساعدة للعرض العصري
+    # ═════════════════════════════════════════════════════════════════
+
+    @classmethod
+    def _dot(cls, enabled: bool) -> str:
+        """🟢/⚫ — نقطة ملونة موفرة للمساحة."""
+        return "🟢" if enabled else "⚫"
+
+    @classmethod
+    def _fmt_dur(cls, seconds: int) -> str:
+        """🆕 v7.5.5: تحويل الثواني لصيغة مختصرة جداً."""
+        try:
+            seconds = int(seconds)
+        except (ValueError, TypeError):
+            return "—"
+        if seconds <= 0:
+            return "∞"
+        if seconds < 60:
+            return f"{seconds}ث"
+        if seconds < 3600:
+            return f"{seconds // 60}د"
+        if seconds < 86400:
+            h = seconds // 3600
+            m = (seconds % 3600) // 60
+            if m == 0:
+                return f"{h}س"
+            return f"{h}س{m}د"
+        if seconds < 2592000:
+            return f"{seconds // 86400}ي"
+        return f"{seconds // 2592000}ش"
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.5.5: عرض الأمان العصري (بطاقات ASCII)
+    # ═════════════════════════════════════════════════════════════════
 
     @classmethod
     def _format_security_text(cls, settings: dict) -> str:
-        st = cls._status_icon
-        lines = [
-            "🔐 إعدادات الأمان",
-            "━━━━━━━━━━━━━━━━━━━━\n",
-            f"🔗 روابط: {st(settings.get('delete_links', 0))} | 👤 معرفات: {st(settings.get('mentions', 0))}",
-            f"🌊 فيضان: {st(settings.get('antiflood_enabled', 0))} | 📊 رسائل: {settings.get('antiflood_messages', 5)} | ⏱️ ثواني: {settings.get('antiflood_seconds', 10)}",
-            f"📏 طول: {settings.get('max_message_length', 0)} | 🌙 ليلي: {st(settings.get('night_mode_enabled', 0))} | 🔞 NSFW: {st(settings.get('nsfw_enabled', 0))}",
-            f"⚠️ تحذيرات: {st(settings.get('warn_enabled', 0))} | 📊 حد: {settings.get('max_warnings', 3)}\n",
-            f"🎯 ترحيب: {st(settings.get('welcome_enabled', 0))} | 👋 وداع: {st(settings.get('goodbye_enabled', 0))}",
-            f"🗑️ رسائل الخدمة: {st(settings.get('delete_service', 0))}",
-            f"🎬 فيديو: {st(settings.get('delete_videos', 0))} | 🎤 صوتي: {st(settings.get('delete_voice', 0))} | 🖼️ ملصقات: {st(settings.get('delete_stickers', 0))}",
-            f"📄 ملفات: {st(settings.get('delete_documents', 0))} | 📸 صور: {st(settings.get('delete_photos', 0))} | 🎞️ متحرك: {st(settings.get('delete_animation', 0))}",
-            f"✅ موافقة: {st(settings.get('auto_approve_join', 0))} | ❌ رفض: {st(settings.get('auto_reject_join', 0))}\n",
-            f"⏱️ كتم: {settings.get('mute_default_duration', 3600)}ث | 🚫 حظر: {settings.get('ban_default_duration', 0)}ث | 🔒 تقييد: {settings.get('restrict_default_duration', 1800)}ث",
-            f"⚠️ مخالفات: {settings.get('violation_strikes', 3)} | ⏱️ مدة: {settings.get('violation_duration', 60)}ث",
-            f"🌊 مدة الفيضان: {settings.get('antiflood_penalty_duration', 3600)}ث | 🌙 مدة الليل: {settings.get('night_mode_action_duration', 3600)}ث",
-            f"⚖️ مدة عقوبة التحذير: {settings.get('warn_penalty_duration', 3600)}ث",
-            "━━━━━━━━━━━━━━━━━━━━"
-        ]
-        return "\n".join(lines)
+        """🆕 v7.5.5: عرض عصري - بطاقات منظمة + مضغوط."""
+        d = cls._dot
+        f = cls._fmt_dur
 
+        # === دوال مساعدة للفصل البصري ===
+        def row(*items) -> str:
+            """ينشئ صفاً بمعلومات متعددة مع فواصل أنيقة."""
+            return "  ⋮  ".join(items)
+
+        # ═══════════════════════════════════════
+        # البطاقة 1: الحماية التلقائية
+        # ═══════════════════════════════════════
+        protections = [
+            ("🔗 روابط",  settings.get('delete_links', 0)),
+            ("👤 معرفات", settings.get('mentions', 0)),
+            ("🎬 فيديو",  settings.get('delete_videos', 0)),
+            ("🎤 صوتي",   settings.get('delete_voice', 0)),
+            ("🖼️ ملصقات", settings.get('delete_stickers', 0)),
+            ("📄 ملفات",  settings.get('delete_documents', 0)),
+            ("🎞️ متحرك",  settings.get('delete_animation', 0)),
+            ("📨 مُعاد",  settings.get('delete_forwarded', 0)),
+            ("📊 استطلاع", settings.get('delete_polls', 0)),
+            ("🗑️ خدمة",   settings.get('delete_service', 0)),
+        ]
+
+        # بناء صفوف من 3 عناصر لكل صف
+        prot_lines = []
+        for i in range(0, len(protections), 3):
+            chunk = protections[i:i+3]
+            prot_lines.append(
+                "  ".join(f"{name} {d(val)}" for name, val in chunk)
+            )
+
+        # ═══════════════════════════════════════
+        # البطاقة 2: الأمان المتقدم
+        # ═══════════════════════════════════════
+        antiflood_msg = settings.get('antiflood_messages', 5)
+        antiflood_sec = settings.get('antiflood_seconds', 10)
+
+        night_start = settings.get('night_mode_start', '—') or '—'
+        night_end = settings.get('night_mode_end', '—') or '—'
+
+        # ═══════════════════════════════════════
+        # البطاقة 3: الترحيب
+        # ═══════════════════════════════════════
+        welcome_row = row(
+            f"🎯 ترحيب {d(settings.get('welcome_enabled', 0))}",
+            f"👋 وداع {d(settings.get('goodbye_enabled', 0))}",
+        )
+        join_row = row(
+            f"✅ موافقة {d(settings.get('auto_approve_join', 0))}",
+            f"❌ رفض {d(settings.get('auto_reject_join', 0))}",
+        )
+
+        # ═══════════════════════════════════════
+        # البطاقة 4: التحذيرات
+        # ═══════════════════════════════════════
+        warn_row = row(
+            f"⚠️ تحذيرات {d(settings.get('warn_enabled', 0))}",
+            f"🎯 الحد {settings.get('max_warnings', 3)}",
+        )
+        violation_row = row(
+            f"🚨 مخالفات {settings.get('violation_strikes', 3)}",
+            f"⏱️ {f(settings.get('violation_duration', 60))}",
+        )
+
+        # ═══════════════════════════════════════
+        # البطاقة 5: المدد
+        # ═══════════════════════════════════════
+        durations_rows = [
+            row(
+                f"🔇 {f(settings.get('mute_default_duration', 3600))}",
+                f"🚫 {f(settings.get('ban_default_duration', 0))}",
+                f"🔒 {f(settings.get('restrict_default_duration', 1800))}",
+            ),
+            row(
+                f"⚠️ {f(settings.get('warn_penalty_duration', 3600))}",
+                f"🌊 {f(settings.get('antiflood_penalty_duration', 3600))}",
+                f"🌙 {f(settings.get('night_mode_action_duration', 3600))}",
+            ),
+        ]
+
+        # ═══════════════════════════════════════
+        # تجميع الرسالة النهائية
+        # ═══════════════════════════════════════
+        parts = [
+            "🔐 <b>إعدادات الأمان</b>",
+            "",
+            "┌─ 🛡️ <b>الحماية التلقائية</b>",
+            *[f"│  {line}" for line in prot_lines],
+            "└─",
+            "",
+            "┌─ ⚙️ <b>الأمان المتقدم</b>",
+            f"│  🌊 الفيضان {d(settings.get('antiflood_enabled', 0))}  •  {antiflood_msg} رسالة / {antiflood_sec}ث",
+            f"│  🌙 ليلي {d(settings.get('night_mode_enabled', 0))}  •  {night_start} ← {night_end}",
+            f"│  📏 حد {settings.get('max_message_length', 0) or '∞'}  •  🔞 NSFW {d(settings.get('nsfw_enabled', 0))}",
+            "└─",
+            "",
+            "┌─ 👋 <b>الترحيب والانضمام</b>",
+            f"│  {welcome_row}",
+            f"│  {join_row}",
+            "└─",
+            "",
+            "┌─ ⚠️ <b>التحذيرات والمخالفات</b>",
+            f"│  {warn_row}",
+            f"│  {violation_row}",
+            "└─",
+            "",
+            "┌─ ⏱️ <b>مدد العقوبات</b>",
+            *[f"│  {line}" for line in durations_rows],
+            "└─",
+            "",
+            "<i>🟢 مفعّل  •  ⚫ معطّل</i>",
+        ]
+
+        return "\n".join(parts)
 
 # =====================================================================
 # 10. كاش الكلمات المحظورة
@@ -927,13 +1059,11 @@ _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
-
 def _normalize_word(word: Any) -> Optional[str]:
     if not isinstance(word, str):
         return None
     word = word.strip().lower()
     return word if word else None
-
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     if _ENABLE_BANNED_WORDS_CACHE:
@@ -987,7 +1117,6 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             logger.error(f"❌ فشل جلب الكلمات المحظورة من قاعدة البيانات: {e}")
             return []
 
-
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
     if chat_id is None or chat_id == -1:
         _banned_words_cache.clear()
@@ -996,7 +1125,6 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
 
-
 async def get_min_publish_interval() -> int:
     val = await DB.get_setting('min_publish_interval', str(CONFIG.MIN_PUBLISH_INTERVAL))
     try:
@@ -1004,33 +1132,20 @@ async def get_min_publish_interval() -> int:
     except (ValueError, TypeError):
         return CONFIG.MIN_PUBLISH_INTERVAL
 
-
 # =====================================================================
 # 11. دوال الصلاحيات
 # =====================================================================
 
-# ✅ v7.5.2: كاش أطول + حجم أكبر
 _auth_cache = TTLCache(
     maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 2000),
-    ttl=600,  # ✅ 10 دقائق بدل 5
+    ttl=600,
 )
 
-
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """
-    ✅ v7.5.2: فحص سريع + كاش + تجنب API قدر الإمكان.
-
-    الخطوات (بالترتيب):
-    1. المالك الرئيسي → مسموح فوراً
-    2. كاش (10 دقائق)
-    3. فحص DB (bot_admins, hidden_admins) — أسرع من API
-    4. Telegram API (فقط عند الحاجة)
-    """
-    # 1. المالك الرئيسي
+    """فحص سريع + كاش + تجنب API قدر الإمكان."""
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
 
-    # 2. الكاش
     cache_key = f"auth_{chat_id}_{user_id}"
     cached = _auth_cache.get(cache_key)
     if cached is not None:
@@ -1038,7 +1153,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
     authorized = False
 
-    # 3. فحص DB أولاً (أسرع من API)
     try:
         row = await DB.fetchone("""
             SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?
@@ -1053,7 +1167,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     except Exception as e:
         logger.debug(f"DB auth check failed: {e}")
 
-    # 4. Telegram API (فقط إن لم نجد في DB)
     if not authorized:
         try:
             member = await bot.get_chat_member(chat_id, user_id)
@@ -1065,11 +1178,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
     _auth_cache[cache_key] = authorized
     return authorized
 
-
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
-    """
-    ✅ v7.5.2: تُستدعى من ChatMemberHandler عند تغيير حالة المشرفين.
-    """
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
@@ -1079,7 +1188,6 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
                     _auth_cache.pop(k, None)
         else:
             _auth_cache.clear()
-
 
 async def check_bot_permissions(bot, chat_id: int) -> dict:
     try:
@@ -1094,7 +1202,6 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
         return {'can_act': True, 'reason': '', 'can_pin': can_pin}
     except Exception as e:
         return {'can_act': False, 'reason': str(e)[:50]}
-
 
 # =====================================================================
 # 12. إرسال آمن
@@ -1129,15 +1236,11 @@ async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, rep
     else:
         return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
 
-
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
-    """
-    ✅ v7.5.3: إرسال آمن مع timeout قصير لـ rate limiter.
-    """
+    """إرسال آمن مع timeout قصير لـ rate limiter."""
     if not text and not any(k in kwargs for k in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']):
         return None
 
-    # ✅ v7.5.3: timeout قصير — يمنع البطء عند ازدحام rate limiter
     try:
         await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=2.0)
     except asyncio.TimeoutError:
@@ -1204,7 +1307,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
         logger.warning(f"⚠️ فشل الإرسال: {e}")
         return None
 
-
 def get_ram_usage() -> dict:
     if psutil is None:
         return {'total': 0, 'used': 0, 'percent': 0}
@@ -1219,16 +1321,86 @@ def get_ram_usage() -> dict:
         logger.error(f"❌ فشل جلب إحصائيات الرام: {e}")
         return {'total': 0, 'used': 0, 'percent': 0}
 
+# =====================================================================
+# 13. 🆕 v7.5.4: دوال حظر / فك حظر المستخدمين
+# =====================================================================
+
+async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
+    """🆕 v7.5.4: حظر مستخدم من استخدام البوت (بواسطة ID)."""
+    try:
+        try:
+            if CONFIG.is_developer(user_id):
+                return False, "لا يمكنك حظر مطور آخر!"
+        except Exception:
+            pass
+
+        row = await DB.fetchone(
+            "SELECT user_id FROM users WHERE user_id=?",
+            (user_id,)
+        )
+
+        if row:
+            await DB.execute(
+                "UPDATE users SET banned=1 WHERE user_id=?",
+                (user_id,)
+            )
+        else:
+            try:
+                await DB.execute(
+                    "INSERT INTO users (user_id, banned, language, created_at) "
+                    "VALUES (?, 1, 'ar', ?)",
+                    (user_id, TimeUtils.utc_now())
+                )
+            except Exception:
+                await DB.execute(
+                    "INSERT INTO users (user_id, banned, language) VALUES (?, 1, 'ar')",
+                    (user_id,)
+                )
+
+        with suppress(Exception):
+            from cache import invalidate_user_cache
+            await invalidate_user_cache(user_id)
+
+        return True, f"✅ تم حظر المستخدم: {user_id}"
+
+    except Exception as e:
+        logger.error(f"❌ ban_user_by_id({user_id}): {e}", exc_info=True)
+        return False, f"❌ فشل الحظر: {str(e)[:100]}"
+
+async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
+    """🆕 v7.5.4: فك حظر مستخدم (بواسطة ID)."""
+    try:
+        row = await DB.fetchone(
+            "SELECT user_id FROM users WHERE user_id=?",
+            (user_id,)
+        )
+
+        if not row:
+            return False, f"⚠️ المستخدم {user_id} غير موجود"
+
+        await DB.execute(
+            "UPDATE users SET banned=0 WHERE user_id=?",
+            (user_id,)
+        )
+
+        with suppress(Exception):
+            from cache import invalidate_user_cache
+            await invalidate_user_cache(user_id)
+
+        return True, f"✅ تم فك حظر المستخدم: {user_id}"
+
+    except Exception as e:
+        logger.error(f"❌ unban_user_by_id({user_id}): {e}", exc_info=True)
+        return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
 # =====================================================================
-# 13. نظام العقوبات
+# 14. نظام العقوبات
 # =====================================================================
 
 class PenaltyStrategy(ABC):
     @abstractmethod
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         pass
-
 
 class BanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1241,7 +1413,6 @@ class BanPenalty(PenaltyStrategy):
             return True, "✅ تم الحظر"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class MutePenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1274,7 +1445,6 @@ class MutePenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class KickPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -1286,7 +1456,6 @@ class KickPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class WarnPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -1296,7 +1465,6 @@ class WarnPenalty(PenaltyStrategy):
             return True, f"⚠️ تحذير {w}"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class RestrictPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1329,7 +1497,6 @@ class RestrictPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
-
 class UnbanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         try:
@@ -1337,7 +1504,6 @@ class UnbanPenalty(PenaltyStrategy):
             return True, "✅ تم إلغاء الحظر"
         except Exception as e:
             return False, str(e)[:100]
-
 
 class PenaltyFactory:
     @staticmethod
@@ -1352,7 +1518,6 @@ class PenaltyFactory:
         }
         return strategies.get(penalty_type)
 
-
 async def apply_penalty(
     bot,
     chat_id: int,
@@ -1365,9 +1530,7 @@ async def apply_penalty(
     first_name: str = "",
     chat_name: str = "",
 ) -> Tuple[bool, str]:
-    """
-    ✅ v7.5.2: تطبيق عقوبة + تسجيلها في DB.
-    """
+    """تطبيق عقوبة + تسجيلها في DB."""
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return False, "لا يمكن معاملة المالك"
     if user_id == bot.id:
@@ -1436,16 +1599,14 @@ async def apply_penalty(
 
     return success, msg
 
-
 # =====================================================================
-# 14. الردود التلقائية
+# 15. الردود التلقائية
 # =====================================================================
 
 _usage_updates: Dict[Tuple[int, str], int] = {}
 _USAGE_FLUSH_LIMIT = 50
 _USAGE_FLUSH_INTERVAL = 60
 _usage_lock = asyncio.Lock()
-
 
 async def _increment_usage_async(chat_id: int, keyword: str):
     async with _usage_lock:
@@ -1454,7 +1615,6 @@ async def _increment_usage_async(chat_id: int, keyword: str):
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
         await _flush_usage_updates()
-
 
 async def _flush_usage_updates():
     async with _usage_lock:
@@ -1474,7 +1634,6 @@ async def _flush_usage_updates():
             for key, count in data:
                 _usage_updates[key] = _usage_updates.get(key, 0) + count
 
-
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
         "SELECT keyword, reply FROM auto_replies WHERE chat_id=? AND is_active=1",
@@ -1492,7 +1651,6 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
 
     await asyncio.to_thread(_write)
     return len(data)
-
 
 async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[Dict]], overwrite: bool = False) -> int:
     try:
@@ -1531,7 +1689,6 @@ async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[D
         logger.error(f"❌ Import error: {e}")
         return 0
 
-
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
         timeout = aiohttp.ClientTimeout(total=10)
@@ -1546,9 +1703,8 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
         logger.error(f"❌ Fetch JSON error: {e}")
         return None
 
-
 # =====================================================================
-# 15. الردود من ملف
+# 16. الردود من ملف
 # =====================================================================
 
 def load_replies_from_file() -> dict:
@@ -1568,14 +1724,12 @@ def load_replies_from_file() -> dict:
         logger.error(f"❌ خطأ في تحميل replies.py: {e}")
         return {}
 
-
 _REPLIES_FROM_FILE = load_replies_from_file()
 
 if _REPLIES_FROM_FILE:
     logger.info(f"✅ تم تحميل ملف الردود بنجاح: {len(_REPLIES_FROM_FILE)} رد متاح")
 else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
-
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
     if not _REPLIES_FROM_FILE or not keyword:
@@ -1605,7 +1759,6 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
 
     return None
 
-
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
@@ -1613,9 +1766,8 @@ def reload_replies_from_file() -> dict:
         logger.info(f"✅ تم إعادة تحميل ملف الردود: {len(_REPLIES_FROM_FILE)} رد")
     return _REPLIES_FROM_FILE
 
-
 # =====================================================================
-# 16. المهام الخلفية
+# 17. المهام الخلفية
 # =====================================================================
 
 class BackgroundTasks:
@@ -1821,11 +1973,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def _do_backup() -> None:
-        """
-        ✅ v7.5.3: النسخ الاحتياطي يعمل على 3 محركات.
-        - لا يستخدم SQLite fallback عند PostgreSQL/MySQL
-        - معالجة آمنة لـ set_setting
-        """
         import time as _time
         t_start = _time.monotonic()
         try:
@@ -2030,9 +2177,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def cleanup_old_data() -> None:
-        """
-        ✅ v7.5.3: استخدام TimeUtils (يعمل على 3 محركات).
-        """
         while True:
             await asyncio.sleep(3600)
             try:
@@ -2077,9 +2221,8 @@ class BackgroundTasks:
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
-
 # =====================================================================
-# 17. خادم الويب
+# 18. خادم الويب
 # =====================================================================
 
 _webhook_app = None
@@ -2102,7 +2245,6 @@ async def setup_webhook(app, port: int):
     logger.info(f"✅ Webhook on port {port}")
     return runner
 
-
 async def webhook_handler(request):
     global _webhook_app
     if _webhook_app is None or not hasattr(_webhook_app, 'bot'):
@@ -2119,17 +2261,13 @@ async def webhook_handler(request):
         logger.error(f"❌ Webhook error: {e}")
         return web.Response(status=500, text="ERROR")
 
-
 # =====================================================================
-# 18. معالج الأخطاء
+# 19. معالج الأخطاء
 # =====================================================================
 
 class ErrorHandler:
     @staticmethod
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ✅ v7.5.2: يسجّل الخطأ + يُرسل إشعارًا لقناة السجلات (إن وُجدت).
-        """
         try:
             error_msg = str(context.error)
             if update:
@@ -2154,7 +2292,6 @@ class ErrorHandler:
         except Exception:
             pass
 
-
 # =====================================================================
 # تصدير
 # =====================================================================
@@ -2168,6 +2305,7 @@ __all__ = [
     'get_min_publish_interval',
     'is_authorized_in_group', 'invalidate_auth_cache', 'check_bot_permissions',
     'safe_send', 'get_ram_usage',
+    'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
     'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
     'apply_penalty',
