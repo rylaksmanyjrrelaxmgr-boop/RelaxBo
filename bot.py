@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v3)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v4)
 ================================================================================
 - دمج نظام الكاش (cache.py) بالكامل
 - استخدام user_cache.get_or_load() في المعالجات (يُعدَّل في handlers.py)
@@ -13,20 +13,17 @@
 - دعم webhook و polling مع إعادة محاولة تلقائية
 
 🆕 v2:
-- ✅ ChatMemberHandler لتحديث المشرفين فورياً (بدل الاستطلاع الدوري)
-- ✅ تسريع /start من 5 ثوان إلى < 300ms
-- ✅ تقليل الحمل على Telegram API بنسبة 95%
+- ✅ ChatMemberHandler لتحديث المشرفين فورياً
+- ✅ تسريع /start
+- ✅ تقليل الحمل على Telegram API
 
 🆕 v3:
 - ✅ keep_alive() لمنع cold start على Render Free tier
-- ✅ تحسين استقرار البوت على Render
 
-🆕 v4 (الجديد):
-- ✅ قائمة القنوات مع حالتها (handlers_channels_list)
-- ✅ تعيين القناة النشطة من الواجهة
-- ✅ حذف قناة مع تأكيد
-- ✅ تعديل الجدولة لكل قناة
-- ✅ إعادة تدوير المنشورات
+🆕 v4:
+- ✅ قائمة القنوات (handlers_channels_list)
+- ✅ إصلاح أزرار الرجوع/الإغلاق (handlers_nav_fix)
+================================================================================
 """
 
 import asyncio
@@ -50,10 +47,12 @@ from handlers import (
     CommandHandlers,
     CallbackHandlers,
     MessageHandlers,
-    chat_member,  # ✅ معالج تحديثات المشرفين
+    chat_member,
 )
 # ✅ v4: استيراد handlers قائمة القنوات
 from handlers.handlers_channels_list import register_channels_list_handlers
+# ✅ v4.1: استيراد إصلاح التنقل
+from handlers.handlers_nav_fix import register_nav_fix
 
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
@@ -76,8 +75,8 @@ ALLOWED_UPDATES = [
     "callback_query",
     "chat_join_request",
     "pre_checkout_query",
-    "chat_member",           # ✅ تحديثات المشرفين
-    "my_chat_member",        # ✅ تغييرات عضوية البوت
+    "chat_member",
+    "my_chat_member",
 ]
 
 # =====================================================================
@@ -213,14 +212,12 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 # =====================================================================
-# 🆕 keep-alive لمنع cold start على Render Free tier
+# keep-alive لمنع cold start على Render Free tier
 # =====================================================================
 
 async def keep_alive():
-    """
-    يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة.
-    """
-    await asyncio.sleep(60)  # انتظار أولي 60 ثانية بعد الإقلاع
+    """يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة."""
+    await asyncio.sleep(60)
 
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
 
@@ -237,7 +234,7 @@ async def keep_alive():
 
     while True:
         try:
-            await asyncio.sleep(300)  # كل 5 دقائق
+            await asyncio.sleep(300)
 
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -427,8 +424,16 @@ async def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
     # ═══════════════════════════════════════════════════════════════════
-    # ✅ v4: قائمة القنوات — يجب أن يكون قبل CallbackHandlers.handle
-    #    حتى تستقبل الـ callbacks الخاصة بـ ch_* أولاً
+    # ✅ v4.1: إصلاح التنقل — يجب أن يُسجَّل أولاً (group=-10)
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        register_nav_fix(app)
+        logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
+    except Exception as e:
+        logger.error(f"❌ فشل تسجيل NAV_FIX: {e}", exc_info=True)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v4: قائمة القنوات
     # ═══════════════════════════════════════════════════════════════════
     try:
         register_channels_list_handlers(app)
@@ -465,7 +470,7 @@ async def main():
     app.add_error_handler(ErrorHandler.handle_error)
 
     # ═══════════════════════════════════════════════════════════════════
-    # ✅ v2: تسجيل معالج تحديثات المشرفين (ChatMemberHandler)
+    # ChatMemberHandler
     # ═══════════════════════════════════════════════════════════════════
     chat_member.register(app)
     logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
@@ -495,18 +500,14 @@ async def main():
                 await asyncio.sleep(60)
 
     tasks = [
-        # 🆕 v3: keep-alive لمنع cold start
         asyncio.create_task(run_task_with_retry(keep_alive, task_name="keep_alive")),
-
         asyncio.create_task(run_task_with_retry(BackgroundTasks.auto_publish, app.bot, task_name="auto_publish")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.auto_backup, task_name="auto_backup")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.reminders, app.bot, task_name="reminders")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.heartbeat, app.bot, task_name="heartbeat")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.flush_usage_periodically, task_name="flush_usage")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_subscriptions, task_name="expire_subscriptions")),
-
         asyncio.create_task(run_task_with_retry(BackgroundTasks.sync_admins_periodically, app.bot, task_name="sync_admins")),
-
         asyncio.create_task(run_task_with_retry(BackgroundTasks.expire_penalties_periodically, task_name="expire_penalties")),
         asyncio.create_task(run_task_with_retry(BackgroundTasks.cleanup_old_data, task_name="cleanup_old_data")),
         asyncio.create_task(run_task_with_retry(cache_cleanup_task, task_name="cache_cleanup")),
@@ -526,7 +527,6 @@ async def main():
             )
             logger.info("✅ Webhook تم التعيين")
             runner = await setup_webhook(app, port)
-            # طلب تسخين
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
