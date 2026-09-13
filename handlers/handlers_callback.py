@@ -4,8 +4,13 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.23 (مُحسَّن — ترقيم المجموعات + أزرار مدموجة)
+الإصدار: v7.5.24 (مُحسَّن — حظر/فك حظر المستخدمين + أزرار مدموجة)
 =====================================================================
+🆕 v7.5.24:
+    ✅ ADMIN_BAN_USER → حظر مستخدم من لوحة المطور
+    ✅ ADMIN_UNBAN_USER → فك حظر مستخدم من لوحة المطور
+    ✅ أزرار مدموجة في قائمة المجموعات
+
 🆕 v7.5.23:
     ✅ _show_groups_list → أزرار مدموجة (أمان + حذف في صف واحد)
     ✅ الحفاظ على الترقيم (1️⃣ 2️⃣ 3️⃣...)
@@ -1812,7 +1817,7 @@ class CallbackHandlers:
         await safe_edit(query, "✅ بدأ النشر الجماعي", bot=context.bot)
 
     # =================================================================
-    # ✅✅✅ الدالة المعدّلة: _show_groups_list مع ترقيم وأزرار مدموجة ✅✅✅
+    # عرض قائمة المجموعات (ترقيم + أزرار مدموجة)
     # =================================================================
 
     @staticmethod
@@ -1839,10 +1844,8 @@ class CallbackHandlers:
             status = "⛔" if g.get('banned') else "✅"
             number = _group_number(i)
 
-            # نص القائمة: ✅ 1️⃣ اسم المجموعة
             text += f"{status} {number} {name}\n"
 
-            # ✅ الأزرار مدموجة في صف واحد (أمان + حذف)
             kb.append([
                 InlineKeyboardButton(
                     f"{number} ⚙️ أمان",
@@ -2323,7 +2326,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # 🆕 v7.5.21: أزرار عدد التحذيرات
             if action == "warn_count":
                 await CallbackHandlers._show_warn_count_buttons(
                     update, context, query, chat_id, lang
@@ -2485,7 +2487,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
-        """🆕 v7.5.21: أزرار عدد التحذيرات."""
+        """أزرار عدد التحذيرات."""
         settings = await DB.get_security_settings(chat_id)
         current = settings.get('max_warnings', 3)
 
@@ -2731,6 +2733,34 @@ class CallbackHandlers:
                 await safe_edit(query, "🎁 أرسل: معرف_المستخدم عدد_الأيام", bot=context.bot)
                 return
 
+            # ═══════════════════════════════════════════════
+            # 🆕 حظر مستخدم (لوحة المطور)
+            # ═══════════════════════════════════════════════
+            if data == "admin_ban_user":
+                StateManager.set(user_id, "wait_ban_user_id")
+                await safe_edit(
+                    query,
+                    "🚫 <b>حظر مستخدم</b>\n\n"
+                    "أرسل معرف المستخدم (ID) لحظره:\n"
+                    "<i>مثال: 123456789</i>",
+                    bot=context.bot,
+                )
+                return
+
+            # ═══════════════════════════════════════════════
+            # 🆕 فك حظر مستخدم (لوحة المطور)
+            # ═══════════════════════════════════════════════
+            if data == "admin_unban_user":
+                StateManager.set(user_id, "wait_unban_user_id")
+                await safe_edit(
+                    query,
+                    "✅ <b>فك حظر مستخدم</b>\n\n"
+                    "أرسل معرف المستخدم (ID) لفك حظره:\n"
+                    "<i>مثال: 123456789</i>",
+                    bot=context.bot,
+                )
+                return
+
             if data == CB.ADMIN_USERS:
                 try:
                     stats = await DB.get_user_stats() or {}
@@ -2882,7 +2912,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, bot=context.bot)
                 return
 
-            # 🆕 v7.5.21: رسالة "جاري..."
             if data == CB.ADMIN_BACKUP:
                 await safe_edit(query, "⏳ جاري إنشاء النسخة الاحتياطية...", bot=context.bot)
                 task = asyncio.create_task(CallbackHandlers._do_backup(context, user_id))
@@ -3099,9 +3128,7 @@ class CallbackHandlers:
             if data == CB.ADMIN_UNBAN_GR:
                 await DB.execute("UPDATE bot_groups SET banned=0 WHERE banned=1")
                 await safe_edit(query, "✅ تم إلغاء حظر جميع المجموعات", bot=context.bot)
-                return
-
-            if data == CB.ADMIN_REPLIES:
+                return            if data == CB.ADMIN_REPLIES:
                 replies = await DB.fetchall(
                     "SELECT keyword FROM auto_replies WHERE chat_id=-1 LIMIT 30"
                 )
@@ -3599,7 +3626,6 @@ class CallbackHandlers:
                     await safe_edit(query, msg, bot=context.bot)
                     return
 
-                # 🆕 v7.5.21: حماية pin
                 if action == "pin":
                     if not update.message or not update.message.reply_to_message:
                         await safe_edit(
@@ -3741,7 +3767,6 @@ class CallbackHandlers:
                     StateManager.clear(user_id)
                     return
 
-                # 🆕 v7.5.21: تحقق من المشاركة المسبقة
                 already_joined = await DB.check_contest_joined(cid, user_id)
                 if already_joined:
                     await safe_edit(query, "❌ شاركت في هذه المسابقة مسبقاً", bot=context.bot)
