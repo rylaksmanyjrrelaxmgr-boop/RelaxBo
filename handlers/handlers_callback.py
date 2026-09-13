@@ -2,47 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.0)
+handlers_callback.py - المعالج النهائي الكامل (v9.0.1)
 =====================================================================
-✅ v9.0.0 — إصلاح شامل لكل الأخطاء المُكتشفة عبر 6 جولات فحص:
+✅ v9.0.1 — إصلاحات إضافية:
+  1.  sec_maxlen handler مضاف في _handle_security
+  2.  sec_act_log handler مضاف
+  3.  sec_auto_reply_menu handler مضاف
+  4.  act_pin handler مضاف في _handle_advanced_actions
+  5.  html.escape لـ ch_display في _show_main_menu_inline
+  6.  posts_cache مستورد من cache.py مباشرة
+  7.  admin_restore_file يستخدم DB.initialize_db()
+  8.  import html في الأعلى
+  9.  إزالة dead code (sec_penalty_durations, _show_penalty_types)
 
-🔴 حرجة:
-  1.  user_cache dummy عند فشل ImportError
-  2.  _handle_group_delete مع فحص صلاحية + ملكية
-  3.  sec_activate_all: يعرض تأكيد (لا يتخطاه)
-  4.  slow_mode_seconds أُزيل من toggle_map
-  5.  _unwrap_get_next_post يُحوّل sqlite3.Row
-  6.  admin_add_banned/del_reply/rem_banned تضبط السياق
-  7.  فحص auth موحد لكل sec_*
-  8.  auto_reply_menu:-1 مقيد بالمطور
-  9.  إزالة Early Return (كان يكسر post_clear_confirm و buy_sub_*)
-  10. query.from_user None guard
-  11. <code> مع parse_mode='HTML'
-  12. int(None) crash في pagination
-
-🟠 عالية:
-  13. feedback عند أخطاء _handle_parameterized
-  14. RetryAfter مع timedelta
-  15. semaphore في _handle_post_publish
-  16. _publish_all لا يفقد منشورات
-  17. حذف effective_chat fallback الخطير
-  18. admin_restore_file يغلق DB
-  19. _do_backup يحفظ النسخة الجديدة + فحص الحجم
-  20. activate_all في transaction
-  21. user_cache.get_or_load مع except عام
-  22. Rate Limit Alert يعمل (دمج _safe_answer)
-  23. DB.get_user_language داخل try
-  24. _handle_group_settings يُفحص قبل التلويث
-  25. _check_sec_auth مع كاش
-  26. PUBLISH_RATE_LIMITER مع timeout
-  27. admin_toggle_ch/gr ذرّي (SQL toggle)
-  28. .get(k) or default (لا None)
-  29. str(x or '?') بدل str(None)
-  30. 20+ dead code في _handle_security
-  31. safe_edit مع clear_markup
-
-🟡 متوسطة ومنخفضة:
-  32-90. تنظيف imports، تأكيدات، ترجمة، pagination، إلخ...
+✅ v9.0.0 — إصلاح شامل (90+ خطأ):
+  [محفوظ بالكامل كما هو موثق سابقاً]
 =====================================================================
 """
 
@@ -52,6 +26,7 @@ import json
 import time
 import shutil
 import os
+import html as _html
 import weakref
 from datetime import timedelta
 from pathlib import Path
@@ -75,7 +50,7 @@ try:
         KeyboardFactory, CB, get_ram_usage,
     )
 except ImportError:
-    from utils import (
+    from .utils import (
         safe_send, is_authorized_in_group,
         get_text, StateManager, UserState,
         KeyboardFactory, CB, get_ram_usage,
@@ -99,7 +74,7 @@ except ImportError:
 
 # ✅ #8: dummy user_cache صريح
 try:
-    from cache import user_cache, invalidate_user_cache
+    from cache import user_cache, invalidate_user_cache, posts_cache
 except ImportError:
     class _DummyUserCache:
         async def get(self, user_id):
@@ -111,7 +86,14 @@ except ImportError:
                 return {}
         async def invalidate(self, user_id=None):
             return
+
+    class _DummyPostsCache:
+        async def invalidate(self, *a, **k):
+            return
+
     user_cache = _DummyUserCache()
+    posts_cache = _DummyPostsCache()
+
     async def invalidate_user_cache(user_id):
         return
 
@@ -139,7 +121,7 @@ ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
 
-# ✅ #80/#69: primary owner محوّل لـ int مرة واحدة
+# ✅ #80: primary owner محوّل لـ int مرة واحدة
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
@@ -170,12 +152,10 @@ def _group_number(index: int) -> str:
 
 
 def _is_primary_owner(user_id: int) -> bool:
-    """✅ #80: فحص نوع-آمن للمالك."""
     return _PRIMARY_OWNER_ID is not None and user_id == _PRIMARY_OWNER_ID
 
 
 def _row_to_dict(row) -> Optional[Dict[str, Any]]:
-    """✅ #4/#20/#29: تحويل موحد لنتائج DB."""
     if row is None:
         return None
     if isinstance(row, dict):
@@ -187,7 +167,6 @@ def _row_to_dict(row) -> Optional[Dict[str, Any]]:
 
 
 def _coerce_int(value, default=0) -> int:
-    """✅ #12: لا int(None)."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -195,7 +174,6 @@ def _coerce_int(value, default=0) -> int:
 
 
 def _safe_str(value, default='?') -> str:
-    """✅ #29: str(None) → '?' بدل 'None'."""
     if value is None:
         return default
     s = str(value)
@@ -238,7 +216,6 @@ async def _trans(key, lang, default_ar) -> str:
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
                     clear_markup=False) -> bool:
-    """✅ #74: clear_markup يدعم مسح الكيبورد."""
     if not query or not query.message:
         if bot and query and query.from_user:
             try:
@@ -258,7 +235,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
     else:
         text = str(text)
 
-    # ✅ clear_markup: إن طُلب مسح الكيبورد
     if clear_markup and reply_markup is None:
         reply_markup = InlineKeyboardMarkup([])
 
@@ -341,7 +317,6 @@ async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
 
 
 async def _is_group_owner(user_id: int, chat_id: int) -> bool:
-    """✅ #2: التحقق من ملكية المجموعة."""
     try:
         if hasattr(DB, 'is_group_owner'):
             return await DB.is_group_owner(user_id, chat_id)
@@ -371,7 +346,6 @@ def _ensure_bot_start_time(context) -> None:
 
 
 async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
-    """✅ #3: بدون update (غير مستخدم)."""
     parts = data.split(":")
     for part in parts[1:]:
         p = part.strip()
@@ -387,7 +361,6 @@ async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
 
 
 async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
-    """✅ #25: فحص موحد مع كاش."""
     if chat_id is None:
         return False
     key = (user_id, chat_id)
@@ -404,7 +377,6 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
 
 
 def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
-    """✅ #25: إبطال الكاش."""
     if chat_id is None:
         _sec_auth_cache.clear()
     else:
@@ -433,7 +405,6 @@ class CallbackHandlers:
         if not query:
             return
 
-        # ✅ #10: from_user guard
         user = query.from_user
         if not user or not user.id:
             await _safe_answer(query, "❌ تعذر التعرف على المستخدم", show_alert=True)
@@ -447,7 +418,7 @@ class CallbackHandlers:
         user_id = user.id
         now_time = time.monotonic()
 
-        # ✅ #37: interval أقصر
+        # interval
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < CALLBACK_MIN_INTERVAL:
@@ -455,14 +426,14 @@ class CallbackHandlers:
             return
         context.user_data[last_cb_key] = now_time
 
-        # ✅ #60: تنظيف دوري
+        # تنظيف دوري
         counter_key = "_cb_counter"
         cb_count = context.bot_data.get(counter_key, 0) + 1
         context.bot_data[counter_key] = cb_count
         if cb_count % RATE_LIMIT_CLEANUP_EVERY == 0:
             CallbackHandlers._cleanup_user_data(context)
 
-        # ✅ #63: rate limit — التحقق قبل الإجابة
+        # rate limit
         rate_key = f"rate_{user_id}"
         rate_data = context.user_data.get(rate_key)
         if not rate_data or now_time - rate_data.get('reset', 0) > RATE_LIMIT_WINDOW:
@@ -471,14 +442,11 @@ class CallbackHandlers:
         context.user_data[rate_key] = rate_data
 
         if rate_data['count'] > CallbackHandlers.RATE_LIMIT_PER_MINUTE:
-            # ✅ #63: إجابة واحدة مع alert
             await _safe_answer(query, "⚠️ تجاوزت الحد، انتظر قليلاً", show_alert=True)
             return
 
-        # ✅ إجابة واحدة فقط بعد تجاوز الفحوص
         await _safe_answer(query)
 
-        # ✅ #23: try يشمل كل شيء حتى lang
         start_time = time.monotonic()
         _ensure_bot_start_time(context)
 
@@ -488,7 +456,7 @@ class CallbackHandlers:
             logger.warning(f"get_user_language failed: {e}")
             lang = 'ar'
 
-        # ✅ #9: احذف Early Return — ندع _handle_parameterized تفحص طبيعياً
+        # ✅ _handle_parameterized أولاً
         try:
             handled = await CallbackHandlers._handle_parameterized(
                 update, context, query, user_id, lang, data
@@ -767,15 +735,21 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ لا توجد قناة نشطة", bot=context.bot)
                 return
 
+            # ✅ v9.0.1: posts_cache من cache.py مباشرة
             if base_data == CB.POST_CLEAR:
                 active = await DB.get_active_channel(user_id)
                 if active:
                     await DB.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
                     try:
-                        from database import internal_cache, CACHE_AVAILABLE, posts_cache
+                        from database import internal_cache
                         await internal_cache.invalidate(f"channel_info_{active}")
-                        if CACHE_AVAILABLE:
-                            await posts_cache.invalidate()
+                    except Exception:
+                        pass
+                    try:
+                        await posts_cache.invalidate(active)
+                    except Exception:
+                        pass
+                    try:
                         await invalidate_user_cache(user_id)
                     except Exception:
                         pass
@@ -802,7 +776,6 @@ class CallbackHandlers:
                 await safe_edit(query, "👑 لوحة الأدمن", reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ #30: sec_* موحد
             if data.startswith("sec_"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return
@@ -881,7 +854,6 @@ class CallbackHandlers:
 
     @staticmethod
     def _cleanup_user_data(context) -> None:
-        """✅ #60: تنظيف دوري."""
         try:
             now = time.monotonic()
             keys_to_del = []
@@ -898,7 +870,7 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # القائمة الرئيسية — ✅ #71: parse_mode='HTML'
+    # القائمة الرئيسية
     # =================================================================
 
     @staticmethod
@@ -931,7 +903,10 @@ class CallbackHandlers:
 
             ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
             if channel_info and isinstance(channel_info, dict):
-                ch_display = channel_info.get('channel_name') or ch_display
+                raw_name = channel_info.get('channel_name')
+                if raw_name:
+                    # ✅ v9.0.1: HTML escape
+                    ch_display = _html.escape(str(raw_name))
 
             sub_text = await _trans('subscription_active', lang, "✅ مفعل") if has_sub else await _trans('subscription_inactive', lang, "❌ غير مفعل")
 
@@ -960,7 +935,6 @@ class CallbackHandlers:
                 unpublished_posts=unpublished_posts,
                 subscription_status=sub_text,
             )
-            # ✅ #71: parse_mode='HTML' لعرض <code>
             await safe_edit(query, title, reply_markup=kb, parse_mode='HTML', bot=context.bot)
             return True
         except Exception as e:
@@ -968,13 +942,11 @@ class CallbackHandlers:
             return False
 
     # =================================================================
-    # الأزرار ذات الصيغة الخاصة
-    # ✅ #9: إزالة Early Return
+    # _handle_parameterized
     # =================================================================
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
-        # ✅ v9.0.0: لا Early Return — post_clear_confirm و buy_sub_* يحتاجان الوصول
         try:
             # ─── رجوع ───────────────────────────────────────────────
             if data in ("sec_close", "grp_close", "security_close", "back_to_groups", "sec_back"):
@@ -995,7 +967,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
 
-            # ─── set_warn_count:CHAT_ID:COUNT ───────────────────────
+            # ─── set_warn_count ─────────────────────────────────────
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1013,7 +985,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── POST_CLEAR تأكيد ✅ #3 ─────────────────────────────
+            # ─── POST_CLEAR تأكيد ───────────────────────────────────
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -1029,7 +1001,7 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ✅ #38: تأكيد حذف منشور واحد
+            # ─── تأكيدات ─────────────────────────────────────────────
             if data.startswith("post_del_confirm:"):
                 post_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -1040,7 +1012,6 @@ class CallbackHandlers:
                                 reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ✅ #38: تأكيد حذف قناة
             if data.startswith("ch_del_confirm:"):
                 ch_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -1051,7 +1022,6 @@ class CallbackHandlers:
                                 reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ✅ #38: تأكيد حذف مجموعة
             if data.startswith("grp_del_confirm:"):
                 chat_id = _coerce_int(data.split(":")[-1])
                 if not await is_authorized_in_group(context.bot, chat_id, user_id):
@@ -1068,7 +1038,7 @@ class CallbackHandlers:
                                 reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ─── set_warn_penalty:TYPE:CHAT_ID ──────────────────────
+            # ─── set_warn_penalty ───────────────────────────────────
             if data.startswith("set_warn_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1086,7 +1056,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── set_duration:TYPE:CHAT_ID:SECS ─────────────────────
+            # ─── set_duration ───────────────────────────────────────
             if data.startswith("set_duration:"):
                 parts = data.split(":")
                 if len(parts) < 4:
@@ -1112,7 +1082,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty:TYPE:CHAT_ID ───────────────────
+            # ─── sec_set_del_penalty ────────────────────────────────
             if data.startswith("sec_set_del_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1133,7 +1103,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty_duration:CHAT_ID ───────────────
+            # ─── sec_set_del_penalty_duration ───────────────────────
             if data.startswith("sec_set_del_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1146,7 +1116,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'delete_penalty')
                 return True
 
-            # ─── sec_penalty_durations:CHAT_ID ──────────────────────
+            # ─── sec_penalty_durations ──────────────────────────────
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1191,7 +1161,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
                 return True
 
-            # ─── sec_penalty_TYPE:CHAT_ID ───────────────────────────
+            # ─── sec_penalty_TYPE ───────────────────────────────────
             if data.startswith("sec_penalty_"):
                 parts = data.split(":")
                 if len(parts) < 2:
@@ -1368,7 +1338,7 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ─── الشراء ✅ #61 ──────────────────────────────────────
+            # ─── الشراء ─────────────────────────────────────────────
             if data.startswith("buy_sub_"):
                 await CallbackHandlers._handle_buy_subscription(update, context, query, user_id, data)
                 return True
@@ -1377,7 +1347,7 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_buy_gift(update, context, query, user_id, data)
                 return True
 
-            # ✅ #2: حذف مجموعة مع auth
+            # ─── حذف مجموعة ─────────────────────────────────────────
             if data.startswith("grp_del:"):
                 await CallbackHandlers._handle_group_delete(update, context, query, user_id, data)
                 return True
@@ -1409,7 +1379,6 @@ class CallbackHandlers:
                 logger.error(f"❌ _handle_parameterized BadRequest: {e}", exc_info=True)
             return True
         except Exception as e:
-            # ✅ #13: feedback عند الأخطاء
             logger.error(f"❌ _handle_parameterized: {e}", exc_info=True)
             try:
                 await safe_edit(query, "❌ حدث خطأ غير متوقع", bot=context.bot)
@@ -1418,7 +1387,7 @@ class CallbackHandlers:
             return True
 
     # =================================================================
-    # Refresh موحد لشاشة الأمان
+    # Refresh موحد
     # =================================================================
 
     @staticmethod
@@ -1514,7 +1483,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _render_translation_menu(query, context, lang):
-        # ✅ #51: كل اللغات
         rows = [
             [("🇸🇦 العربية", "ar"), ("🇬🇧 English", "en")],
             [("🇫🇷 Français", "fr"), ("🇹🇷 Türkçe", "tr")],
@@ -1568,8 +1536,8 @@ class CallbackHandlers:
             return
         plan_id = plan_d.get('id', 0)
         price = _coerce_int(plan_d.get('price'), 0)
-        name = plan_d.get('name') or plan_name  # ✅ #84
-        description = plan_d.get('description') or name  # ✅ #40
+        name = plan_d.get('name') or plan_name
+        description = plan_d.get('description') or name
         invoice_number = await DB.create_invoice(user_id, plan_id, price)
         if not invoice_number:
             await safe_edit(query, "❌ فشل الدفع", bot=context.bot)
@@ -1587,8 +1555,8 @@ class CallbackHandlers:
             logger.error(f"❌ فشل إرسال الفاتورة: {e}")
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.warning(f"⚠️ فشل إلغاء الفاتورة {invoice_number}: {ce}")
             await safe_edit(query, f"❌ {str(e)[:50]}", bot=context.bot)
 
     @staticmethod
@@ -1605,7 +1573,7 @@ class CallbackHandlers:
             return
         plan_id = plan_d.get('id', 0)
         price = _coerce_int(plan_d.get('price'), 0)
-        name = plan_d.get('name') or 'هدية'  # ✅ #84
+        name = plan_d.get('name') or 'هدية'
         description = plan_d.get('description') or "كود هدية"
         invoice_number = await DB.create_invoice(user_id, plan_id, price)
         if not invoice_number:
@@ -1624,11 +1592,10 @@ class CallbackHandlers:
             logger.error(f"❌ فشل إرسال فاتورة الهدية: {e}")
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.warning(f"⚠️ فشل إلغاء الفاتورة {invoice_number}: {ce}")
             await safe_edit(query, f"❌ {str(e)[:50]}", bot=context.bot)
 
-    # ✅ #2: حماية كاملة
     @staticmethod
     async def _handle_group_delete(update, context, query, user_id, data):
         try:
@@ -1647,7 +1614,6 @@ class CallbackHandlers:
         else:
             await safe_edit(query, "❌ فشل الحذف", bot=context.bot)
 
-    # ✅ #24: لا تلويث قبل فحص الصلاحية
     @staticmethod
     async def _handle_group_settings(update, context, query, user_id, lang, data):
         try:
@@ -1658,7 +1624,6 @@ class CallbackHandlers:
         if not await is_authorized_in_group(context.bot, chat_id, user_id):
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
-        # ✅ بعد الفحص فقط
         context.user_data['security_chat_id'] = chat_id
         try:
             settings = await DB.get_security_settings(chat_id) or {}
@@ -1720,10 +1685,6 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 رجوع", callback_data=CB.CH_LIST)]]), bot=context.bot)
 
-    # =================================================================
-    # _handle_post_add
-    # =================================================================
-
     @staticmethod
     async def _handle_post_add(update, context, query, user_id):
         try:
@@ -1746,7 +1707,6 @@ class CallbackHandlers:
                 return
 
             StateManager.set(user_id, UserState.ADDING_POSTS)
-
             await safe_edit(
                 query, "📥 أرسل المنشورات:",
                 reply_markup=InlineKeyboardMarkup(
@@ -1757,10 +1717,6 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"❌ _handle_post_add: {e}", exc_info=True)
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
-
-    # =================================================================
-    # _handle_post_publish — ✅ #15: semaphore + #41: فحص اشتراك
-    # =================================================================
 
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
@@ -1839,10 +1795,6 @@ class CallbackHandlers:
         task.add_done_callback(ACTIVE_TASKS.discard)
         await safe_edit(query, "✅ بدأ النشر الجماعي", bot=context.bot)
 
-    # =================================================================
-    # قائمة المجموعات — ✅ #90: ترقيم بدون فراغات
-    # =================================================================
-
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
         groups = await DB.get_user_groups(user_id)
@@ -1873,10 +1825,6 @@ class CallbackHandlers:
             ])
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
-
-    # =================================================================
-    # النشر — ✅ #5: Row→dict
-    # =================================================================
 
     @staticmethod
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
@@ -1954,7 +1902,6 @@ class CallbackHandlers:
             await DB.update_next_publish(ch_db_id)
             return True
         except RetryAfter as e:
-            # ✅ #14: دعم timedelta
             delay = e.retry_after
             if isinstance(delay, timedelta):
                 delay = delay.total_seconds()
@@ -2010,7 +1957,6 @@ class CallbackHandlers:
                     if ch_info_d and ch_info_d.get('channel_id'):
                         tasks.append((chd.get('id'), ch_info_d['channel_id'], post))
                     else:
-                        # ✅ #16: لا نفقد المنشور
                         pid = post.get('id')
                         if pid:
                             try:
@@ -2033,7 +1979,6 @@ class CallbackHandlers:
 
             async def run(task):
                 async with _publish_semaphore:
-                    # ✅ #26: timeout للـ limiter
                     try:
                         await asyncio.wait_for(PUBLISH_RATE_LIMITER.acquire(), timeout=PUBLISH_ACQUIRE_TIMEOUT)
                     except (asyncio.TimeoutError, Exception):
@@ -2063,10 +2008,6 @@ class CallbackHandlers:
             except Exception:
                 pass
 
-    # =================================================================
-    # عرض القوائم — ✅ #12 + #90
-    # =================================================================
-
     @staticmethod
     async def _show_channel_list(update, context, query, user_id, lang=None):
         if not lang:
@@ -2080,7 +2021,6 @@ class CallbackHandlers:
             await safe_edit(query, "📭 لا توجد قنوات!", reply_markup=kb, bot=context.bot)
             return
 
-        # ✅ #12: _coerce_int
         page = _coerce_int(context.user_data.get('channel_page'), 0)
         per_page = 5
         total_pages = max(1, (len(channels) + per_page - 1) // per_page)
@@ -2107,7 +2047,7 @@ class CallbackHandlers:
             number = _group_number(display_idx)
             st = "✅" if not chd.get('banned') else "🚫"
             raw_name = chd.get('channel_name') or f"قناة {display_idx}"
-            name = raw_name[:35]
+            name = _html.escape(str(raw_name)[:35])
 
             text += f"{st} {number}  {name}\n"
 
@@ -2145,7 +2085,6 @@ class CallbackHandlers:
         per_page = 5
         total = await DB.fetchval("SELECT COUNT(*) FROM posts WHERE channel_db_id=?", (active,), default=0)
         total_pages = max(1, (total + per_page - 1) // per_page)
-        # ✅ #12: _coerce_int
         page = _coerce_int(context.user_data.get('post_page'), 0)
         if page >= total_pages:
             page = total_pages - 1
@@ -2164,7 +2103,6 @@ class CallbackHandlers:
             if pid is None:
                 continue
             text += f"🆔 {pid}: {(pd.get('text') or '')[:30]}\n"
-            # ✅ #38: تأكيد الحذف
             kb.append([InlineKeyboardButton(f"🗑️ حذف {pid}", callback_data=f"post_del_confirm:{pid}")])
         nav = []
         if page > 0:
@@ -2180,7 +2118,7 @@ class CallbackHandlers:
         await safe_edit(query, display_text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # =================================================================
-    # معالجات الأمان — ✅ #30: Dead Code أُزيل
+    # معالجات الأمان — ✅ v9.0.1: أضفنا 3 handlers مفقودة
     # =================================================================
 
     @staticmethod
@@ -2190,7 +2128,6 @@ class CallbackHandlers:
         data = query.data
         parts = data.split(":")
 
-        # ✅ #17: لا effective_chat fallback
         chat_id = None
         if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
             chat_id = int(parts[1])
@@ -2206,7 +2143,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ لم يتم تحديد المجموعة", bot=context.bot)
             return
 
-        # ✅ #82: استخراج آمن للـ action
         prefix0 = parts[0]
         action = prefix0[4:] if prefix0.startswith("sec_") else prefix0
 
@@ -2215,7 +2151,31 @@ class CallbackHandlers:
             return
 
         try:
-            # ─── تفعيل/تعطيل الكل (مع تأكيد) ✅ #3 ─────────────────
+            # ═══════════════════════════════════════════════════════════
+            # ✅ v9.0.1: 3 handlers مفقودة كانت تسبب "⚠️ غير متوفر"
+            # ═══════════════════════════════════════════════════════════
+
+            # 1) sec_maxlen — فتح شاشة طول الرسالة
+            if action == "maxlen":
+                StateManager.set(user_id, UserState.WAIT_MAX_LEN)
+                context.user_data['sec_chat'] = chat_id
+                await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة (0 = بلا حد):", bot=context.bot)
+                return
+
+            # 2) sec_act_log — عرض سجل الإجراءات
+            if action == "act_log":
+                await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang)
+                return
+
+            # 3) sec_auto_reply_menu — فتح لوحة الردود التلقائية للمجموعة
+            if action == "auto_reply_menu":
+                context.user_data['auto_chat'] = chat_id
+                await CallbackHandlers._handle_auto_reply(update, context, query, user_id, lang)
+                return
+
+            # ═══════════════════════════════════════════════════════════
+
+            # ─── تفعيل/تعطيل الكل (مع تأكيد) ───────────────────────
             if action in ("activate_all", "enable_all", "deactivate_all", "disable_all"):
                 is_activate = action in ("activate_all", "enable_all")
                 confirm_action = "activate_all_confirm" if is_activate else "deactivate_all_confirm"
@@ -2234,7 +2194,6 @@ class CallbackHandlers:
 
             if action in ("activate_all_confirm", "deactivate_all_confirm"):
                 is_activate = (action == "activate_all_confirm")
-                # ✅ #20: transaction إن أمكن
                 activate_values = dict(
                     delete_links=1, delete_mentions=1, slow_mode=1, slow_mode_seconds=5,
                     delete_videos=1, delete_audio=1, delete_animation=1,
@@ -2294,7 +2253,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
-            # ✅ #4: slow_mode_seconds أُزيل من toggle_map
+            # ─── toggle_map ─────────────────────────────────────────
             toggle_map = {
                 "links": "delete_links", "mentions": "mentions", "slow": "slow_mode",
                 "video": "delete_videos", "audio": "delete_audio",
@@ -2324,6 +2283,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
+            # ─── warn ───────────────────────────────────────────────
             if action == "warn":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ تفعيل/تعطيل", callback_data=f"sec_warn_toggle:{chat_id}")],
@@ -2400,7 +2360,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_advanced_actions(update, context, query, chat_id, lang)
                 return
 
-            # ✅ #3: slow_mode_seconds مستقل
             if action == "slow_mode_seconds":
                 StateManager.set(user_id, UserState.WAIT_SLOW_MODE_SECONDS)
                 context.user_data['sec_chat'] = chat_id
@@ -2417,10 +2376,6 @@ class CallbackHandlers:
                 StateManager.set(user_id, UserState.WAIT_GOODBYE_TEXT)
                 context.user_data['sec_chat'] = chat_id
                 await safe_edit(query, "📝 أرسل نص الوداع:", bot=context.bot)
-                return
-
-            if action == "penalty_durations":
-                await CallbackHandlers._show_all_penalty_durations_menu(query, context, chat_id)
                 return
 
             if action == "set_antiflood_messages":
@@ -2625,6 +2580,7 @@ class CallbackHandlers:
              InlineKeyboardButton("🔒 تقييد", callback_data=f"act_restrict:{chat_id}")],
             [InlineKeyboardButton("🔓 فك الحظر", callback_data=f"act_unban:{chat_id}"),
              InlineKeyboardButton("⚠️ تحذير", callback_data=f"act_warn:{chat_id}")],
+            [InlineKeyboardButton("📌 تثبيت", callback_data=f"act_pin:{chat_id}")],
             [InlineKeyboardButton("📋 السجل", callback_data=f"act_log:{chat_id}")],
             [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
@@ -2747,7 +2703,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_admin_channels(update, context, query, user_id, lang)
                 return
 
-            # ✅ #94: SQL toggle ذرّي
             if data.startswith("admin_toggle_ch:"):
                 ch_db_id = _coerce_int(data.split(":")[-1])
                 if ch_db_id <= 0:
@@ -2856,7 +2811,6 @@ class CallbackHandlers:
                                           f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')}.db")
                     shutil.copy2(PATHS.DB, pre_restore_backup)
 
-                    # ✅ #18: إغلاق DB
                     db_closed = False
                     try:
                         close_fn = getattr(DB, 'close', None)
@@ -2868,13 +2822,18 @@ class CallbackHandlers:
 
                     shutil.copy2(backup_file, PATHS.DB)
 
+                    # ✅ v9.0.1: استخدام initialize_db بدل reconnect
                     if db_closed:
                         try:
-                            reconnect = getattr(DB, 'reconnect', None) or getattr(DB, 'connect', None)
-                            if callable(reconnect):
-                                await reconnect()
-                        except Exception:
-                            pass
+                            init_fn = getattr(DB, 'initialize_db', None)
+                            if callable(init_fn):
+                                await init_fn()
+                            else:
+                                init_fn = getattr(DB, 'initialize', None)
+                                if callable(init_fn):
+                                    await init_fn()
+                        except Exception as ie:
+                            logger.warning(f"⚠️ فشل إعادة تهيئة DB بعد الاستعادة: {ie}")
 
                     await safe_edit(query, "✅ تمت الاستعادة بنجاح! يُنصح بإعادة تشغيل البوت.", bot=context.bot)
                 except Exception as e:
@@ -3017,7 +2976,10 @@ class CallbackHandlers:
 
             if data == CB.ADMIN_REFRESH_CACHE:
                 _invalidate_sec_auth_cache()
-                await invalidate_user_cache(user_id)
+                try:
+                    await invalidate_user_cache(user_id)
+                except Exception:
+                    pass
                 await safe_edit(query, "🔄 تم تحديث الكاش", bot=context.bot)
                 return
 
@@ -3087,7 +3049,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ #6: يضبط auto_chat
             if data == "admin_add_reply":
                 StateManager.set(user_id, UserState.WAIT_KEYWORD)
                 context.user_data['auto_chat'] = -1
@@ -3157,7 +3118,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ #6: يضبط ban_chat
             if data == "admin_add_banned":
                 StateManager.set(user_id, UserState.WAIT_GLOBAL_BAN)
                 context.user_data['ban_chat'] = -1
@@ -3235,7 +3195,6 @@ class CallbackHandlers:
             except Exception:
                 pass
 
-    # ✅ #27: pagination
     @staticmethod
     async def _show_admin_channels(update, context, query, user_id, lang):
         try:
@@ -3344,7 +3303,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # الردود التلقائية — ✅ #7
+    # الردود التلقائية
     # =================================================================
 
     @staticmethod
@@ -3372,7 +3331,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ لم يتم تحديد المجموعة", bot=context.bot)
             return
 
-        # ✅ #7: -1 للمطور فقط
         if chat_id == -1:
             if not CONFIG.is_developer(user_id):
                 await safe_edit(query, "❌ غير مصرح", bot=context.bot)
@@ -3426,7 +3384,6 @@ class CallbackHandlers:
                 await safe_edit(query, "🗑️ أرسل الكلمة:", bot=context.bot)
                 return
 
-            # ✅ #39: تأكيد
             if action == "reset":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🗑️ نعم احذف الكل", callback_data=f"auto_reply_reset_confirm:{chat_id}")],
@@ -3530,7 +3487,7 @@ class CallbackHandlers:
         await safe_edit(query, "📅 جدولة القناة", reply_markup=kb, bot=context.bot)
 
     # =================================================================
-    # الإجراءات المتقدمة
+    # الإجراءات المتقدمة — ✅ v9.0.1: أضفنا act_pin
     # =================================================================
 
     @staticmethod
@@ -3593,6 +3550,8 @@ class CallbackHandlers:
                     "kick": (UserState.WAIT_KICK, "👢 أرسل معرف المستخدم:"),
                     "restrict": (UserState.WAIT_RESTRICT, "🔒 أرسل معرف المستخدم:"),
                     "unban": (UserState.WAIT_UNBAN, "🔓 أرسل معرف المستخدم:"),
+                    # ✅ v9.0.1: act_pin
+                    "pin": (UserState.WAIT_PIN, "📌 قم بالرد على رسالة لتثبيتها:"),
                 }
                 if action in user_actions:
                     state, msg = user_actions[action]
@@ -3738,7 +3697,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # النسخ الاحتياطي — ✅ #15 #16 #19 #40
+    # النسخ الاحتياطي
     # =================================================================
 
     @staticmethod
@@ -3756,7 +3715,6 @@ class CallbackHandlers:
             except Exception:
                 pass
 
-            # ✅ #16: فحص الحجم
             try:
                 size = backup_file.stat().st_size
             except Exception:
@@ -3768,7 +3726,6 @@ class CallbackHandlers:
                                 f"الملف في: {backup_file}")
                 return
 
-            # ✅ #19: لا نحذف النسخة الجديدة
             def _safe_mtime(p):
                 try:
                     return p.stat().st_mtime
