@@ -2,11 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل - النسخة النهائية (v7.5.2)
+handlers_message.py - معالجات الرسائل - النسخة النهائية (v7.5.3)
 =====================================================================
 - متوافق تماماً مع database.py و handlers_callback.py
 - جميع الدوال موجودة ومصححة بالكامل
 - دعم كامل للنصوص والوسائط
+
+🆕 v7.5.3:
+    ✅ _handle_ban_user_input → استقبال ID الحظر من لوحة المطور
+    ✅ _handle_unban_user_input → استقبال ID فك الحظر من لوحة المطور
+    ✅ استخدام ban_user_by_id / unban_user_by_id من utils
 
 🆕 v7.5.2 إصلاحات جوهرية:
     ✅ RateLimiter منفصل لكل مجموعة (بدل مشترك)
@@ -59,6 +64,8 @@ from utils import (
     _auto_reply_cache, get_reply_from_file, _REPLIES_FROM_FILE,
     reload_replies_from_file, _increment_usage_async,
     fetch_json_from_url, import_auto_replies,
+    # 🆕 v7.5.3
+    ban_user_by_id, unban_user_by_id,
 )
 from cache import settings_cache, banned_words_cache, auth_cache
 
@@ -70,12 +77,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
 # =====================================================================
 # ثوابت
 # =====================================================================
 
-# ✅ v7.5.2: حدود أمنية
 MAX_SUPPORT_MESSAGE_LENGTH = 4000
 MAX_BROADCAST_MESSAGE_LENGTH = 4000
 MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -83,22 +88,15 @@ MAX_GIFT_CODE_LENGTH = 50
 MAX_VIOLATION_STRIKES = 100
 MAX_ADMIN_BROADCAST_TARGETS = 100_000
 
-# ✅ v7.5.2: مدة الانتظار بين رسائل البث (10 رسائل/ثانية)
 BROADCAST_DELAY_SECONDS = 0.1
-
-# ✅ v7.5.2: حد أقصى لعدد المجموعات في Rate Limiter cache
 MAX_GROUP_LIMITERS_CACHE = 1000
 
-
 # =====================================================================
-# ✅ v7.5.2: مدير Rate Limiter لكل مجموعة
+# مدير Rate Limiter لكل مجموعة
 # =====================================================================
 
 class GroupRateLimiterManager:
-    """
-    ✅ v7.5.2: بدل استخدام RATE_LIMITER مشترك بين كل المجموعات،
-    نُخصّص RateLimiter منفصل لكل chat_id.
-    """
+    """RateLimiter منفصل لكل chat_id."""
 
     _limiters: Dict[int, RateLimiter] = {}
     _last_access: Dict[int, float] = {}
@@ -109,7 +107,6 @@ class GroupRateLimiterManager:
     async def get(cls, chat_id: int) -> RateLimiter:
         async with cls._lock:
             now = time.time()
-            # تنظيف إذا تجاوزنا الحد
             if len(cls._limiters) >= cls.MAX_SIZE and chat_id not in cls._limiters:
                 sorted_items = sorted(cls._last_access.items(), key=lambda x: x[1])
                 to_remove = sorted_items[: cls.MAX_SIZE // 5]
@@ -130,15 +127,12 @@ class GroupRateLimiterManager:
         cls._limiters.clear()
         cls._last_access.clear()
 
-
 # =====================================================================
 # دوال الترجمة المساعدة
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
-    """
-    دالة ترجمة موحدة: تعيد النص المترجم إن وُجد، وإلا تعيد النص الافتراضي.
-    """
+    """دالة ترجمة موحدة."""
     try:
         text = await get_text(lang, key)
         if text == key:
@@ -147,11 +141,8 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     except Exception:
         return default
 
-
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """
-    ✅ v7.5.2: ضمان وجود lang في context.user_data (مع fallback لـ DB).
-    """
+    """ضمان وجود lang في context.user_data."""
     lang = context.user_data.get('lang')
     if lang:
         return lang
@@ -167,7 +158,6 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
 
     return 'ar'
 
-
 # =====================================================================
 # دوال الكاش
 # =====================================================================
@@ -181,7 +171,6 @@ async def get_security_settings_cached(chat_id: int) -> dict:
     await settings_cache.set_security(chat_id, settings)
     return settings
 
-
 async def get_auto_reply_settings_cached(chat_id: int) -> dict:
     """جلب إعدادات الردود التلقائية مع التخزين المؤقت"""
     cached = await settings_cache.get_auto_reply_settings(chat_id)
@@ -191,16 +180,13 @@ async def get_auto_reply_settings_cached(chat_id: int) -> dict:
     await settings_cache.set_auto_reply_settings(chat_id, settings)
     return settings
 
-
 async def invalidate_security_cache(chat_id: int = None) -> None:
     """إبطال الكاش الأمني"""
     await settings_cache.invalidate_security(chat_id)
 
-
 async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
     """إبطال كاش الردود التلقائية"""
     await settings_cache.invalidate_auto_reply(chat_id)
-
 
 # =====================================================================
 # دوال مساعدة
@@ -216,7 +202,6 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 1
     except Exception as e:
         logger.debug(f"تعذر حذف الرسالة المؤجلة: {e}")
 
-
 async def apply_violation_penalty(
     update,
     context,
@@ -226,11 +211,8 @@ async def apply_violation_penalty(
     penalty_type: str,
     duration_seconds: int,
 ) -> Tuple[bool, str]:
-    """
-    ✅ v7.5.2: تطبيق عقوبة مع تمرير username/first_name/chat_name.
-    """
+    """تطبيق عقوبة مع تمرير username/first_name/chat_name."""
     try:
-        # جمع بيانات المستخدم/المجموعة
         username = ""
         first_name = ""
         chat_name = ""
@@ -261,14 +243,8 @@ async def apply_violation_penalty(
         logger.error(f"❌ فشل تطبيق العقوبة: {e}", exc_info=True)
         return False, str(e)[:100]
 
-
 def _is_safe_url(url: str) -> bool:
-    """
-    ✅ v7.5.2: فحص أمان URL لمنع SSRF.
-    - يجب أن يبدأ بـ http:// أو https://
-    - يجب أن يكون host موجود
-    - يُرفض العناوين الداخلية
-    """
+    """فحص أمان URL لمنع SSRF."""
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -276,7 +252,6 @@ def _is_safe_url(url: str) -> bool:
         host = (parsed.hostname or "").lower()
         if not host:
             return False
-        # منع العناوين الداخلية
         blocked_patterns = (
             "localhost", "127.", "0.0.0.0", "::1",
             "10.", "192.168.", "172.16.", "172.17.", "172.18.",
@@ -290,28 +265,22 @@ def _is_safe_url(url: str) -> bool:
     except Exception:
         return False
 
-
 def _parse_contest_date(date_str: str) -> Optional[datetime]:
-    """
-    ✅ v7.5.2: تحليل تاريخ المسابقة (متوافق مع Python 3.10).
-    """
+    """تحليل تاريخ المسابقة (متوافق مع Python 3.10)."""
     if not date_str:
         return None
     date_str = date_str.strip()
 
-    # محاولة 1: fromisoformat مع T
     try:
         return datetime.fromisoformat(date_str)
     except (ValueError, TypeError):
         pass
 
-    # محاولة 2: fromisoformat مع مسافة (Python 3.11+ فقط)
     try:
         return datetime.fromisoformat(date_str.replace(" ", "T"))
     except (ValueError, TypeError):
         pass
 
-    # محاولة 3: صيغ شائعة
     formats = (
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d %H:%M:%S",
@@ -327,11 +296,8 @@ def _parse_contest_date(date_str: str) -> Optional[datetime]:
 
     return None
 
-
 async def _check_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
-    """
-    ✅ v7.5.2: التحقق من صلاحيات المشرف مع fallback إلى DB.
-    """
+    """التحقق من صلاحيات المشرف مع fallback إلى DB."""
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
 
@@ -342,7 +308,6 @@ async def _check_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
     except Exception as e:
         logger.warning(f"تعذر التحقق من الصلاحية (is_authorized): {e}")
 
-    # ✅ fallback: فحص DB مباشرة
     try:
         row = await DB.fetchval(
             "SELECT 1 FROM group_admins WHERE chat_id = ? AND user_id = ? LIMIT 1",
@@ -353,30 +318,23 @@ async def _check_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
         logger.debug(f"تعذر التحقق من DB: {e}")
         return False
 
-
 async def _is_postgres_db() -> bool:
-    """✅ v7.5.2: هل قاعدة البيانات PostgreSQL؟"""
     try:
         return getattr(DB, "DB_TYPE", "sqlite") == "postgres"
     except Exception:
         return False
 
-
 async def _is_mysql_db() -> bool:
-    """✅ v7.5.2: هل قاعدة البيانات MySQL؟"""
     try:
         return getattr(DB, "DB_TYPE", "sqlite") == "mysql"
     except Exception:
         return False
 
-
 async def _is_sqlite_db() -> bool:
-    """✅ v7.5.2: هل قاعدة البيانات SQLite؟"""
     try:
         return getattr(DB, "DB_TYPE", "sqlite") == "sqlite"
     except Exception:
         return False
-
 
 # =====================================================================
 # معالجات الرسائل
@@ -384,7 +342,6 @@ async def _is_sqlite_db() -> bool:
 
 class MessageHandlers:
 
-    # ✅ v7.5.2: handlers dict في class-level (بدل بناء كل مرة)
     _PRIVATE_HANDLERS_MAP: Dict[UserState, str] = {
         UserState.WAIT_CHANNEL: "_handle_channel_input",
         UserState.ADDING_POSTS: "_handle_adding_posts",
@@ -440,6 +397,9 @@ class MessageHandlers:
         UserState.WAIT_REDEEM_GIFT: "_handle_redeem_gift_input",
         UserState.WAIT_RESTORE: "_handle_restore_input",
         UserState.WAIT_BACKUP_FILE: "_handle_backup_file_input",
+        # 🆕 v7.5.3: حظر/فك حظر المستخدمين
+        UserState.WAIT_BAN_USER_ID: "_handle_ban_user_input",
+        UserState.WAIT_UNBAN_USER_ID: "_handle_unban_user_input",
     }
 
     # =================================================================
@@ -455,7 +415,6 @@ class MessageHandlers:
             lang = await _ensure_lang(update, context)
             state = StateManager.get(user_id)
 
-            # تحليل المشاعر
             if state == UserState.WAIT_MOOD:
                 if analyze_sentiment is None:
                     msg = await _trans('mood_service_unavailable', lang, "❌ خدمة تحليل المشاعر غير متاحة حالياً")
@@ -477,7 +436,6 @@ class MessageHandlers:
                 StateManager.clear(user_id)
                 return
 
-            # ✅ v7.5.2: استخدام handlers map
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(state)
             if handler_name:
                 handler = getattr(MessageHandlers, handler_name, None)
@@ -495,6 +453,100 @@ class MessageHandlers:
             except Exception:
                 pass
 
+    # =================================================================
+    # 🆕 v7.5.3: حظر / فك حظر المستخدمين (لوحة المطور)
+    # =================================================================
+
+    @staticmethod
+    async def _handle_ban_user_input(update, context):
+        """🆕 v7.5.3: استقبال ID الحظر من لوحة المطور."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+
+        # فحص الصلاحية
+        if not CONFIG.is_developer(user_id):
+            msg = await _trans('unauthorized', lang, "❌ غير مصرح")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        text = (update.effective_message.text or "").strip()
+
+        # تحليل ID
+        try:
+            target_id = int(text)
+        except (ValueError, AttributeError):
+            msg = await _trans(
+                'invalid_user_id', lang,
+                "❌ معرف غير صالح. أرسل رقماً فقط.\nمثال: <code>123456789</code>"
+            )
+            await safe_send(context.bot, user_id, msg, parse_mode='HTML')
+            return
+
+        # حماية: لا يمكن حظر نفسك
+        if target_id == user_id:
+            msg = await _trans('cant_ban_self', lang, "❌ لا يمكنك حظر نفسك!")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        # تنفيذ الحظر عبر الدالة الجاهزة
+        success, msg = await ban_user_by_id(target_id)
+        await safe_send(context.bot, user_id, msg)
+
+        # إبلاغ المستخدم المحظور (اختياري)
+        if success:
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    "🚫 تم حظرك من استخدام البوت."
+                )
+            except Exception:
+                pass
+
+        StateManager.clear(user_id)
+
+    @staticmethod
+    async def _handle_unban_user_input(update, context):
+        """🆕 v7.5.3: استقبال ID فك الحظر من لوحة المطور."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+
+        # فحص الصلاحية
+        if not CONFIG.is_developer(user_id):
+            msg = await _trans('unauthorized', lang, "❌ غير مصرح")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        text = (update.effective_message.text or "").strip()
+
+        # تحليل ID
+        try:
+            target_id = int(text)
+        except (ValueError, AttributeError):
+            msg = await _trans(
+                'invalid_user_id', lang,
+                "❌ معرف غير صالح. أرسل رقماً فقط.\nمثال: <code>123456789</code>"
+            )
+            await safe_send(context.bot, user_id, msg, parse_mode='HTML')
+            return
+
+        # تنفيذ فك الحظر
+        success, msg = await unban_user_by_id(target_id)
+        await safe_send(context.bot, user_id, msg)
+
+        # إبلاغ المستخدم (اختياري)
+        if success:
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    "✅ تم فك الحظر عنك. يمكنك استخدام البوت الآن."
+                )
+            except Exception:
+                pass
+
+        StateManager.clear(user_id)
 
     # =================================================================
     # رسائل المجموعات
@@ -510,7 +562,6 @@ class MessageHandlers:
         user_id = update.effective_user.id
         message = update.effective_message
 
-        # ✅ v7.5.2: RateLimiter منفصل لكل مجموعة
         try:
             limiter = await GroupRateLimiterManager.get(chat_id)
             await limiter.acquire()
@@ -593,7 +644,6 @@ class MessageHandlers:
                 update, context, chat_id, msg_text, user_id
             )
 
-
     # =================================================================
     # حذف وتحذير
     # =================================================================
@@ -609,12 +659,9 @@ class MessageHandlers:
             return settings.get('warn_penalty_duration', 3600)
         return settings.get('auto_mute_duration', 3600)
 
-
     @staticmethod
     async def _get_violation_message(violation_type: str, lang: str) -> str:
-        """
-        ✅ v7.5.2: نص المخالفة عبر الترجمة.
-        """
+        """نص المخالفة عبر الترجمة."""
         trans_key = f"violation_{violation_type}"
         default_messages = {
             'link': '🚫 الروابط غير مسموحة',
@@ -634,7 +681,6 @@ class MessageHandlers:
         default = default_messages.get(violation_type, f'🚫 مخالفة: {violation_type}')
         return await _trans(trans_key, lang, default)
 
-
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id, violation_type, settings: dict):
         """حذف الرسالة وإرسال تنبيه وتطبيق العقوبات"""
@@ -651,7 +697,6 @@ class MessageHandlers:
             logger.error(f"فشل تحديث عدد المخالفات: {e}")
             violation_count = 1
 
-        # قواعد العقوبات
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(chat_id, violation_type)
@@ -680,7 +725,6 @@ class MessageHandlers:
                     settings, violation_type, penalty_type
                 )
 
-        # تسجيل في admin_logs
         try:
             await DB.add_admin_log(
                 chat_id, context.bot.id, f"violation_{violation_type}", user_id
@@ -688,7 +732,6 @@ class MessageHandlers:
         except Exception as e:
             logger.debug(f"add_admin_log: {e}")
 
-        # ✅ v7.5.2: نص المخالفة عبر الترجمة
         violation_message = await MessageHandlers._get_violation_message(
             violation_type, lang
         )
@@ -734,7 +777,6 @@ class MessageHandlers:
                         await DB.reset_violation_count(user_id, chat_id)
                     except Exception as e:
                         logger.debug(f"safe_send/DB.reset: {e}")
-
 
     # =================================================================
     # الردود التلقائية
@@ -793,7 +835,6 @@ class MessageHandlers:
         except Exception as e:
             logger.error(f"❌ خطأ في الردود: {e}")
             return False
-
 
     # =================================================================
     # إضافة القناة
@@ -917,7 +958,6 @@ class MessageHandlers:
 
         StateManager.clear(user_id)
 
-
     # =================================================================
     # إضافة المنشورات
     # =================================================================
@@ -984,7 +1024,6 @@ class MessageHandlers:
             )
             await safe_send(context.bot, user_id, msg)
 
-
     # =================================================================
     # الدعم الفني
     # =================================================================
@@ -993,7 +1032,6 @@ class MessageHandlers:
     async def _handle_support_message(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
-        # ✅ v7.5.2: حد أقصى للحجم
         content = (update.effective_message.text or "")[:MAX_SUPPORT_MESSAGE_LENGTH]
         username = update.effective_user.username or ""
         ticket_number = await DB.create_ticket(user_id, username, content)
@@ -1003,7 +1041,6 @@ class MessageHandlers:
             f"✅ تم استلام رسالتك!\n🎫 رقم التذكرة: {ticket_number}"
         )
         await safe_send(context.bot, user_id, msg)
-
 
     # =================================================================
     # البث الجماعي
@@ -1017,7 +1054,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.5.2: حد أقصى للحجم
         content = (update.effective_message.text or "")[:MAX_BROADCAST_MESSAGE_LENGTH]
         if not content:
             msg = await _trans('empty_message', lang, "❌ الرسالة فارغة")
@@ -1067,7 +1103,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     # =================================================================
     # التحديثات والإعدادات
     # =================================================================
@@ -1095,7 +1130,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_update_ch_input(update, context):
         user_id = update.effective_user.id
@@ -1108,7 +1142,6 @@ class MessageHandlers:
         msg = await _trans('set_success', lang, f"✅ تم تعيين: {escape(text)}")
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_force_input(update, context):
@@ -1125,11 +1158,9 @@ class MessageHandlers:
             )
             await safe_send(context.bot, user_id, msg)
         else:
-            # ✅ v7.5.2: التحقق من صحة القناة
             try:
                 chat = await context.bot.get_chat(text)
                 chat_id = chat.id
-                # التحقق من أن البوت في القناة
                 try:
                     bot_member = await context.bot.get_chat_member(
                         chat_id, context.bot.id
@@ -1165,7 +1196,6 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_log_ch_input(update, context):
         user_id = update.effective_user.id
@@ -1178,7 +1208,6 @@ class MessageHandlers:
         msg = await _trans('set_success', lang, f"✅ تم تعيين: {escape(text)}")
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     # =================================================================
     # المشرفين
@@ -1196,7 +1225,6 @@ class MessageHandlers:
             admin_id = int(text)
             if admin_id <= 0:
                 raise ValueError
-            # ✅ v7.5.2: التحقق من وجود المستخدم في users
             user_exists = await DB.fetchval(
                 "SELECT 1 FROM users WHERE user_id = ?", (admin_id,)
             )
@@ -1230,7 +1258,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_admin_rem_input(update, context):
         user_id = update.effective_user.id
@@ -1259,7 +1286,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     # =================================================================
     # الردود التلقائية - إدارة
     # =================================================================
@@ -1277,15 +1303,12 @@ class MessageHandlers:
             context.bot, user_id, f"✅ الكلمة: {escape(keyword)}\n{msg}"
         )
 
-
     @staticmethod
     async def _save_auto_reply_from_message(
         update, context, user_id: int, lang: str,
         chat_id: int, keyword: str
     ) -> bool:
-        """
-        ✅ v7.5.2: دالة موحّدة لحفظ الردود التلقائية.
-        """
+        """دالة موحّدة لحفظ الردود التلقائية."""
         if not keyword:
             msg = await _trans(
                 'empty_keyword', lang, "❌ الكلمة المفتاحية فارغة"
@@ -1339,7 +1362,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return False
 
-
     @staticmethod
     async def _handle_reply_input(update, context):
         user_id = update.effective_user.id
@@ -1352,12 +1374,10 @@ class MessageHandlers:
             return
         chat_id = context.user_data.get('auto_chat', -1)
 
-        # ✅ v7.5.2: استخدام الدالة الموحّدة
         await MessageHandlers._save_auto_reply_from_message(
             update, context, user_id, lang, chat_id, keyword
         )
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_auto_key(update, context):
@@ -1373,7 +1393,6 @@ class MessageHandlers:
             context.bot, user_id, f"✅ الكلمة: {escape(keyword)}\n{msg}"
         )
 
-
     @staticmethod
     async def _handle_auto_reply_input(update, context):
         user_id = update.effective_user.id
@@ -1386,12 +1405,10 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.5.2: استخدام الدالة الموحّدة
         await MessageHandlers._save_auto_reply_from_message(
             update, context, user_id, lang, chat_id, keyword
         )
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_auto_del(update, context):
@@ -1404,7 +1421,6 @@ class MessageHandlers:
         msg = await _trans('deleted_success', lang, "✅ تم الحذف")
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     # =================================================================
     # الكلمات المحظورة - إدارة
@@ -1434,7 +1450,6 @@ class MessageHandlers:
             )
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_rem_global_ban_input(update, context):
         user_id = update.effective_user.id
@@ -1445,7 +1460,6 @@ class MessageHandlers:
         msg = await _trans('removed_success', lang, "✅ تمت الإزالة")
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_group_ban_input(update, context):
@@ -1477,7 +1491,6 @@ class MessageHandlers:
             )
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_rem_group_ban_input(update, context):
         user_id = update.effective_user.id
@@ -1495,7 +1508,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     # =================================================================
     # المسابقات
     # =================================================================
@@ -1509,7 +1521,6 @@ class MessageHandlers:
         msg = await _trans('send_description_prompt', lang, "📝 أرسل الوصف:")
         await safe_send(context.bot, user_id, msg)
 
-
     @staticmethod
     async def _handle_contest_desc(update, context):
         user_id = update.effective_user.id
@@ -1518,7 +1529,6 @@ class MessageHandlers:
         StateManager.set(user_id, UserState.WAIT_CONTEST_PRIZE)
         msg = await _trans('send_prize_prompt', lang, "🎁 أرسل الجائزة:")
         await safe_send(context.bot, user_id, msg)
-
 
     @staticmethod
     async def _handle_contest_prize(update, context):
@@ -1529,7 +1539,6 @@ class MessageHandlers:
         msg = await _trans('send_date_prompt', lang, "📅 أرسل التاريخ (YYYY-MM-DD HH:MM):")
         await safe_send(context.bot, user_id, msg)
 
-
     @staticmethod
     async def _handle_contest_date(update, context):
         user_id = update.effective_user.id
@@ -1539,7 +1548,6 @@ class MessageHandlers:
         prize = context.user_data.get('contest_prize', '')
         date = update.effective_message.text or ""
 
-        # ✅ v7.5.2: استخدام _parse_contest_date
         parsed = _parse_contest_date(date)
         if not parsed:
             msg = await _trans(
@@ -1560,7 +1568,6 @@ class MessageHandlers:
             )
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_contest_answer(update, context):
         user_id = update.effective_user.id
@@ -1580,7 +1587,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, "❌ لا توجد مسابقة محددة")
         StateManager.clear(user_id)
 
-
     # =================================================================
     # الاستيراد
     # =================================================================
@@ -1596,7 +1602,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.5.2: حد أقصى للحجم
         if doc.file_size and doc.file_size > MAX_IMPORT_FILE_SIZE:
             msg = await _trans(
                 'file_too_large', lang,
@@ -1623,14 +1628,12 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, "❌ حدث خطأ أثناء الاستيراد")
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_github_url(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         url = (update.effective_message.text or "").strip()
 
-        # ✅ v7.5.2: فحص URL
         if not _is_safe_url(url):
             msg = await _trans(
                 'invalid_url', lang,
@@ -1670,7 +1673,6 @@ class MessageHandlers:
                     pass
         StateManager.clear(user_id)
 
-
     # =================================================================
     # منح اشتراك
     # =================================================================
@@ -1706,7 +1708,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     # =================================================================
     # الجدولة
     # =================================================================
@@ -1737,7 +1738,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_hour_input(update, context):
         user_id = update.effective_user.id
@@ -1763,7 +1763,6 @@ class MessageHandlers:
             msg = await _trans('invalid_number', lang, "❌ رقم غير صالح")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_day_input(update, context):
@@ -1791,7 +1790,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_pub_time_input(update, context):
         user_id = update.effective_user.id
@@ -1814,7 +1812,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, f"✅ {time_val}")
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_rem_days_input(update, context):
         user_id = update.effective_user.id
@@ -1833,7 +1830,6 @@ class MessageHandlers:
             msg = await _trans('invalid_number', lang, "❌ رقم غير صالح")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     # =================================================================
     # إعدادات الأمان
@@ -1861,7 +1857,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_warn_count_input(update, context):
         user_id = update.effective_user.id
@@ -1886,7 +1881,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_welcome_text_input(update, context):
         user_id = update.effective_user.id
@@ -1904,7 +1898,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_goodbye_text_input(update, context):
         user_id = update.effective_user.id
@@ -1921,7 +1914,6 @@ class MessageHandlers:
         msg = await _trans('saved_success', lang, "✅ تم الحفظ")
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_slow_mode_input(update, context):
@@ -1945,7 +1937,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_antiflood_messages_input(update, context):
         user_id = update.effective_user.id
@@ -1968,7 +1959,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_antiflood_seconds_input(update, context):
         user_id = update.effective_user.id
@@ -1990,7 +1980,6 @@ class MessageHandlers:
             msg = await _trans('invalid_number', lang, "❌ رقم غير صالح")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_night_start_input(update, context):
@@ -2015,7 +2004,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, f"✅ {time_val}")
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_night_end_input(update, context):
         user_id = update.effective_user.id
@@ -2038,7 +2026,6 @@ class MessageHandlers:
         await invalidate_security_cache(chat_id)
         await safe_send(context.bot, user_id, f"✅ {time_val}")
         StateManager.clear(user_id)
-
 
     # =================================================================
     # العقوبات
@@ -2085,7 +2072,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_mute_input(update, context):
         user_id = update.effective_user.id
@@ -2127,7 +2113,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_warn_input(update, context):
         user_id = update.effective_user.id
@@ -2162,7 +2147,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_kick_input(update, context):
         user_id = update.effective_user.id
@@ -2196,7 +2180,6 @@ class MessageHandlers:
             msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_restrict_input(update, context):
@@ -2239,7 +2222,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_unban_input(update, context):
         user_id = update.effective_user.id
@@ -2273,7 +2255,6 @@ class MessageHandlers:
             msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_pin_input(update, context):
@@ -2309,7 +2290,6 @@ class MessageHandlers:
             )
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     # =================================================================
     # معالجات إضافية
@@ -2349,7 +2329,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_violation_strikes_input(update, context):
         user_id = update.effective_user.id
@@ -2362,7 +2341,6 @@ class MessageHandlers:
             return
         try:
             strikes = int(update.effective_message.text or "3")
-            # ✅ v7.5.2: حد أعلى
             if strikes <= 0 or strikes > MAX_VIOLATION_STRIKES:
                 raise ValueError
             await DB.update_security_settings(chat_id, violation_strikes=strikes)
@@ -2381,7 +2359,6 @@ class MessageHandlers:
             msg = await _trans('execution_failed', lang, "❌ فشل")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
-
 
     @staticmethod
     async def _handle_violation_duration_input(update, context):
@@ -2414,12 +2391,10 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
-        # ✅ v7.5.2: قص الكود
         code = (update.effective_message.text or "").strip()[:MAX_GIFT_CODE_LENGTH]
         if not code:
             msg = await _trans('send_code', lang, "❌ أرسل الكود")
@@ -2447,18 +2422,15 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-
     # =================================================================
-    # استعادة قاعدة البيانات — v7.5.2
+    # استعادة قاعدة البيانات
     # =================================================================
 
     @staticmethod
     async def _do_db_restore(
         update, context, user_id: int, lang: str
     ) -> None:
-        """
-        ✅ v7.5.2: تنفيذ استعادة قاعدة البيانات مع فحص المحرك.
-        """
+        """تنفيذ استعادة قاعدة البيانات مع فحص المحرك."""
         if await _is_postgres_db():
             msg = await _trans(
                 'restore_postgres_unsupported', lang,
@@ -2477,7 +2449,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return
 
-        # SQLite فقط
         doc = update.effective_message.document
         if not doc:
             msg = await _trans('send_db', lang, "❌ أرسل ملف قاعدة البيانات (.db)")
@@ -2489,7 +2460,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return
 
-        # حد أقصى للحجم
         if doc.file_size and doc.file_size > 100 * 1024 * 1024:
             msg = await _trans(
                 'file_too_large', lang, "❌ حجم الملف كبير جدًا (الحد: 100 MB)"
@@ -2506,7 +2476,6 @@ class MessageHandlers:
             )
             await file.download_to_drive(tmp_path)
 
-            # نسخة احتياطية قبل الاستعادة
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
             pre_restore = (
                 PATHS.BACKUPS
@@ -2536,7 +2505,6 @@ class MessageHandlers:
                 except OSError:
                     pass
 
-
     @staticmethod
     async def _handle_restore_input(update, context):
         user_id = update.effective_user.id
@@ -2549,10 +2517,9 @@ class MessageHandlers:
         await MessageHandlers._do_db_restore(update, context, user_id, lang)
         StateManager.clear(user_id)
 
-
     @staticmethod
     async def _handle_backup_file_input(update, context):
-        """معالج استقبال ملف النسخ الاحتياطي (.db) من زر admin_upload_backup"""
+        """معالج استقبال ملف النسخ الاحتياطي (.db)"""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -2564,31 +2531,19 @@ class MessageHandlers:
         await MessageHandlers._do_db_restore(update, context, user_id, lang)
         StateManager.clear(user_id)
 
-
     # =================================================================
     # handle_service — الحذف فقط (بدون ترحيب/وداع)
     # =================================================================
 
     @staticmethod
     async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        معالجة رسائل الخدمة (انضمام/مغادرة).
-
-        ⚠️ مهم: هذا المعالج يقوم فقط بحذف رسائل الخدمة إذا كان
-        delete_service مفعلاً في إعدادات الأمان.
-
-        الترحيب والوداع يتم إرسالهما من handlers/chat_member.py
-        (ChatMemberHandler) لمنع الرسائل المزدوجة.
-
-        ✅ v7.5.2: يُغطّي كل أنواع رسائل الخدمة.
-        """
+        """معالجة رسائل الخدمة (انضمام/مغادرة)."""
         if not update.effective_chat or not update.effective_message:
             return
 
         chat_id = update.effective_chat.id
         message = update.effective_message
 
-        # ✅ v7.5.2: كل أنواع رسائل الخدمة
         is_service_message = any([
             message.new_chat_members,
             message.left_chat_member,
@@ -2620,7 +2575,6 @@ class MessageHandlers:
                     logger.debug(f"تعذر حذف رسالة الخدمة: {e}")
         except Exception as e:
             logger.debug(f"handle_service error: {e}")
-
 
     # =================================================================
     # طلبات الانضمام
@@ -2654,7 +2608,6 @@ class MessageHandlers:
                     pass
                 else:
                     logger.warning(f"فشل الموافقة على طلب الانضمام: {e}")
-
 
 # =====================================================================
 # تصدير
