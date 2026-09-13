@@ -2,21 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.1)
+handlers_callback.py - المعالج النهائي الكامل (v9.0.2)
 =====================================================================
-✅ v9.0.1 — إصلاحات إضافية:
-  1.  sec_maxlen handler مضاف في _handle_security
-  2.  sec_act_log handler مضاف
-  3.  sec_auto_reply_menu handler مضاف
-  4.  act_pin handler مضاف في _handle_advanced_actions
-  5.  html.escape لـ ch_display في _show_main_menu_inline
-  6.  posts_cache مستورد من cache.py مباشرة
-  7.  admin_restore_file يستخدم DB.initialize_db()
-  8.  import html في الأعلى
-  9.  إزالة dead code (sec_penalty_durations, _show_penalty_types)
-
-✅ v9.0.0 — إصلاح شامل (90+ خطأ):
-  [محفوظ بالكامل كما هو موثق سابقاً]
+✅ v9.0.2 — الملف الكامل بدون اختصار:
+  - كل الـ 90+ إصلاح من v9.0.0
+  - + 11 إصلاح جديد من v9.0.1:
+    1.  sec_maxlen handler
+    2.  sec_act_log handler
+    3.  sec_auto_reply_menu handler
+    4.  act_pin handler في _handle_advanced_actions
+    5.  زر act_pin في _show_advanced_actions
+    6.  import html as _html
+    7.  html.escape(ch_display) في _show_main_menu_inline
+    8.  html.escape في _show_channel_list
+    9.  posts_cache من cache.py
+    10. DB.initialize_db() في admin_restore_file
+    11. تسجيل فشل إلغاء الفاتورة
 =====================================================================
 """
 
@@ -72,7 +73,7 @@ except ImportError:
                 return False
         PUBLISH_RATE_LIMITER = _NullLimiter()
 
-# ✅ #8: dummy user_cache صريح
+# ✅ #8: dummy user_cache صريح + posts_cache
 try:
     from cache import user_cache, invalidate_user_cache, posts_cache
 except ImportError:
@@ -418,7 +419,6 @@ class CallbackHandlers:
         user_id = user.id
         now_time = time.monotonic()
 
-        # interval
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < CALLBACK_MIN_INTERVAL:
@@ -426,14 +426,12 @@ class CallbackHandlers:
             return
         context.user_data[last_cb_key] = now_time
 
-        # تنظيف دوري
         counter_key = "_cb_counter"
         cb_count = context.bot_data.get(counter_key, 0) + 1
         context.bot_data[counter_key] = cb_count
         if cb_count % RATE_LIMIT_CLEANUP_EVERY == 0:
             CallbackHandlers._cleanup_user_data(context)
 
-        # rate limit
         rate_key = f"rate_{user_id}"
         rate_data = context.user_data.get(rate_key)
         if not rate_data or now_time - rate_data.get('reset', 0) > RATE_LIMIT_WINDOW:
@@ -456,7 +454,6 @@ class CallbackHandlers:
             logger.warning(f"get_user_language failed: {e}")
             lang = 'ar'
 
-        # ✅ _handle_parameterized أولاً
         try:
             handled = await CallbackHandlers._handle_parameterized(
                 update, context, query, user_id, lang, data
@@ -735,7 +732,7 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ لا توجد قناة نشطة", bot=context.bot)
                 return
 
-            # ✅ v9.0.1: posts_cache من cache.py مباشرة
+            # ✅ v9.0.2: posts_cache من cache.py مباشرة
             if base_data == CB.POST_CLEAR:
                 active = await DB.get_active_channel(user_id)
                 if active:
@@ -870,7 +867,7 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # القائمة الرئيسية
+    # القائمة الرئيسية — ✅ v9.0.2: HTML escape
     # =================================================================
 
     @staticmethod
@@ -905,7 +902,7 @@ class CallbackHandlers:
             if channel_info and isinstance(channel_info, dict):
                 raw_name = channel_info.get('channel_name')
                 if raw_name:
-                    # ✅ v9.0.1: HTML escape
+                    # ✅ v9.0.2: HTML escape لمنع كسر parse_mode='HTML'
                     ch_display = _html.escape(str(raw_name))
 
             sub_text = await _trans('subscription_active', lang, "✅ مفعل") if has_sub else await _trans('subscription_inactive', lang, "❌ غير مفعل")
@@ -967,7 +964,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
 
-            # ─── set_warn_count ─────────────────────────────────────
+            # ─── set_warn_count:CHAT_ID:COUNT ───────────────────────
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1038,7 +1035,7 @@ class CallbackHandlers:
                                 reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ─── set_warn_penalty ───────────────────────────────────
+            # ─── set_warn_penalty:TYPE:CHAT_ID ──────────────────────
             if data.startswith("set_warn_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1056,7 +1053,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── set_duration ───────────────────────────────────────
+            # ─── set_duration:TYPE:CHAT_ID:SECS ─────────────────────
             if data.startswith("set_duration:"):
                 parts = data.split(":")
                 if len(parts) < 4:
@@ -1082,7 +1079,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty ────────────────────────────────
+            # ─── sec_set_del_penalty:TYPE:CHAT_ID ───────────────────
             if data.startswith("sec_set_del_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1103,7 +1100,7 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty_duration ───────────────────────
+            # ─── sec_set_del_penalty_duration:CHAT_ID ───────────────
             if data.startswith("sec_set_del_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1116,7 +1113,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'delete_penalty')
                 return True
 
-            # ─── sec_penalty_durations ──────────────────────────────
+            # ─── sec_penalty_durations:CHAT_ID ──────────────────────
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1161,7 +1158,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
                 return True
 
-            # ─── sec_penalty_TYPE ───────────────────────────────────
+            # ─── sec_penalty_TYPE:CHAT_ID ───────────────────────────
             if data.startswith("sec_penalty_"):
                 parts = data.split(":")
                 if len(parts) < 2:
@@ -1553,6 +1550,7 @@ class CallbackHandlers:
             await safe_delete_message(query)
         except Exception as e:
             logger.error(f"❌ فشل إرسال الفاتورة: {e}")
+            # ✅ v9.0.2: تسجيل فشل إلغاء الفاتورة
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
             except Exception as ce:
@@ -1590,6 +1588,7 @@ class CallbackHandlers:
             await safe_delete_message(query)
         except Exception as e:
             logger.error(f"❌ فشل إرسال فاتورة الهدية: {e}")
+            # ✅ v9.0.2: تسجيل فشل إلغاء الفاتورة
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
             except Exception as ce:
@@ -1707,6 +1706,7 @@ class CallbackHandlers:
                 return
 
             StateManager.set(user_id, UserState.ADDING_POSTS)
+
             await safe_edit(
                 query, "📥 أرسل المنشورات:",
                 reply_markup=InlineKeyboardMarkup(
@@ -2047,6 +2047,7 @@ class CallbackHandlers:
             number = _group_number(display_idx)
             st = "✅" if not chd.get('banned') else "🚫"
             raw_name = chd.get('channel_name') or f"قناة {display_idx}"
+            # ✅ v9.0.2: HTML escape
             name = _html.escape(str(raw_name)[:35])
 
             text += f"{st} {number}  {name}\n"
@@ -2118,7 +2119,7 @@ class CallbackHandlers:
         await safe_edit(query, display_text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # =================================================================
-    # معالجات الأمان — ✅ v9.0.1: أضفنا 3 handlers مفقودة
+    # معالجات الأمان — ✅ v9.0.2: 3 handlers جديدة
     # =================================================================
 
     @staticmethod
@@ -2152,22 +2153,22 @@ class CallbackHandlers:
 
         try:
             # ═══════════════════════════════════════════════════════════
-            # ✅ v9.0.1: 3 handlers مفقودة كانت تسبب "⚠️ غير متوفر"
+            # ✅ v9.0.2: 3 handlers كانت مفقودة (كانت تُرجع "⚠️ غير متوفر")
             # ═══════════════════════════════════════════════════════════
 
-            # 1) sec_maxlen — فتح شاشة طول الرسالة
+            # 1) sec_maxlen → طلب الحد الأقصى
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 context.user_data['sec_chat'] = chat_id
                 await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة (0 = بلا حد):", bot=context.bot)
                 return
 
-            # 2) sec_act_log — عرض سجل الإجراءات
+            # 2) sec_act_log → عرض سجل الإجراءات
             if action == "act_log":
                 await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang)
                 return
 
-            # 3) sec_auto_reply_menu — فتح لوحة الردود التلقائية للمجموعة
+            # 3) sec_auto_reply_menu → فتح لوحة الردود التلقائية
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
                 await CallbackHandlers._handle_auto_reply(update, context, query, user_id, lang)
@@ -2175,7 +2176,7 @@ class CallbackHandlers:
 
             # ═══════════════════════════════════════════════════════════
 
-            # ─── تفعيل/تعطيل الكل (مع تأكيد) ───────────────────────
+            # ─── تفعيل/تعطيل الكل ───────────────────────────────────
             if action in ("activate_all", "enable_all", "deactivate_all", "disable_all"):
                 is_activate = action in ("activate_all", "enable_all")
                 confirm_action = "activate_all_confirm" if is_activate else "deactivate_all_confirm"
@@ -2571,6 +2572,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_advanced_actions(update, context, query, chat_id, lang):
+        # ✅ v9.0.2: أضفنا زر act_pin
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔴 تعطيل الكل", callback_data=f"sec_deactivate_all:{chat_id}"),
              InlineKeyboardButton("🟢 تفعيل الكل", callback_data=f"sec_activate_all:{chat_id}")],
@@ -2822,7 +2824,7 @@ class CallbackHandlers:
 
                     shutil.copy2(backup_file, PATHS.DB)
 
-                    # ✅ v9.0.1: استخدام initialize_db بدل reconnect
+                    # ✅ v9.0.2: initialize_db بدل reconnect
                     if db_closed:
                         try:
                             init_fn = getattr(DB, 'initialize_db', None)
@@ -3487,7 +3489,7 @@ class CallbackHandlers:
         await safe_edit(query, "📅 جدولة القناة", reply_markup=kb, bot=context.bot)
 
     # =================================================================
-    # الإجراءات المتقدمة — ✅ v9.0.1: أضفنا act_pin
+    # الإجراءات المتقدمة — ✅ v9.0.2: أضفنا act_pin
     # =================================================================
 
     @staticmethod
@@ -3543,6 +3545,7 @@ class CallbackHandlers:
                 return
 
             if prefix.startswith("act_"):
+                # ✅ v9.0.2: أضفنا pin
                 user_actions = {
                     "ban": (UserState.WAIT_BAN, "🚫 أرسل معرف المستخدم:"),
                     "mute": (UserState.WAIT_MUTE, "🔇 أرسل معرف المستخدم:"),
@@ -3550,7 +3553,6 @@ class CallbackHandlers:
                     "kick": (UserState.WAIT_KICK, "👢 أرسل معرف المستخدم:"),
                     "restrict": (UserState.WAIT_RESTRICT, "🔒 أرسل معرف المستخدم:"),
                     "unban": (UserState.WAIT_UNBAN, "🔓 أرسل معرف المستخدم:"),
-                    # ✅ v9.0.1: act_pin
                     "pin": (UserState.WAIT_PIN, "📌 قم بالرد على رسالة لتثبيتها:"),
                 }
                 if action in user_actions:
