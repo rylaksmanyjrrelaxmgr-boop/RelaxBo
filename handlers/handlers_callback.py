@@ -4,12 +4,16 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.22 (مُحسَّن — ترقيم المجموعات + رموز مميزة)
+الإصدار: v7.5.23 (مُحسَّن — ترقيم المجموعات + أزرار مدموجة)
 =====================================================================
+🆕 v7.5.23:
+    ✅ _show_groups_list → أزرار مدموجة (أمان + حذف في صف واحد)
+    ✅ الحفاظ على الترقيم (1️⃣ 2️⃣ 3️⃣...)
+    ✅ توفير مساحة العرض
+
 🆕 v7.5.22:
     ✅ _show_groups_list → ترقيم (1️⃣ 2️⃣ 3️⃣...) لكل مجموعة
     ✅ تمييز بصري واضح للأسماء المتشابهة
-    ✅ الرقم يظهر في النص وفي الأزرار
 
 🆕 v7.5.21:
     ✅ warn_count → أزرار (1, 2, 3, 4, 5, 10)
@@ -122,13 +126,11 @@ GROUP_NUMBER_EMOJIS = [
     "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
 ]
 
-
 def _group_number(index: int) -> str:
     """إرجاع رمز الرقم التسلسلي للمجموعة (1-based)."""
     if 1 <= index <= len(GROUP_NUMBER_EMOJIS):
         return GROUP_NUMBER_EMOJIS[index - 1]
     return f"{index}."
-
 
 # =====================================================================
 # دوال مساعدة عامة
@@ -154,7 +156,6 @@ async def _safe_answer(query, text=None, show_alert=False) -> bool:
         logger.debug(f"Query answer error: {e}")
         return False
 
-
 async def _trans(key, lang, default_ar) -> str:
     """جلب النص المترجم مع fallback للعربية"""
     if not lang:
@@ -166,7 +167,6 @@ async def _trans(key, lang, default_ar) -> str:
         return text
     except Exception:
         return default_ar
-
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -> bool:
     """تعديل الرسالة بأمان مع معالجة شاملة لكل حالات 400 Bad Request."""
@@ -257,7 +257,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None) -
         logger.debug(f"safe_edit error: {e}")
         return False
 
-
 async def safe_delete_message(query_or_message) -> None:
     """حذف رسالة بأمان"""
     try:
@@ -268,7 +267,6 @@ async def safe_delete_message(query_or_message) -> None:
     except Exception:
         pass
 
-
 def _mask_id(id_value, prefix=3, suffix=2) -> str:
     """إخفاء جزء من المعرفات الحساسة"""
     if id_value is None:
@@ -278,7 +276,6 @@ def _mask_id(id_value, prefix=3, suffix=2) -> str:
         return "***"
     return s[:prefix] + "***" + s[-suffix:]
 
-
 async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
     """التحقق من ملكية القناة"""
     try:
@@ -286,7 +283,6 @@ async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
     except Exception as e:
         logger.error(f"_is_channel_owner: {e}")
         return False
-
 
 def _clear_context_keys(context, extra_keys=None) -> None:
     """تمسح مفاتيح السياق فقط، وتُبقي: last_cb_* (debounce) و rate_* (rate limiting)"""
@@ -296,12 +292,10 @@ def _clear_context_keys(context, extra_keys=None) -> None:
         for k in extra_keys:
             context.user_data.pop(k, None)
 
-
 def _ensure_bot_start_time(context) -> None:
     """التأكد من وجود start_time في bot_data"""
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
-
 
 # =====================================================================
 # CallbackHandlers
@@ -1818,12 +1812,12 @@ class CallbackHandlers:
         await safe_edit(query, "✅ بدأ النشر الجماعي", bot=context.bot)
 
     # =================================================================
-    # ✅✅✅ الدالة المعدّلة: _show_groups_list مع ترقيم ✅✅✅
+    # ✅✅✅ الدالة المعدّلة: _show_groups_list مع ترقيم وأزرار مدموجة ✅✅✅
     # =================================================================
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
-        """عرض قائمة المجموعات مع ترقيم مميز (1️⃣ 2️⃣ 3️⃣ ...) لتمييز الأسماء المتشابهة."""
+        """عرض قائمة المجموعات مع ترقيم مميز وأزرار مدموجة في صف واحد."""
         groups = await DB.get_user_groups(user_id)
         if not groups:
             kb = InlineKeyboardMarkup([
@@ -1848,17 +1842,17 @@ class CallbackHandlers:
             # نص القائمة: ✅ 1️⃣ اسم المجموعة
             text += f"{status} {number} {name}\n"
 
-            # زر الأمان
-            kb.append([InlineKeyboardButton(
-                f"{number} ⚙️ أمان — {name[:18]}",
-                callback_data=f"{CB.GRP_SET}:{gid}"
-            )])
-
-            # زر الحذف
-            kb.append([InlineKeyboardButton(
-                f"{number} 🗑️ حذف — {name[:18]}",
-                callback_data=f"grp_del:{gid}"
-            )])
+            # ✅ الأزرار مدموجة في صف واحد (أمان + حذف)
+            kb.append([
+                InlineKeyboardButton(
+                    f"{number} ⚙️ أمان",
+                    callback_data=f"{CB.GRP_SET}:{gid}"
+                ),
+                InlineKeyboardButton(
+                    f"{number} 🗑️ حذف",
+                    callback_data=f"grp_del:{gid}"
+                ),
+            ])
 
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
