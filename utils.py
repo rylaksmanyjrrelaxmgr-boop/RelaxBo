@@ -2,21 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.7.0)
+utils.py - الأدوات المساعدة للبوت (v7.7.1)
 =================================================================================
+🆕 v7.7.1:
+    ✅ _get_security_stats: استعلامات متوازية + timeout
+    ✅ إزالة expires_at غير الموجود
+    ✅ أزرار أسرع (< 1 ثانية بدل 6)
+
 🆕 v7.7.0:
-    ✅ _format_security_text: جدول مرتب + إحصائيات اختيارية
-    ✅ _get_security_stats: إحصائيات شاملة للمجموعة
+    ✅ _format_security_text: جدول مرتب + إحصائيات
     ✅ ban_user_by_id / unban_user_by_id
 
 🆕 v7.5.4:
-    ✅ CB.ADMIN_BAN_USER / CB.ADMIN_UNBAN_USER
+    ✅ CB.ADMIN_BAN_USER / ADMIN_UNBAN_USER
     ✅ UserState.WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
-
-🆕 v7.5.3:
-    ✅ PUBLISH_RATE_LIMITER منفصل
-    ✅ safe_send: timeout 2s
-    ✅ _do_backup آمن
 =================================================================================
 """
 
@@ -846,12 +845,10 @@ class KeyboardFactory:
 
     @classmethod
     def _dot(cls, enabled: bool) -> str:
-        """🟢/⚫ — نقطة ملونة موفرة للمساحة."""
         return "🟢" if enabled else "⚫"
 
     @classmethod
     def _fmt_dur(cls, seconds: int) -> str:
-        """تحويل الثواني لصيغة مختصرة."""
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
@@ -873,30 +870,19 @@ class KeyboardFactory:
         return f"{seconds // 2592000}ش"
 
     # ═════════════════════════════════════════════════════════════════
-    # _get_security_stats — إحصائيات شاملة
+    # 🆕 v7.7.1: _get_security_stats — متوازي + سريع
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
-        """🆕 v7.7.0: إحصائيات شاملة (اليوم + إجمالي)."""
+        """🆕 v7.7.1: إحصائيات سريعة ومتوازية + بدون أخطاء."""
         stats = {
-            'penalties_today': 0,
-            'mutes_today': 0,
-            'bans_today': 0,
-            'kicks_today': 0,
-            'warns_today': 0,
-            'photos_deleted': 0,
-            'videos_deleted': 0,
-            'stickers_deleted': 0,
-            'files_deleted': 0,
-            'links_deleted': 0,
-            'forwards_deleted': 0,
-            'active_warnings': 0,
-            'total_violations': 0,
-            'banned_words': 0,
-            'auto_replies': 0,
-            'banned_members': 0,
-            'muted_members': 0,
+            'penalties_today': 0, 'mutes_today': 0, 'bans_today': 0,
+            'kicks_today': 0, 'warns_today': 0,
+            'photos_deleted': 0, 'videos_deleted': 0, 'stickers_deleted': 0,
+            'files_deleted': 0, 'links_deleted': 0, 'forwards_deleted': 0,
+            'active_warnings': 0, 'total_violations': 0,
+            'banned_words': 0, 'auto_replies': 0,
         }
 
         try:
@@ -904,29 +890,27 @@ class KeyboardFactory:
                 hour=0, minute=0, second=0, microsecond=0, tzinfo=None
             )
 
-            try:
-                row = await DB.fetchone(
+            async def safe_fetch(sql, params, default=None):
+                try:
+                    return await asyncio.wait_for(
+                        DB.fetchone(sql, params), timeout=2.0
+                    )
+                except Exception:
+                    return default
+
+            # === تنفيذ متوازي — 6 استعلامات ===
+            penalties_row, deleted_row, warns_row, words_row, replies_row, viols_row = await asyncio.gather(
+                safe_fetch(
                     "SELECT "
                     "  SUM(CASE WHEN penalty_type='mute' THEN 1 ELSE 0 END) as mutes, "
                     "  SUM(CASE WHEN penalty_type='ban' THEN 1 ELSE 0 END) as bans, "
                     "  SUM(CASE WHEN penalty_type='kick' THEN 1 ELSE 0 END) as kicks, "
                     "  SUM(CASE WHEN penalty_type='warn' THEN 1 ELSE 0 END) as warns, "
                     "  COUNT(*) as total "
-                    "FROM user_penalties "
-                    "WHERE chat_id = ? AND created_at >= ?",
+                    "FROM user_penalties WHERE chat_id = ? AND created_at >= ?",
                     (chat_id, today_start)
-                )
-                if row:
-                    stats['mutes_today'] = row.get('mutes', 0) or 0
-                    stats['bans_today'] = row.get('bans', 0) or 0
-                    stats['kicks_today'] = row.get('kicks', 0) or 0
-                    stats['warns_today'] = row.get('warns', 0) or 0
-                    stats['penalties_today'] = row.get('total', 0) or 0
-            except Exception:
-                pass
-
-            try:
-                row = await DB.fetchone(
+                ),
+                safe_fetch(
                     "SELECT "
                     "  SUM(CASE WHEN action LIKE '%photo%' THEN 1 ELSE 0 END) as photos, "
                     "  SUM(CASE WHEN action LIKE '%video%' THEN 1 ELSE 0 END) as videos, "
@@ -934,76 +918,57 @@ class KeyboardFactory:
                     "  SUM(CASE WHEN action LIKE '%document%' THEN 1 ELSE 0 END) as files, "
                     "  SUM(CASE WHEN action LIKE '%link%' THEN 1 ELSE 0 END) as links, "
                     "  SUM(CASE WHEN action LIKE '%forward%' THEN 1 ELSE 0 END) as forwards "
-                    "FROM admin_logs "
-                    "WHERE chat_id = ? AND created_at >= ? "
+                    "FROM admin_logs WHERE chat_id = ? AND created_at >= ? "
                     "  AND action LIKE 'violation_%'",
                     (chat_id, today_start)
-                )
-                if row:
-                    stats['photos_deleted'] = row.get('photos', 0) or 0
-                    stats['videos_deleted'] = row.get('videos', 0) or 0
-                    stats['stickers_deleted'] = row.get('stickers', 0) or 0
-                    stats['files_deleted'] = row.get('files', 0) or 0
-                    stats['links_deleted'] = row.get('links', 0) or 0
-                    stats['forwards_deleted'] = row.get('forwards', 0) or 0
-            except Exception:
-                pass
-
-            try:
-                row = await DB.fetchone(
+                ),
+                safe_fetch(
                     "SELECT COUNT(*) as cnt FROM user_warnings WHERE chat_id = ?",
                     (chat_id,)
-                )
-                stats['active_warnings'] = row['cnt'] if row else 0
-            except Exception:
-                pass
-
-            try:
-                row = await DB.fetchone(
-                    "SELECT SUM(violation_count) as total FROM user_violations WHERE chat_id = ?",
-                    (chat_id,)
-                )
-                stats['total_violations'] = (row['total'] or 0) if row else 0
-            except Exception:
-                pass
-
-            try:
-                row = await DB.fetchone(
+                ),
+                safe_fetch(
                     "SELECT COUNT(*) as cnt FROM banned_words WHERE chat_id = ?",
                     (chat_id,)
-                )
-                stats['banned_words'] = row['cnt'] if row else 0
-            except Exception:
-                pass
-
-            try:
-                row = await DB.fetchone(
-                    "SELECT COUNT(*) as cnt FROM auto_replies WHERE chat_id = ? AND is_active = 1",
+                ),
+                safe_fetch(
+                    "SELECT COUNT(*) as cnt FROM auto_replies "
+                    "WHERE chat_id = ? AND is_active = 1",
                     (chat_id,)
-                )
-                stats['auto_replies'] = row['cnt'] if row else 0
-            except Exception:
-                pass
+                ),
+                safe_fetch(
+                    "SELECT SUM(violation_count) as total FROM user_violations "
+                    "WHERE chat_id = ?",
+                    (chat_id,)
+                ),
+                return_exceptions=True,
+            )
 
-            try:
-                row = await DB.fetchone(
-                    "SELECT COUNT(*) as cnt FROM user_penalties "
-                    "WHERE chat_id = ? AND penalty_type='ban' AND expires_at > ?",
-                    (chat_id, datetime.now(timezone.utc).replace(tzinfo=None))
-                )
-                stats['banned_members'] = row['cnt'] if row else 0
-            except Exception:
-                pass
+            if isinstance(penalties_row, dict):
+                stats['mutes_today'] = penalties_row.get('mutes', 0) or 0
+                stats['bans_today'] = penalties_row.get('bans', 0) or 0
+                stats['kicks_today'] = penalties_row.get('kicks', 0) or 0
+                stats['warns_today'] = penalties_row.get('warns', 0) or 0
+                stats['penalties_today'] = penalties_row.get('total', 0) or 0
 
-            try:
-                row = await DB.fetchone(
-                    "SELECT COUNT(*) as cnt FROM user_penalties "
-                    "WHERE chat_id = ? AND penalty_type='mute' AND expires_at > ?",
-                    (chat_id, datetime.now(timezone.utc).replace(tzinfo=None))
-                )
-                stats['muted_members'] = row['cnt'] if row else 0
-            except Exception:
-                pass
+            if isinstance(deleted_row, dict):
+                stats['photos_deleted'] = deleted_row.get('photos', 0) or 0
+                stats['videos_deleted'] = deleted_row.get('videos', 0) or 0
+                stats['stickers_deleted'] = deleted_row.get('stickers', 0) or 0
+                stats['files_deleted'] = deleted_row.get('files', 0) or 0
+                stats['links_deleted'] = deleted_row.get('links', 0) or 0
+                stats['forwards_deleted'] = deleted_row.get('forwards', 0) or 0
+
+            if isinstance(warns_row, dict):
+                stats['active_warnings'] = warns_row.get('cnt', 0) or 0
+
+            if isinstance(words_row, dict):
+                stats['banned_words'] = words_row.get('cnt', 0) or 0
+
+            if isinstance(replies_row, dict):
+                stats['auto_replies'] = replies_row.get('cnt', 0) or 0
+
+            if isinstance(viols_row, dict):
+                stats['total_violations'] = viols_row.get('total', 0) or 0
 
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
@@ -1011,7 +976,7 @@ class KeyboardFactory:
         return stats
 
     # ═════════════════════════════════════════════════════════════════
-    # _format_security_text — التنسيق القديم الجميل
+    # _format_security_text
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
@@ -1361,7 +1326,7 @@ def get_ram_usage() -> dict:
 # =====================================================================
 
 async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """🆕 حظر مستخدم من استخدام البوت (بواسطة ID)."""
+    """حظر مستخدم من استخدام البوت (بواسطة ID)."""
     try:
         try:
             if CONFIG.is_developer(user_id):
@@ -1391,7 +1356,7 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
 
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """🆕 فك حظر مستخدم (بواسطة ID)."""
+    """فك حظر مستخدم (بواسطة ID)."""
     try:
         row = await DB.fetchone("SELECT user_id FROM users WHERE user_id=?", (user_id,))
         if not row:
