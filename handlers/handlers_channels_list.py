@@ -11,18 +11,16 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - تعديل الجدولة
 - عرض تفاصيل قناة
 - رجوع للقائمة الرئيسية
-- إضافة قناة (عرض تعليمات)
-
-الاستخدام في bot.py:
-    from handlers.handlers_channels_list import register_channels_list_handlers
-    register_channels_list_handlers(application)
+- إضافة قناة (باستقبال @username أو رابط t.me)
 ================================================================================
 """
 
 import logging
-import asyncio
+import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    ContextTypes, CallbackQueryHandler, MessageHandler, filters
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +37,6 @@ except ImportError:
     TimeUtils = None
 
 
-# زر الرجوع — مع fallback
 try:
     from utils.keyboards import get_back_button
 except (ImportError, AttributeError):
@@ -645,10 +642,7 @@ async def channel_schedule_set_callback(
 async def back_to_main_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    الرجوع للقائمة الرئيسية.
-    يحذف الرسالة الحالية ثم يفتح القائمة الرئيسية.
-    """
+    """الرجوع للقائمة الرئيسية"""
     query = update.callback_query
 
     try:
@@ -656,13 +650,11 @@ async def back_to_main_menu_callback(
     except Exception:
         pass
 
-    # احذف الرسالة الحالية
     try:
         await query.message.delete()
     except Exception as e:
         logger.debug(f"حذف الرسالة: {e}")
 
-    # استدعاء القائمة الرئيسية
     try:
         from handlers.handlers_command import CommandHandlers
 
@@ -730,20 +722,13 @@ async def _send_main_menu_fallback(context, user_id: int):
 
 
 # =====================================================================
-# 8. ✅ إضافة قناة (النسخة المصححة — تعرض تعليمات)
+# 8. إضافة قناة (زر → عرض تعليمات)
 # =====================================================================
 
 async def add_channel_redirect_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    عرض تعليمات إضافة قناة.
-    
-    ✅ النسخة المصححة:
-    - لا تستدعي CommandHandlers.channels (التي تعرض قائمة القنوات)
-    - تعرض تعليمات واضحة للمستخدم
-    - المستخدم يرسل @channel مباشرة
-    """
+    """عرض تعليمات إضافة قناة."""
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -751,6 +736,10 @@ async def add_channel_redirect_callback(
         await query.answer()
     except Exception:
         pass
+
+    # ═══ مهم: ضع المستخدم في وضع "إضافة قناة" ═══
+    if context.user_data is not None:
+        context.user_data["awaiting_channel_add"] = True
 
     try:
         text = (
@@ -778,24 +767,259 @@ async def add_channel_redirect_callback(
         )
     except Exception as e:
         logger.error(f"❌ add_channel_redirect: {e}", exc_info=True)
-        try:
-            await query.answer(
-                "أرسل @channel_name لإضافة قناة",
-                show_alert=True
+
+
+# =====================================================================
+# 9. معالج الرسائل النصية لإضافة قناة
+# =====================================================================
+
+async def add_channel_from_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    يعالج رسائل المستخدم النصية لإضافة قناة.
+    يلتقط:
+    - @channel_username
+    - https://t.me/channel_username
+    - t.me/channel_username
+    """
+    message = update.message
+    if not message or not message.text:
+        return
+
+    text = message.text.strip()
+    user_id = message.from_user.id
+
+    # ═══ استخراج اسم القناة ═══
+    channel_username = None
+
+    # @username
+    match = re.match(r"^@([a-zA-Z0-9_]{4,})$", text)
+    if match:
+        channel_username = match.group(1)
+    else:
+        # t.me/username أو https://t.me/username
+        match = re.search(
+            r"(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})(?:/|$|\?)",
+            text,
+        )
+        if match:
+            channel_username = match.group(1)
+
+    # ═══ إذا لم نجد قناة → تجاهل ═══
+    if not channel_username:
+        # إذا كان في وضع "إضافة قناة" → أظهر خطأ
+        if context.user_data and context.user_data.get("awaiting_channel_add"):
+            try:
+                await message.reply_text(
+                    "⚠️ <b>صيغة غير صحيحة</b>\n\n"
+                    "أرسل:\n"
+                    "• <code>@my_channel</code>\n"
+                    "• <code>https://t.me/my_channel</code>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        return
+
+    logger.info(f"📥 محاولة إضافة قناة: @{channel_username} من {user_id}")
+
+    # ═══ أرسل رسالة "جاري المعالجة" ═══
+    processing_msg = None
+    try:
+        processing_msg = await message.reply_text(
+            f"⏳ جاري التحقق من <code>@{channel_username}</code>...",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    # ═══ التحقق من المستخدم ═══
+    try:
+        user = await DB.get_user_full_data(user_id, include_stats=True)
+        if not user:
+            await _edit_or_send(
+                processing_msg, message,
+                "⚠️ الرجاء إرسال /start أولاً."
             )
+            return
+
+        if user.get("banned"):
+            await _edit_or_send(
+                processing_msg, message,
+                "🚫 أنت محظور من استخدام البوت."
+            )
+            return
+
+        if not user.get("has_subscription"):
+            await _edit_or_send(
+                processing_msg, message,
+                "💎 <b>يجب أن يكون لديك اشتراك نشط</b>\n\n"
+                "استخدم /subscribe للاشتراك."
+            )
+            return
+
+        channels_count = user.get("channels_count", 0)
+        active_sub = await DB.get_active_subscription(user_id)
+        if active_sub:
+            max_channels = active_sub.get("max_channels", 0)
+            if channels_count >= max_channels:
+                await _edit_or_send(
+                    processing_msg, message,
+                    f"⚠️ <b>وصلت للحد الأقصى</b>\n\n"
+                    f"عدد قنواتك: {channels_count}/{max_channels}"
+                )
+                return
+
+    except Exception as e:
+        logger.error(f"❌ فحص الصلاحيات: {e}", exc_info=True)
+        await _edit_or_send(
+            processing_msg, message,
+            "⚠️ حدث خطأ. حاول لاحقاً."
+        )
+        return
+
+    # ═══ جلب القناة من Telegram ═══
+    try:
+        chat = await context.bot.get_chat(f"@{channel_username}")
+    except Exception as e:
+        logger.warning(f"⚠️ فشل جلب القناة @{channel_username}: {e}")
+        await _edit_or_send(
+            processing_msg, message,
+            f"❌ <b>لم أتمكن من الوصول للقناة</b>\n\n"
+            f"تأكد أن:\n"
+            f"• القناة موجودة\n"
+            f"• المعرّف صحيح: <code>@{channel_username}</code>\n"
+            f"• القناة عامة (public)"
+        )
+        return
+
+    # ═══ التحقق من أن البوت مشرف ═══
+    try:
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        bot_status = getattr(bot_member, "status", "")
+
+        if bot_status not in ("administrator", "creator"):
+            await _edit_or_send(
+                processing_msg, message,
+                f"⚠️ <b>البوت ليس مشرفاً في القناة</b>\n\n"
+                f"📌 القناة: <b>{chat.title}</b>\n\n"
+                f"<b>الحل:</b>\n"
+                f"1. أضف البوت إلى القناة\n"
+                f"2. ارقِّه إلى <b>مشرف</b>\n"
+                f"3. امنحه صلاحية <b>نشر الرسائل</b>\n"
+                f"4. أعد إرسال <code>@{channel_username}</code>"
+            )
+            return
+
+        can_post = getattr(bot_member, "can_post_messages", True)
+        if not can_post:
+            await _edit_or_send(
+                processing_msg, message,
+                f"⚠️ <b>البوت لا يملك صلاحية النشر</b>\n\n"
+                f"امنح البوت صلاحية <b>Post Messages</b> في القناة."
+            )
+            return
+
+    except Exception as e:
+        logger.error(f"❌ فحص صلاحيات البوت: {e}", exc_info=True)
+        await _edit_or_send(
+            processing_msg, message,
+            "⚠️ لم أتمكن من التحقق من صلاحيات البوت في القناة."
+        )
+        return
+
+    # ═══ إضافة القناة إلى DB ═══
+    try:
+        result = await DB.add_channel(
+            user_id=user_id,
+            channel_id=chat.id,
+            channel_name=chat.title,
+            set_active=True,
+        )
+    except Exception as e:
+        logger.error(f"❌ فشل add_channel: {e}", exc_info=True)
+        await _edit_or_send(
+            processing_msg, message,
+            "❌ حدث خطأ أثناء إضافة القناة."
+        )
+        return
+
+    # ═══ النتيجة ═══
+    if result:
+        channel_name = result.get("channel_name", chat.title)
+        channel_db_id = result.get("id")
+        posts_count = result.get("posts_count", 0)
+
+        success_text = (
+            f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
+            f"📡 <b>{channel_name}</b>\n"
+            f"🆔 <code>{chat.id}</code>\n"
+            f"🔗 @{channel_username}\n\n"
+            f"📥 منشورات موجودة: {posts_count}\n"
+            f"🟢 تم تعيينها <b>القناة النشطة</b>\n\n"
+            f"يمكنك الآن إضافة منشورات لها."
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+            [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+        ])
+
+        try:
+            if processing_msg:
+                await processing_msg.edit_text(
+                    success_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            else:
+                await message.reply_text(
+                    success_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+        except Exception:
+            await message.reply_text(
+                success_text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+
+        logger.info(f"✅ تم إضافة القناة @{channel_username} للمستخدم {user_id}")
+
+        # امسح وضع "إضافة قناة"
+        if context.user_data:
+            context.user_data.pop("awaiting_channel_add", None)
+
+    else:
+        await _edit_or_send(
+            processing_msg, message,
+            f"❌ <b>فشل إضافة القناة</b>\n\n"
+            f"قد تكون القناة مسجلة مسبقاً أو حدث خطأ."
+        )
+
+
+async def _edit_or_send(processing_msg, message, text: str):
+    """تعديل الرسالة أو إرسال جديدة"""
+    try:
+        if processing_msg:
+            await processing_msg.edit_text(text, parse_mode="HTML")
+        else:
+            await message.reply_text(text, parse_mode="HTML")
+    except Exception:
+        try:
+            await message.reply_text(text, parse_mode="HTML")
         except Exception:
             pass
 
 
 # =====================================================================
-# 9. تسجيل كل الـ handlers
+# 10. تسجيل كل الـ handlers
 # =====================================================================
 
 def register_channels_list_handlers(application):
-    """
-    تسجيل كل handlers قائمة القنوات.
-    استدعِ هذه الدالة في bot.py بعد تهيئة التطبيق.
-    """
+    """تسجيل كل handlers قائمة القنوات."""
     try:
         # ═══ الرجوع للقائمة الرئيسية ═══
         application.add_handler(
@@ -805,7 +1029,7 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ ✅ إضافة قناة ═══
+        # ═══ إضافة قناة (زر) ═══
         application.add_handler(
             CallbackQueryHandler(
                 add_channel_redirect_callback,
@@ -860,6 +1084,22 @@ def register_channels_list_handlers(application):
             CallbackQueryHandler(
                 channel_schedule_set_callback, pattern=r"^ch_sched_set:"
             )
+        )
+
+        # ═══ ✅ معالج الرسائل النصية لإضافة قناة ═══
+        # group=-1 → يُنفَّذ قبل MessageHandlers.handle_private
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & filters.ChatType.PRIVATE
+                & ~filters.COMMAND
+                & (
+                    filters.Regex(r"^@[a-zA-Z0-9_]{4,}$")
+                    | filters.Regex(r"^.*t\.me/[a-zA-Z0-9_]{4,}.*$")
+                ),
+                add_channel_from_message,
+            ),
+            group=-1,
         )
 
         logger.info("✅ تم تسجيل handlers قائمة القنوات")
