@@ -2,20 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.7.1)
+utils.py - الأدوات المساعدة للبوت (v7.7.2)
 =================================================================================
+🆕 v7.7.2 (تصحيحات أمنية + تنظيف):
+    ✅ is_authorized_in_group: int() coercion لـ PRIMARY_OWNER_ID
+    ✅ _auth_cache: TTL=30s (بدل 600s) — أمان أعلى
+    ✅ RateLimiter.acquire: لا يحتفظ بالـ semaphore أثناء النوم
+    ✅ admin_panel أُضيف إلى _default_menus
+    ✅ sec_slow_mode_seconds / sec_welcome_text / sec_goodbye_text في security menu
+    ✅ إزالة _HAS_UNIFIED_CACHE + كاشات ميتة
+    ✅ ~40 نص افتراضي جديد
+
 🆕 v7.7.1:
     ✅ _get_security_stats: استعلامات متوازية + timeout
-    ✅ إزالة expires_at غير الموجود
     ✅ أزرار أسرع (< 1 ثانية بدل 6)
 
 🆕 v7.7.0:
     ✅ _format_security_text: جدول مرتب + إحصائيات
     ✅ ban_user_by_id / unban_user_by_id
-
-🆕 v7.5.4:
-    ✅ CB.ADMIN_BAN_USER / ADMIN_UNBAN_USER
-    ✅ UserState.WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
 =================================================================================
 """
 
@@ -51,12 +55,6 @@ import aiohttp.web as web
 
 from config import CONFIG, PATHS
 from database import DB
-
-try:
-    from cache import settings_cache, banned_words_cache, auth_cache
-    _HAS_UNIFIED_CACHE = True
-except ImportError:
-    _HAS_UNIFIED_CACHE = False
 
 logger = logging.getLogger(__name__)
 
@@ -155,11 +153,16 @@ class TextUtils:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
 # =====================================================================
-# 3. Rate Limiter
+# 3. Rate Limiter (✅ v7.7.2: semaphore محرَّر أثناء النوم)
 # =====================================================================
 
 class RateLimiter:
-    """محدد معدل الإرسال."""
+    """
+    محدد معدل الإرسال.
+
+    ✅ v7.7.2: لا نحتفظ بالـ semaphore أثناء النوم.
+    السبب: كان يسبب تسلسل كل المهام عبر semaphore واحد تحت الضغط.
+    """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._last_calls = deque(maxlen=max_per_second * 2)
@@ -167,9 +170,10 @@ class RateLimiter:
         self.max_per_second = max_per_second
 
     async def acquire(self, *args, **kwargs):
-        async with self.semaphore:
-            while True:
-                wait_time = 0.0
+        while True:
+            wait_time = 0.0
+            # احصل على الـ semaphore لفترة قصيرة فقط
+            async with self.semaphore:
                 async with self._lock:
                     now = time.time()
                     while self._last_calls and now - self._last_calls[0] > 1:
@@ -178,10 +182,11 @@ class RateLimiter:
                         self._last_calls.append(now)
                         return
                     wait_time = 1 - (now - self._last_calls[0])
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                else:
-                    await asyncio.sleep(0.01)
+            # ✅ semaphore محرَّر → مهام أخرى يمكنها التقدم
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            else:
+                await asyncio.sleep(0.01)
 
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
@@ -256,10 +261,6 @@ class AutoReplyCache:
         self.cache.clear()
 
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
-_security_settings_cache = {}
-_security_settings_time = {}
-_auto_reply_settings_cache = {}
-_auto_reply_settings_time = {}
 
 # =====================================================================
 # 6. الترجمات
@@ -608,29 +609,84 @@ class KeyboardFactory:
     _default_lang: str = "ar"
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
 
+    # ✅ v7.7.2: أزرار لا تحتاج :chat_id
     _NO_CHAT_ID_BUTTONS = {
+        # عام
         "sec_close", "panel_close", "back", "main", "cancel",
         "help", "settings", "language", "check_sub",
+        # إعدادات المستخدم
         "toggle_auto", "toggle_rec", "plans", "subscribe",
         "support", "support_ticket", "developer", "trial",
         "contests", "contest_winners", "referral", "ref_claim",
         "ref_list", "reminder", "rem_sub", "rem_daily",
         "rem_weekly", "rem_days", "translation", "trans_off",
-        "invoices", "groups", "admin", "panel_close",
+        "invoices", "groups", "admin",
+        # منشورات
         "pub_all", "post_add", "post_pub", "post_list", "post_rec",
-        "admin_uptime",
-        "admin_ban_user", "admin_unban_user",
+        "post_clear", "finish_posts",
+        # أدمن عام
+        "admin_uptime", "admin_ban_user", "admin_unban_user",
+        "admin_users", "admin_banned", "admin_unban_all",
+        "admin_channels", "admin_banned_ch", "admin_activate_ch",
+        "admin_groups", "admin_banned_gr", "admin_unban_gr",
+        "admin_add_admin", "admin_rem_admin", "admin_list_admins",
+        "admin_ram", "admin_stats", "admin_metrics",
+        "admin_backup", "admin_restore", "admin_restore_sel",
+        "admin_show_backups", "admin_upload_backup",
+        "admin_send_update", "admin_set_update_ch", "admin_show_update",
+        "admin_force_sub", "admin_set_force", "admin_disable_force",
+        "admin_broadcast", "admin_tickets", "admin_del_tickets",
+        "admin_log_ch", "admin_set_log_ch",
+        "admin_replies", "admin_add_reply", "admin_list_replies", "admin_del_reply",
+        "admin_banned_words", "admin_add_banned", "admin_list_banned", "admin_rem_banned",
+        "admin_create_contest", "admin_declare_winner",
+        "admin_export_replies", "admin_import_replies", "admin_import_github",
+        "admin_refresh_cache", "admin_invoices", "admin_payment_logs",
+        "admin_grant_free", "admin_del_contest",
     }
 
+    # ✅ v7.7.2: ~40 نص جديد
     _default_texts = {
         "back": "🔙 رجوع",
         "main": "🌿 الرئيسية",
+        "cancel": "❌ إلغاء",
         "add_group_button": "➕ أضف البوت لمجموعة",
         "security_button": "⚙️ أمان {name}",
         "ch_add": "➕ إضافة قناة",
+        "ch_list": "📡 قنواتي",
+        "ch_stats": "📊 إحصائيات",
+        "ch_del": "🗑️ حذف",
+        "ch_sel": "📌 اختيار",
+        "sched_btn": "📅 الجدولة",
+        "groups": "👥 مجموعاتي",
+        "post_add": "📥 إضافة منشورات",
+        "post_pub": "📤 نشر منشور",
+        "post_list": "📋 منشوراتي",
+        "post_rec": "♻️ إعادة التدوير",
+        "post_del": "🗑️ حذف منشور",
+        "post_clear": "🧹 مسح الكل",
+        "pub_all": "📤 نشر الكل",
+        "finish_posts": "✅ إنهاء",
+        "settings": "⚙️ الإعدادات",
+        "toggle_auto": "📤 النشر التلقائي",
+        "toggle_rec": "♻️ إعادة التدوير",
+        "plans": "💎 الباقات",
+        "subscribe": "💎 اشتراك",
+        "gift_plans": "🎁 شراء كود هدية",
+        "redeem_gift": "🎟️ استخدام كود هدية",
+        "support": "📞 دعم فني",
+        "support_ticket": "📝 تذكرة دعم",
+        "developer": "👨‍💻 المطور",
+        "help": "📚 مساعدة",
+        "language": "🌐 اللغة",
+        "trial": "🎁 تجربة مجانية",
+        "admin_panel_btn": "👑 لوحة الأدمن",
+
+        # security — أزرار
         "sec_links": "🔗 روابط",
         "sec_mentions": "👤 منشن",
         "sec_slow": "🐌 بطيء",
+        "sec_slow_mode_seconds": "⏱️ مدة بطيء",
         "sec_flood": "🌊 فيضان",
         "sec_video": "🎬 فيديو",
         "sec_audio": "🎤 صوت",
@@ -643,34 +699,53 @@ class KeyboardFactory:
         "sec_game": "🎮 لعبة",
         "sec_voice": "🎤 صوتي",
         "sec_videonote": "🎥 فيديو نوت",
-        "sec_banned_words": "🚫 كلمات",
+        "sec_banned_words": "🚫 كلمات محظورة",
+        "sec_toggle_banned_words": "✅ تفعيل الحذف / ❌ تعطيل الحذف",
         "sec_welcome": "🎯 ترحيب",
+        "sec_welcome_text": "📝 نص ترحيب",
         "sec_goodbye": "👋 وداع",
+        "sec_goodbye_text": "📝 نص وداع",
         "sec_night": "🌙 ليلي",
-        "sec_approve_join": "✅ موافقة",
-        "sec_reject_join": "❌ رفض",
+        "sec_approve_join": "✅ موافقة الانضمام",
+        "sec_reject_join": "❌ رفض الانضمام",
         "sec_nsfw": "🔞 NSFW",
-        "sec_maxlen": "📏 الحد",
+        "sec_maxlen": "📏 الحد الأقصى للطول",
         "sec_warn": "⚠️ تحذيرات",
-        "sec_penalty": "🚫 عقوبات",
-        "sec_del_pen": "🗑️ عقوبة الحذف",
-        "sec_adv_act": "🛠️ إجراءات",
-        "sec_act_log": "📋 سجل",
-        "sec_auto_reply_menu": "🤖 ردود تلقائية",
+        "sec_warn_count": "🔢 عدد التحذيرات",
+        "sec_warn_penalty": "⚖️ عقوبة التحذير",
+        "sec_warn_penalty_duration": "⏱️ مدة عقوبة التحذير",
+        "sec_penalty": "⚖️ العقوبات",
+        "sec_del_pen": "⚖️ عقوبة الحذف",
+        "sec_adv_act": "🛠️ إجراءات متقدمة",
+        "sec_act_log": "📜 السجل",
+        "sec_auto_reply_menu": "📝 الردود",
         "sec_antiflood_settings": "🌊 إعدادات الفيضان",
         "sec_night_settings": "🌙 إعدادات الليل",
-        "sec_penalty_durations": "⏱️ المدد",
-        "sec_violation_penalties": "🚨 مخالفات",
+        "sec_penalty_durations": "⏳ مدد العقوبات",
+        "sec_violation_settings": "⚖️ عقوبات المخالفات",
+        "sec_violation_penalties": "🚨 عقوبات المخالفات",
+        "sec_activate_all": "✅ تفعيل الكل",
+        "sec_deactivate_all": "❌ تعطيل الكل",
         "sec_enable_all": "✅ تفعيل الكل",
         "sec_disable_all": "❌ تعطيل الكل",
-        "sec_close": "🔒 إغلاق",
-        "auto_reply_toggle": "🔘 تفعيل/تعطيل",
-        "auto_reply_admins": "👤 للمشرفين",
-        "auto_reply_add": "➕ إضافة",
-        "auto_reply_del": "🗑️ حذف",
-        "auto_reply_list": "📋 القائمة",
-        "auto_reply_stats": "📊 إحصائيات",
-        "auto_reply_reset": "🔄 إعادة",
+        "sec_close": "❌ إغلاق",
+        "sec_set_antiflood_messages": "🔢 عدد الرسائل",
+        "sec_set_antiflood_seconds": "⏱️ الثواني",
+        "sec_set_night_start": "🌙 وقت البدء",
+        "sec_set_night_end": "🌙 وقت النهاية",
+        "sec_set_violation_strikes": "📊 عدد المخالفات",
+        "sec_set_violation_duration": "⏱️ مدة عقوبة المخالفة",
+        "sec_antiflood_duration": "⏱️ مدة عقوبة الفيضان",
+        "sec_night_duration": "⏱️ مدة إجراء الليل",
+        "sec_set_antiflood_penalty": "🚫 نوع عقوبة الفيضان",
+        "sec_set_night_action": "🌙 إجراء الليل",
+        "sec_penalty_none": "🚫 بدون عقوبة",
+        "sec_penalty_ban": "🚫 حظر",
+        "sec_penalty_mute": "🔇 كتم",
+        "sec_penalty_kick": "👢 طرد",
+        "sec_penalty_restrict": "🔒 تقييد",
+
+        # advanced actions
         "act_ban": "🚫 حظر",
         "act_mute": "🔇 كتم",
         "act_warn": "⚠️ تحذير",
@@ -679,24 +754,60 @@ class KeyboardFactory:
         "act_unban": "🔓 فك حظر",
         "act_pin": "📌 تثبيت",
         "act_log": "📋 سجل",
+
+        # banned words
+        "ban_add": "➕ إضافة كلمة",
+        "ban_list": "📋 قائمة الكلمات",
+        "ban_rem": "🗑️ حذف كلمة",
+
+        # penalty
         "pen_ban": "🚫 حظر",
         "pen_mute": "🔇 كتم",
         "pen_kick": "👢 طرد",
         "pen_warn": "⚠️ تحذير",
-        "ban_add": "➕ إضافة",
-        "ban_list": "📋 القائمة",
-        "ban_rem": "🗑️ حذف",
-        "buy_sub_1": "1 يوم ⭐",
-        "buy_sub_7": "7 أيام ⭐",
-        "buy_sub_30": "30 يوم ⭐",
-        "buy_sub_90": "90 يوم ⭐",
-        "buy_sub_365": "365 يوم ⭐",
-        "gift_plans": "🎁 الهدايا",
-        "redeem_gift": "🎟️ استبدال",
-        "panel_close": "🔒 إغلاق",
-        "sec_links_on": "🔗 روابط ✅",
-        "admin_ban_user": "🚫 حظر مستخدم",
-        "admin_unban_user": "✅ فك حظر مستخدم",
+
+        # auto-reply
+        "auto_reply": "📝 الردود التلقائية",
+        "auto_reply_toggle": "🔄 تشغيل/إيقاف",
+        "auto_reply_admins": "👤 للمشرفين فقط",
+        "auto_reply_add": "➕ إضافة رد",
+        "auto_reply_del": "🗑️ حذف رد",
+        "auto_reply_list": "📋 قائمة الردود",
+        "auto_reply_stats": "📊 إحصائيات",
+        "auto_reply_reset": "🗑️ حذف الكل",
+        "auto_reply_menu": "📝 الردود التلقائية",
+
+        # panel
+        "panel_lock": "🔒 قفل المجموعة",
+        "panel_unlock": "🔓 فتح المجموعة",
+        "panel_close": "❌ إغلاق اللوحة",
+
+        # schedule
+        "sched_min": "⏱️ بالدقائق",
+        "sched_hour": "🕐 بالساعات",
+        "sched_day": "📅 بالأيام",
+        "sched_time": "🕒 وقت محدد",
+
+        # reference
+        "referral": "🔗 الإحالات",
+        "ref_claim": "🎁 صرف المكافأة",
+        "ref_list": "📋 قائمة المُحالين",
+        "reminder": "⏰ التذكيرات",
+        "rem_sub": "🔔 تذكير الاشتراك",
+        "rem_daily": "📊 التقرير اليومي",
+        "rem_weekly": "📈 التقرير الأسبوعي",
+        "rem_days": "📅 عدد الأيام",
+        "translation": "🌐 الترجمة",
+        "trans_off": "❌ إيقاف الترجمة",
+        "invoices": "🧾 فواتيري",
+        "contests": "🏆 المسابقات",
+        "contest_winners": "🏆 الفائزون",
+        "contest_join": "✍️ المشاركة",
+        "buy_sub_1": "🗓️ يوم واحد",
+        "buy_sub_7": "🗓️ أسبوع",
+        "buy_sub_30": "🗓️ شهر",
+        "buy_sub_90": "🗓️ 3 أشهر",
+        "buy_sub_365": "🗓️ سنة",
     }
 
     @classmethod
@@ -714,21 +825,19 @@ class KeyboardFactory:
                 return config
         except FileNotFoundError:
             if lang != cls._default_lang:
-                logger.warning(f"⚠️ ملف buttons_config_{lang}.json غير موجود، سيتم استخدام اللغة الافتراضية")
+                logger.warning(f"⚠️ buttons_config_{lang}.json غير موجود، الافتراضية")
                 return cls._load_config_for_lang(cls._default_lang)
-            else:
-                logger.warning("⚠️ buttons_config_ar.json غير موجود، سيتم استخدام إعدادات افتراضية")
-                default_config = {"texts": cls._default_texts, "menus": {}}
-                cls._configs[cls._default_lang] = default_config
-                return default_config
+            logger.warning("⚠️ buttons_config_ar.json غير موجود، استخدام افتراضية")
+            default_config = {"texts": cls._default_texts, "menus": {}}
+            cls._configs[cls._default_lang] = default_config
+            return default_config
         except Exception as e:
             logger.error(f"❌ خطأ في قراءة buttons_config_{lang}.json: {e}")
             if lang != cls._default_lang:
                 return cls._load_config_for_lang(cls._default_lang)
-            else:
-                default_config = {"texts": cls._default_texts, "menus": {}}
-                cls._configs[cls._default_lang] = default_config
-                return default_config
+            default_config = {"texts": cls._default_texts, "menus": {}}
+            cls._configs[cls._default_lang] = default_config
+            return default_config
 
     @classmethod
     def load_config(cls):
@@ -754,63 +863,12 @@ class KeyboardFactory:
         return config.get("menus", {}).get(menu_name, {}).get("rows", [])
 
     @classmethod
-    def build(cls, menu_name: str, chat_id: int = None, extra_data: Dict = None, lang: str = None) -> InlineKeyboardMarkup:
+    def build(cls, menu_name: str, chat_id: int = None, extra_data: Dict = None,
+              lang: str = None) -> InlineKeyboardMarkup:
         rows = cls.get_menu(menu_name, lang)
 
         if not rows:
-            default_menus = {
-                "banned_words": [["ban_add", "ban_list"], ["ban_rem"], ["back"]],
-                "auto_reply_manage": [
-                    ["auto_reply_toggle", "auto_reply_admins"],
-                    ["auto_reply_add", "auto_reply_del"],
-                    ["auto_reply_list", "auto_reply_stats"],
-                    ["auto_reply_reset"], ["back"]
-                ],
-                "auto_reply": [
-                    ["auto_reply_toggle", "auto_reply_admins"],
-                    ["auto_reply_add", "auto_reply_del"],
-                    ["auto_reply_list", "auto_reply_stats"],
-                    ["auto_reply_reset"], ["back"]
-                ],
-                "security": [
-                    ["sec_links", "sec_mentions", "sec_forward"],
-                    ["sec_video", "sec_audio", "sec_anim"],
-                    ["sec_doc", "sec_sticker", "sec_service"],
-                    ["sec_poll", "sec_game", "sec_videonote"],
-                    ["sec_flood", "sec_slow", "sec_night"],
-                    ["sec_welcome", "sec_goodbye"],
-                    ["sec_approve_join", "sec_reject_join"],
-                    ["sec_banned_words", "sec_nsfw"],
-                    ["sec_maxlen", "sec_warn"],
-                    ["sec_violation_penalties"],
-                    ["sec_penalty", "sec_del_pen"],
-                    ["sec_penalty_durations"],
-                    ["sec_adv_act", "sec_act_log"],
-                    ["sec_auto_reply_menu"],
-                    ["sec_antiflood_settings", "sec_night_settings"],
-                    ["sec_enable_all", "sec_disable_all"],
-                    ["sec_close"]
-                ],
-                "penalty": [["pen_ban", "pen_mute"], ["pen_kick", "pen_warn"], ["back"]],
-                "advanced_actions": [
-                    ["act_ban", "act_mute"], ["act_warn", "act_kick"],
-                    ["act_restrict", "act_unban"], ["act_pin"], ["act_log"], ["back"]
-                ],
-                "violation_penalties": [["sec_set_violation_strikes", "sec_set_violation_duration"], ["back"]],
-                "settings": [["toggle_auto", "toggle_rec"], ["reminder", "translation"], ["referral", "invoices"], ["back"]],
-                "plans": [["buy_sub_1", "buy_sub_7"], ["buy_sub_30", "buy_sub_90"], ["buy_sub_365"], ["gift_plans", "redeem_gift"], ["back"]],
-                "reminder": [["rem_sub", "rem_daily"], ["rem_weekly"], ["rem_days"], ["back"]],
-                "translation": [["lang_ar", "lang_en"], ["trans_off"], ["back"]],
-                "channel_settings": [["sched_min", "sched_hour"], ["sched_day", "sched_time"], ["back"]],
-                "admin": [
-                    ["admin_users", "admin_stats"], ["admin_banned", "admin_unban_all"],
-                    ["admin_channels", "admin_groups"],
-                    ["admin_ban_user", "admin_unban_user"],
-                    ["admin_grant_free", "admin_add_admin"],
-                    ["admin_broadcast", "admin_invoices"], ["admin_backup", "admin_restore"],
-                    ["admin_ram", "admin_metrics"], ["back"]
-                ]
-            }
+            default_menus = cls._get_default_menus()
             if menu_name in default_menus:
                 rows = default_menus[menu_name]
             else:
@@ -840,6 +898,156 @@ class KeyboardFactory:
         return InlineKeyboardMarkup(keyboard)
 
     @classmethod
+    def _get_default_menus(cls) -> Dict[str, List[List[str]]]:
+        """✅ v7.7.2: القوائم الافتراضية — محدّثة مع admin_panel + security كاملة."""
+        return {
+            "main_menu": [
+                ["ch_list", "groups"], ["post_add", "post_pub"],
+                ["post_list", "post_rec"], ["pub_all"],
+                ["plans", "subscribe"], ["gift_plans", "redeem_gift"],
+                ["support", "developer"], ["help", "language"],
+                ["trial", "contests"], ["settings"],
+            ],
+            "settings": [
+                ["toggle_auto", "toggle_rec"],
+                ["translation", "reminder"],
+                ["referral", "invoices"],
+                ["back"],
+            ],
+            "plans": [
+                ["buy_sub_1", "buy_sub_7"], ["buy_sub_30", "buy_sub_90"],
+                ["buy_sub_365"], ["gift_plans", "redeem_gift"], ["back"],
+            ],
+            "support": [["support_ticket"], ["back"]],
+            "reminder": [
+                ["rem_sub", "rem_daily"], ["rem_weekly", "rem_days"], ["back"],
+            ],
+            "translation": [["trans_off"], ["back"]],
+            "referral": [["ref_claim", "ref_list"], ["back"]],
+            "contests": [["contest_winners"], ["back"]],
+
+            # ✅ v7.7.2: security menu محدّث
+            "security": [
+                ["sec_links", "sec_mentions", "sec_forward"],
+                ["sec_video", "sec_audio", "sec_anim"],
+                ["sec_doc", "sec_sticker", "sec_service"],
+                ["sec_poll", "sec_game", "sec_videonote"],
+                ["sec_flood", "sec_slow", "sec_night"],
+                ["sec_slow_mode_seconds"],
+                ["sec_welcome", "sec_goodbye"],
+                ["sec_welcome_text", "sec_goodbye_text"],
+                ["sec_approve_join", "sec_reject_join"],
+                ["sec_banned_words", "sec_nsfw"],
+                ["sec_maxlen", "sec_warn"],
+                ["sec_warn_count"],
+                ["sec_warn_penalty", "sec_warn_penalty_duration"],
+                ["sec_violation_penalties"],
+                ["sec_penalty", "sec_del_pen"],
+                ["sec_penalty_durations"],
+                ["sec_adv_act", "sec_act_log"],
+                ["sec_auto_reply_menu"],
+                ["sec_antiflood_settings", "sec_night_settings"],
+                ["sec_enable_all", "sec_disable_all"],
+                ["sec_close"],
+            ],
+
+            "banned_words": [
+                ["ban_add", "ban_list"], ["ban_rem"],
+                ["sec_toggle_banned_words"], ["back"],
+            ],
+            "penalty": [
+                ["pen_ban", "pen_mute"], ["pen_kick", "pen_warn"], ["back"],
+            ],
+            "advanced_actions": [
+                ["act_ban", "act_mute"], ["act_warn", "act_kick"],
+                ["act_restrict", "act_unban"], ["act_pin"], ["act_log"],
+                ["back"],
+            ],
+            "auto_reply": [
+                ["auto_reply_toggle", "auto_reply_admins"],
+                ["auto_reply_add", "auto_reply_del"],
+                ["auto_reply_list", "auto_reply_stats"],
+                ["auto_reply_reset"], ["back"],
+            ],
+            "auto_reply_manage": [
+                ["auto_reply_toggle", "auto_reply_admins"],
+                ["auto_reply_add", "auto_reply_del"],
+                ["auto_reply_list", "auto_reply_stats"],
+                ["auto_reply_reset"], ["back"],
+            ],
+            "panel": [["panel_lock", "panel_unlock"], ["panel_close"]],
+            "channel_settings": [
+                ["sched_min", "sched_hour"],
+                ["sched_day", "sched_time"],
+                ["back"],
+            ],
+            "antiflood_settings": [
+                ["sec_set_antiflood_messages", "sec_set_antiflood_seconds"],
+                ["sec_set_antiflood_penalty"],
+                ["sec_antiflood_duration"],
+                ["back"],
+            ],
+            "night_settings": [
+                ["sec_set_night_start", "sec_set_night_end"],
+                ["sec_set_night_action"],
+                ["sec_night_duration"],
+                ["back"],
+            ],
+            "violation_penalties": [
+                ["sec_set_violation_strikes", "sec_set_violation_duration"],
+                ["back"],
+            ],
+
+            # ✅ v7.7.2: admin_panel (كان مفقوداً)
+            "admin_panel": [
+                ["admin_users", "admin_banned"], ["admin_unban_all"],
+                ["admin_ban_user", "admin_unban_user"],
+                ["admin_channels", "admin_banned_ch"],
+                ["admin_activate_ch"],
+                ["admin_groups", "admin_banned_gr"],
+                ["admin_unban_gr"],
+                ["admin_add_admin", "admin_rem_admin"],
+                ["admin_list_admins"],
+                ["admin_ram", "admin_stats"],
+                ["admin_uptime"],
+                ["admin_metrics"],
+                ["admin_backup", "admin_restore"],
+                ["admin_upload_backup", "admin_show_backups"],
+                ["admin_send_update", "admin_set_update_ch"],
+                ["admin_show_update"],
+                ["admin_force_sub", "admin_set_force"],
+                ["admin_disable_force"],
+                ["admin_broadcast"],
+                ["admin_tickets", "admin_del_tickets"],
+                ["admin_log_ch", "admin_set_log_ch"],
+                ["admin_replies"],
+                ["admin_add_reply", "admin_list_replies"],
+                ["admin_del_reply"],
+                ["admin_banned_words", "admin_add_banned"],
+                ["admin_list_banned", "admin_rem_banned"],
+                ["admin_create_contest", "admin_declare_winner"],
+                ["admin_export_replies", "admin_import_replies"],
+                ["admin_import_github"],
+                ["admin_refresh_cache"],
+                ["admin_invoices", "admin_payment_logs"],
+                ["admin_grant_free"],
+                ["back"],
+            ],
+            # alias للتوافق
+            "admin": [
+                ["admin_users", "admin_banned"], ["admin_unban_all"],
+                ["admin_channels", "admin_groups"],
+                ["admin_ban_user", "admin_unban_user"],
+                ["admin_grant_free", "admin_add_admin"],
+                ["admin_broadcast", "admin_invoices"],
+                ["admin_backup", "admin_restore"],
+                ["admin_ram", "admin_metrics"], ["back"],
+            ],
+        }
+
+    # ─── status icons ───────────────────────────────────────────────
+
+    @classmethod
     def _status_icon(cls, value: bool) -> str:
         return "✅" if value else "❌"
 
@@ -862,20 +1070,16 @@ class KeyboardFactory:
         if seconds < 86400:
             h = seconds // 3600
             m = (seconds % 3600) // 60
-            if m == 0:
-                return f"{h}س"
-            return f"{h}س{m}د"
+            return f"{h}س" if m == 0 else f"{h}س{m}د"
         if seconds < 2592000:
             return f"{seconds // 86400}ي"
         return f"{seconds // 2592000}ش"
 
-    # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.7.1: _get_security_stats — متوازي + سريع
-    # ═════════════════════════════════════════════════════════════════
+    # ─── security stats ─────────────────────────────────────────────
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
-        """🆕 v7.7.1: إحصائيات سريعة ومتوازية + بدون أخطاء."""
+        """✅ v7.7.1: إحصائيات سريعة ومتوازية + بدون أخطاء."""
         stats = {
             'penalties_today': 0, 'mutes_today': 0, 'bans_today': 0,
             'kicks_today': 0, 'warns_today': 0,
@@ -898,8 +1102,8 @@ class KeyboardFactory:
                 except Exception:
                     return default
 
-            # === تنفيذ متوازي — 6 استعلامات ===
-            penalties_row, deleted_row, warns_row, words_row, replies_row, viols_row = await asyncio.gather(
+            (penalties_row, deleted_row, warns_row,
+             words_row, replies_row, viols_row) = await asyncio.gather(
                 safe_fetch(
                     "SELECT "
                     "  SUM(CASE WHEN penalty_type='mute' THEN 1 ELSE 0 END) as mutes, "
@@ -922,23 +1126,15 @@ class KeyboardFactory:
                     "  AND action LIKE 'violation_%'",
                     (chat_id, today_start)
                 ),
-                safe_fetch(
-                    "SELECT COUNT(*) as cnt FROM user_warnings WHERE chat_id = ?",
-                    (chat_id,)
-                ),
-                safe_fetch(
-                    "SELECT COUNT(*) as cnt FROM banned_words WHERE chat_id = ?",
-                    (chat_id,)
-                ),
+                safe_fetch("SELECT COUNT(*) as cnt FROM user_warnings WHERE chat_id = ?", (chat_id,)),
+                safe_fetch("SELECT COUNT(*) as cnt FROM banned_words WHERE chat_id = ?", (chat_id,)),
                 safe_fetch(
                     "SELECT COUNT(*) as cnt FROM auto_replies "
-                    "WHERE chat_id = ? AND is_active = 1",
-                    (chat_id,)
+                    "WHERE chat_id = ? AND is_active = 1", (chat_id,)
                 ),
                 safe_fetch(
                     "SELECT SUM(violation_count) as total FROM user_violations "
-                    "WHERE chat_id = ?",
-                    (chat_id,)
+                    "WHERE chat_id = ?", (chat_id,)
                 ),
                 return_exceptions=True,
             )
@@ -949,7 +1145,6 @@ class KeyboardFactory:
                 stats['kicks_today'] = penalties_row.get('kicks', 0) or 0
                 stats['warns_today'] = penalties_row.get('warns', 0) or 0
                 stats['penalties_today'] = penalties_row.get('total', 0) or 0
-
             if isinstance(deleted_row, dict):
                 stats['photos_deleted'] = deleted_row.get('photos', 0) or 0
                 stats['videos_deleted'] = deleted_row.get('videos', 0) or 0
@@ -957,16 +1152,12 @@ class KeyboardFactory:
                 stats['files_deleted'] = deleted_row.get('files', 0) or 0
                 stats['links_deleted'] = deleted_row.get('links', 0) or 0
                 stats['forwards_deleted'] = deleted_row.get('forwards', 0) or 0
-
             if isinstance(warns_row, dict):
                 stats['active_warnings'] = warns_row.get('cnt', 0) or 0
-
             if isinstance(words_row, dict):
                 stats['banned_words'] = words_row.get('cnt', 0) or 0
-
             if isinstance(replies_row, dict):
                 stats['auto_replies'] = replies_row.get('cnt', 0) or 0
-
             if isinstance(viols_row, dict):
                 stats['total_violations'] = viols_row.get('total', 0) or 0
 
@@ -974,10 +1165,6 @@ class KeyboardFactory:
             logger.debug(f"_get_security_stats: {e}")
 
         return stats
-
-    # ═════════════════════════════════════════════════════════════════
-    # _format_security_text
-    # ═════════════════════════════════════════════════════════════════
 
     @classmethod
     def _format_security_text(cls, settings: dict, stats: dict = None) -> str:
@@ -1108,7 +1295,8 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
         lock = _banned_words_locks[chat_id]
         async with lock:
             now = time.time()
-            if chat_id in _banned_words_cache and (now - _banned_words_cache_time.get(chat_id, 0)) < _BANNED_WORDS_CACHE_TTL:
+            if chat_id in _banned_words_cache and \
+               (now - _banned_words_cache_time.get(chat_id, 0)) < _BANNED_WORDS_CACHE_TTL:
                 return _banned_words_cache[chat_id]
             try:
                 local_words = await DB.get_banned_words(chat_id) or []
@@ -1163,22 +1351,17 @@ async def get_min_publish_interval() -> int:
         return CONFIG.MIN_PUBLISH_INTERVAL
 
 # =====================================================================
-# 11. دوال الصلاحيات
+# 11. دوال الصلاحيات (✅ v7.7.2: TTL=30s + int coercion)
 # =====================================================================
 
+# ✅ v7.7.2: TTL من 600s → 30s. كان 10 دقائق، الآن 30 ثانية.
 _auth_cache = TTLCache(
     maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 2000),
-    ttl=600,
+    ttl=30,
 )
 
-async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    if user_id == CONFIG.PRIMARY_OWNER_ID:
-        return True
-    cache_key = f"auth_{chat_id}_{user_id}"
-    cached = _auth_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    authorized = False
+async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
+    """الفحص الفعلي بدون كاش (DB + Telegram API)."""
     try:
         row = await DB.fetchone("""
             SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?
@@ -1189,26 +1372,51 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
             LIMIT 1
         """, (chat_id, user_id, chat_id, user_id, chat_id, user_id, user_id))
         if row is not None:
-            authorized = True
+            return True
     except Exception as e:
         logger.debug(f"DB auth check failed: {e}")
-    if not authorized:
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            if member.status in ('administrator', 'creator'):
-                authorized = True
-        except Exception as e:
-            logger.debug(f"Telegram API auth check failed: {e}")
+
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        if member.status in ('administrator', 'creator'):
+            return True
+    except Exception as e:
+        logger.debug(f"Telegram API auth check failed: {e}")
+
+    return False
+
+async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    # ✅ v7.7.2: int coercion لتفادي TypeError عند مقارنة نص بـ int
+    try:
+        primary_id = int(CONFIG.PRIMARY_OWNER_ID)
+    except (TypeError, ValueError, AttributeError):
+        primary_id = None
+    if primary_id is not None and user_id == primary_id:
+        return True
+
+    cache_key = f"auth_{chat_id}_{user_id}"
+    cached = _auth_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    authorized = await _do_auth_check(bot, chat_id, user_id)
     _auth_cache[cache_key] = authorized
     return authorized
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
+    """
+    إبطال كاش الصلاحيات (sync).
+
+    استخدم هذا بعد أي تغيير في المشرفين:
+        invalidate_auth_cache(chat_id=..., user_id=...)
+    """
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
         elif chat_id:
+            prefix = f"auth_{chat_id}_"
             for k in list(_auth_cache.keys()):
-                if k.startswith(f"auth_{chat_id}_"):
+                if k.startswith(prefix):
                     _auth_cache.pop(k, None)
         else:
             _auth_cache.clear()
@@ -1231,7 +1439,8 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 # 12. إرسال آمن
 # =====================================================================
 
-async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, reply_markup=None, **kwargs):
+async def _send_media(bot, chat_id, media_type, media_file_id,
+                      caption=None, reply_markup=None, **kwargs):
     if media_type == 'photo':
         return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
     elif media_type == 'video':
@@ -1260,8 +1469,12 @@ async def _send_media(bot, chat_id, media_type, media_file_id, caption=None, rep
     else:
         return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
 
-async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = None, **kwargs):
-    if not text and not any(k in kwargs for k in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']):
+async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
+                    parse_mode: str = None, **kwargs):
+    if not text and not any(
+        k in kwargs for k in ['photo', 'video', 'document', 'audio',
+                              'voice', 'animation', 'sticker', 'video_note']
+    ):
         return None
     try:
         await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=2.0)
@@ -1270,7 +1483,8 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
     media_type = None
     media_file_id = None
-    for mt in ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'video_note']:
+    for mt in ['photo', 'video', 'document', 'audio', 'voice',
+               'animation', 'sticker', 'video_note']:
         if mt in kwargs:
             media_type = mt
             media_file_id = kwargs.pop(mt)
@@ -1278,17 +1492,25 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
     caption_text = text[:1024] if media_type else text
     try:
         if media_type:
-            return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+            return await _send_media(bot, chat_id, media_type, media_file_id,
+                                     caption=caption_text or None,
+                                     reply_markup=reply_markup, **kwargs)
         else:
-            return await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+            return await bot.send_message(chat_id=chat_id, text=text,
+                                          reply_markup=reply_markup,
+                                          parse_mode=parse_mode, **kwargs)
     except TimedOut:
         logger.warning("⚠️ Timed out، محاولة إعادة الإرسال...")
         try:
             await asyncio.sleep(1)
             if media_type:
-                return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+                return await _send_media(bot, chat_id, media_type, media_file_id,
+                                         caption=caption_text or None,
+                                         reply_markup=reply_markup, **kwargs)
             else:
-                return await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+                return await bot.send_message(chat_id=chat_id, text=text,
+                                              reply_markup=reply_markup,
+                                              parse_mode=parse_mode, **kwargs)
         except Exception as e2:
             logger.error(f"❌ فشل الإرسال بعد المحاولة الثانية: {e2}")
             return None
@@ -1297,9 +1519,13 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None, parse_mode:
         if "can't parse entities" in error_msg or "parse" in error_msg:
             try:
                 if media_type:
-                    return await _send_media(bot, chat_id, media_type, media_file_id, caption=caption_text or None, reply_markup=reply_markup, **kwargs)
+                    return await _send_media(bot, chat_id, media_type, media_file_id,
+                                             caption=caption_text or None,
+                                             reply_markup=reply_markup, **kwargs)
                 else:
-                    return await bot.send_message(chat_id=chat_id, text=text[:4096], reply_markup=reply_markup, parse_mode=None, **kwargs)
+                    return await bot.send_message(chat_id=chat_id, text=text[:4096],
+                                                  reply_markup=reply_markup,
+                                                  parse_mode=None, **kwargs)
             except Exception as e2:
                 logger.error(f"❌ فشل الإرسال النهائي: {e2}")
         return None
@@ -1322,7 +1548,7 @@ def get_ram_usage() -> dict:
         return {'total': 0, 'used': 0, 'percent': 0}
 
 # =====================================================================
-# 13. دوال حظر/فك حظر المستخدمين
+# 13. دوال حظر/فك حظر المستخدمين (✅ v7.7.2: invalidate_auth_cache أيضاً)
 # =====================================================================
 
 async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
@@ -1348,8 +1574,10 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
                     (user_id,)
                 )
         with suppress(Exception):
-            from cache import invalidate_user_cache
-            await invalidate_user_cache(user_id)
+            from cache import invalidate_user_cache as _iuc
+            await _iuc(user_id)
+        # ✅ v7.7.2: إبطال كاش الصلاحيات أيضاً
+        invalidate_auth_cache(user_id=user_id)
         return True, f"✅ تم حظر المستخدم: {user_id}"
     except Exception as e:
         logger.error(f"❌ ban_user_by_id({user_id}): {e}", exc_info=True)
@@ -1363,8 +1591,10 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
             return False, f"⚠️ المستخدم {user_id} غير موجود"
         await DB.execute("UPDATE users SET banned=0 WHERE user_id=?", (user_id,))
         with suppress(Exception):
-            from cache import invalidate_user_cache
-            await invalidate_user_cache(user_id)
+            from cache import invalidate_user_cache as _iuc
+            await _iuc(user_id)
+        # ✅ v7.7.2: إبطال كاش الصلاحيات أيضاً
+        invalidate_auth_cache(user_id=user_id)
         return True, f"✅ تم فك حظر المستخدم: {user_id}"
     except Exception as e:
         logger.error(f"❌ unban_user_by_id({user_id}): {e}", exc_info=True)
@@ -1467,10 +1697,15 @@ class PenaltyFactory:
         }
         return strategies.get(penalty_type)
 
-async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str, duration: int = 60,
-                        reason: str = "", moderator: int = None, username: str = "",
-                        first_name: str = "", chat_name: str = "") -> Tuple[bool, str]:
-    if user_id == CONFIG.PRIMARY_OWNER_ID:
+async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
+                        duration: int = 60, reason: str = "", moderator: int = None,
+                        username: str = "", first_name: str = "",
+                        chat_name: str = "") -> Tuple[bool, str]:
+    try:
+        primary_id = int(CONFIG.PRIMARY_OWNER_ID)
+    except (TypeError, ValueError, AttributeError):
+        primary_id = None
+    if primary_id is not None and user_id == primary_id:
         return False, "لا يمكن معاملة المالك"
     if user_id == bot.id:
         return False, "لا يمكن معاملة البوت"
@@ -1521,7 +1756,7 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str, duration:
     return success, msg
 
 # =====================================================================
-# 15. الردود التلقائية
+# 15. الردود التلقائية — helpers
 # =====================================================================
 
 _usage_updates: Dict[Tuple[int, str], int] = {}
@@ -1573,7 +1808,9 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     await asyncio.to_thread(_write)
     return len(data)
 
-async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[Dict]], overwrite: bool = False) -> int:
+async def import_auto_replies(chat_id: int,
+                              file_path_or_data: Union[str, List[Dict]],
+                              overwrite: bool = False) -> int:
     try:
         if isinstance(file_path_or_data, str):
             with open(file_path_or_data, "r", encoding="utf-8") as f:
@@ -1591,7 +1828,8 @@ async def import_auto_replies(chat_id: int, file_path_or_data: Union[str, List[D
             if not keyword or not reply:
                 continue
             if overwrite:
-                await DB.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?", (chat_id, keyword))
+                await DB.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?",
+                                 (chat_id, keyword))
             reply_type = item.get('reply_type', 'text')
             media_id = item.get('media_file_id')
             buttons = item.get('buttons')
@@ -1689,7 +1927,8 @@ class BackgroundTasks:
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
     @staticmethod
-    async def _get_admin_ids_cached(bot, chat_id: int, force_refresh: bool = False) -> List[int]:
+    async def _get_admin_ids_cached(bot, chat_id: int,
+                                     force_refresh: bool = False) -> List[int]:
         now = time.time()
         if not force_refresh and chat_id in BackgroundTasks._group_admins_cache:
             cached_time, cached_ids = BackgroundTasks._group_admins_cache[chat_id]
@@ -1816,7 +2055,8 @@ class BackgroundTasks:
         active_tasks = {}
         while True:
             try:
-                channels = await asyncio.wait_for(DB.get_channels_to_publish(max_channels), timeout=10)
+                channels = await asyncio.wait_for(
+                    DB.get_channels_to_publish(max_channels), timeout=10)
                 if not channels:
                     await asyncio.sleep(60)
                     continue
@@ -1826,9 +2066,12 @@ class BackgroundTasks:
                         continue
                     published_count = ch.get('published_count', 0)
 
-                    async def run_publish(ch=ch, bot=bot, sleep_seconds=sleep_seconds, published_count=published_count):
+                    async def run_publish(ch=ch, bot=bot,
+                                          sleep_seconds=sleep_seconds,
+                                          published_count=published_count):
                         async with publish_semaphore:
-                            await BackgroundTasks._publish_single_channel(bot, ch, sleep_seconds, published_count)
+                            await BackgroundTasks._publish_single_channel(
+                                bot, ch, sleep_seconds, published_count)
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
@@ -1996,8 +2239,11 @@ class BackgroundTasks:
                     nonlocal updated_count
                     async with semaphore:
                         try:
-                            chat_id = (group_row['chat_id'] if isinstance(group_row, dict) else group_row[0])
-                            admin_ids = await BackgroundTasks._get_admin_ids_cached(bot, chat_id)
+                            chat_id = (group_row['chat_id']
+                                       if isinstance(group_row, dict)
+                                       else group_row[0])
+                            admin_ids = await BackgroundTasks._get_admin_ids_cached(
+                                bot, chat_id)
                             if admin_ids:
                                 await DB.sync_group_admins(chat_id, admin_ids)
                                 updated_count += 1
@@ -2005,8 +2251,10 @@ class BackgroundTasks:
                         except Exception as e:
                             logger.debug(f"Sync admins {group_row}: {e}")
 
-                await asyncio.gather(*[sync_one(g) for g in groups], return_exceptions=True)
-                logger.info(f"✅ تم تحديث مشرفي {updated_count}/{len(groups)} مجموعة")
+                await asyncio.gather(*[sync_one(g) for g in groups],
+                                     return_exceptions=True)
+                logger.info(
+                    f"✅ تم تحديث مشرفي {updated_count}/{len(groups)} مجموعة")
             except asyncio.TimeoutError:
                 logger.error("❌ استعلام المجموعات استغرق أكثر من 15 ثانية")
             except Exception as e:
@@ -2028,10 +2276,6 @@ class BackgroundTasks:
         while True:
             await asyncio.sleep(3600)
             try:
-                _security_settings_cache.clear()
-                _security_settings_time.clear()
-                _auto_reply_settings_cache.clear()
-                _auto_reply_settings_time.clear()
                 _banned_words_cache.clear()
                 _banned_words_cache_time.clear()
                 _auto_reply_cache.clear()
@@ -2106,7 +2350,10 @@ class ErrorHandler:
         try:
             error_msg = str(context.error)
             if update:
-                logger.error(f"❌ خطأ في التحديث {update.update_id}: {context.error}", exc_info=True)
+                logger.error(
+                    f"❌ خطأ في التحديث {update.update_id}: {context.error}",
+                    exc_info=True,
+                )
             else:
                 logger.error(f"❌ خطأ: {context.error}", exc_info=True)
             try:
@@ -2117,7 +2364,8 @@ class ErrorHandler:
                                  f"🕐 {TimeUtils.mecca_iso()}")
                     if update and update.effective_user:
                         short_msg += f"\n👤 {update.effective_user.id}"
-                    await safe_send(context.bot, log_channel, short_msg, parse_mode='Markdown')
+                    await safe_send(context.bot, log_channel, short_msg,
+                                    parse_mode='Markdown')
             except Exception:
                 pass
         except Exception:
