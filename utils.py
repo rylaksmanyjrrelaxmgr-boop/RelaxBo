@@ -2,26 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.5.5 — عصري + حظر مستخدمين)
+utils.py - الأدوات المساعدة للبوت (v7.5.6 — توفير مساحة حقيقي)
 =================================================================================
-🆕 v7.5.5 (عصري):
-    ✅ _format_security_text: بطاقات ASCII أنيقة + دوائر ملونة 🟢/⚫
-    ✅ _fmt_dur: صيغة مختصرة للمدد (1س بدل 3600ث)
-    ✅ قائمة أزرار security مضغوطة (3 أزرار/صف)
-    ✅ مفتاح الرموز في الأسفل
+🆕 v7.5.6 (توفير حقيقي):
+    ✅ _format_security_text: 10 أسطر فقط (بدل 34)
+    ✅ رموز بدون مسافات + كلمات مختصرة
+    ✅ إلغاء إطارات ASCII المهدورة
+    ✅ الحفاظ على كل المعلومات
+
+🆕 v7.5.5:
+    ✅ _dot (🟢/⚫)
+    ✅ _fmt_dur (1س بدل 3600ث)
+    ✅ أزرار security مضغوطة
 
 🆕 v7.5.4:
     ✅ CB.ADMIN_BAN_USER / CB.ADMIN_UNBAN_USER
     ✅ UserState.WAIT_BAN_USER_ID / WAIT_UNBAN_USER_ID
     ✅ ban_user_by_id() / unban_user_by_id()
 
-🆕 v7.5.3 (إصلاح بطء الأزرار أثناء النشر):
-    ✅ PUBLISH_RATE_LIMITER: RateLimiter منفصل للنشر
-    ✅ safe_send: timeout قصير (2s)
-    ✅ _do_backup: معالجة آمنة لـ set_setting
+🆕 v7.5.3 (إصلاح بطء الأزرار):
+    ✅ PUBLISH_RATE_LIMITER منفصل
+    ✅ safe_send: timeout 2s
+    ✅ _do_backup آمن
 
 🆕 v7.5.2 (إصلاحات أداء):
-    ✅ is_authorized_in_group: كاش أطول (600s)
+    ✅ is_authorized_in_group: كاش 600s
     ✅ RateLimiter: لا حجب متسلسل
 =================================================================================
 """
@@ -59,7 +64,7 @@ import aiohttp.web as web
 from config import CONFIG, PATHS
 from database import DB
 
-# استيراد اختياري للكاش الموحد (لا يؤثر إن لم يوجد)
+# استيراد اختياري للكاش الموحد
 try:
     from cache import settings_cache, banned_words_cache, auth_cache
     _HAS_UNIFIED_CACHE = True
@@ -194,10 +199,10 @@ class RateLimiter:
                 else:
                     await asyncio.sleep(0.01)
 
-# ✅ v7.5.3: RATE_LIMITER رئيسي
+# ✅ RATE_LIMITER رئيسي
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 
-# ✅ v7.5.3: PUBLISH_RATE_LIMITER منفصل للنشر
+# ✅ PUBLISH_RATE_LIMITER منفصل للنشر
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 
 # =====================================================================
@@ -805,7 +810,7 @@ class KeyboardFactory:
                     ["auto_reply_list", "auto_reply_stats"],
                     ["auto_reply_reset"], ["back"]
                 ],
-                # 🆕 v7.5.5: قائمة أمان مضغوطة (3 أزرار لكل صف)
+                # 🆕 v7.5.6: قائمة أمان مضغوطة (3 أزرار لكل صف)
                 "security": [
                     # 🛡️ الحماية التلقائية (3×4)
                     ["sec_links", "sec_mentions", "sec_forward"],
@@ -891,11 +896,11 @@ class KeyboardFactory:
 
     @classmethod
     def _status_icon(cls, value: bool) -> str:
-        """✅/❌ — للاستخدام العام (يُفضّل dot للأمان)."""
+        """✅/❌ — للاستخدام العام."""
         return "✅" if value else "❌"
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.5.5: دوال مساعدة للعرض العصري
+    # 🆕 v7.5.6: دوال مساعدة للعرض الموفّر
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
@@ -905,7 +910,7 @@ class KeyboardFactory:
 
     @classmethod
     def _fmt_dur(cls, seconds: int) -> str:
-        """🆕 v7.5.5: تحويل الثواني لصيغة مختصرة جداً."""
+        """🆕 v7.5.6: تحويل الثواني لصيغة مختصرة جداً."""
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
@@ -927,127 +932,73 @@ class KeyboardFactory:
         return f"{seconds // 2592000}ش"
 
     # ═════════════════════════════════════════════════════════════════
-    # 🆕 v7.5.5: عرض الأمان العصري (بطاقات ASCII)
+    # 🆕 v7.5.6: عرض الأمان الموفّر (10 أسطر)
     # ═════════════════════════════════════════════════════════════════
 
     @classmethod
     def _format_security_text(cls, settings: dict) -> str:
-        """🆕 v7.5.5: عرض عصري - بطاقات منظمة + مضغوط."""
+        """🆕 v7.5.6: عرض موفّر — 10 أسطر فقط مع كل المعلومات."""
         d = cls._dot
         f = cls._fmt_dur
 
-        # === دوال مساعدة للفصل البصري ===
-        def row(*items) -> str:
-            """ينشئ صفاً بمعلومات متعددة مع فواصل أنيقة."""
-            return "  ⋮  ".join(items)
+        # === الحماية التلقائية (رموز بدون نص) ===
+        links = d(settings.get('delete_links', 0))
+        mentions = d(settings.get('mentions', 0))
+        video = d(settings.get('delete_videos', 0))
+        audio = d(settings.get('delete_voice', 0))
+        stickers = d(settings.get('delete_stickers', 0))
+        files = d(settings.get('delete_documents', 0))
+        anim = d(settings.get('delete_animation', 0))
+        fwd = d(settings.get('delete_forwarded', 0))
+        polls = d(settings.get('delete_polls', 0))
+        service = d(settings.get('delete_service', 0))
+
+        # === الأمان المتقدم ===
+        flood_on = d(settings.get('antiflood_enabled', 0))
+        flood_n = settings.get('antiflood_messages', 5)
+        flood_s = settings.get('antiflood_seconds', 10)
+
+        night_on = d(settings.get('night_mode_enabled', 0))
+        night_a = settings.get('night_mode_start', '—') or '—'
+        night_b = settings.get('night_mode_end', '—') or '—'
+
+        maxlen = settings.get('max_message_length', 0) or '∞'
+        nsfw = d(settings.get('nsfw_enabled', 0))
+
+        # === الترحيب والانضمام ===
+        welcome = d(settings.get('welcome_enabled', 0))
+        goodbye = d(settings.get('goodbye_enabled', 0))
+        approve = d(settings.get('auto_approve_join', 0))
+        reject = d(settings.get('auto_reject_join', 0))
+
+        # === التحذيرات والمخالفات ===
+        warn = d(settings.get('warn_enabled', 0))
+        warn_max = settings.get('max_warnings', 3)
+        viol_s = settings.get('violation_strikes', 3)
+        viol_d = f(settings.get('violation_duration', 60))
+
+        # === المدد ===
+        mute_d = f(settings.get('mute_default_duration', 3600))
+        ban_d = f(settings.get('ban_default_duration', 0))
+        restrict_d = f(settings.get('restrict_default_duration', 1800))
+        warn_pd = f(settings.get('warn_penalty_duration', 3600))
+        flood_pd = f(settings.get('antiflood_penalty_duration', 3600))
+        night_pd = f(settings.get('night_mode_action_duration', 3600))
 
         # ═══════════════════════════════════════
-        # البطاقة 1: الحماية التلقائية
+        # تجميع الرسالة (10 أسطر)
         # ═══════════════════════════════════════
-        protections = [
-            ("🔗 روابط",  settings.get('delete_links', 0)),
-            ("👤 معرفات", settings.get('mentions', 0)),
-            ("🎬 فيديو",  settings.get('delete_videos', 0)),
-            ("🎤 صوتي",   settings.get('delete_voice', 0)),
-            ("🖼️ ملصقات", settings.get('delete_stickers', 0)),
-            ("📄 ملفات",  settings.get('delete_documents', 0)),
-            ("🎞️ متحرك",  settings.get('delete_animation', 0)),
-            ("📨 مُعاد",  settings.get('delete_forwarded', 0)),
-            ("📊 استطلاع", settings.get('delete_polls', 0)),
-            ("🗑️ خدمة",   settings.get('delete_service', 0)),
-        ]
-
-        # بناء صفوف من 3 عناصر لكل صف
-        prot_lines = []
-        for i in range(0, len(protections), 3):
-            chunk = protections[i:i+3]
-            prot_lines.append(
-                "  ".join(f"{name} {d(val)}" for name, val in chunk)
-            )
-
-        # ═══════════════════════════════════════
-        # البطاقة 2: الأمان المتقدم
-        # ═══════════════════════════════════════
-        antiflood_msg = settings.get('antiflood_messages', 5)
-        antiflood_sec = settings.get('antiflood_seconds', 10)
-
-        night_start = settings.get('night_mode_start', '—') or '—'
-        night_end = settings.get('night_mode_end', '—') or '—'
-
-        # ═══════════════════════════════════════
-        # البطاقة 3: الترحيب
-        # ═══════════════════════════════════════
-        welcome_row = row(
-            f"🎯 ترحيب {d(settings.get('welcome_enabled', 0))}",
-            f"👋 وداع {d(settings.get('goodbye_enabled', 0))}",
+        return (
+            f"🔐 <b>الأمان</b>\n"
+            f"🗑️ {links}🔗 {mentions}👤 {video}🎬 {audio}🎤 {stickers}🖼️\n"
+            f"   {files}📄 {anim}🎞️ {fwd}📨 {polls}📊 {service}🗑️\n"
+            f"🌊{flood_on} {flood_n}ر/{flood_s}ث  ⋮  🌙{night_on} {night_a}←{night_b}\n"
+            f"📏{maxlen}  ⋮  🔞{nsfw}  ⋮  ⚠️{warn}({warn_max})  ⋮  🚨{viol_s}/{viol_d}\n"
+            f"🎯{welcome}ترحيب {goodbye}وداع  ⋮  ✅{approve}❌{reject}\n"
+            f"⏱️ 🔇{mute_d}  🚫{ban_d}  🔒{restrict_d}\n"
+            f"   ⚠️{warn_pd}  🌊{flood_pd}  🌙{night_pd}\n"
+            f"<i>🟢مفعّل ⚫معطّل</i>"
         )
-        join_row = row(
-            f"✅ موافقة {d(settings.get('auto_approve_join', 0))}",
-            f"❌ رفض {d(settings.get('auto_reject_join', 0))}",
-        )
-
-        # ═══════════════════════════════════════
-        # البطاقة 4: التحذيرات
-        # ═══════════════════════════════════════
-        warn_row = row(
-            f"⚠️ تحذيرات {d(settings.get('warn_enabled', 0))}",
-            f"🎯 الحد {settings.get('max_warnings', 3)}",
-        )
-        violation_row = row(
-            f"🚨 مخالفات {settings.get('violation_strikes', 3)}",
-            f"⏱️ {f(settings.get('violation_duration', 60))}",
-        )
-
-        # ═══════════════════════════════════════
-        # البطاقة 5: المدد
-        # ═══════════════════════════════════════
-        durations_rows = [
-            row(
-                f"🔇 {f(settings.get('mute_default_duration', 3600))}",
-                f"🚫 {f(settings.get('ban_default_duration', 0))}",
-                f"🔒 {f(settings.get('restrict_default_duration', 1800))}",
-            ),
-            row(
-                f"⚠️ {f(settings.get('warn_penalty_duration', 3600))}",
-                f"🌊 {f(settings.get('antiflood_penalty_duration', 3600))}",
-                f"🌙 {f(settings.get('night_mode_action_duration', 3600))}",
-            ),
-        ]
-
-        # ═══════════════════════════════════════
-        # تجميع الرسالة النهائية
-        # ═══════════════════════════════════════
-        parts = [
-            "🔐 <b>إعدادات الأمان</b>",
-            "",
-            "┌─ 🛡️ <b>الحماية التلقائية</b>",
-            *[f"│  {line}" for line in prot_lines],
-            "└─",
-            "",
-            "┌─ ⚙️ <b>الأمان المتقدم</b>",
-            f"│  🌊 الفيضان {d(settings.get('antiflood_enabled', 0))}  •  {antiflood_msg} رسالة / {antiflood_sec}ث",
-            f"│  🌙 ليلي {d(settings.get('night_mode_enabled', 0))}  •  {night_start} ← {night_end}",
-            f"│  📏 حد {settings.get('max_message_length', 0) or '∞'}  •  🔞 NSFW {d(settings.get('nsfw_enabled', 0))}",
-            "└─",
-            "",
-            "┌─ 👋 <b>الترحيب والانضمام</b>",
-            f"│  {welcome_row}",
-            f"│  {join_row}",
-            "└─",
-            "",
-            "┌─ ⚠️ <b>التحذيرات والمخالفات</b>",
-            f"│  {warn_row}",
-            f"│  {violation_row}",
-            "└─",
-            "",
-            "┌─ ⏱️ <b>مدد العقوبات</b>",
-            *[f"│  {line}" for line in durations_rows],
-            "└─",
-            "",
-            "<i>🟢 مفعّل  •  ⚫ معطّل</i>",
-        ]
-
-        return "\n".join(parts)
 
 # =====================================================================
 # 10. كاش الكلمات المحظورة
