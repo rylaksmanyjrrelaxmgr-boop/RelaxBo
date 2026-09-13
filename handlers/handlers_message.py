@@ -2,20 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.5)
+handlers_message.py - معالجات الرسائل (v7.7.6)
 =====================================================================
+🆕 v7.7.6:
+    ✅ _ensure_lang محسّنة (كاش سريع + timeout قصير)
+    ✅ Logging تشخيصي في handle_private و _handle_adding_posts
+    ✅ حل مشكلة الاستعلام البطيء (3s)
+
 ✅ 60 حالة مستخدم — جميعها مُعالَجة 100%
 ✅ التقاط المنشورات كاملة
 ✅ حظر/فك حظر المستخدمين
 ✅ جميع المدد الافتراضية
 ✅ تحديد الفائز في المسابقات
-
-🆕 v7.7.5:
-    ✅ _handle_penalty_default_duration
-    ✅ _handle_contest_winner
-    ✅ _handle_penalty_mute_duration
-    ✅ _handle_penalty_ban_duration
-    ✅ _handle_penalty_restrict_duration
 =====================================================================
 """
 
@@ -115,18 +113,44 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     except Exception:
         return default
 
+# 🆕 v7.7.6: _ensure_lang محسّنة
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """✅ v7.7.6: كاش سريع + timeout قصير لتفادي البطء."""
+    # 1) من الذاكرة أولاً (أسرع)
     lang = context.user_data.get('lang')
     if lang:
         return lang
+
+    user_id = None
     try:
         user_id = update.effective_user.id if update and update.effective_user else None
-        if user_id:
-            lang = await DB.get_user_language(user_id) or 'ar'
-            context.user_data['lang'] = lang
-            return lang
     except Exception:
         pass
+
+    if user_id:
+        # 2) من الكاش السريع
+        try:
+            from cache import user_cache
+            cached = await user_cache.get(user_id)
+            if cached and cached.get('language'):
+                lang = cached['language']
+                context.user_data['lang'] = lang
+                return lang
+        except Exception:
+            pass
+
+        # 3) من DB مع timeout قصير (لا يتجاوز 2 ثانية)
+        try:
+            lang = await asyncio.wait_for(
+                DB.get_user_language(user_id),
+                timeout=2.0
+            ) or 'ar'
+            context.user_data['lang'] = lang
+            return lang
+        except (asyncio.TimeoutError, Exception):
+            logger.debug(f"⚠️ _ensure_lang timeout for user {user_id}, using 'ar'")
+
+    # 4) الافتراضي
     return 'ar'
 
 async def get_security_settings_cached(chat_id: int) -> dict:
@@ -337,8 +361,19 @@ class MessageHandlers:
         lang = 'ar'
         try:
             user_id = update.effective_user.id
-            lang = await _ensure_lang(update, context)
             state = StateManager.get(user_id)
+
+            # 🆕 v7.7.6: Logging تشخيصي
+            text_preview = ""
+            try:
+                msg = update.effective_message
+                if msg:
+                    text_preview = (msg.text or msg.caption or "")[:40]
+            except Exception:
+                pass
+            logger.info(f"📥 handle_private: user={user_id}, state={state}, text='{text_preview}'")
+
+            lang = await _ensure_lang(update, context)
 
             if state == UserState.WAIT_MOOD:
                 if analyze_sentiment is None:
@@ -365,6 +400,7 @@ class MessageHandlers:
             if handler_name:
                 handler = getattr(MessageHandlers, handler_name, None)
                 if handler:
+                    logger.info(f"🎯 Calling handler: {handler_name}")
                     await handler(update, context)
                 else:
                     logger.warning(f"⚠️ handler غير موجود: {handler_name}")
@@ -456,7 +492,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_penalty_default_duration(update, context):
-        """معالج المدة الافتراضية للعقوبات."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = (context.user_data.get('adv_chat')
@@ -502,7 +537,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_winner(update, context):
-        """معالج اختيار الفائز في مسابقة."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
 
@@ -552,7 +586,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_penalty_mute_duration(update, context):
-        """معالج مدة الكتم الافتراضية."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
@@ -582,7 +615,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_penalty_ban_duration(update, context):
-        """معالج مدة الحظر الافتراضية."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
@@ -612,7 +644,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_penalty_restrict_duration(update, context):
-        """معالج مدة التقييد الافتراضية."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
@@ -965,14 +996,28 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # ✅ إضافة المنشورات
+    # ✅ إضافة المنشورات (مع Logging)
     # =================================================================
 
     @staticmethod
     async def _handle_adding_posts(update, context):
+        # 🆕 v7.7.6: Logging
+        try:
+            msg = update.effective_message
+            logger.info(
+                f"🎯 _handle_adding_posts: user={update.effective_user.id}, "
+                f"text='{(msg.text or msg.caption or '')[:30] if msg else 'NO_MSG'}', "
+                f"has_photo={bool(msg.photo) if msg else False}, "
+                f"has_video={bool(msg.video) if msg else False}"
+            )
+        except Exception:
+            pass
+
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         channel_db_id = await DB.get_active_channel(user_id)
+
+        logger.info(f"🎯 _handle_adding_posts: channel_db_id={channel_db_id}")
 
         if not channel_db_id:
             StateManager.clear(user_id)
@@ -1023,8 +1068,16 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return
 
+        logger.info(f"🎯 saving post: type={media_type}, has_file={bool(media_file_id)}, text_len={len(text)}")
+
         posts = [(text, media_type, media_file_id)]
-        count = await DB.add_posts(user_id, channel_db_id, posts)
+        try:
+            count = await DB.add_posts(user_id, channel_db_id, posts)
+            logger.info(f"🎯 DB.add_posts returned: {count}")
+        except Exception as e:
+            logger.error(f"❌ DB.add_posts failed: {e}", exc_info=True)
+            await safe_send(context.bot, user_id, f"❌ خطأ في الحفظ: {str(e)[:80]}")
+            return
 
         if count > 0:
             msg = await _trans('post_added', lang, "✅ تمت إضافة المنشور")
