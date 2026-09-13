@@ -2,22 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.2)
+handlers_callback.py - المعالج النهائي الكامل (v9.0.3)
 =====================================================================
-✅ v9.0.2 — الملف الكامل بدون اختصار:
-  - كل الـ 90+ إصلاح من v9.0.0
-  - + 11 إصلاح جديد من v9.0.1:
-    1.  sec_maxlen handler
-    2.  sec_act_log handler
-    3.  sec_auto_reply_menu handler
-    4.  act_pin handler في _handle_advanced_actions
-    5.  زر act_pin في _show_advanced_actions
-    6.  import html as _html
-    7.  html.escape(ch_display) في _show_main_menu_inline
-    8.  html.escape في _show_channel_list
-    9.  posts_cache من cache.py
-    10. DB.initialize_db() في admin_restore_file
-    11. تسجيل فشل إلغاء الفاتورة
+✅ v9.0.3 — إصلاح نهائي:
+  - sec_auto_reply_menu: عرض لوحة الردود مباشرة
+    (كان يُستدعي _handle_auto_reply الذي يفشل لأن query.data = "sec_auto_reply_menu"
+     بينما action يُستخرج كـ "sec_menu" → "⚠️ غير معروف")
+
+✅ v9.0.2:
+  - sec_maxlen handler
+  - sec_act_log handler
+  - act_pin handler
+  - HTML escape في القوائم
+  - posts_cache من cache.py
+  - DB.initialize_db() في admin_restore_file
+
+✅ v9.0.0:
+  - كل الإصلاحات الـ 90+ الموثقة سابقاً
 =====================================================================
 """
 
@@ -57,7 +58,6 @@ except ImportError:
         KeyboardFactory, CB, get_ram_usage,
     )
 
-# ✅ #31: fallback نظيف لـ PUBLISH_RATE_LIMITER
 try:
     from utils import PUBLISH_RATE_LIMITER
 except ImportError:
@@ -73,7 +73,6 @@ except ImportError:
                 return False
         PUBLISH_RATE_LIMITER = _NullLimiter()
 
-# ✅ #8: dummy user_cache صريح + posts_cache
 try:
     from cache import user_cache, invalidate_user_cache, posts_cache
 except ImportError:
@@ -122,7 +121,6 @@ ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
 
-# ✅ #80: primary owner محوّل لـ int مرة واحدة
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
@@ -131,7 +129,6 @@ except (TypeError, ValueError, AttributeError):
 ACTIVE_TASKS: weakref.WeakSet = weakref.WeakSet()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
-# ✅ #25: كاش فحص الصلاحيات الأمنية
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 
 _CONTEXT_KEYS_TO_CLEAR = (
@@ -732,7 +729,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ لا توجد قناة نشطة", bot=context.bot)
                 return
 
-            # ✅ v9.0.2: posts_cache من cache.py مباشرة
             if base_data == CB.POST_CLEAR:
                 active = await DB.get_active_channel(user_id)
                 if active:
@@ -867,7 +863,7 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # القائمة الرئيسية — ✅ v9.0.2: HTML escape
+    # القائمة الرئيسية
     # =================================================================
 
     @staticmethod
@@ -902,7 +898,6 @@ class CallbackHandlers:
             if channel_info and isinstance(channel_info, dict):
                 raw_name = channel_info.get('channel_name')
                 if raw_name:
-                    # ✅ v9.0.2: HTML escape لمنع كسر parse_mode='HTML'
                     ch_display = _html.escape(str(raw_name))
 
             sub_text = await _trans('subscription_active', lang, "✅ مفعل") if has_sub else await _trans('subscription_inactive', lang, "❌ غير مفعل")
@@ -945,7 +940,6 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
         try:
-            # ─── رجوع ───────────────────────────────────────────────
             if data in ("sec_close", "grp_close", "security_close", "back_to_groups", "sec_back"):
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
@@ -964,7 +958,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
 
-            # ─── set_warn_count:CHAT_ID:COUNT ───────────────────────
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -982,7 +975,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── POST_CLEAR تأكيد ───────────────────────────────────
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -998,7 +990,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ─── تأكيدات ─────────────────────────────────────────────
             if data.startswith("post_del_confirm:"):
                 post_id = _coerce_int(data.split(":")[-1])
                 kb = InlineKeyboardMarkup([
@@ -1035,7 +1026,6 @@ class CallbackHandlers:
                                 reply_markup=kb, parse_mode='HTML', bot=context.bot)
                 return True
 
-            # ─── set_warn_penalty:TYPE:CHAT_ID ──────────────────────
             if data.startswith("set_warn_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1053,7 +1043,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── set_duration:TYPE:CHAT_ID:SECS ─────────────────────
             if data.startswith("set_duration:"):
                 parts = data.split(":")
                 if len(parts) < 4:
@@ -1079,7 +1068,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty:TYPE:CHAT_ID ───────────────────
             if data.startswith("sec_set_del_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -1100,7 +1088,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
-            # ─── sec_set_del_penalty_duration:CHAT_ID ───────────────
             if data.startswith("sec_set_del_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1113,7 +1100,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'delete_penalty')
                 return True
 
-            # ─── sec_penalty_durations:CHAT_ID ──────────────────────
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1126,7 +1112,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_all_penalty_durations_menu(query, context, chat_id)
                 return True
 
-            # ─── مدد مختلفة ────────────────────────────────────────
             for prefix, action_type in (
                 ("sec_set_mute_duration:", "mute"),
                 ("sec_set_ban_duration:", "ban"),
@@ -1158,7 +1143,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
                 return True
 
-            # ─── sec_penalty_TYPE:CHAT_ID ───────────────────────────
             if data.startswith("sec_penalty_"):
                 parts = data.split(":")
                 if len(parts) < 2:
@@ -1183,7 +1167,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ─── antiflood messages/seconds ─────────────────────────
             for prefix, state, prompt in (
                 ("sec_set_antiflood_messages:", UserState.WAIT_ANTIFLOOD_MESSAGES, "📊 أرسل عدد الرسائل المسموحة:"),
                 ("sec_set_antiflood_seconds:", UserState.WAIT_ANTIFLOOD_SECONDS, "⏱️ أرسل عدد الثواني:"),
@@ -1231,7 +1214,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ─── night start/end ────────────────────────────────────
             for prefix, state, prompt in (
                 ("sec_set_night_start:", UserState.WAIT_NIGHT_START, "🌙 أرسل وقت البدء (HH:MM):"),
                 ("sec_set_night_end:", UserState.WAIT_NIGHT_END, "🌙 أرسل وقت النهاية (HH:MM):"),
@@ -1279,7 +1261,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع إجراء غير صالح", bot=context.bot)
                 return True
 
-            # ─── violation settings ─────────────────────────────────
             if data.startswith("sec_violation_settings:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1335,7 +1316,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ─── الشراء ─────────────────────────────────────────────
             if data.startswith("buy_sub_"):
                 await CallbackHandlers._handle_buy_subscription(update, context, query, user_id, data)
                 return True
@@ -1344,7 +1324,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_buy_gift(update, context, query, user_id, data)
                 return True
 
-            # ─── حذف مجموعة ─────────────────────────────────────────
             if data.startswith("grp_del:"):
                 await CallbackHandlers._handle_group_delete(update, context, query, user_id, data)
                 return True
@@ -1550,7 +1529,6 @@ class CallbackHandlers:
             await safe_delete_message(query)
         except Exception as e:
             logger.error(f"❌ فشل إرسال الفاتورة: {e}")
-            # ✅ v9.0.2: تسجيل فشل إلغاء الفاتورة
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
             except Exception as ce:
@@ -1588,7 +1566,6 @@ class CallbackHandlers:
             await safe_delete_message(query)
         except Exception as e:
             logger.error(f"❌ فشل إرسال فاتورة الهدية: {e}")
-            # ✅ v9.0.2: تسجيل فشل إلغاء الفاتورة
             try:
                 await DB.execute("UPDATE invoices SET status='cancelled' WHERE number=?", (invoice_number,))
             except Exception as ce:
@@ -2047,7 +2024,6 @@ class CallbackHandlers:
             number = _group_number(display_idx)
             st = "✅" if not chd.get('banned') else "🚫"
             raw_name = chd.get('channel_name') or f"قناة {display_idx}"
-            # ✅ v9.0.2: HTML escape
             name = _html.escape(str(raw_name)[:35])
 
             text += f"{st} {number}  {name}\n"
@@ -2119,7 +2095,7 @@ class CallbackHandlers:
         await safe_edit(query, display_text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # =================================================================
-    # معالجات الأمان — ✅ v9.0.2: 3 handlers جديدة
+    # معالجات الأمان — ✅ v9.0.3: sec_auto_reply_menu مُصلَح
     # =================================================================
 
     @staticmethod
@@ -2153,30 +2129,42 @@ class CallbackHandlers:
 
         try:
             # ═══════════════════════════════════════════════════════════
-            # ✅ v9.0.2: 3 handlers كانت مفقودة (كانت تُرجع "⚠️ غير متوفر")
+            # ✅ v9.0.3: sec_auto_reply_menu — عرض لوحة الردود مباشرة
+            # (لا نستدعي _handle_auto_reply لأن query.data يبقى
+            #  "sec_auto_reply_menu:CHAT" و action سيُستخرج كـ "sec_menu")
             # ═══════════════════════════════════════════════════════════
+            if action == "auto_reply_menu":
+                context.user_data['auto_chat'] = chat_id
+                try:
+                    kb = KeyboardFactory.build("auto_reply", chat_id=chat_id, lang=lang)
+                except Exception as e:
+                    logger.error(f"auto_reply_menu build failed: {e}")
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 رجوع", callback_data=f"{CB.GRP_SET}:{chat_id}")]
+                    ])
+                await safe_edit(
+                    query,
+                    "🤖 إعدادات الردود التلقائية:",
+                    reply_markup=kb,
+                    bot=context.bot,
+                )
+                return
 
-            # 1) sec_maxlen → طلب الحد الأقصى
+            # ═══════════════════════════════════════════════════════════
+            # ✅ v9.0.2: sec_maxlen + sec_act_log
+            # ═══════════════════════════════════════════════════════════
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 context.user_data['sec_chat'] = chat_id
                 await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة (0 = بلا حد):", bot=context.bot)
                 return
 
-            # 2) sec_act_log → عرض سجل الإجراءات
             if action == "act_log":
                 await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang)
                 return
 
-            # 3) sec_auto_reply_menu → فتح لوحة الردود التلقائية
-            if action == "auto_reply_menu":
-                context.user_data['auto_chat'] = chat_id
-                await CallbackHandlers._handle_auto_reply(update, context, query, user_id, lang)
-                return
-
             # ═══════════════════════════════════════════════════════════
 
-            # ─── تفعيل/تعطيل الكل ───────────────────────────────────
             if action in ("activate_all", "enable_all", "deactivate_all", "disable_all"):
                 is_activate = action in ("activate_all", "enable_all")
                 confirm_action = "activate_all_confirm" if is_activate else "deactivate_all_confirm"
@@ -2254,7 +2242,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
-            # ─── toggle_map ─────────────────────────────────────────
             toggle_map = {
                 "links": "delete_links", "mentions": "mentions", "slow": "slow_mode",
                 "video": "delete_videos", "audio": "delete_audio",
@@ -2284,7 +2271,6 @@ class CallbackHandlers:
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
-            # ─── warn ───────────────────────────────────────────────
             if action == "warn":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ تفعيل/تعطيل", callback_data=f"sec_warn_toggle:{chat_id}")],
@@ -2572,7 +2558,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_advanced_actions(update, context, query, chat_id, lang):
-        # ✅ v9.0.2: أضفنا زر act_pin
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔴 تعطيل الكل", callback_data=f"sec_deactivate_all:{chat_id}"),
              InlineKeyboardButton("🟢 تفعيل الكل", callback_data=f"sec_activate_all:{chat_id}")],
@@ -2824,7 +2809,6 @@ class CallbackHandlers:
 
                     shutil.copy2(backup_file, PATHS.DB)
 
-                    # ✅ v9.0.2: initialize_db بدل reconnect
                     if db_closed:
                         try:
                             init_fn = getattr(DB, 'initialize_db', None)
@@ -3305,7 +3289,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # الردود التلقائية
+    # الردود التلقائية — تعمل للأزرار auto_reply_*:CHAT
     # =================================================================
 
     @staticmethod
@@ -3314,7 +3298,15 @@ class CallbackHandlers:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
         parts = data.split(":")
-        action = parts[0].replace("auto_reply_", "")
+
+        # ✅ v9.0.3: استخراج action بطريقة صحيحة
+        raw_action = parts[0]
+        if raw_action.startswith("sec_"):
+            raw_action = raw_action[4:]
+        if raw_action.startswith("auto_reply_"):
+            action = raw_action[len("auto_reply_"):]
+        else:
+            action = raw_action
 
         chat_id = None
         if len(parts) >= 2:
@@ -3344,6 +3336,7 @@ class CallbackHandlers:
 
         try:
             if action == "menu":
+                context.user_data['auto_chat'] = chat_id
                 kb = KeyboardFactory.build("auto_reply", chat_id=chat_id, lang=lang)
                 await safe_edit(query, "🤖 إعدادات الردود التلقائية:", reply_markup=kb, bot=context.bot)
                 return
@@ -3489,7 +3482,7 @@ class CallbackHandlers:
         await safe_edit(query, "📅 جدولة القناة", reply_markup=kb, bot=context.bot)
 
     # =================================================================
-    # الإجراءات المتقدمة — ✅ v9.0.2: أضفنا act_pin
+    # الإجراءات المتقدمة
     # =================================================================
 
     @staticmethod
@@ -3545,7 +3538,6 @@ class CallbackHandlers:
                 return
 
             if prefix.startswith("act_"):
-                # ✅ v9.0.2: أضفنا pin
                 user_actions = {
                     "ban": (UserState.WAIT_BAN, "🚫 أرسل معرف المستخدم:"),
                     "mute": (UserState.WAIT_MUTE, "🔇 أرسل معرف المستخدم:"),
