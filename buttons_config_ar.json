@@ -141,7 +141,7 @@
     "sec_menu_advanced": "⚙️ الأمان المتقدم",
     "sec_menu_welcome": "👋 الترحيب",
     "sec_menu_warns": "⚠️ التحذيرات",
-    "sec_menu_penalties": "🚫 العقوبات",
+    "sec_menu_penalties": "⚖️ العقوبات",
     "sec_menu_violations": "🚨 المخالفات",
     "sec_menu_actions": "🛠️ الإجراءات",
     "sec_menu_stats": "📊 الإحصائيات",
@@ -290,8 +290,7 @@
     "security": {
       "rows": [
         ["sec_menu_auto", "sec_menu_advanced"],
-        ["sec_menu_welcome", "sec_menu_warns"],
-        ["sec_menu_penalties", "sec_menu_violations"],
+        ["sec_menu_welcome", "sec_menu_penalties"],
         ["sec_menu_actions", "sec_menu_stats"],
         ["sec_activate_all", "sec_deactivate_all"],
         ["sec_close"]
@@ -300,10 +299,10 @@
     "sec_auto_menu": {
       "rows": [
         ["sec_links", "sec_mentions"],
-        ["sec_video", "sec_audio"],
-        ["sec_anim", "sec_service"],
-        ["sec_doc", "sec_sticker"],
         ["sec_forward", "sec_poll"],
+        ["sec_video", "sec_audio"],
+        ["sec_sticker", "sec_doc"],
+        ["sec_anim", "sec_service"],
         ["sec_game", "sec_voice"],
         ["sec_videonote", "sec_banned_words"],
         ["sec_back_main"]
@@ -326,23 +325,13 @@
         ["sec_back_main"]
       ]
     },
-    "sec_warns_menu": {
+    "sec_penalties_menu": {
       "rows": [
         ["sec_warn", "sec_warn_count"],
         ["sec_warn_penalty", "sec_warn_penalty_duration"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_penalties_menu": {
-      "rows": [
+        ["sec_violation_penalties", "sec_violation_settings"],
         ["sec_penalty", "sec_del_pen"],
         ["sec_penalty_durations"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_violations_menu": {
-      "rows": [
-        ["sec_violation_settings"],
         ["sec_back_main"]
       ]
     },
@@ -350,6 +339,24 @@
       "rows": [
         ["sec_adv_act", "sec_act_log"],
         ["sec_auto_reply_menu"],
+        ["sec_back_main"]
+      ]
+    },
+    "sec_stats_menu": {
+      "rows": [
+        ["sec_back_main"]
+      ]
+    },
+    "sec_warns_menu": {
+      "rows": [
+        ["sec_warn", "sec_warn_count"],
+        ["sec_warn_penalty", "sec_warn_penalty_duration"],
+        ["sec_back_main"]
+      ]
+    },
+    "sec_violations_menu": {
+      "rows": [
+        ["sec_violation_settings"],
         ["sec_back_main"]
       ]
     },
