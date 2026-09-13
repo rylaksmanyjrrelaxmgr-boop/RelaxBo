@@ -2,32 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.23)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.24)
 ================================================================================
+🆕 v7.5.24 (إصلاحات استعادة النسخة الاحتياطية):
+    ✅ DB.reconnect() — method جديد كان مفقوداً
+    ✅ DB.close() — إعادة تعيين _initialized + tasks بشكل كامل
+    ✅ __init__: self.posts_cache = posts_cache
+    ✅ initialize_db() — logs أفضل
+
 🆕 v7.5.23 (إصلاح عدّاد المنشورات):
-    ✅ get_start_data: `unpublished_posts` = للقناة النشطة فقط
-    ✅ get_user_full_data: `unpublished_posts` = للقناة النشطة فقط
-    ✅ حماية ضد active_channel = NULL (استخدام COALESCE)
-    ✅ إضافة حقل `total_unpublished_posts` للعرض الإجمالي (اختياري)
+    ✅ get_start_data: unpublished_posts = للقناة النشطة فقط
+    ✅ get_user_full_data: unpublished_posts = للقناة النشطة فقط
+    ✅ حماية ضد active_channel = NULL عبر COALESCE
 
-🆕 v7.5.22 (ضمان UNIQUE على settings.key):
-    ✅ _create_tables: استدعاء ensure_settings_unique_constraint()
-    ✅ يعمل تلقائياً على PostgreSQL/MySQL (يتجاهل SQLite)
-    ✅ يضمن عمل ON CONFLICT (key) في set_setting
-
-🆕 v7.5.21 (إصلاح register_user + TIMESTAMP):
-    ✅ register_user: استبدال TimeUtils.sql_iso() بـ TimeUtils.utc_now()
-    ✅ register_user (not force): نفس الإصلاح
-    ✅ يمنع خطأ: "expected a datetime.date or datetime.datetime instance, got 'str'"
-
-🆕 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء):
-    ✅ _adapt_params(params, query): لا يحوّل str → datetime
-    ✅ تمرير query إلى كل استدعاءات _adapt_params
-    ✅ get_start_data: استعلام واحد بدل 5
-    ✅ get_user: استعلام واحد موحّد
-    ✅ إزالة copy.deepcopy من مسار الكاش الساخن
-    ✅ TTL أطول للـ lang_* (600s)
-    ✅ PRAGMA wal_autocheckpoint + mmap_size لـ SQLite
+🆕 v7.5.22 (ضمان UNIQUE على settings.key)
+🆕 v7.5.21 (إصلاح register_user + TIMESTAMP)
+🆕 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء)
 ================================================================================
 """
 
@@ -109,7 +99,7 @@ except ImportError:
         MAX_GLOBAL_BANNED_WORDS = 500
 
 # =====================================================================
-# 0.2 استيراد وحدة إنشاء الجداول
+# 0.2 استيراد database_tables
 # =====================================================================
 
 try:
@@ -130,7 +120,7 @@ except ImportError as e:
     TABLES_MODULE_AVAILABLE = False
 
 # =====================================================================
-# 0.2.1-0.2.10 استيراد الـ Mixins
+# 0.2.1-0.2.10 Mixins
 # =====================================================================
 
 try:
@@ -268,7 +258,7 @@ class InternalQueryCache:
 internal_cache = InternalQueryCache(ttl=30, max_size=10000)
 
 # =====================================================================
-# 0.4 SimpleCache الكامل
+# 0.4 SimpleCache
 # =====================================================================
 
 class SimpleCache:
@@ -436,7 +426,7 @@ class SettingsCache(SimpleCache):
     pass
 
 # =====================================================================
-# 0.5 محاولة تحميل cache.py الحقيقي
+# 0.5 cache.py الحقيقي
 # =====================================================================
 
 try:
@@ -468,21 +458,16 @@ except ImportError:
     async def invalidate_user_cache(user_id: int):
         try:
             await user_cache.invalidate(user_id)
-            await internal_cache.invalidate(f"user_{user_id}")
-            await internal_cache.invalidate(f"user_{user_id}_True")
-            await internal_cache.invalidate(f"user_{user_id}_False")
-            await internal_cache.invalidate(f"lang_{user_id}")
-            await internal_cache.invalidate(f"channels_{user_id}")
-            await internal_cache.invalidate(f"groups_{user_id}")
-            await internal_cache.invalidate(f"reminder_settings_{user_id}")
-            await internal_cache.invalidate(f"auto_recycle_{user_id}")
-            await internal_cache.invalidate(f"auto_publish_{user_id}")
-            await internal_cache.invalidate(f"user_settings_batch_{user_id}")
-            await internal_cache.invalidate(f"has_active_sub_{user_id}")
-            await internal_cache.invalidate(f"has_active_subscription_{user_id}")
-            await internal_cache.invalidate(f"subscription_active_{user_id}")
-            await internal_cache.invalidate(f"subscription_{user_id}")
-            await internal_cache.invalidate(f"start_data_{user_id}")
+            for k in (
+                f"user_{user_id}", f"user_{user_id}_True", f"user_{user_id}_False",
+                f"lang_{user_id}", f"channels_{user_id}", f"groups_{user_id}",
+                f"reminder_settings_{user_id}", f"auto_recycle_{user_id}",
+                f"auto_publish_{user_id}", f"user_settings_batch_{user_id}",
+                f"has_active_sub_{user_id}", f"has_active_subscription_{user_id}",
+                f"subscription_active_{user_id}", f"subscription_{user_id}",
+                f"start_data_{user_id}",
+            ):
+                await internal_cache.invalidate(k)
         except Exception as e:
             logger.debug(f"invalidate_user_cache: {e}")
 
@@ -547,9 +532,7 @@ MAX_PENALTY_LOCKS_CONFIG = int(os.getenv("MAX_PENALTY_LOCKS", "5000"))
 POSTS_BATCH_SIZE = int(os.getenv("POSTS_BATCH_SIZE", "100"))
 SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))
 EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "true"
-
 MAX_ACTIVE_PENALTIES_FETCH = 1000
-
 UTC = timezone.utc
 
 # =====================================================================
@@ -623,36 +606,28 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
         logger.error(f"❌ اسم عمود غير صالح: {col_name}")
         return False
-
     if not col_def or not isinstance(col_def, str):
         logger.error(f"❌ تعريف عمود فارغ: {col_def}")
         return False
-
     for dangerous in (";", "--", "/*", "*/", "\x00"):
         if dangerous in col_def:
             logger.error(f"❌ أحرف خطرة '{dangerous}' في col_def: {col_def}")
             return False
-
     col_def_stripped = col_def.strip()
     if not col_def_stripped:
         return False
-
     col_def_upper = col_def_stripped.upper()
-
     type_match = re.match(r"^([A-Z_][A-Z0-9_]*)", col_def_upper)
     if not type_match:
         logger.error(f"❌ لا يمكن استخراج النوع: {col_def}")
         return False
-
     base_type = type_match.group(1)
     if base_type not in _ALLOWED_COLUMN_TYPES:
         logger.error(f"❌ نوع عمود غير مسموح: {base_type}")
         return False
-
     without_strings = re.sub(r"'[^']*'", "", col_def_upper)
     cleaned = re.sub(r"[(),.\d+\-*/=]", " ", without_strings)
     words = re.findall(r"[A-Z_]+", cleaned)
-
     for word in words:
         if word in _ALLOWED_COLUMN_TYPES:
             continue
@@ -660,23 +635,19 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
             continue
         logger.error(f"❌ كلمة غير مسموحة '{word}' في: {col_def}")
         return False
-
     return True
 
 
 def _clone_start_data(data: Dict) -> Dict:
     if not isinstance(data, dict):
         return data
-
     cloned = dict(data)
-
     for key in ("channel_info",):
         value = cloned.get(key)
         if isinstance(value, dict):
             cloned[key] = dict(value)
         elif isinstance(value, list):
             cloned[key] = list(value)
-
     return cloned
 
 
@@ -690,22 +661,17 @@ async def _create_pool_with_retry(
         try:
             pool = await pool_factory()
             if attempt > 0:
-                logger.info(
-                    f"✅ نجح الاتصال بـ {name} بعد {attempt + 1} محاولات"
-                )
+                logger.info(f"✅ نجح الاتصال بـ {name} بعد {attempt + 1} محاولات")
             return pool
         except Exception as e:
             last_exc = e
             if attempt == max_attempts - 1:
-                logger.error(
-                    f"❌ فشل الاتصال بـ {name} بعد {max_attempts} محاولات"
-                )
+                logger.error(f"❌ فشل الاتصال بـ {name} بعد {max_attempts} محاولات")
                 raise last_exc
             delay = min(2 ** attempt, 30)
             logger.warning(
                 f"⚠️ فشل الاتصال بـ {name} "
-                f"(محاولة {attempt + 1}/{max_attempts}): {e} — "
-                f"إعادة بعد {delay}s"
+                f"(محاولة {attempt + 1}/{max_attempts}): {e} — إعادة بعد {delay}s"
             )
             await asyncio.sleep(delay)
     if last_exc:
@@ -716,10 +682,8 @@ async def _create_pool_with_retry(
 async def _get_unique_columns(table: str, conn) -> List[str]:
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
-
     columns = []
     existing_columns = set()
-
     try:
         if USE_POSTGRES:
             rows = await conn.fetch(
@@ -742,7 +706,6 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
     except Exception as e:
         logger.warning(f"⚠️ فشل جلب أعمدة جدول {table}: {e}")
         return KNOWN_UNIQUE_FALLBACK.get(table, ["id"])
-
     try:
         if USE_POSTGRES:
             pk_rows = await conn.fetch(
@@ -750,8 +713,7 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                 SELECT a.attname
                 FROM pg_index i
                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                WHERE i.indrelid = $1::regclass
-                  AND i.indisprimary
+                WHERE i.indrelid = $1::regclass AND i.indisprimary
                 """,
                 table,
             )
@@ -764,8 +726,7 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                     FROM pg_index i
                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
                     WHERE i.indrelid = $1::regclass
-                      AND i.indisunique
-                      AND NOT i.indisprimary
+                      AND i.indisunique AND NOT i.indisprimary
                     LIMIT 1
                     """,
                     table,
@@ -806,10 +767,8 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
         columns = [col for col in fallback if col in existing_columns]
         if not columns and existing_columns:
             columns = [list(existing_columns)[0]]
-
     if not columns:
         columns = ["id"]
-
     _UNIQUE_CACHE[table] = columns
     return columns
 
@@ -818,13 +777,11 @@ async def _find_best_conflict_target(
     table: str, conn, insert_columns: List[str]
 ) -> Optional[str]:
     insert_set = set(insert_columns)
-
     if USE_POSTGRES:
         try:
             rows = await conn.fetch(
                 """
-                SELECT i.indexname,
-                       ix.indisprimary,
+                SELECT i.indexname, ix.indisprimary,
                        array_agg(a.attname ORDER BY a.attnum) AS cols
                 FROM pg_indexes i
                 JOIN pg_class t ON t.relname = i.tablename
@@ -832,8 +789,7 @@ async def _find_best_conflict_target(
                     SELECT oid FROM pg_class
                     WHERE relname = i.indexname AND relkind = 'i'
                 )
-                JOIN pg_attribute a
-                  ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
                 WHERE i.tablename = $1 AND ix.indisunique
                 GROUP BY i.indexname, ix.indisprimary
                 """,
@@ -853,10 +809,8 @@ async def _find_best_conflict_target(
         except Exception as e:
             logger.warning(f"⚠️ فشل جلب قيود UNIQUE لـ {table}: {e}")
             return None
-
     elif USE_MYSQL:
         return None
-
     else:
         try:
             cursor = await conn.execute(f"PRAGMA index_list({table})")
@@ -901,50 +855,28 @@ def _convert_placeholders(query: str) -> str:
         while i < len(query):
             ch = query[i]
             if escape_next:
-                result.append(ch)
-                escape_next = False
-                i += 1
-                continue
+                result.append(ch); escape_next = False; i += 1; continue
             if ch == "\\" and (in_single or in_double):
-                escape_next = True
-                result.append(ch)
-                i += 1
-                continue
+                escape_next = True; result.append(ch); i += 1; continue
             if (not in_single and not in_double and not in_block_comment
                     and ch == "-" and i + 1 < len(query) and query[i + 1] == "-"):
                 in_comment = True
             if in_comment:
                 if ch == "\n":
                     in_comment = False
-                result.append(ch)
-                i += 1
-                continue
+                result.append(ch); i += 1; continue
             if (not in_single and not in_double and not in_comment
                     and ch == "/" and i + 1 < len(query) and query[i + 1] == "*"):
-                in_block_comment = True
-                result.append(ch)
-                i += 1
-                continue
+                in_block_comment = True; result.append(ch); i += 1; continue
             if in_block_comment:
                 if ch == "*" and i + 1 < len(query) and query[i + 1] == "/":
                     in_block_comment = False
-                    result.append(ch)
-                    result.append(query[i + 1])
-                    i += 2
-                    continue
-                result.append(ch)
-                i += 1
-                continue
+                    result.append(ch); result.append(query[i + 1]); i += 2; continue
+                result.append(ch); i += 1; continue
             if ch == "'" and not in_double and not in_comment and not in_block_comment:
-                in_single = not in_single
-                result.append(ch)
-                i += 1
-                continue
+                in_single = not in_single; result.append(ch); i += 1; continue
             if ch == '"' and not in_single and not in_comment and not in_block_comment:
-                in_double = not in_double
-                result.append(ch)
-                i += 1
-                continue
+                in_double = not in_double; result.append(ch); i += 1; continue
             if (ch == "$" and not in_single and not in_double
                     and not in_comment and not in_block_comment):
                 j = i + 1
@@ -957,17 +889,12 @@ def _convert_placeholders(query: str) -> str:
                             param_count = n
                     except ValueError:
                         pass
-                    result.append(query[i:j])
-                    i = j
-                    continue
+                    result.append(query[i:j]); i = j; continue
             if (ch == "?" and not in_single and not in_double
                     and not in_comment and not in_block_comment):
                 param_count += 1
-                result.append(f"${param_count}")
-                i += 1
-                continue
-            result.append(ch)
-            i += 1
+                result.append(f"${param_count}"); i += 1; continue
+            result.append(ch); i += 1
         return "".join(result)
     elif USE_MYSQL:
         result = []
@@ -980,57 +907,32 @@ def _convert_placeholders(query: str) -> str:
         while i < len(query):
             ch = query[i]
             if escape_next:
-                result.append(ch)
-                escape_next = False
-                i += 1
-                continue
+                result.append(ch); escape_next = False; i += 1; continue
             if ch == "\\" and (in_single or in_double):
-                escape_next = True
-                result.append(ch)
-                i += 1
-                continue
+                escape_next = True; result.append(ch); i += 1; continue
             if (not in_single and not in_double and not in_comment and not in_block_comment
                     and ch == "-" and i + 1 < len(query) and query[i + 1] == "-"):
                 in_comment = True
             if in_comment:
                 if ch == "\n":
                     in_comment = False
-                result.append(ch)
-                i += 1
-                continue
+                result.append(ch); i += 1; continue
             if (not in_single and not in_double and not in_comment
                     and ch == "/" and i + 1 < len(query) and query[i + 1] == "*"):
-                in_block_comment = True
-                result.append(ch)
-                i += 1
-                continue
+                in_block_comment = True; result.append(ch); i += 1; continue
             if in_block_comment:
                 if ch == "*" and i + 1 < len(query) and query[i + 1] == "/":
                     in_block_comment = False
-                    result.append(ch)
-                    result.append(query[i + 1])
-                    i += 2
-                    continue
-                result.append(ch)
-                i += 1
-                continue
+                    result.append(ch); result.append(query[i + 1]); i += 2; continue
+                result.append(ch); i += 1; continue
             if ch == "'" and not in_double:
-                in_single = not in_single
-                result.append(ch)
-                i += 1
-                continue
+                in_single = not in_single; result.append(ch); i += 1; continue
             if ch == '"' and not in_single:
-                in_double = not in_double
-                result.append(ch)
-                i += 1
-                continue
+                in_double = not in_double; result.append(ch); i += 1; continue
             if (ch == "?" and not in_single and not in_double
                     and not in_comment and not in_block_comment):
-                result.append("%s")
-                i += 1
-                continue
-            result.append(ch)
-            i += 1
+                result.append("%s"); i += 1; continue
+            result.append(ch); i += 1
         return "".join(result)
     else:
         return query
@@ -1051,27 +953,17 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
-
         conflict_cols = None
         if conn:
             try:
                 conflict_cols = await _find_best_conflict_target(table, conn, columns)
             except Exception as e:
                 logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
-
-        if conflict_cols:
-            target = f" ({conflict_cols})"
-        else:
-            target = ""
-
+        target = f" ({conflict_cols})" if conflict_cols else ""
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
             end_pos = values_match.end()
-            new_query = (
-                new_query[:end_pos]
-                + f" ON CONFLICT{target} DO NOTHING"
-                + new_query[end_pos:]
-            )
+            new_query = new_query[:end_pos] + f" ON CONFLICT{target} DO NOTHING" + new_query[end_pos:]
         else:
             new_query = new_query + f" ON CONFLICT{target} DO NOTHING"
         return new_query
@@ -1096,25 +988,21 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             return new_query + " ON CONFLICT DO NOTHING"
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
-
         best_cols = None
         if conn:
             try:
                 best_cols = await _find_best_conflict_target(table, conn, columns)
             except Exception as e:
                 logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
-
         if not best_cols:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
             if values_match:
                 end_pos = values_match.end()
                 return new_query[:end_pos] + " ON CONFLICT DO NOTHING" + new_query[end_pos:]
             return new_query + " ON CONFLICT DO NOTHING"
-
         pk_list = [c.strip() for c in best_cols.split(",") if c.strip()]
         pk_set = set(pk_list)
         set_columns = [col for col in columns if col not in pk_set]
-
         if not set_columns:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
             if values_match:
@@ -1123,7 +1011,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             else:
                 new_query = new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
             return new_query
-
         existing_columns = set()
         try:
             if USE_POSTGRES:
@@ -1144,7 +1031,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                 existing_columns = {row[1] for row in rows}
         except Exception:
             pass
-
         set_columns = [col for col in set_columns if col in existing_columns]
         if not set_columns:
             values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
@@ -1154,7 +1040,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
             else:
                 new_query = new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
             return new_query
-
         set_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in set_columns])
         values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
         if values_match:
@@ -1176,7 +1061,6 @@ def _convert_upsert(query: str) -> str:
         return query
     if USE_POSTGRES:
         return query
-
     pattern = re.compile(
         r"ON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+"
         r"(.+?)"
@@ -1186,18 +1070,14 @@ def _convert_upsert(query: str) -> str:
     match = pattern.search(query)
     if not match:
         return query
-
     update_set = match.group(2).strip()
-
-    def replace_excluded(m):
-        return f"VALUES({m.group(1)})"
-
     new_update_set = re.sub(
-        r"excluded\.([a-zA-Z_][a-zA-Z0-9_]*)", replace_excluded, update_set
+        r"excluded\.([a-zA-Z_][a-zA-Z0-9_]*)",
+        lambda m: f"VALUES({m.group(1)})",
+        update_set,
     )
     new_query = query[: match.start()].rstrip()
     tail = query[match.end():]
-
     tail_stripped = tail.lstrip()
     tail_upper = tail_stripped.upper()
     if tail_upper.startswith("WHERE"):
@@ -1210,7 +1090,6 @@ def _convert_upsert(query: str) -> str:
             "_convert_upsert: MySQL لا يدعم RETURNING. "
             f"الاستعلام: {query[:200]}"
         )
-
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}" + tail
 
 
@@ -1220,7 +1099,6 @@ def _adapt_params(params: tuple, query: str = "") -> tuple:
     """
     if params is None:
         return ()
-
     new_params = []
     for p in params:
         if isinstance(p, datetime):
@@ -1229,12 +1107,10 @@ def _adapt_params(params: tuple, query: str = "") -> tuple:
                     p = p.astimezone(UTC).replace(tzinfo=None)
                 except Exception:
                     p = p.replace(tzinfo=None)
-
             if USE_POSTGRES:
                 new_params.append(p)
             else:
                 new_params.append(p.strftime("%Y-%m-%d %H:%M:%S"))
-
         elif isinstance(p, bool):
             if USE_POSTGRES:
                 new_params.append(p)
@@ -1344,7 +1220,7 @@ class TimeUtils:
 
 
 # =====================================================================
-# 3. فئة Database (ترث من كل الـ Mixins)
+# 3. فئة Database
 # =====================================================================
 
 class Database(
@@ -1502,6 +1378,8 @@ class Database(
         self.settings_cache = settings_cache
         self.groups_cache = groups_cache
         self.auth_cache = auth_cache
+        # ✅ v7.5.24 FIX
+        self.posts_cache = posts_cache
         self.CONFIG = CONFIG
         self.PATHS = PATHS
         self.DATABASE_URL = DATABASE_URL
@@ -1635,6 +1513,9 @@ class Database(
             return None
 
     async def close(self):
+        """
+        ✅ v7.5.24: إعادة تعيين كاملة.
+        """
         tasks = []
         if self._cleanup_task:
             self._cleanup_task.cancel()
@@ -1681,7 +1562,38 @@ class Database(
         except Exception as e:
             logger.debug(f"clear_all_caches on close: {e}")
 
+        # ✅ v7.5.24 FIX: إعادة تعيين كاملة
         self._initialized = False
+        self._cleanup_task = None
+        self._secondary_index_task = None
+        self._cache_cleanup_task = None
+
+    async def reconnect(self):
+        """
+        ✅ v7.5.24 NEW: إعادة الاتصال بقاعدة البيانات.
+        يُستخدم بعد استعادة نسخة احتياطية — يُغلق ويعيد التهيئة كاملاً.
+        """
+        try:
+            logger.info("🔄 بدء إعادة الاتصال بقاعدة البيانات...")
+            try:
+                await self.close()
+            except Exception as e:
+                logger.warning(f"⚠️ فشل close أثناء reconnect: {e}")
+
+            await self.initialize()
+
+            try:
+                async with self.connection() as conn:
+                    await self._create_tables()
+                    await self._migrate_schema(conn)
+            except Exception as e:
+                logger.warning(f"⚠️ فشل re-migrate بعد reconnect: {e}")
+
+            logger.info("✅ تم إعادة الاتصال بقاعدة البيانات بنجاح")
+            return True
+        except Exception as e:
+            logger.error(f"❌ فشل reconnect: {e}", exc_info=True)
+            return False
 
     async def _get_connection(self):
         if not self._initialized:
