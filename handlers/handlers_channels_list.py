@@ -11,7 +11,8 @@ handlers_channels_list.py - واجهة قائمة القنوات مع حالته
 - تعديل الجدولة
 - عرض تفاصيل قناة
 - رجوع للقائمة الرئيسية
-- إضافة قناة (باستقبال @username أو رابط t.me)
+- إضافة قناة (@username / t.me)
+- إضافة منشورات (سريع ⚡)
 ================================================================================
 """
 
@@ -722,7 +723,7 @@ async def _send_main_menu_fallback(context, user_id: int):
 
 
 # =====================================================================
-# 8. إضافة قناة (زر → عرض تعليمات)
+# 8. إضافة قناة (زر → تعليمات)
 # =====================================================================
 
 async def add_channel_redirect_callback(
@@ -737,7 +738,6 @@ async def add_channel_redirect_callback(
     except Exception:
         pass
 
-    # ═══ مهم: ضع المستخدم في وضع "إضافة قناة" ═══
     if context.user_data is not None:
         context.user_data["awaiting_channel_add"] = True
 
@@ -776,13 +776,7 @@ async def add_channel_redirect_callback(
 async def add_channel_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    يعالج رسائل المستخدم النصية لإضافة قناة.
-    يلتقط:
-    - @channel_username
-    - https://t.me/channel_username
-    - t.me/channel_username
-    """
+    """معالج الرسائل النصية لإضافة قناة."""
     message = update.message
     if not message or not message.text:
         return
@@ -793,12 +787,10 @@ async def add_channel_from_message(
     # ═══ استخراج اسم القناة ═══
     channel_username = None
 
-    # @username
     match = re.match(r"^@([a-zA-Z0-9_]{4,})$", text)
     if match:
         channel_username = match.group(1)
     else:
-        # t.me/username أو https://t.me/username
         match = re.search(
             r"(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})(?:/|$|\?)",
             text,
@@ -806,9 +798,7 @@ async def add_channel_from_message(
         if match:
             channel_username = match.group(1)
 
-    # ═══ إذا لم نجد قناة → تجاهل ═══
     if not channel_username:
-        # إذا كان في وضع "إضافة قناة" → أظهر خطأ
         if context.user_data and context.user_data.get("awaiting_channel_add"):
             try:
                 await message.reply_text(
@@ -824,7 +814,6 @@ async def add_channel_from_message(
 
     logger.info(f"📥 محاولة إضافة قناة: @{channel_username} من {user_id}")
 
-    # ═══ أرسل رسالة "جاري المعالجة" ═══
     processing_msg = None
     try:
         processing_msg = await message.reply_text(
@@ -834,7 +823,7 @@ async def add_channel_from_message(
     except Exception:
         pass
 
-    # ═══ التحقق من المستخدم ═══
+    # ═══ فحص المستخدم ═══
     try:
         user = await DB.get_user_full_data(user_id, include_stats=True)
         if not user:
@@ -879,7 +868,7 @@ async def add_channel_from_message(
         )
         return
 
-    # ═══ جلب القناة من Telegram ═══
+    # ═══ جلب القناة ═══
     try:
         chat = await context.bot.get_chat(f"@{channel_username}")
     except Exception as e:
@@ -894,7 +883,7 @@ async def add_channel_from_message(
         )
         return
 
-    # ═══ التحقق من أن البوت مشرف ═══
+    # ═══ فحص صلاحيات البوت ═══
     try:
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
         bot_status = getattr(bot_member, "status", "")
@@ -917,7 +906,7 @@ async def add_channel_from_message(
             await _edit_or_send(
                 processing_msg, message,
                 f"⚠️ <b>البوت لا يملك صلاحية النشر</b>\n\n"
-                f"امنح البوت صلاحية <b>Post Messages</b> في القناة."
+                f"امنح البوت صلاحية <b>Post Messages</b>."
             )
             return
 
@@ -925,11 +914,11 @@ async def add_channel_from_message(
         logger.error(f"❌ فحص صلاحيات البوت: {e}", exc_info=True)
         await _edit_or_send(
             processing_msg, message,
-            "⚠️ لم أتمكن من التحقق من صلاحيات البوت في القناة."
+            "⚠️ لم أتمكن من التحقق من صلاحيات البوت."
         )
         return
 
-    # ═══ إضافة القناة إلى DB ═══
+    # ═══ إضافة القناة ═══
     try:
         result = await DB.add_channel(
             user_id=user_id,
@@ -948,7 +937,6 @@ async def add_channel_from_message(
     # ═══ النتيجة ═══
     if result:
         channel_name = result.get("channel_name", chat.title)
-        channel_db_id = result.get("id")
         posts_count = result.get("posts_count", 0)
 
         success_text = (
@@ -957,12 +945,12 @@ async def add_channel_from_message(
             f"🆔 <code>{chat.id}</code>\n"
             f"🔗 @{channel_username}\n\n"
             f"📥 منشورات موجودة: {posts_count}\n"
-            f"🟢 تم تعيينها <b>القناة النشطة</b>\n\n"
-            f"يمكنك الآن إضافة منشورات لها."
+            f"🟢 تم تعيينها <b>القناة النشطة</b>"
         )
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+            [InlineKeyboardButton("➕ إضافة منشورات", callback_data="post_add")],
             [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
         ])
 
@@ -988,7 +976,6 @@ async def add_channel_from_message(
 
         logger.info(f"✅ تم إضافة القناة @{channel_username} للمستخدم {user_id}")
 
-        # امسح وضع "إضافة قناة"
         if context.user_data:
             context.user_data.pop("awaiting_channel_add", None)
 
@@ -996,7 +983,7 @@ async def add_channel_from_message(
         await _edit_or_send(
             processing_msg, message,
             f"❌ <b>فشل إضافة القناة</b>\n\n"
-            f"قد تكون القناة مسجلة مسبقاً أو حدث خطأ."
+            f"قد تكون مسجلة مسبقاً."
         )
 
 
@@ -1015,7 +1002,87 @@ async def _edit_or_send(processing_msg, message, text: str):
 
 
 # =====================================================================
-# 10. تسجيل كل الـ handlers
+# 10. ⚡ معالج سريع لزر "إضافة منشورات" (كان بطيئاً 2s)
+# =====================================================================
+
+async def posts_add_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    ⚡ معالج سريع لزر إضافة منشورات.
+    - يستعلم مباشرة عن active_channel
+    - استعلام واحد فقط للقناة النشطة
+    - لا يستدعي CommandHandlers (يتجنب البطء)
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    # 1) الإجابة الفورية على الـ callback
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    # 2) استعلام واحد سريع فقط
+    ch_name = None
+    try:
+        active_id = await DB.fetchval(
+            "SELECT active_channel FROM users WHERE user_id = ?",
+            (user_id,), default=None,
+        )
+        if active_id:
+            ch_name = await DB.fetchval(
+                "SELECT channel_name FROM user_channels "
+                "WHERE id = ? AND banned = 0",
+                (active_id,), default=None,
+            )
+    except Exception as e:
+        logger.error(f"posts_add_callback query: {e}")
+
+    # 3) بناء النص — سريع
+    if ch_name:
+        text = (
+            f"➕ <b>إضافة منشورات</b>\n\n"
+            f"📡 القناة النشطة: <b>{ch_name}</b>\n\n"
+            f"<b>📌 طرق الإضافة:</b>\n"
+            f"• أرسل <b>نص</b> مباشرة في المحادثة\n"
+            f"• أرسل <b>صورة/فيديو/ملف</b> مع تعليق\n"
+            f"• أرسل <b>عدة رسائل</b> — كلها تُضاف تلقائياً\n\n"
+            f"💡 <i>ابدأ بإرسال المحتوى الآن</i>"
+        )
+    else:
+        text = (
+            "⚠️ <b>لا توجد قناة نشطة</b>\n\n"
+            "اختر قناة أولاً من قائمة قنواتك."
+        )
+
+    # 4) الأزرار
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+    ])
+
+    # 5) تعديل الرسالة فوراً
+    try:
+        await query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.debug(f"edit_message_text: {e}")
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as e2:
+            logger.error(f"reply_text: {e2}")
+
+
+# =====================================================================
+# 11. تسجيل كل الـ handlers
 # =====================================================================
 
 def register_channels_list_handlers(application):
@@ -1034,6 +1101,14 @@ def register_channels_list_handlers(application):
             CallbackQueryHandler(
                 add_channel_redirect_callback,
                 pattern=r"^add_channel$"
+            )
+        )
+
+        # ═══ ⚡ إضافة منشورات (سريع — يسبق CallbackHandlers.handle) ═══
+        application.add_handler(
+            CallbackQueryHandler(
+                posts_add_callback,
+                pattern=r"^(post_add|posts_add)$"
             )
         )
 
@@ -1086,8 +1161,7 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ ✅ معالج الرسائل النصية لإضافة قناة ═══
-        # group=-1 → يُنفَّذ قبل MessageHandlers.handle_private
+        # ═══ معالج الرسائل النصية لإضافة قناة ═══
         application.add_handler(
             MessageHandler(
                 filters.TEXT
