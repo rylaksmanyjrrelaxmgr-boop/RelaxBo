@@ -137,16 +137,6 @@
     "panel_unlock": "🔓 فتح المجموعة",
     "panel_close": "❌ إغلاق اللوحة",
 
-    "sec_menu_auto": "🗑️ الحذف التلقائي",
-    "sec_menu_advanced": "⚙️ الأمان المتقدم",
-    "sec_menu_welcome": "👋 الترحيب",
-    "sec_menu_warns": "⚠️ التحذيرات",
-    "sec_menu_penalties": "⚖️ العقوبات",
-    "sec_menu_violations": "🚨 المخالفات",
-    "sec_menu_actions": "🛠️ الإجراءات",
-    "sec_menu_stats": "📊 الإحصائيات",
-    "sec_back_main": "🔙 رجوع",
-
     "sec_links": "🔗 روابط",
     "sec_mentions": "👤 منشن",
     "sec_slow": "🐌 بطيء",
@@ -170,24 +160,24 @@
     "sec_goodbye": "👋 وداع",
     "sec_goodbye_text": "📝 نص وداع",
     "sec_night": "🌙 ليلي",
-    "sec_approve_join": "✅ موافقة",
-    "sec_reject_join": "❌ رفض",
+    "sec_approve_join": "✅ موافقة الانضمام",
+    "sec_reject_join": "❌ رفض الانضمام",
     "sec_nsfw": "🔞 NSFW",
-    "sec_maxlen": "📏 طول",
+    "sec_maxlen": "📏 الحد الأقصى للطول",
     "sec_warn": "⚠️ تحذيرات",
     "sec_warn_count": "🔢 عدد التحذيرات",
-    "sec_warn_penalty": "⚖️ عقوبة",
-    "sec_warn_penalty_duration": "⏱️ مدة تحذير",
+    "sec_warn_penalty": "⚖️ عقوبة التحذير",
+    "sec_warn_penalty_duration": "⏱️ مدة عقوبة التحذير",
     "sec_penalty": "⚖️ العقوبات",
     "sec_del_pen": "⚖️ عقوبة الحذف",
-    "sec_adv_act": "🛠️ إجراءات",
+    "sec_adv_act": "🛠️ إجراءات متقدمة",
     "sec_act_log": "📜 السجل",
-    "sec_auto_reply_menu": "📝 ردود",
-    "sec_antiflood_settings": "⚙️ فيضان",
-    "sec_night_settings": "⚙️ ليلي",
-    "sec_penalty_durations": "⏳ المدد",
-    "sec_violation_settings": "⚖️ عقوبات",
-    "sec_violation_penalties": "🚨 عقوبات",
+    "sec_auto_reply_menu": "📝 الردود",
+    "sec_antiflood_settings": "🌊 إعدادات الفيضان",
+    "sec_night_settings": "🌙 إعدادات الليل",
+    "sec_penalty_durations": "⏳ مدد العقوبات",
+    "sec_violation_settings": "⚖️ عقوبات المخالفات",
+    "sec_violation_penalties": "🚨 عقوبات المخالفات",
     "sec_activate_all": "✅ تفعيل الكل",
     "sec_deactivate_all": "❌ تعطيل الكل",
     "sec_close": "❌ إغلاق",
@@ -202,10 +192,10 @@
     "sec_set_night_start": "🌙 وقت البدء",
     "sec_set_night_end": "🌙 وقت النهاية",
     "sec_set_violation_strikes": "📊 عدد المخالفات",
-    "sec_set_violation_duration": "⏱️ مدة المخالفة",
-    "sec_antiflood_duration": "⏱️ مدة الفيضان",
-    "sec_night_duration": "⏱️ مدة الليل",
-    "sec_set_antiflood_penalty": "🚫 عقوبة الفيضان",
+    "sec_set_violation_duration": "⏱️ مدة عقوبة المخالفة",
+    "sec_antiflood_duration": "⏱️ مدة عقوبة الفيضان",
+    "sec_night_duration": "⏱️ مدة إجراء الليل",
+    "sec_set_antiflood_penalty": "🚫 نوع عقوبة الفيضان",
     "sec_set_night_action": "🌙 إجراء الليل",
     "sec_penalty_none": "🚫 بدون عقوبة",
     "sec_penalty_ban": "🚫 حظر",
@@ -289,75 +279,25 @@
     },
     "security": {
       "rows": [
-        ["sec_menu_auto", "sec_menu_advanced"],
-        ["sec_menu_welcome", "sec_menu_penalties"],
-        ["sec_menu_actions", "sec_menu_stats"],
-        ["sec_activate_all", "sec_deactivate_all"],
-        ["sec_close"]
-      ]
-    },
-    "sec_auto_menu": {
-      "rows": [
-        ["sec_links", "sec_mentions"],
-        ["sec_forward", "sec_poll"],
-        ["sec_video", "sec_audio"],
-        ["sec_sticker", "sec_doc"],
-        ["sec_anim", "sec_service"],
-        ["sec_game", "sec_voice"],
-        ["sec_videonote", "sec_banned_words"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_advanced_menu": {
-      "rows": [
-        ["sec_flood", "sec_antiflood_settings"],
-        ["sec_night", "sec_night_settings"],
-        ["sec_slow", "sec_slow_mode_seconds"],
-        ["sec_nsfw", "sec_maxlen"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_welcome_menu": {
-      "rows": [
-        ["sec_welcome", "sec_welcome_text"],
-        ["sec_goodbye", "sec_goodbye_text"],
+        ["sec_links", "sec_mentions", "sec_forward"],
+        ["sec_video", "sec_audio", "sec_anim"],
+        ["sec_doc", "sec_sticker", "sec_service"],
+        ["sec_poll", "sec_game", "sec_videonote"],
+        ["sec_flood", "sec_slow", "sec_night"],
+        ["sec_welcome", "sec_goodbye"],
         ["sec_approve_join", "sec_reject_join"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_penalties_menu": {
-      "rows": [
-        ["sec_warn", "sec_warn_count"],
+        ["sec_banned_words", "sec_nsfw"],
+        ["sec_maxlen", "sec_warn"],
+        ["sec_warn_count"],
         ["sec_warn_penalty", "sec_warn_penalty_duration"],
-        ["sec_violation_penalties", "sec_violation_settings"],
+        ["sec_violation_penalties"],
         ["sec_penalty", "sec_del_pen"],
         ["sec_penalty_durations"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_actions_menu": {
-      "rows": [
         ["sec_adv_act", "sec_act_log"],
         ["sec_auto_reply_menu"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_stats_menu": {
-      "rows": [
-        ["sec_back_main"]
-      ]
-    },
-    "sec_warns_menu": {
-      "rows": [
-        ["sec_warn", "sec_warn_count"],
-        ["sec_warn_penalty", "sec_warn_penalty_duration"],
-        ["sec_back_main"]
-      ]
-    },
-    "sec_violations_menu": {
-      "rows": [
-        ["sec_violation_settings"],
-        ["sec_back_main"]
+        ["sec_antiflood_settings", "sec_night_settings"],
+        ["sec_enable_all", "sec_disable_all"],
+        ["sec_close"]
       ]
     },
     "banned_words": {
