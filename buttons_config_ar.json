@@ -37,6 +37,8 @@
     "admin_users": "👥 المستخدمين",
     "admin_banned": "⛔ المحظورين",
     "admin_unban_all": "🔓 إلغاء حظر الكل",
+    "admin_ban_user": "🚫 حظر مستخدم",
+    "admin_unban_user": "✅ فك حظر مستخدم",
     "admin_channels": "📡 القنوات (أدمن)",
     "admin_banned_ch": "🚫 القنوات المحظورة",
     "admin_activate_ch": "✅ تفعيل القنوات",
@@ -241,6 +243,7 @@
       "rows": [
         ["admin_users", "admin_banned"],
         ["admin_unban_all"],
+        ["admin_ban_user", "admin_unban_user"],
         ["admin_channels", "admin_banned_ch"],
         ["admin_activate_ch"],
         ["admin_groups", "admin_banned_gr"],
