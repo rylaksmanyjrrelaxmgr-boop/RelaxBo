@@ -2,19 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (v7.7.2)
+handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (v7.7.4)
 =====================================================================
+🆕 v7.7.4:
+    ✅ إصلاح sec_violation_penalties (كان ناقصاً)
+    ✅ admin_show_backups
+    ✅ 100% من المعالجات مكتملة
+
+🆕 v7.7.3:
+    ✅ admin_show_backups
+
 🆕 v7.7.2:
     ✅ إصلاح sec_enable_all / sec_disable_all
-    ✅ دعم activate_all / enable_all بالتبادل
-    ✅ زر رجوع sec_close يعمل بشكل صحيح
-
-🆕 v7.7.1:
-    ✅ _get_security_stats متوازي (في utils.py)
-
-🆕 v7.7.0:
-    ✅ إحصائيات في صفحة الأمان
-    ✅ ban/unban user
 =====================================================================
 """
 
@@ -701,9 +700,6 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
         try:
-            # ═══════════════════════════════════════════════
-            # أزرار الرجوع من الأمان
-            # ═══════════════════════════════════════════════
             if data in ("sec_close", "grp_close", "security_close", "back_to_groups", "sec_back"):
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
@@ -716,9 +712,7 @@ class CallbackHandlers:
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # ✅ v7.7.2: دعم sec_enable_all / sec_disable_all
-            # ═══════════════════════════════════════════════
+            # تفعيل/تعطيل الكل
             if data.startswith("sec_enable_all:") or data.startswith("sec_disable_all:"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return True
@@ -727,9 +721,11 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # set_warn_count
-            # ═══════════════════════════════════════════════
+            # 🆕 v7.7.4: sec_violation_penalties
+            if data.startswith("sec_violation_penalties:") or data.startswith("sec_violation_settings:"):
+                await CallbackHandlers._handle_security(update, context, query, user_id, lang)
+                return True
+
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -752,9 +748,6 @@ class CallbackHandlers:
                                 bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # POST_CLEAR تأكيد
-            # ═══════════════════════════════════════════════
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -770,9 +763,6 @@ class CallbackHandlers:
                 await safe_edit(query, text, reply_markup=kb, bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # set_warn_penalty
-            # ═══════════════════════════════════════════════
             if data.startswith("set_warn_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -795,9 +785,6 @@ class CallbackHandlers:
                                 bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # set_warn_duration
-            # ═══════════════════════════════════════════════
             if data.startswith("set_warn_duration:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -817,9 +804,6 @@ class CallbackHandlers:
                                 bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # set_duration
-            # ═══════════════════════════════════════════════
             if data.startswith("set_duration:"):
                 parts = data.split(":")
                 if len(parts) < 4:
@@ -850,9 +834,6 @@ class CallbackHandlers:
                                 bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_del_penalty
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_set_del_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -878,9 +859,6 @@ class CallbackHandlers:
                                 bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_del_penalty_duration
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_set_del_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -894,9 +872,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'delete_penalty')
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_penalty_durations
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -910,31 +885,10 @@ class CallbackHandlers:
                 await CallbackHandlers._show_all_penalty_durations_menu(query, context, chat_id)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_mute/ban/restrict_duration
-            # ═══════════════════════════════════════════════
             for prefix, action_type in (
                 ("sec_set_mute_duration:", "mute"),
                 ("sec_set_ban_duration:", "ban"),
                 ("sec_set_restrict_duration:", "restrict"),
-            ):
-                if data.startswith(prefix):
-                    parts = data.split(":")
-                    if len(parts) != 2:
-                        await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
-                        return True
-                    try:
-                        chat_id = int(parts[1])
-                    except ValueError:
-                        await safe_edit(query, "❌ معرف غير صالح", bot=context.bot)
-                        return True
-                    await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, action_type)
-                    return True
-
-            # ═══════════════════════════════════════════════
-            # sec_antiflood_duration / sec_night_duration
-            # ═══════════════════════════════════════════════
-            for prefix, action_type in (
                 ("sec_antiflood_duration:", "antiflood"),
                 ("sec_night_duration:", "night"),
             ):
@@ -951,9 +905,6 @@ class CallbackHandlers:
                     await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, action_type)
                     return True
 
-            # ═══════════════════════════════════════════════
-            # sec_warn_penalty_duration
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_warn_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -967,9 +918,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(update, context, query, chat_id, lang, 'warn_penalty')
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_penalty_*
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_penalty_"):
                 parts = data.split(":")
                 if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
@@ -993,9 +941,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_antiflood_messages / seconds
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_set_antiflood_messages:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1026,9 +971,6 @@ class CallbackHandlers:
                 await safe_edit(query, "⏱️ أرسل عدد الثواني:", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_antiflood_penalty
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_antiflood_penalty:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1064,9 +1006,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_night_start/end
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_set_night_start:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1097,9 +1036,6 @@ class CallbackHandlers:
                 await safe_edit(query, "🌙 أرسل وقت النهاية (HH:MM):", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_night_action
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_night_action:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1135,9 +1071,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع إجراء غير صالح", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_violation_settings
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_violation_settings:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1151,9 +1084,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_violation_penalties(update, context, query, chat_id, lang)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # sec_set_violation_strikes / duration / penalty
-            # ═══════════════════════════════════════════════
             if data.startswith("sec_set_violation_strikes:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1204,9 +1134,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # buy_sub_* / buy_gift
-            # ═══════════════════════════════════════════════
             if data.startswith("buy_sub_"):
                 await CallbackHandlers._handle_buy_subscription(update, context, query, user_id, data)
                 return True
@@ -1215,9 +1142,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_buy_gift(update, context, query, user_id, data)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # grp_del / grp_set
-            # ═══════════════════════════════════════════════
             if data.startswith("grp_del:"):
                 await CallbackHandlers._handle_group_delete(update, context, query, data)
                 return True
@@ -1226,9 +1150,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_group_settings(update, context, query, user_id, lang, data)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # ch_sel / ch_del / ch_stats
-            # ═══════════════════════════════════════════════
             if data.startswith(CB.CH_SEL + ":"):
                 await CallbackHandlers._handle_channel_select(update, context, query, user_id, data)
                 return True
@@ -1241,9 +1162,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_channel_stats(update, context, query, user_id, data)
                 return True
 
-            # ═══════════════════════════════════════════════
-            # POST_DEL
-            # ═══════════════════════════════════════════════
             if data.startswith(CB.POST_DEL + ":"):
                 await CallbackHandlers._handle_post_delete(update, context, query, user_id, lang, data)
                 return True
@@ -1827,32 +1745,18 @@ class CallbackHandlers:
             return
 
         try:
-            # ═══════════════════════════════════════════════
-            # ✅ v7.7.2: تفعيل الكل / تعطيل الكل
-            # ═══════════════════════════════════════════════
             if action in ("activate_all", "enable_all", "deactivate_all", "disable_all"):
                 is_activate = action in ("activate_all", "enable_all")
                 confirm_action = "activate_all_confirm" if is_activate else "deactivate_all_confirm"
-
                 if is_activate:
-                    confirm_text = await _trans(
-                        "activate_all_confirmation", lang,
-                        "⚠️ هل أنت متأكد من تفعيل جميع الإعدادات الأمنية؟"
-                    )
+                    confirm_text = await _trans("activate_all_confirmation", lang,
+                                                "⚠️ هل أنت متأكد من تفعيل جميع الإعدادات الأمنية؟")
                 else:
-                    confirm_text = await _trans(
-                        "deactivate_all_confirmation", lang,
-                        "⚠️ هل أنت متأكد من تعطيل جميع الإعدادات الأمنية؟"
-                    )
+                    confirm_text = await _trans("deactivate_all_confirmation", lang,
+                                                "⚠️ هل أنت متأكد من تعطيل جميع الإعدادات الأمنية؟")
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "✅ نعم",
-                        callback_data=f"sec_{confirm_action}:{chat_id}"
-                    )],
-                    [InlineKeyboardButton(
-                        "❌ إلغاء",
-                        callback_data=f"grp_set:{chat_id}"
-                    )],
+                    [InlineKeyboardButton("✅ نعم", callback_data=f"sec_{confirm_action}:{chat_id}")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data=f"grp_set:{chat_id}")],
                 ])
                 await safe_edit(query, confirm_text, reply_markup=kb, bot=context.bot)
                 return
@@ -1908,20 +1812,13 @@ class CallbackHandlers:
                          chat_id, TimeUtils.utc_now()))
                 except Exception:
                     pass
-
                 settings = await DB.get_security_settings(chat_id)
                 stats = await KeyboardFactory._get_security_stats(chat_id)
-                await safe_edit(
-                    query,
-                    KeyboardFactory._format_security_text(settings, stats),
-                    reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                    bot=context.bot,
-                )
+                await safe_edit(query, KeyboardFactory._format_security_text(settings, stats),
+                                reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
+                                bot=context.bot)
                 return
 
-            # ═══════════════════════════════════════════════
-            # Toggle switchers
-            # ═══════════════════════════════════════════════
             toggle_map = {
                 "links": "delete_links", "mentions": "mentions", "slow": "slow_mode",
                 "video": "delete_videos", "audio": "delete_audio",
@@ -2104,7 +2001,8 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'night_action')
                 return
 
-            if action == "violation_settings":
+            # 🆕 v7.7.4: دعم violation_penalties + violation_settings
+            if action in ("violation_settings", "violation_penalties"):
                 await CallbackHandlers._show_violation_penalties(update, context, query, chat_id, lang)
                 return
 
@@ -2600,6 +2498,10 @@ class CallbackHandlers:
             if data == "admin_upload_backup":
                 StateManager.set(user_id, UserState.WAIT_BACKUP_FILE)
                 await safe_edit(query, "📤 أرسل ملف النسخ الاحتياطي بصيغة .db:", bot=context.bot)
+                return
+
+            if data == "admin_show_backups":
+                await CallbackHandlers._show_restore_backups(update, context, query, user_id)
                 return
 
             if data == CB.ADMIN_REFRESH_CACHE:
