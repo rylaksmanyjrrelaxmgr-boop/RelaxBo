@@ -4,21 +4,19 @@
 """
 handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار
 =====================================================================
-الإصدار: v7.5.24 (مُحسَّن — حظر/فك حظر المستخدمين + أزرار مدموجة)
+الإصدار: v7.5.25 (مُصحَّح — إصلاح خطأ النسخ)
 =====================================================================
+🆕 v7.5.25:
+    ✅ إصلاح SyntaxError في _handle_admin (السطر المدمج)
+    ✅ return و if في سطرين منفصلين
+
 🆕 v7.5.24:
     ✅ ADMIN_BAN_USER → حظر مستخدم من لوحة المطور
     ✅ ADMIN_UNBAN_USER → فك حظر مستخدم من لوحة المطور
-    ✅ أزرار مدموجة في قائمة المجموعات
 
 🆕 v7.5.23:
     ✅ _show_groups_list → أزرار مدموجة (أمان + حذف في صف واحد)
     ✅ الحفاظ على الترقيم (1️⃣ 2️⃣ 3️⃣...)
-    ✅ توفير مساحة العرض
-
-🆕 v7.5.22:
-    ✅ _show_groups_list → ترقيم (1️⃣ 2️⃣ 3️⃣...) لكل مجموعة
-    ✅ تمييز بصري واضح للأسماء المتشابهة
 
 🆕 v7.5.21:
     ✅ warn_count → أزرار (1, 2, 3, 4, 5, 10)
@@ -26,19 +24,6 @@ handlers_callback.py - المعالج النهائي الكامل لجميع ا�
     ✅ pin → حماية من update.message = None
     ✅ CONTEST_JOIN → تحقق من المشاركة المسبقة
     ✅ ADMIN_BACKUP → رسالة "جاري..."
-    ✅ زر "📅" → "📅 جدولة" (نص واضح)
-
-🆕 v7.5.15:
-    ✅ sec_close / grp_close → ترجع لقائمة المجموعات
-    ✅ sec_back → ترجع لقائمة المجموعات
-
-🆕 v7.5.14:
-    ✅ safe_edit: معالجة شاملة لكل حالات 400 Bad Request
-    ✅ admin_stats/admin_metrics/admin_users: .get() بدل []
-
-🆕 v7.5.13:
-    ✅ MAX_CONCURRENT_PUBLISH = 2
-    ✅ PUBLISH_DELAY_SECONDS = 0.2
 =====================================================================
 """
 
@@ -121,10 +106,6 @@ _CONTEXT_KEYS_TO_CLEAR = (
 )
 
 _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
-
-# =====================================================================
-# رموز ترقيم المجموعات (يُستخدم في _show_groups_list)
-# =====================================================================
 
 GROUP_NUMBER_EMOJIS = [
     "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
@@ -330,7 +311,6 @@ class CallbackHandlers:
         user_id = query.from_user.id
         now_time = time.monotonic()
 
-        # Debounce
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < 1.5:
@@ -340,7 +320,6 @@ class CallbackHandlers:
 
         await _safe_answer(query)
 
-        # Rate Limiting
         rate_key = f"rate_{user_id}"
         rate_data = context.user_data.get(rate_key)
         if not rate_data or now_time - rate_data.get('reset', 0) > 60:
@@ -354,7 +333,6 @@ class CallbackHandlers:
         start_time = time.monotonic()
         _ensure_bot_start_time(context)
 
-        # معالجة الأزرار ذات الصيغة الخاصة (تتضمن ":")
         handled = await CallbackHandlers._handle_parameterized(
             update, context, query, user_id, lang, data
         )
@@ -364,7 +342,6 @@ class CallbackHandlers:
                 logger.warning(f"🐢 زر بطيء (param) {data[:30]} — {elapsed:.2f}s")
             return
 
-        # تحديد base_data
         base_data = data
         if ':' in data:
             parts = data.split(':')
@@ -890,7 +867,7 @@ class CallbackHandlers:
                 )
                 return True
 
-            # ========== 🆕 v7.5.21: set_warn_count ==========
+            # ========== set_warn_count ==========
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
@@ -915,7 +892,7 @@ class CallbackHandlers:
                 )
                 return True
 
-            # ========== 🆕 v7.5.21: POST_CLEAR تأكيد ==========
+            # ========== POST_CLEAR تأكيد ==========
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
@@ -2737,7 +2714,7 @@ class CallbackHandlers:
             # 🆕 حظر مستخدم (لوحة المطور)
             # ═══════════════════════════════════════════════
             if data == "admin_ban_user":
-                StateManager.set(user_id, "wait_ban_user_id")
+                StateManager.set(user_id, UserState.WAIT_BAN_USER_ID)
                 await safe_edit(
                     query,
                     "🚫 <b>حظر مستخدم</b>\n\n"
@@ -2751,7 +2728,7 @@ class CallbackHandlers:
             # 🆕 فك حظر مستخدم (لوحة المطور)
             # ═══════════════════════════════════════════════
             if data == "admin_unban_user":
-                StateManager.set(user_id, "wait_unban_user_id")
+                StateManager.set(user_id, UserState.WAIT_UNBAN_USER_ID)
                 await safe_edit(
                     query,
                     "✅ <b>فك حظر مستخدم</b>\n\n"
@@ -3128,7 +3105,9 @@ class CallbackHandlers:
             if data == CB.ADMIN_UNBAN_GR:
                 await DB.execute("UPDATE bot_groups SET banned=0 WHERE banned=1")
                 await safe_edit(query, "✅ تم إلغاء حظر جميع المجموعات", bot=context.bot)
-                return            if data == CB.ADMIN_REPLIES:
+                return
+
+            if data == CB.ADMIN_REPLIES:
                 replies = await DB.fetchall(
                     "SELECT keyword FROM auto_replies WHERE chat_id=-1 LIMIT 30"
                 )
