@@ -10,6 +10,10 @@ database_channels_posts.py - دوال القنوات والمنشورات (Mixin
 - 12 دالة قنوات (Channels)
 - 7 دوال منشورات (Posts)
 
+🆕 v7.5.18 (إصلاح PostgreSQL):
+    ✅ reset_posts: استخدام _fetchval_with_conn بدل conn.execute
+    ✅ يعمل مع PostgreSQL + SQLite + MySQL
+
 📌 كل الدوال تعمل بنفس السلوك السابق — لا تغيير في الميزات.
 """
 
@@ -723,36 +727,60 @@ class ChannelsPostsMixin:
         return result
 
     async def reset_posts(self, user_id: int, channel_db_id: int) -> int:
-        """إعادة تعيين كل المنشورات (published=0, fail_count=0)"""
+        """
+        إعادة تعيين كل المنشورات (published=0, fail_count=0).
+
+        ✅ v7.5.18: استخدام _fetchval_with_conn بدل conn.execute
+        (يعمل مع PostgreSQL + SQLite + MySQL)
+        """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache
 
         try:
             async with self.transaction() as conn:
-                cursor = await conn.execute(
-                    "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
-                    (channel_db_id, user_id),
+                # ✅ استخدم الدالة المساعدة (تعمل مع كل قواعد البيانات)
+                owns = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT 1 FROM user_channels "
+                    "WHERE id = ? AND user_id = ? AND banned = 0",
+                    channel_db_id, user_id,
                 )
-                if not await cursor.fetchone():
+                if not owns:
+                    logger.warning(
+                        f"⚠️ reset_posts: المستخدم {user_id} لا يملك "
+                        f"القناة {channel_db_id}"
+                    )
                     return 0
 
+                # إعادة تعيين الكل
                 await self._execute_with_conn(
                     conn,
-                    "UPDATE posts SET published = 0, fail_count = 0 WHERE channel_db_id = ?",
+                    "UPDATE posts SET published = 0, fail_count = 0 "
+                    "WHERE channel_db_id = ?",
                     channel_db_id,
                 )
+
+                # عد المنشورات
                 count = await self._fetchval_with_conn(
                     conn,
-                    "SELECT COUNT(*) FROM posts WHERE channel_db_id = ? AND published = 0",
-                    channel_db_id, default=0,
+                    "SELECT COUNT(*) FROM posts "
+                    "WHERE channel_db_id = ? AND published = 0",
+                    channel_db_id,
+                    default=0,
                 )
 
+                # إبطال الكاش
                 await internal_cache.invalidate(f"user_{user_id}")
                 await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                 if CACHE_AVAILABLE:
                     await invalidate_user_cache(user_id)
                     await posts_cache.invalidate(channel_db_id)
+
+                logger.info(
+                    f"♻️ إعادة تدوير: {count} منشور للقناة {channel_db_id}"
+                )
                 return count
+
         except Exception as e:
             logger.error(f"❌ Error in reset_posts: {e}", exc_info=True)
             return 0
