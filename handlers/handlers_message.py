@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل - النسخة النهائية (v7.7.0)
+handlers_message.py - معالجات الرسائل (v7.7.5)
 =====================================================================
-- متوافق مع database.py و handlers_callback.py v7.7.0 (القوائم الفرعية)
-- جميع الدوال موجودة ومصححة بالكامل
+✅ 60 حالة مستخدم — جميعها مُعالَجة 100%
+✅ التقاط المنشورات كاملة
+✅ حظر/فك حظر المستخدمين
+✅ جميع المدد الافتراضية
+✅ تحديد الفائز في المسابقات
 
-🆕 v7.7.0:
-    ✅ توافق كامل مع القوائم الفرعية للأمان
-    ✅ بدون تغييرات هيكلية (متوافق مع v7.5.3)
-
-🆕 v7.5.3:
-    ✅ _handle_ban_user_input → حظر مستخدم من لوحة المطور
-    ✅ _handle_unban_user_input → فك حظر مستخدم من لوحة المطور
+🆕 v7.7.5:
+    ✅ _handle_penalty_default_duration
+    ✅ _handle_contest_winner
+    ✅ _handle_penalty_mute_duration
+    ✅ _handle_penalty_ban_duration
+    ✅ _handle_penalty_restrict_duration
 =====================================================================
 """
 
@@ -318,6 +320,12 @@ class MessageHandlers:
         UserState.WAIT_BACKUP_FILE: "_handle_backup_file_input",
         UserState.WAIT_BAN_USER_ID: "_handle_ban_user_input",
         UserState.WAIT_UNBAN_USER_ID: "_handle_unban_user_input",
+        # 🆕 v7.7.5
+        UserState.WAIT_PENALTY_DEFAULT_DURATION: "_handle_penalty_default_duration",
+        UserState.WAIT_CONTEST_WINNER: "_handle_contest_winner",
+        UserState.WAIT_PENALTY_MUTE_DURATION: "_handle_penalty_mute_duration",
+        UserState.WAIT_PENALTY_BAN_DURATION: "_handle_penalty_ban_duration",
+        UserState.WAIT_PENALTY_RESTRICT_DURATION: "_handle_penalty_restrict_duration",
     }
 
     # =================================================================
@@ -371,7 +379,7 @@ class MessageHandlers:
                 pass
 
     # =================================================================
-    # حظر / فك حظر المستخدمين (لوحة المطور)
+    # حظر / فك حظر المستخدمين
     # =================================================================
 
     @staticmethod
@@ -386,7 +394,6 @@ class MessageHandlers:
             return
 
         text = (update.effective_message.text or "").strip()
-
         try:
             target_id = int(text)
         except (ValueError, AttributeError):
@@ -424,7 +431,6 @@ class MessageHandlers:
             return
 
         text = (update.effective_message.text or "").strip()
-
         try:
             target_id = int(text)
         except (ValueError, AttributeError):
@@ -442,6 +448,196 @@ class MessageHandlers:
             except Exception:
                 pass
 
+        StateManager.clear(user_id)
+
+    # =================================================================
+    # 🆕 v7.7.5: المعالجات الخمسة الجديدة
+    # =================================================================
+
+    @staticmethod
+    async def _handle_penalty_default_duration(update, context):
+        """معالج المدة الافتراضية للعقوبات."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+        chat_id = (context.user_data.get('adv_chat')
+                   or context.user_data.get('sec_chat')
+                   or context.user_data.get('security_chat_id'))
+        if not chat_id:
+            msg = await _trans('group_not_specified', lang, "❌ لم يتم تحديد المجموعة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        if not await _check_admin_in_chat(context, chat_id, user_id):
+            msg = await _trans('not_admin_in_group', lang, "❌ لم تعد مشرفًا في هذه المجموعة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        try:
+            minutes = int((update.effective_message.text or "").strip())
+            if minutes <= 0 or minutes > 43200:
+                raise ValueError("out of range")
+
+            duration_seconds = minutes * 60
+            await DB.update_security_settings(
+                chat_id,
+                mute_default_duration=duration_seconds,
+                ban_default_duration=duration_seconds,
+                restrict_default_duration=duration_seconds,
+            )
+            await invalidate_security_cache(chat_id)
+            await safe_send(
+                context.bot, user_id,
+                f"✅ تم تعيين المدة الافتراضية: {minutes} دقيقة"
+            )
+        except (ValueError, AttributeError):
+            msg = await _trans('invalid_number', lang, "❌ رقم غير صالح (1-43200 دقيقة)")
+            await safe_send(context.bot, user_id, msg)
+        except Exception as e:
+            logger.error(f"فشل تعيين المدة الافتراضية: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
+            await safe_send(context.bot, user_id, msg)
+        StateManager.clear(user_id)
+
+    @staticmethod
+    async def _handle_contest_winner(update, context):
+        """معالج اختيار الفائز في مسابقة."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+
+        if not CONFIG.is_developer(user_id):
+            msg = await _trans('unauthorized', lang, "❌ غير مصرح")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        contest_id = context.user_data.get('contest_join') or context.user_data.get('contest_id')
+        if not contest_id:
+            msg = await _trans('no_active_contest', lang, "❌ لا توجد مسابقة محددة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        try:
+            winner_id = int((update.effective_message.text or "").strip())
+            if winner_id <= 0:
+                raise ValueError
+        except (ValueError, AttributeError):
+            msg = await _trans('invalid_user_id', lang, "❌ معرف غير صالح")
+            await safe_send(context.bot, user_id, msg)
+            return
+
+        try:
+            success = await DB.declare_winner(contest_id, winner_id)
+            if success:
+                await safe_send(
+                    context.bot, user_id,
+                    f"✅ تم تحديد الفائز: <code>{winner_id}</code>",
+                    parse_mode='HTML'
+                )
+                try:
+                    await context.bot.send_message(
+                        winner_id, "🎉 مبروك! فزت بالمسابقة!"
+                    )
+                except Exception:
+                    pass
+            else:
+                await safe_send(context.bot, user_id, "❌ فشل تحديد الفائز")
+        except Exception as e:
+            logger.error(f"فشل تحديد الفائز: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
+            await safe_send(context.bot, user_id, msg)
+        StateManager.clear(user_id)
+
+    @staticmethod
+    async def _handle_penalty_mute_duration(update, context):
+        """معالج مدة الكتم الافتراضية."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+        chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
+        if not chat_id:
+            msg = await _trans('group_not_specified', lang, "❌ لم يتم تحديد المجموعة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        try:
+            minutes = int((update.effective_message.text or "").strip())
+            if minutes < 0 or minutes > 43200:
+                raise ValueError
+            duration_seconds = minutes * 60
+            await DB.update_security_settings(chat_id, mute_default_duration=duration_seconds)
+            await invalidate_security_cache(chat_id)
+            duration_display = "دائم" if minutes == 0 else f"{minutes} دقيقة"
+            await safe_send(context.bot, user_id, f"✅ تم تعيين مدة الكتم: {duration_display}")
+        except (ValueError, AttributeError):
+            msg = await _trans('invalid_number', lang, "❌ رقم غير صالح (0-43200)")
+            await safe_send(context.bot, user_id, msg)
+        except Exception as e:
+            logger.error(f"فشل تعيين مدة الكتم: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
+            await safe_send(context.bot, user_id, msg)
+        StateManager.clear(user_id)
+
+    @staticmethod
+    async def _handle_penalty_ban_duration(update, context):
+        """معالج مدة الحظر الافتراضية."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+        chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
+        if not chat_id:
+            msg = await _trans('group_not_specified', lang, "❌ لم يتم تحديد المجموعة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        try:
+            minutes = int((update.effective_message.text or "").strip())
+            if minutes < 0 or minutes > 43200:
+                raise ValueError
+            duration_seconds = minutes * 60
+            await DB.update_security_settings(chat_id, ban_default_duration=duration_seconds)
+            await invalidate_security_cache(chat_id)
+            duration_display = "دائم" if minutes == 0 else f"{minutes} دقيقة"
+            await safe_send(context.bot, user_id, f"✅ تم تعيين مدة الحظر: {duration_display}")
+        except (ValueError, AttributeError):
+            msg = await _trans('invalid_number', lang, "❌ رقم غير صالح (0-43200)")
+            await safe_send(context.bot, user_id, msg)
+        except Exception as e:
+            logger.error(f"فشل تعيين مدة الحظر: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
+            await safe_send(context.bot, user_id, msg)
+        StateManager.clear(user_id)
+
+    @staticmethod
+    async def _handle_penalty_restrict_duration(update, context):
+        """معالج مدة التقييد الافتراضية."""
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+        chat_id = context.user_data.get('sec_chat') or context.user_data.get('security_chat_id')
+        if not chat_id:
+            msg = await _trans('group_not_specified', lang, "❌ لم يتم تحديد المجموعة")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        try:
+            minutes = int((update.effective_message.text or "").strip())
+            if minutes < 0 or minutes > 43200:
+                raise ValueError
+            duration_seconds = minutes * 60
+            await DB.update_security_settings(chat_id, restrict_default_duration=duration_seconds)
+            await invalidate_security_cache(chat_id)
+            duration_display = "دائم" if minutes == 0 else f"{minutes} دقيقة"
+            await safe_send(context.bot, user_id, f"✅ تم تعيين مدة التقييد: {duration_display}")
+        except (ValueError, AttributeError):
+            msg = await _trans('invalid_number', lang, "❌ رقم غير صالح (0-43200)")
+            await safe_send(context.bot, user_id, msg)
+        except Exception as e:
+            logger.error(f"فشل تعيين مدة التقييد: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
+            await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
     # =================================================================
@@ -769,7 +965,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # إضافة المنشورات
+    # ✅ إضافة المنشورات
     # =================================================================
 
     @staticmethod
@@ -785,26 +981,47 @@ class MessageHandlers:
             return
 
         msg = update.effective_message
+        if not msg:
+            return
+
         media_type = 'text'
         media_file_id = ''
         text = msg.text or msg.caption or ""
 
         if msg.photo:
-            media_type, media_file_id, text = 'photo', msg.photo[-1].file_id, msg.caption or ""
+            media_type = 'photo'
+            media_file_id = msg.photo[-1].file_id
+            text = msg.caption or ""
         elif msg.video:
-            media_type, media_file_id, text = 'video', msg.video.file_id, msg.caption or ""
+            media_type = 'video'
+            media_file_id = msg.video.file_id
+            text = msg.caption or ""
         elif msg.document:
-            media_type, media_file_id, text = 'document', msg.document.file_id, msg.caption or ""
+            media_type = 'document'
+            media_file_id = msg.document.file_id
+            text = msg.caption or ""
         elif msg.audio:
-            media_type, media_file_id, text = 'audio', msg.audio.file_id, msg.caption or ""
+            media_type = 'audio'
+            media_file_id = msg.audio.file_id
+            text = msg.caption or ""
         elif msg.voice:
-            media_type, media_file_id = 'voice', msg.voice.file_id
+            media_type = 'voice'
+            media_file_id = msg.voice.file_id
         elif msg.animation:
-            media_type, media_file_id, text = 'animation', msg.animation.file_id, msg.caption or ""
+            media_type = 'animation'
+            media_file_id = msg.animation.file_id
+            text = msg.caption or ""
         elif msg.sticker:
-            media_type, media_file_id = 'sticker', msg.sticker.file_id
+            media_type = 'sticker'
+            media_file_id = msg.sticker.file_id
         elif msg.video_note:
-            media_type, media_file_id = 'video_note', msg.video_note.file_id
+            media_type = 'video_note'
+            media_file_id = msg.video_note.file_id
+
+        if not text and not media_file_id:
+            msg = await _trans('empty_message', lang, "❌ الرسالة فارغة")
+            await safe_send(context.bot, user_id, msg)
+            return
 
         posts = [(text, media_type, media_file_id)]
         count = await DB.add_posts(user_id, channel_db_id, posts)
@@ -814,7 +1031,8 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         else:
             msg = await _trans('post_add_failed', lang,
-                               "❌ لم تتم إضافة المنشور.\n• قد يكون المنشور مكررًا.\n"
+                               "❌ لم تتم إضافة المنشور.\n"
+                               "• قد يكون المنشور مكررًا.\n"
                                "• أو تم الوصول إلى الحد الأقصى للمنشورات غير المنشورة.")
             await safe_send(context.bot, user_id, msg)
 
@@ -2152,7 +2370,6 @@ class MessageHandlers:
             if settings.get('delete_service'):
                 try:
                     await message.delete()
-                    logger.debug(f"🗑️ حذف رسالة خدمة في {chat_id}")
                 except Exception as e:
                     logger.debug(f"تعذر حذف رسالة الخدمة: {e}")
         except Exception as e:
