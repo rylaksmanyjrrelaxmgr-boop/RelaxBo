@@ -2,18 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل لجميع الأزرار (v7.7.4)
+handlers_callback.py - المعالج النهائي الكامل (v7.7.7)
 =====================================================================
+🆕 v7.7.7:
+    ✅ إصلاح _handle_post_add (logging + owner bypass + التحقق من القناة)
+    ✅ تمييز أفضل بين: اشتراك منتهي / لا قناة نشطة
+
 🆕 v7.7.4:
-    ✅ إصلاح sec_violation_penalties (كان ناقصاً)
+    ✅ sec_violation_penalties
     ✅ admin_show_backups
-    ✅ 100% من المعالجات مكتملة
-
-🆕 v7.7.3:
-    ✅ admin_show_backups
-
-🆕 v7.7.2:
-    ✅ إصلاح sec_enable_all / sec_disable_all
 =====================================================================
 """
 
@@ -516,6 +513,7 @@ class CallbackHandlers:
 
             if base_data == "finish_posts":
                 StateManager.clear(user_id)
+                await safe_edit(query, "✅ تم إنهاء إضافة المنشورات", bot=context.bot)
                 return
 
             if base_data == CB.POST_PUB:
@@ -712,7 +710,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_groups_list(update, context, query, user_id, lang)
                 return True
 
-            # تفعيل/تعطيل الكل
             if data.startswith("sec_enable_all:") or data.startswith("sec_disable_all:"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return True
@@ -721,7 +718,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return True
 
-            # 🆕 v7.7.4: sec_violation_penalties
             if data.startswith("sec_violation_penalties:") or data.startswith("sec_violation_settings:"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return True
@@ -1408,20 +1404,51 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 رجوع", callback_data=CB.CH_LIST)]]), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.7.7: _handle_post_add (محسّنة + Logging)
+    # ═════════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_post_add(update, context, query, user_id):
-        if not await DB.has_active_subscription(user_id) and user_id != CONFIG.PRIMARY_OWNER_ID:
-            await safe_edit(query, "❌ انتهى اشتراكك!", bot=context.bot)
-            return
-        active = await DB.get_active_channel(user_id)
-        if not active:
-            await safe_edit(query, "❌ لا توجد قناة نشطة", bot=context.bot)
-            return
-        StateManager.set(user_id, UserState.ADDING_POSTS)
-        await safe_edit(query, "📥 أرسل المنشورات:",
-                        reply_markup=InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("✅ إنهاء", callback_data="finish_posts")]]),
-                        bot=context.bot)
+        """إضافة منشور — مع فحص واضح للاشتراك والقناة."""
+        try:
+            is_owner = (user_id == CONFIG.PRIMARY_OWNER_ID)
+            has_sub = await DB.has_active_subscription(user_id) if not is_owner else True
+            active = await DB.get_active_channel(user_id)
+
+            logger.info(
+                f"🔍 _handle_post_add: user={user_id}, "
+                f"is_owner={is_owner}, has_sub={has_sub}, "
+                f"active_channel={active}"
+            )
+
+            if not has_sub:
+                await safe_edit(query, "❌ انتهى اشتراكك!", bot=context.bot)
+                return
+
+            if not active:
+                await safe_edit(
+                    query,
+                    "❌ <b>لا توجد قناة نشطة</b>\n\n"
+                    "📡 اذهب إلى <b>قنواتي</b> وأضف قناة أولاً.",
+                    parse_mode='HTML',
+                    bot=context.bot,
+                )
+                return
+
+            StateManager.set(user_id, UserState.ADDING_POSTS)
+            logger.info(f"✅ State set: user={user_id} → ADDING_POSTS")
+
+            await safe_edit(
+                query, "📥 أرسل المنشورات:",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("✅ إنهاء", callback_data="finish_posts")]]
+                ),
+                bot=context.bot,
+            )
+        except Exception as e:
+            logger.error(f"❌ _handle_post_add: {e}", exc_info=True)
+            await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
@@ -2001,7 +2028,6 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_type_selection(update, context, query, chat_id, lang, 'night_action')
                 return
 
-            # 🆕 v7.7.4: دعم violation_penalties + violation_settings
             if action in ("violation_settings", "violation_penalties"):
                 await CallbackHandlers._show_violation_penalties(update, context, query, chat_id, lang)
                 return
