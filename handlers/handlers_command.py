@@ -2,16 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - النسخة النهائية الكاملة
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.19
 ===================================================================================
-جميع الأوامر النصية للبوت مع دعم المشرفين المخفيين وإصلاح جميع المشاكل.
+🆕 v7.5.19 (إصلاحات شاملة):
+    ✅ _moderation_command: default duration حسب action
+       - /ban بدون مدة → دائم
+       - /mute بدون مدة → ساعة
+       - /restrict بدون مدة → 30 دقيقة
+    ✅ restore: أزرار قابلة للنقر + safe_mtime
+    ✅ channels/posts/gift_plans: row access آمن (_get_channel_field)
+    ✅ _force_sub_cache: key = (user_id, force_ch)
+    ✅ إزالة dead imports + _safe_answer غير المستخدمة
+    ✅ stats: حماية None
+    ✅ _safe_edit_or_send: default parse_mode=None
 
-🆕 v7.5.17 (نهائي):
+🆕 v7.5.18:
+    ✅ start: فحص وجود المستخدم قبل register_user
+
+🆕 v7.5.17:
     ✅ developer: @RelaxMggr + تعديل بدل إرسال جديدة
     ✅ gift_plans: إضافة lang المفقودة
-    ✅ _safe_edit_or_send: دالة موحّدة
-    ✅ حماية من None و Empty
-    ✅ parse_mode تلقائي مع fallback
+===================================================================================
 """
 
 import asyncio
@@ -27,11 +38,11 @@ from telegram.error import BadRequest, TimedOut
 from config import CONFIG, PATHS
 from database import DB, TimeUtils
 from utils import (
-    TextUtils, safe_send, is_authorized_in_group,
+    is_authorized_in_group,
     check_bot_permissions, invalidate_auth_cache, apply_penalty,
-    RATE_LIMITER, METRICS, get_text, StateManager, UserState,
+    get_text, StateManager, UserState,
     KeyboardFactory, TranslationManager, CB,
-    export_auto_replies, import_auto_replies,
+    export_auto_replies,
 )
 from cache import user_cache
 
@@ -42,26 +53,49 @@ logger = logging.getLogger(__name__)
 # دوال مساعدة
 # ═══════════════════════════════════════════════════════════════════
 
-async def _safe_answer(query, text=None, show_alert=False):
-    """الإجابة على الاستعلامات بأمان"""
+def _safe_mtime(p):
+    """✅ v7.5.19: قراءة آمنة لـ mtime (تتجنب FileNotFoundError)."""
     try:
-        if text:
-            await query.answer(text, show_alert=show_alert)
-        else:
-            await query.answer()
-        return True
-    except (BadRequest, TimedOut) as e:
-        logger.debug(f"Query answer failed: {e}")
-        return False
-    except Exception as e:
-        logger.warning(f"⚠️ فشل query.answer: {e}")
-        return False
+        return p.stat().st_mtime
+    except (OSError, FileNotFoundError):
+        return 0
 
 
-async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode='Markdown'):
+def _get_field(row, key, default=None):
     """
-    ✅ إذا كان من callback → عدّل الرسالة الحالية.
-    ✅ إذا كان من أمر → أرسل رسالة جديدة.
+    ✅ v7.5.19: قراءة آمنة لحقل من row (dict/Row/tuple).
+    """
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row.get(key, default)
+    except AttributeError:
+        pass
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        return default
+
+
+def _row_to_dict(row) -> dict:
+    """✅ v7.5.19: تحويل موحد لصف DB."""
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        return {}
+
+
+async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
+    """
+    ✅ v7.5.19: parse_mode default = None.
+    إذا كان من callback → عدّل الرسالة الحالية.
+    إذا كان من أمر → أرسل رسالة جديدة.
     """
     query = update.callback_query
     user_id = update.effective_user.id
@@ -117,7 +151,7 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
 
 
 def _mask_id(id_value, prefix=3, suffix=2):
-    """إخفاء جزء من المعرفات الحساسة"""
+    """إخفاء جزء من المعرفات الحساسة."""
     if id_value is None:
         return "***"
     s = str(id_value)
@@ -127,7 +161,7 @@ def _mask_id(id_value, prefix=3, suffix=2):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# كاش الاشتراك الإجباري
+# كاش الاشتراك الإجباري — ✅ v7.5.19: key=(user_id, force_ch)
 # ═══════════════════════════════════════════════════════════════════
 
 _force_sub_cache: dict = {}
@@ -138,7 +172,7 @@ _FORCE_CHANNEL_CACHE_TTL = 600
 
 
 async def _get_force_channel_cached(bot, force_ch: str):
-    """جلب معلومات قناة الاشتراك الإجباري مع كاش"""
+    """جلب معلومات قناة الاشتراك الإجباري مع كاش."""
     now = _time_module.time()
     cached = _force_channel_cache.get(force_ch)
     if cached:
@@ -161,9 +195,12 @@ async def _get_force_channel_cached(bot, force_ch: str):
 
 
 async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> bool:
-    """فحص الاشتراك الإجباري مع كاش"""
+    """
+    ✅ v7.5.19: cache key = (user_id, force_ch).
+    السبب: لو غُيّرت قناة الاشتراك، الكاش القديم لا يُستخدم خطأً.
+    """
     now = _time_module.time()
-    cache_key = user_id
+    cache_key = (user_id, force_ch)
 
     cached = _force_sub_cache.get(cache_key)
     if cached:
@@ -183,16 +220,20 @@ async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> 
 
 
 def _invalidate_force_sub_cache(user_id: int = None):
-    """إبطال كاش الاشتراك الإجباري"""
+    """
+    ✅ v7.5.19: إبطال كل مفاتيح المستخدم (بغض النظر عن القناة).
+    """
     if user_id is None:
         _force_sub_cache.clear()
         _force_channel_cache.clear()
     else:
-        _force_sub_cache.pop(user_id, None)
+        keys_to_del = [k for k in _force_sub_cache if k[0] == user_id]
+        for k in keys_to_del:
+            _force_sub_cache.pop(k, None)
 
 
 async def _trans(key, lang, default_ar):
-    """جلب النص المترجم مع fallback"""
+    """جلب النص المترجم مع fallback."""
     try:
         text = await get_text(lang, key)
         if not text or text == key:
@@ -211,12 +252,24 @@ class CommandHandlers:
 
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """الأمر /start - القائمة الرئيسية"""
+        """الأمر /start - القائمة الرئيسية."""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
 
-        await DB.register_user(user_id, username, first_name)
+        # ✅ v7.5.18: فحص وجود المستخدم قبل register_user
+        try:
+            user_exists = await DB.fetchval(
+                "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+            )
+            if not user_exists:
+                await DB.register_user(user_id, username, first_name)
+        except Exception as e:
+            logger.warning(f"register_user check failed: {e}")
+            try:
+                await DB.register_user(user_id, username, first_name)
+            except Exception:
+                pass
 
         # معالجة الإحالات
         args = context.args or []
@@ -276,17 +329,19 @@ class CommandHandlers:
 
         user_data = await user_cache.get_or_load(user_id, DB)
 
-        lang = user_data['language']
-        channel_info = user_data['channel_info']
-        unpublished_posts = user_data['unpublished_posts']
-        groups_count = user_data['groups_count']
-        has_sub = user_data['has_subscription']
-        auto = user_data['auto_publish']
-        recycle = user_data['auto_recycle']
+        lang = user_data.get('language', 'ar') or 'ar'
+        channel_info = user_data.get('channel_info')
+        unpublished_posts = user_data.get('unpublished_posts', 0)
+        groups_count = user_data.get('groups_count', 0)
+        has_sub = user_data.get('has_subscription', False)
+        auto = user_data.get('auto_publish', True)
+        recycle = user_data.get('auto_recycle', True)
 
         ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
-        if channel_info:
-            ch_display = channel_info['channel_name']
+        if channel_info and isinstance(channel_info, dict):
+            ch_name = channel_info.get('channel_name')
+            if ch_name:
+                ch_display = ch_name
 
         sub_text = await _trans('subscription_active', lang, "✅ مفعل") if has_sub \
             else await _trans('subscription_inactive', lang, "❌ غير مفعل")
@@ -402,20 +457,17 @@ class CommandHandlers:
 
     @staticmethod
     async def developer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """معلومات المطور — تُعرض في نفس الرسالة"""
+        """معلومات المطور — تُعرض في نفس الرسالة."""
         user_id = update.effective_user.id
 
-        # ✅ القيم الثابتة (مع حماية من القيم الخطأ)
         dev_name = getattr(CONFIG, 'DEVELOPER_NAME', "ريلاكس") or "ريلاكس"
         dev_contact = getattr(CONFIG, 'DEVELOPER_CONTACT', "@RelaxMggr") or "@RelaxMggr"
 
-        # حماية: إذا كانت القيم خطأ → استبدلها
         if "Reelaaax" in dev_contact or "Reelaaaxbot" in dev_contact:
             dev_contact = "@RelaxMggr"
         if not dev_name or dev_name == "developer_info":
             dev_name = "ريلاكس"
 
-        # النص النهائي
         text = (
             f"👨‍💻 **معلومات المطور**\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -446,7 +498,16 @@ class CommandHandlers:
                 parse_mode=None,
             )
             return
-        stats = await DB.get_bot_stats()
+
+        # ✅ v7.5.19: حماية من None
+        try:
+            stats_data = await DB.get_bot_stats()
+            if not isinstance(stats_data, dict):
+                stats_data = {}
+        except Exception as e:
+            logger.warning(f"get_bot_stats failed: {e}")
+            stats_data = {}
+
         text = await _trans('stats_message', lang,
             "📊 **الإحصائيات**\n\n👥 المستخدمون: {users}\n"
             "📡 القنوات: {channels}\n👥 المجموعات: {groups}\n"
@@ -454,11 +515,13 @@ class CommandHandlers:
             "💎 الاشتراكات النشطة: {active_subs}\n🎫 التذاكر: {tickets}"
         )
         text = text.format(
-            users=stats.get('users', 0), channels=stats.get('channels', 0),
-            groups=stats.get('groups', 0), posts=stats.get('posts', 0),
-            published=stats.get('published', 0),
-            active_subs=stats.get('active_subs', 0),
-            tickets=stats.get('tickets', 0),
+            users=stats_data.get('users', 0),
+            channels=stats_data.get('channels', 0),
+            groups=stats_data.get('groups', 0),
+            posts=stats_data.get('posts', 0),
+            published=stats_data.get('published', 0),
+            active_subs=stats_data.get('active_subs', 0),
+            tickets=stats_data.get('tickets', 0),
         )
         await _safe_edit_or_send(update, context, text, parse_mode='Markdown')
 
@@ -513,21 +576,25 @@ class CommandHandlers:
         text = "🏆 <b>" + await _trans('active_contests', lang, "المسابقات النشطة") + "</b>\n\n"
         kb = []
         for c in contests:
-            end_date = c.get('end_date') or ''
-            title = escape(c.get('title', ''))
-            prize = escape(c.get('prize', ''))
-            participants = c.get('participants', 0)
+            c_d = _row_to_dict(c)
+            end_date = c_d.get('end_date') or ''
+            title = escape(str(c_d.get('title', '')))
+            prize = escape(str(c_d.get('prize', '')))
+            participants = c_d.get('participants', 0)
+            c_id = c_d.get('id')
+            if c_id is None:
+                continue
             text += (
                 f"• <b>{title}</b>\n"
                 f"  🎁 {prize}\n"
-                f"  📅 {escape(end_date[:10])}\n"
+                f"  📅 {escape(str(end_date)[:10])}\n"
                 f"  👥 {await _trans('participants', lang, 'المشاركون')}: {participants}\n\n"
             )
             join_text = await _trans('join_contest', lang, "✍️ المشاركة")
             kb.append([
                 InlineKeyboardButton(
                     f"{join_text} {title[:20]}",
-                    callback_data=f"{CB.CONTEST_JOIN}:{c['id']}"
+                    callback_data=f"{CB.CONTEST_JOIN}:{c_id}"
                 )
             ])
 
@@ -725,22 +792,41 @@ class CommandHandlers:
 
     @staticmethod
     async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """✅ v7.5.19: عرض النسخ بأزرار قابلة للنقر + safe_mtime."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
-        backups = sorted(
-            PATHS.BACKUPS.glob("backup_*.db"),
-            key=lambda x: x.stat().st_mtime, reverse=True,
-        )
-        if not backups:
-            await _safe_edit_or_send(
-                update, context, "📭 لا توجد نسخ", parse_mode=None
+        try:
+            backups = sorted(
+                PATHS.BACKUPS.glob("backup_*.db"),
+                key=_safe_mtime, reverse=True,
             )
-            return
-        text = "🔄 <b>النسخ المتاحة:</b>\n\n" + "\n".join(
-            b.name for b in backups[:10]
-        )
-        await _safe_edit_or_send(update, context, text, parse_mode='HTML')
+            if not backups:
+                await _safe_edit_or_send(
+                    update, context, "📭 لا توجد نسخ", parse_mode=None
+                )
+                return
+
+            kb = []
+            for b in backups[:10]:
+                fname = b.name
+                kb.append([InlineKeyboardButton(
+                    f"📁 {fname}",
+                    callback_data=f"admin_restore_file:{fname}"
+                )])
+            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.ADMIN)])
+
+            await _safe_edit_or_send(
+                update, context,
+                "📂 اختر نسخة احتياطية للاستعادة:",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode=None,
+            )
+        except Exception as e:
+            logger.error(f"restore: {e}", exc_info=True)
+            await _safe_edit_or_send(
+                update, context, "❌ حدث خطأ", parse_mode=None
+            )
 
     @staticmethod
     async def auto_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -774,6 +860,7 @@ class CommandHandlers:
 
     @staticmethod
     async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         channels = await DB.get_user_channels(user_id)
         if not channels:
@@ -783,11 +870,15 @@ class CommandHandlers:
             return
         text = "📡 <b>قنواتك:</b>\n\n"
         for ch in channels:
-            text += f"• {escape(ch['channel_name'])} (<code>{ch['channel_id']}</code>)\n"
+            ch_d = _row_to_dict(ch)
+            name = _get_field(ch_d, 'channel_name', '?')
+            ch_id = _get_field(ch_d, 'channel_id', '?')
+            text += f"• {escape(str(name))} (<code>{escape(str(ch_id))}</code>)\n"
         await _safe_edit_or_send(update, context, text, parse_mode='HTML')
 
     @staticmethod
     async def posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         active = await DB.get_active_channel(user_id)
         if not active:
@@ -803,7 +894,10 @@ class CommandHandlers:
             return
         text = "📋 <b>منشوراتك:</b>\n\n"
         for p in posts:
-            text += f"• <code>{p['id']}</code>: {(escape(p['text'] or '')[:30])}\n"
+            p_d = _row_to_dict(p)
+            pid = _get_field(p_d, 'id', '?')
+            ptext = _get_field(p_d, 'text', '') or ''
+            text += f"• <code>{escape(str(pid))}</code>: {escape(str(ptext)[:30])}\n"
         await _safe_edit_or_send(update, context, text, parse_mode='HTML')
 
     # ═══════════════════════════════════════════════════════════════
@@ -812,7 +906,8 @@ class CommandHandlers:
 
     @staticmethod
     async def security(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -824,6 +919,8 @@ class CommandHandlers:
             return
         context.user_data['security_chat_id'] = chat_id
         settings = await DB.get_security_settings(chat_id)
+        if not isinstance(settings, dict):
+            settings = _row_to_dict(settings)
         text = KeyboardFactory._format_security_text(settings)
         kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
         await _safe_edit_or_send(
@@ -832,7 +929,8 @@ class CommandHandlers:
 
     @staticmethod
     async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -851,7 +949,8 @@ class CommandHandlers:
 
     @staticmethod
     async def lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -868,7 +967,8 @@ class CommandHandlers:
 
     @staticmethod
     async def unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -1021,12 +1121,15 @@ class CommandHandlers:
 
         text = "👤 <b>المخفيون</b>\n"
         for o in owners:
-            text += f"👑 <code>{o['owner_id']}</code>\n"
+            o_d = _row_to_dict(o)
+            text += f"👑 <code>{o_d.get('owner_id', '?')}</code>\n"
         for a in admins:
-            text += f"🛡️ <code>{a['admin_id']}</code>\n"
+            a_d = _row_to_dict(a)
+            text += f"🛡️ <code>{a_d.get('admin_id', '?')}</code>\n"
         for a in anonymous_admins:
-            real = f"<code>{a['user_id']}</code>" if a['user_id'] else "غير معروف"
-            text += f"🕵️ مجهول: <code>{a['anonymous_id']}</code> (حقيقي: {real})\n"
+            a_d = _row_to_dict(a)
+            real = f"<code>{a_d.get('user_id')}</code>" if a_d.get('user_id') else "غير معروف"
+            text += f"🕵️ مجهول: <code>{a_d.get('anonymous_id', '?')}</code> (حقيقي: {real})\n"
 
         if not (owners or admins or anonymous_admins):
             text = "📭 لا يوجد"
@@ -1035,7 +1138,8 @@ class CommandHandlers:
 
     @staticmethod
     async def syncgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_chat or update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             await _safe_edit_or_send(
                 update, context,
                 "❌ هذا الأمر للمجموعات فقط", parse_mode=None,
@@ -1170,8 +1274,10 @@ class CommandHandlers:
                     "WHERE chat_id=? AND anonymous_id=?",
                     (chat_id, anon_id),
                 )
-                if row and row['user_id']:
-                    user_id_map[anon_id] = row['user_id']
+                if row:
+                    row_d = _row_to_dict(row)
+                    if row_d.get('user_id'):
+                        user_id_map[anon_id] = row_d['user_id']
 
         if anonymous_ids:
             await DB.sync_anonymous_admins(
@@ -1238,7 +1344,8 @@ class CommandHandlers:
 
     @staticmethod
     async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -1267,7 +1374,11 @@ class CommandHandlers:
     async def _moderation_command(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str
     ) -> None:
-        if update.effective_chat.type not in ['group', 'supergroup']:
+        """
+        ✅ v7.5.19: default duration حسب action.
+        """
+        if not update.effective_chat or \
+                update.effective_chat.type not in ['group', 'supergroup']:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -1313,8 +1424,17 @@ class CommandHandlers:
             )
             return
 
+        # ✅ v7.5.19: default duration حسب action
+        default_durations = {
+            'ban': 0,           # دائم
+            'mute': 3600,       # ساعة
+            'restrict': 1800,   # 30 دقيقة
+            'warn': 0,          # لا يحتاج
+            'kick': 0,          # لا يحتاج
+        }
+        duration_seconds = default_durations.get(action, 60)
+
         reason_parts = []
-        duration_seconds = 60
         if len(args) > 1:
             try:
                 minutes = int(args[1])
@@ -1350,7 +1470,10 @@ class CommandHandlers:
         )
         await _safe_edit_or_send(update, context, msg, parse_mode=None)
         if success:
-            await invalidate_auth_cache(chat_id=chat_id, user_id=target)
+            try:
+                await invalidate_auth_cache(chat_id=chat_id, user_id=target)
+            except Exception:
+                pass
 
     # ═══════════════════════════════════════════════════════════════
     # أوامر المطور
@@ -1430,7 +1553,8 @@ class CommandHandlers:
             plan_row = await DB.fetchone(
                 "SELECT id FROM plans WHERE is_active=1 AND is_gift=0 LIMIT 1"
             )
-        plan_id = plan_row['id'] if plan_row else None
+        plan_row_d = _row_to_dict(plan_row)
+        plan_id = plan_row_d.get('id') if plan_row_d else None
         if plan_id is None:
             await _safe_edit_or_send(
                 update, context, "❌ لا توجد خطط", parse_mode=None
@@ -1453,7 +1577,7 @@ class CommandHandlers:
 
     @staticmethod
     async def gift_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.17: إضافة lang المفقودة"""
+        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         lang = await DB.get_user_language(user_id) or 'ar'
 
@@ -1466,9 +1590,15 @@ class CommandHandlers:
 
         kb = []
         for plan in plans:
+            p_d = _row_to_dict(plan)
+            p_id = p_d.get('id')
+            p_days = p_d.get('days', '?')
+            p_price = p_d.get('price', '?')
+            if p_id is None:
+                continue
             kb.append([InlineKeyboardButton(
-                f"🎁 {plan['days']} يوم - {plan['price']} ⭐",
-                callback_data=f"buy_gift:{plan['id']}"
+                f"🎁 {p_days} يوم - {p_price} ⭐",
+                callback_data=f"buy_gift:{p_id}"
             )])
 
         back_text = KeyboardFactory.get_text("back", lang)
@@ -1498,7 +1628,11 @@ class CommandHandlers:
                 update, context, "❌ كود غير صالح", parse_mode=None
             )
             return
-        success, days = await DB.redeem_gift_code(user_id, code)
+        result = await DB.redeem_gift_code(user_id, code)
+        if isinstance(result, tuple):
+            success, days = result
+        else:
+            success, days = (bool(result), 0)
         if success and days > 0:
             await _safe_edit_or_send(
                 update, context,
