@@ -2,33 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.1)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.3)
 ================================================================================
-🚀 v7.6.1 (توحيد الفهارس + رفع الإصدار):
-  ✅ CURRENT_SCHEMA_VERSION = 3
-  ✅ EXPECTED_INDEX_COUNT = 65 (كان 62)
-  ✅ 3 فهارس جديدة نُقلت من database.py:
-     - idx_referral_rewards_count
-     - idx_contest_participants_contest
-     - idx_gift_codes_plan
-  ✅ توحيد مصدر الفهارس: كل الفهارس الآن في COMMON_INDEXES
+🚀 v7.6.3 (الحل الذكي — فحص التعريفات):
+  ✅ _ensure_index_definitions_match_postgres/sqlite/mysql
+     - يفحص كل فهرس في COMMON_INDEXES
+     - يحذف فقط عند اختلاف التعريف (أعمدة مختلفة)
+     - لا churn للفهارس المطابقة
+  ✅ CURRENT_SCHEMA_VERSION = 5
 
-🚀 v7.6.0 (Fast-path — تسريع بدء التشغيل):
-  ✅ فحص مبكر لـ schema_version قبل أي CREATE TABLE
-  ✅ إذا كان الـschema محدّثاً: تخطي كامل (~0.5s بدل ~31s)
-  ✅ يقلل زمن إعادة التشغيل (spin-down/wake-up) من ~40s إلى ~5s
+🚀 v7.6.2:
+  ✅ حذف 11 فهرساً من DEPRECATED_INDEXES (كانت مكررة)
+  ✅ CURRENT_SCHEMA_VERSION = 4
 
-🆕 v7.5.9 (تنظيف الفهارس القديمة):
-  ✅ DEPRECATED_INDEXES: قائمة الفهارس القديمة المراد حذفها
-  ✅ _drop_deprecated_indexes_postgres/sqlite/mysql: دوال الحذف
-  ✅ حذف الفهارس القديمة تلقائياً قبل إنشاء الجديدة
-  ✅ دمج _create_indexes_sqlite/postgres في دالة موحّدة
-
-📌 v7.5.8 (إصلاحات v5.4):
-  - _safe_now_iso: إزالة +00:00 من fallback (توافق MySQL)
-  - _fetch_existing_indexes_mysql: تبسيط
-  - فحص مسبق للأعمدة في CHECK لـ plans.features (PostgreSQL)
-  - توحيد schema_version insert لكل المحركات
+🚀 v7.6.1: توحيد الفهارس + 3 فهارس من database.py
+🚀 v7.6.0: Fast-path (~0.5s بدل ~31s)
 ================================================================================
 """
 
@@ -39,11 +27,10 @@ import re
 from datetime import datetime, timezone
 
 # =====================================================================
-# 0. ثوابت مشتركة
+# 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.1: رفع الإصدار لتفعيل ترحيل الفهارس الجديدة
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 5
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -52,13 +39,10 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.1: عدد الفهارس (بعد إضافة 3 فهارس)
 EXPECTED_INDEX_COUNT = 65
 
 COMMON_INDEXES = [
-    # ═══════════════════════════════════════════════════════════════
-    # USERS (6)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USERS (6) ═══
     ("users", "idx_users_banned", "users(banned)"),
     ("users", "idx_users_active_channel", "users(active_channel)"),
     ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
@@ -66,9 +50,7 @@ COMMON_INDEXES = [
     ("users", "idx_users_subscription_end", "users(subscription_end)"),
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_CHANNELS (4)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_CHANNELS (4) ═══
     ("user_channels", "idx_uc_user", "user_channels(user_id)"),
     ("user_channels", "idx_user_channels_user_created",
      "user_channels(user_id, created_at DESC)"),
@@ -77,9 +59,7 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # POSTS (5)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ POSTS (5) ═══
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel", "posts(channel_db_id)"),
     ("posts", "idx_posts_published", "posts(published)"),
@@ -88,45 +68,33 @@ COMMON_INDEXES = [
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # BOT_GROUPS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ BOT_GROUPS (2) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_GROUPS_LINK (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_GROUPS_LINK (1) ═══
     ("user_groups_link", "idx_user_groups_link_user_id",
      "user_groups_link(user_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # GROUP_ADMINS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ GROUP_ADMINS (2) ═══
     ("group_admins", "idx_group_admins_user_id",
      "group_admins(user_id)"),
     ("group_admins", "idx_group_admins_user_chat",
      "group_admins(user_id, chat_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_OWNER_GROUPS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ HIDDEN_OWNER_GROUPS (2) ═══
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id",
      "hidden_owner_groups(owner_id)"),
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat",
      "hidden_owner_groups(owner_id, chat_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # HIDDEN_ADMINS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ HIDDEN_ADMINS (2) ═══
     ("hidden_admins", "idx_hidden_admins_admin_id",
      "hidden_admins(admin_id)"),
     ("hidden_admins", "idx_hidden_admins_admin_chat",
      "hidden_admins(admin_id, chat_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # ANONYMOUS_ADMINS (4)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ ANONYMOUS_ADMINS (4) ═══
     ("anonymous_admins", "idx_anonymous_admins_user_id",
      "anonymous_admins(user_id)"),
     ("anonymous_admins", "idx_anonymous_admins_anonymous_id",
@@ -136,16 +104,12 @@ COMMON_INDEXES = [
     ("anonymous_admins", "idx_anon_anon_chat",
      "anonymous_admins(anonymous_id, chat_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # BANNED_WORDS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ BANNED_WORDS (2) ═══
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # AUTO_REPLIES (4)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ AUTO_REPLIES (4) ═══
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
@@ -154,17 +118,13 @@ COMMON_INDEXES = [
     ("auto_replies", "idx_ar_usage",
      "auto_replies(usage_count DESC)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # SCHEDULE (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ SCHEDULE (2) ═══
     ("schedule", "idx_schedule_next_publish",
      "schedule(next_publish_date)"),
     ("schedule", "idx_schedule_channel_next",
      "schedule(channel_db_id, next_publish_date)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # SUBSCRIPTIONS (5)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ SUBSCRIPTIONS (5) ═══
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
@@ -173,46 +133,32 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_subscriptions_user_status_end",
      "subscriptions(user_id, status, end_date)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # INVOICES (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ INVOICES (1) ═══
     ("invoices", "idx_inv_user", "invoices(user_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # REFERRALS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ REFERRALS (2) ═══
     ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
     ("referrals", "idx_referrals_referrer_created",
      "referrals(referrer_id, created_at DESC)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.6.1: REFERRAL_REWARDS (1) — نُقلت من database.py
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ REFERRAL_REWARDS (1) ═══
     ("referral_rewards", "idx_referral_rewards_count",
      "referral_rewards(referral_count)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # CONTESTS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ CONTESTS (2) ═══
     ("contests", "idx_contests_status", "contests(status)"),
     ("contests", "idx_contests_status_end",
      "contests(status, end_date)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.6.1: CONTEST_PARTICIPANTS (1) — نُقلت من database.py
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ CONTEST_PARTICIPANTS (1) ═══
     ("contest_participants", "idx_contest_participants_contest",
      "contest_participants(contest_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.6.1: GIFT_CODES (1) — نُقلت من database.py
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ GIFT_CODES (1) ═══
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_PENALTIES (4)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_PENALTIES (4) ═══
     ("user_penalties", "idx_penalties_user",
      "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat",
@@ -222,65 +168,47 @@ COMMON_INDEXES = [
     ("user_penalties", "idx_penalties_user_chat_status_end",
      "user_penalties(user_id, chat_id, status, end_time)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_POINTS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_POINTS (2) ═══
     ("user_points", "idx_points_user", "user_points(user_id)"),
     ("user_points", "idx_user_points_value", "user_points(points DESC)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # SUPPORT_TICKETS (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ SUPPORT_TICKETS (2) ═══
     ("support_tickets", "idx_tickets_status",
      "support_tickets(status)"),
     ("support_tickets", "idx_tickets_status_created",
      "support_tickets(status, created_at DESC)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # PAYMENT_LOGS (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ PAYMENT_LOGS (1) ═══
     ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # ADMIN_LOGS (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ ADMIN_LOGS (1) ═══
     ("admin_logs", "idx_admin_logs_chat",
      "admin_logs(chat_id, id DESC)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # PENALTY_ARCHIVE (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ PENALTY_ARCHIVE (1) ═══
     ("penalty_archive", "idx_penalty_archive_archived",
      "penalty_archive(archived_at)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # SENTIMENT_HISTORY (2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ SENTIMENT_HISTORY (2) ═══
     ("sentiment_history", "idx_sentiment_user_chat",
      "sentiment_history(user_id, chat_id)"),
     ("sentiment_history", "idx_sentiment_created",
      "sentiment_history(created_at)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_MESSAGES (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_MESSAGES (1) ═══
     ("user_messages", "idx_user_messages_chat",
      "user_messages(chat_id)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # SCHEDULED_POSTS (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ SCHEDULED_POSTS (1) ═══
     ("scheduled_posts", "idx_scheduled_posts_time",
      "scheduled_posts(publish_time)"),
 
-    # ═══════════════════════════════════════════════════════════════
-    # USER_REMINDER_SETTINGS (1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ USER_REMINDER_SETTINGS (1) ═══
     ("user_reminder_settings", "idx_reminder_subscription",
      "user_reminder_settings(subscription_reminder)"),
 ]
 
-# ✅ v7.5.9: قائمة الفهارس القديمة المراد حذفها (تنظيف)
+# ✅ v7.6.2: الفهارس القديمة (بعد إزالة 11 فهرساً مكرراً)
 DEPRECATED_INDEXES = [
     # ═══ posts ═══
     "idx_posts_channel_pub_fail_created_optimized",
@@ -296,42 +224,31 @@ DEPRECATED_INDEXES = [
     "idx_posts_channel_fail",
 
     # ═══ subscriptions ═══
-    "idx_subscriptions_user_status",
-    "idx_subscriptions_user_status_end",
     "idx_sub_user_status_end",
     "idx_subscriptions_active",
     "idx_subscriptions_active_end",
-    "idx_sub_user",
-    "idx_sub_end",
-    "idx_sub_status",
 
     # ═══ user_channels ═══
-    "idx_user_channels_user_banned",
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
     "idx_user_channels_id_user",
     "idx_uc_user_banned",
-    "idx_uc_user",
     "idx_uc_channel_id",
     "idx_uc_active",
 
     # ═══ user_penalties ═══
     "idx_penalties_user_chat_status",
     "idx_penalties_user_chat",
-    "idx_penalties_user",
     "idx_user_penalties_active_end",
     "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup",
     "idx_penalties_chat_status",
-    "idx_penalties_chat",
 
     # ═══ banned_words ═══
-    "idx_banned_words_chat",
     "idx_banned_words_word",
 
     # ═══ user_reminder_settings ═══
     "idx_reminders_subscription",
-    "idx_reminder_subscription",
     "idx_reminders_user",
 
     # ═══ admin_logs ═══
@@ -402,7 +319,6 @@ DEPRECATED_INDEXES = [
     "idx_ugl_user",
 ]
 
-# ✅ v7.6.1: فحص فعلي لعدد الفهارس عند الاستيراد
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
     f"❌ عدد الفهارس غير مطابق: "
     f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
@@ -414,7 +330,6 @@ assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
-    """✅ v7.5.8: fallback بدون +00:00 (توافق MySQL DATETIME)."""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
@@ -424,7 +339,6 @@ def _safe_now_iso(TimeUtils) -> str:
 
 
 def _safe_now_dt(TimeUtils):
-    """✅ v7.5.8: datetime نظيف بدون tzinfo (PostgreSQL TIMESTAMP)."""
     if TimeUtils:
         try:
             return TimeUtils.utc_now()
@@ -434,18 +348,39 @@ def _safe_now_dt(TimeUtils):
 
 
 def _is_valid_index_name(name: str) -> bool:
-    """✅ v7.5.9: فحص أمان لاسم الفهرس."""
     if not name or not isinstance(name, str):
         return False
     return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
 
 
+def _normalize_columns(col_str: str) -> str:
+    """
+    ✅ v7.6.3: تطبيع قائمة الأعمدة للمقارنة.
+
+    - إزالة المسافات
+    - lowercase
+    - إزالة public. prefix
+    """
+    if not col_str:
+        return ""
+    s = col_str.replace(" ", "").lower()
+    s = s.replace("public.", "")
+    return s
+
+
+def _parse_expected_columns(cols: str) -> str:
+    """استخراج الأعمدة من 'table(col1, col2)'."""
+    m = re.match(r"^\w+\((.+)\)$", cols.strip())
+    if not m:
+        return ""
+    return m.group(1)
+
+
 # =====================================================================
-# ✅ v7.6.0: دوال Fast-path (فحص schema_version قبل الإنشاء)
+# Fast-path: قراءة schema_version
 # =====================================================================
 
 async def _get_current_schema_version_postgres(conn):
-    """✅ v7.6.0: قراءة إصدار الـschema الحالي (PostgreSQL)."""
     try:
         row = await conn.fetchrow(
             "SELECT MAX(version) AS v FROM schema_version"
@@ -458,7 +393,6 @@ async def _get_current_schema_version_postgres(conn):
 
 
 async def _get_current_schema_version_sqlite(conn):
-    """✅ v7.6.0: قراءة إصدار الـschema الحالي (SQLite)."""
     try:
         cursor = await conn.execute(
             "SELECT MAX(version) FROM schema_version"
@@ -472,7 +406,6 @@ async def _get_current_schema_version_sqlite(conn):
 
 
 async def _get_current_schema_version_mysql(conn):
-    """✅ v7.6.0: قراءة إصدار الـschema الحالي (MySQL)."""
     try:
         cursor = await conn.cursor()
         await cursor.execute("SELECT MAX(version) FROM schema_version")
@@ -518,7 +451,6 @@ async def _fetch_existing_indexes_sqlite(conn):
 
 
 async def _fetch_existing_indexes_mysql(conn, tables):
-    """✅ v7.5.8: تبسيط + logging أفضل + parameterized."""
     if not tables:
         return set()
     try:
@@ -552,31 +484,207 @@ async def _fetch_existing_indexes_mysql(conn, tables):
         return existing
 
 
-async def _fetch_existing_tables_postgres(conn):
+# =====================================================================
+# ✅ v7.6.3: فحص تعريفات الفهارس (Smart Check)
+# =====================================================================
+
+async def _ensure_index_definitions_match_postgres(conn, logger):
+    """
+    ✅ v7.6.3: يفحص تعريف كل فهرس في COMMON_INDEXES.
+    يحذف فقط عند اختلاف الأعمدة الفعلية عن المتوقعة.
+    """
+    checked = 0
+    dropped = 0
+    missing = 0
+
     try:
         rows = await conn.fetch(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ANY(current_schemas(false))"
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[])",
+            [name for _, name, _ in COMMON_INDEXES],
         )
-        return {row["table_name"] for row in rows}
-    except Exception:
-        return set()
+        existing = {row["indexname"]: row["indexdef"] for row in rows}
+
+        for _table, idx_name, cols in COMMON_INDEXES:
+            if not _is_valid_index_name(idx_name):
+                continue
+            if idx_name not in existing:
+                missing += 1
+                continue
+
+            actual_def = existing[idx_name]
+            # استخراج الأعمدة من "USING btree (col1, col2 DESC)"
+            m = re.search(
+                r"USING\s+\w+\s+\(([^)]+)\)",
+                actual_def,
+                re.IGNORECASE,
+            )
+            if not m:
+                continue
+
+            actual_cols = _normalize_columns(m.group(1))
+            expected_cols = _normalize_columns(_parse_expected_columns(cols))
+
+            if actual_cols != expected_cols:
+                logger.warning(
+                    f"⚠️ PG: {idx_name} تعريف مختلف "
+                    f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
+                )
+                try:
+                    await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                    dropped += 1
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+            checked += 1
+
+        if logger:
+            if dropped > 0:
+                logger.info(
+                    f"🔧 PG: أُعيد بناء {dropped} فهرس (تعريف مختلف) — "
+                    f"فُحص {checked}، مفقود {missing}"
+                )
+            else:
+                logger.debug(
+                    f"✅ PG: كل الفهارس ({checked}) بتعريف صحيح، "
+                    f"مفقود {missing}"
+                )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_postgres: {e}")
 
 
-async def _fetch_existing_tables_sqlite(conn):
+async def _ensure_index_definitions_match_sqlite(conn, logger):
+    """✅ v7.6.3: SQLite version."""
+    checked = 0
+    dropped = 0
+    missing = 0
+
     try:
+        names = [name for _, name, _ in COMMON_INDEXES]
+        if not names:
+            return
+
+        placeholders = ",".join(["?"] * len(names))
         cursor = await conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name IS NOT NULL"
+            f"SELECT name, sql FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(names),
         )
         rows = await cursor.fetchall()
-        return {row[0] for row in rows}
-    except Exception:
-        return set()
+        existing = {r[0]: (r[1] or "") for r in rows}
+
+        for _table, idx_name, cols in COMMON_INDEXES:
+            if not _is_valid_index_name(idx_name):
+                continue
+            if idx_name not in existing:
+                missing += 1
+                continue
+
+            sql_def = existing[idx_name]
+            # SQLite: "CREATE INDEX name ON table(col1, col2)"
+            m = re.search(
+                r"ON\s+\w+\s*\(([^)]+)\)",
+                sql_def,
+                re.IGNORECASE,
+            )
+            if not m:
+                continue
+
+            actual_cols = _normalize_columns(m.group(1))
+            expected_cols = _normalize_columns(_parse_expected_columns(cols))
+
+            if actual_cols != expected_cols:
+                logger.warning(
+                    f"⚠️ SQLite: {idx_name} تعريف مختلف — يُحذف"
+                )
+                try:
+                    await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                    dropped += 1
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+            checked += 1
+
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 SQLite: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_sqlite: {e}")
+
+
+async def _ensure_index_definitions_match_mysql(conn, logger):
+    """✅ v7.6.3: MySQL version — يعتمد على SHOW INDEX (اسم الأعمدة فقط)."""
+    checked = 0
+    dropped = 0
+    missing = 0
+
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        for table in tables:
+            if not _is_valid_index_name(table):
+                continue
+
+            try:
+                cursor = await conn.cursor()
+                await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                rows = await cursor.fetchall()
+                await cursor.close()
+            except Exception:
+                continue
+
+            # SHOW INDEX columns:
+            # 0=Table, 1=Non_unique, 2=Key_name, 3=Seq_in_index, 4=Column_name
+            by_key = {}
+            for r in rows:
+                key_name = r[2]
+                seq = r[3]
+                col_name = r[4]
+                by_key.setdefault(key_name, []).append((seq, col_name))
+
+            for _t, idx_name, cols in COMMON_INDEXES:
+                if _t != table:
+                    continue
+                if not _is_valid_index_name(idx_name):
+                    continue
+                if idx_name not in by_key:
+                    missing += 1
+                    continue
+
+                sorted_cols = sorted(by_key[idx_name], key=lambda x: x[0])
+                actual_cols = _normalize_columns(
+                    ",".join(c for _, c in sorted_cols)
+                )
+                expected_cols = _normalize_columns(
+                    _parse_expected_columns(cols)
+                )
+
+                if actual_cols != expected_cols:
+                    logger.warning(
+                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف — يُحذف"
+                    )
+                    try:
+                        await conn.execute(
+                            f"DROP INDEX {idx_name} ON `{table}`"
+                        )
+                        dropped += 1
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+                checked += 1
+
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 MySQL: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_mysql: {e}")
 
 
 # =====================================================================
-# ✅ v7.5.9: دوال حذف الفهارس القديمة (DEPRECATED)
+# حذف الفهارس القديمة (DEPRECATED)
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
@@ -595,7 +703,6 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
         dropped = 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
-                logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
                 continue
             try:
                 await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
@@ -625,7 +732,6 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
         dropped = 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
-                logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
                 continue
             try:
                 await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
@@ -650,10 +756,8 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
         for table, idx_name in existing:
             if idx_name in DEPRECATED_INDEXES:
                 if not _is_valid_index_name(idx_name):
-                    logger.warning(f"⚠️ اسم فهرس غير صالح: {idx_name}")
                     continue
                 if not _is_valid_index_name(table):
-                    logger.warning(f"⚠️ اسم جدول غير صالح: {table}")
                     continue
                 try:
                     await conn.execute(
@@ -674,7 +778,7 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.5.9: دالة موحّدة لإنشاء الفهارس
+# إنشاء الفهارس
 # =====================================================================
 
 async def _create_indexes_generic(
@@ -703,8 +807,6 @@ async def _create_indexes_generic(
     failed = 0
     for _table, idx_name, cols in to_create:
         if not _is_valid_index_name(idx_name):
-            if logger:
-                logger.warning(f"⚠️ {db_name} اسم فهرس غير صالح: {idx_name}")
             failed += 1
             continue
         try:
@@ -757,8 +859,6 @@ async def _create_indexes_mysql(conn, logger):
             skipped += 1
             continue
         if not _is_valid_index_name(idx_name):
-            if logger:
-                logger.warning(f"⚠️ MySQL اسم فهرس غير صالح: {idx_name}")
             failed += 1
             continue
         try:
@@ -775,9 +875,7 @@ async def _create_indexes_mysql(conn, logger):
             else:
                 failed += 1
                 if logger:
-                    logger.warning(
-                        f"⚠️ MySQL فهرس {idx_name}: {e}"
-                    )
+                    logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
 
     if logger:
         logger.info(
@@ -787,25 +885,19 @@ async def _create_indexes_mysql(conn, logger):
 
 
 # =====================================================================
-# 1. إنشاء جداول SQLite
+# 1. جداول SQLite
 # =====================================================================
 
 async def create_tables_sqlite(conn, logger, TimeUtils):
-    # ═══════════════════════════════════════════════════════════════
-    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
-    # ═══════════════════════════════════════════════════════════════
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         if logger:
             logger.info(
                 f"⏩ SQLite: schema v{current} محدّث — "
-                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+                f"تخطي (fast-path)"
             )
         return
 
-    # ═══════════════════════════════════════════════════════════════
-    # من هنا: الكود كما هو (يُنفَّذ فقط عند أول تشغيل أو ترقية)
-    # ═══════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -1375,10 +1467,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # حذف الفهارس القديمة أولاً
+    # ✅ v7.6.3: فحص التعريفات → حذف → إنشاء
     await _drop_deprecated_indexes_sqlite(conn, logger)
-
-    # ثم إنشاء الفهارس الجديدة
+    await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
 
     try:
@@ -1395,31 +1486,22 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             logger.warning(f"⚠️ schema_version SQLite: {e}")
 
     if logger:
-        logger.info(
-            "✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة"
-        )
+        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
 
 
 # =====================================================================
-# 2. إنشاء جداول PostgreSQL
+# 2. جداول PostgreSQL
 # =====================================================================
 
 async def create_tables_postgres(conn, logger, TimeUtils):
-    # ═══════════════════════════════════════════════════════════════
-    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
-    # ═══════════════════════════════════════════════════════════════
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         if logger:
             logger.info(
-                f"⏩ PG: schema v{current} محدّث — "
-                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+                f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
             )
         return
 
-    # ═══════════════════════════════════════════════════════════════
-    # من هنا: الكود كما هو
-    # ═══════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -1993,10 +2075,9 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # حذف الفهارس القديمة أولاً
+    # ✅ v7.6.3: 3 خطوات
     await _drop_deprecated_indexes_postgres(conn, logger)
-
-    # ثم إنشاء الفهارس الجديدة
+    await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
 
     try:
@@ -2013,31 +2094,22 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             logger.warning(f"⚠️ schema_version PG: {e}")
 
     if logger:
-        logger.info(
-            "✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة"
-        )
+        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
 
 
 # =====================================================================
-# 3. إنشاء جداول MySQL
+# 3. جداول MySQL
 # =====================================================================
 
 async def create_tables_mysql(conn, logger, TimeUtils):
-    # ═══════════════════════════════════════════════════════════════
-    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
-    # ═══════════════════════════════════════════════════════════════
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         if logger:
             logger.info(
-                f"⏩ MySQL: schema v{current} محدّث — "
-                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+                f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
             )
         return
 
-    # ═══════════════════════════════════════════════════════════════
-    # من هنا: الكود كما هو
-    # ═══════════════════════════════════════════════════════════════
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
     try:
         await conn.execute("""
@@ -2620,10 +2692,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # حذف الفهارس القديمة أولاً
+        # ✅ v7.6.3: 3 خطوات
         await _drop_deprecated_indexes_mysql(conn, logger)
-
-        # ثم إنشاء الفهارس الجديدة
+        await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
 
         try:
@@ -2642,18 +2713,14 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 logger.warning(f"⚠️ schema_version MySQL: {e}")
 
         if logger:
-            logger.info(
-                "✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة"
-            )
+            logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
 
     finally:
         try:
             await conn.execute("SET FOREIGN_KEY_CHECKS=1")
         except Exception as e:
             if logger:
-                logger.error(
-                    f"❌ فشل إعادة تفعيل FOREIGN_KEY_CHECKS: {e}"
-                )
+                logger.error(f"❌ فشل إعادة FOREIGN_KEY_CHECKS: {e}")
 
 
 # =====================================================================
