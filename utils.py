@@ -2,27 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.0 - Smart Edition)
+utils.py - الأدوات المساعدة للبوت (v7.8.1 - Smart Edition)
 =================================================================================
+🧠 v7.8.1 (حماية من thundering herd + batch subscriptions):
+    ✅ SmartCache.get_or_set(): dedup للمفاتيح المتزامنة
+       (50 كوروتين تطلب نفس المفتاح → استدعاء DB واحد فقط)
+    ✅ BackgroundTasks._publish_single_channel: يقبل has_sub مسبقاً
+    ✅ BackgroundTasks.auto_publish: batch subscription check
+       (من 20 استعلام → 1 استعلام IN)
+    ✅ Semaphore limit 8 (بدل 20) — ضغط أقل على Pool
+    ✅ تأخير بين المهام 0.3s (بدل 0.5s) — لكن أسرع عملياً
+
 🧠 v7.8.0 (تحسينات ذكية شاملة):
-    ✅ PenaltyFactory: Singleton strategies (لا instance per call)
-    ✅ KeyboardFactory: Preload كل اللغات + Warmup تلقائي
+    ✅ PenaltyFactory: Singleton strategies
+    ✅ KeyboardFactory: Preload كل اللغات + Warmup
     ✅ TranslationManager: Preload + Async warmup
-    ✅ StateManager: يستخدم TTLCache (تنظيف تلقائي)
-    ✅ RateLimiter: Adaptive — يبطئ تلقائياً عند ضغط Telegram (429)
-    ✅ _group_admins_cache: TTL متكيّف حسب نشاط المجموعة
-    ✅ _get_security_stats: dedup cache (5s) — يمنع تكرار الاستعلامات
-    ✅ _auth_cache: negative cache + ttl ذكي (60s positives, 15s negatives)
+    ✅ StateManager: TTLCache (تنظيف تلقائي)
+    ✅ RateLimiter: Adaptive (429-aware)
+    ✅ _group_admins_cache: TTL متكيّف
+    ✅ _get_security_stats: dedup cache (5s)
+    ✅ _auth_cache: negative cache + ttl ذكي
     ✅ safe_send: Exponential backoff للـ429
-    ✅ auto_publish: Dynamic semaphore (يتكيف مع الحمل)
-    ✅ _banned_words_cache: Global batching للكلمات
-    ✅ warmup_all(): Preload كل اللغات + الأزرار عند بدء التشغيل
+    ✅ _banned_words_cache: Global batching
+    ✅ warmup_all(): Preload at startup
     ✅ _query_cache: كاش موحّد للاستعلامات المتكررة
 
 📌 v7.7.3: _do_auth_check: Telegram API أولاً
 📌 v7.7.2: تصحيحات أمنية + تنظيف
 📌 v7.7.1: _get_security_stats متوازي
-📌 v7.7.0: _format_security_text + ban_user_by_id
 =================================================================================
 """
 
@@ -62,22 +69,25 @@ from database import DB
 logger = logging.getLogger(__name__)
 
 # =====================================================================
-# 0. 🧠 كاش موحّد للاستعلامات المتكررة
+# 0. 🧠 SmartCache — كاش موحّد مع dedup
 # =====================================================================
 
 class SmartCache:
     """
-    ✅ v7.8.0: كاش موحّد async-safe بسيط.
+    🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
 
-    يجمع عدة كاشات متفرقة تحت إدارة واحدة.
+    - get_or_set: يضمن استدعاء واحد فقط لكل مفتاح حتى مع 50 كوروتين متزامنة
+    - LRU eviction عند الوصول للحد
+    - TTL قابل للتخصيص لكل مفتاح
     """
-    __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock')
+    __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
     def __init__(self, ttl: int = 60, max_size: int = 5000):
         self._cache: Dict[str, Tuple[Any, float]] = {}
         self._ttl_default = ttl
         self._max_size = max_size
         self._lock = asyncio.Lock()
+        self._stampede_locks: Dict[str, asyncio.Lock] = {}
 
     async def get(self, key: str, default=None):
         async with self._lock:
@@ -89,6 +99,43 @@ class SmartCache:
                 del self._cache[key]
                 return default
             return value
+
+    async def get_or_set(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[Any]],
+        ttl: int = None,
+    ) -> Any:
+        """
+        🧠 v7.8.1: حماية من thundering herd.
+
+        لو N كوروتين طلبت نفس المفتاح في نفس اللحظة → استدعاء DB واحد فقط.
+        """
+        # محاولة أولى سريعة
+        value = await self.get(key)
+        if value is not None:
+            return value
+
+        # حماية: قفل per-key
+        async with self._lock:
+            lock = self._stampede_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._stampede_locks[key] = lock
+
+        async with lock:
+            # إعادة فحص — ربما امتلأ المفتاح أثناء انتظار القفل
+            value = await self.get(key)
+            if value is not None:
+                return value
+
+            loaded = await loader()
+            if loaded is not None:
+                await self.set(key, loaded, ttl)
+
+            async with self._lock:
+                self._stampede_locks.pop(key, None)
+            return loaded
 
     async def set(self, key: str, value, ttl: int = None):
         effective_ttl = ttl if ttl is not None else self._ttl_default
@@ -219,15 +266,12 @@ class TextUtils:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
 # =====================================================================
-# 3. 🧠 Rate Limiter — Adaptive
+# 3. Rate Limiter — Adaptive
 # =====================================================================
 
 class RateLimiter:
     """
     🧠 v7.8.0: محدد معدل ذكي — يبطئ تلقائياً عند ضغط Telegram (429).
-
-    - كل 429 → يضاعف delay مؤقتاً
-    - بعد 60 ثانية بلا 429 → يعود للسرعة الطبيعية
     """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -235,7 +279,6 @@ class RateLimiter:
         self._lock = asyncio.Lock()
         self.max_per_second = max_per_second
         self._base_max = max_per_second
-        # 🧠 Adaptive throttling
         self._throttle_factor = 1.0
         self._last_429 = 0.0
         self._429_count = 0
@@ -250,7 +293,6 @@ class RateLimiter:
         )
 
     def _get_effective_rate(self) -> int:
-        # إعادة التعيين بعد 60s من آخر 429
         if time.time() - self._last_429 > 60:
             self._throttle_factor = 1.0
         return max(1, int(self._base_max / self._throttle_factor))
@@ -312,7 +354,7 @@ class MetricsCollector:
 METRICS = MetricsCollector()
 
 # =====================================================================
-# 5. كاش الردود (يستخدم TTLCache الآن)
+# 5. كاش الردود
 # =====================================================================
 
 class AutoReplyCache:
@@ -339,15 +381,12 @@ class AutoReplyCache:
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
-# 6. الترجمات — 🧠 Preload + Warmup
+# 6. الترجمات — Preload + Warmup
 # =====================================================================
 
 class TranslationManager:
     """
     🧠 v7.8.0: إدارة الترجمات مع preload + warmup.
-
-    - Preload كل اللغات عند warmup_all()
-    - استخدام threading.Lock للـsync load (آمن من الاستيراد المتزامن)
     """
     _translations: Dict[str, Dict] = {}
     _locales_dir: str = str(Path(__file__).resolve().parent / "locales")
@@ -362,7 +401,6 @@ class TranslationManager:
             return cls._translations[lang]
 
         with cls._load_lock:
-            # double-check inside lock
             if lang in cls._translations:
                 return cls._translations[lang]
 
@@ -431,7 +469,7 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
 
 # =====================================================================
-# 7. إدارة الحالات — 🧠 TTLCache
+# 7. إدارة الحالات — TTLCache
 # =====================================================================
 
 class UserState(Enum):
@@ -502,12 +540,7 @@ class UserState(Enum):
 
 
 class StateManager:
-    """
-    🧠 v7.8.0: إدارة الحالات بـ TTLCache (تنظيف تلقائي).
-
-    - timeout موحّد 300s
-    - لا حاجة لمهمة تنظيف دورية
-    """
+    """🧠 v7.8.0: إدارة الحالات بـ TTLCache (تنظيف تلقائي)."""
     _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
     _lock = threading.Lock()
 
@@ -528,7 +561,7 @@ class StateManager:
 
     @classmethod
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
-        """يرجع True إن لم يكن موجوداً (منطق معاكس للسلوك القديم مقصود)."""
+        """يرجع True إن لم يكن موجوداً."""
         with cls._lock:
             return user_id not in cls._cache
 
@@ -704,16 +737,11 @@ class CB:
     AUTO_REPLY_LIST = "auto_reply_list"
 
 # =====================================================================
-# 9. مصنع الكيبوردات — 🧠 Preload
+# 9. مصنع الكيبوردات — Preload
 # =====================================================================
 
 class KeyboardFactory:
-    """
-    🧠 v7.8.0: مصنع لوحات المفاتيح مع preload.
-
-    - preload_all(): يحمّل كل ملفات buttons_config_xx.json
-    - Warmup: أول build() أسرع 10x
-    """
+    """🧠 v7.8.0: مصنع لوحات المفاتيح مع preload."""
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
@@ -953,9 +981,7 @@ class KeyboardFactory:
 
     @classmethod
     def preload_all(cls) -> int:
-        """
-        🧠 v7.8.0: preload كل اللغات — أول build() يصبح instant.
-        """
+        """🧠 v7.8.0: preload كل اللغات."""
         langs = list(TranslationManager.get_available_languages().keys())
         count = 0
         for lang in langs:
@@ -1193,11 +1219,7 @@ class KeyboardFactory:
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
-        """
-        🧠 v7.8.0: dedup cache (5s) — يمنع تكرار الاستعلامات.
-
-        إذا نُقرت نفس القائمة مرتين في < 5s، نُرجع نفس الإحصائيات.
-        """
+        """🧠 v7.8.0: dedup cache (5s)."""
         cache_key = f"sec_stats_{chat_id}"
         cached = await _security_stats_cache.get(cache_key)
         if cached is not None:
@@ -1396,7 +1418,7 @@ class KeyboardFactory:
         )
 
 # =====================================================================
-# 10. كاش الكلمات المحظورة — 🧠 Global batching
+# 10. كاش الكلمات المحظورة — Global batching
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -1405,7 +1427,6 @@ _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
-# 🧠 v7.8.0: كاش الكلمات العامة (chat_id = -1) — يُجلب مرة واحدة
 _global_words_cache: List[str] = []
 _global_words_loaded_at: float = 0.0
 _GLOBAL_WORDS_TTL = 120
@@ -1507,24 +1528,19 @@ async def get_min_publish_interval() -> int:
         return CONFIG.MIN_PUBLISH_INTERVAL
 
 # =====================================================================
-# 11. دوال الصلاحيات — 🧠 Smart cache
+# 11. دوال الصلاحيات — Smart cache
 # =====================================================================
 
-# الكاشات الذكية (positives + negatives)
 _auth_cache = TTLCache(
     maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 2000),
     ttl=30,
 )
 
-# legacy compat: كاش قديم يُبقي API متوافقاً
 _auth_cache_legacy = _auth_cache
 
 
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
-    """
-    v7.7.3: Telegram API أولاً (أسرع 10x) ثم DB.
-    """
-    # 1) Telegram API (سريع + موثوق)
+    """v7.7.3: Telegram API أولاً (أسرع 10x) ثم DB."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ('administrator', 'creator'):
@@ -1532,7 +1548,6 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
     except Exception as e:
         logger.debug(f"Telegram API auth check failed: {e}")
 
-    # 2) DB (للمشرفين المخفيين والمجهولين فقط)
     try:
         row = await DB.fetchone("""
             SELECT 1 FROM hidden_owner_groups WHERE chat_id=? AND owner_id=?
@@ -1551,12 +1566,7 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
 
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """
-    🧠 v7.8.0: كاش مزدوج — positives (60s) و negatives (15s).
-
-    السبب: negatives تُتكرر كثيراً (مستخدمون عاديون يضغطون أزرار)،
-    لذا TTL قصير. positives أكثر استقراراً، TTL أطول.
-    """
+    """🧠 v7.8.0: كاش مزدوج — positives (60s) و negatives (15s)."""
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
@@ -1566,12 +1576,10 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
     cache_key = f"auth_{chat_id}_{user_id}"
 
-    # 1) فحص legacy cache
     cached = _auth_cache.get(cache_key)
     if cached is not None:
         return cached
 
-    # 2) فحص smart caches
     pos = await _auth_cache_smart.get(cache_key)
     if pos is not None:
         return pos
@@ -1581,7 +1589,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
     authorized = await _do_auth_check(bot, chat_id, user_id)
 
-    # 3) تخزين في الكاش المناسب
     if authorized:
         _auth_cache[cache_key] = True
         await _auth_cache_smart.set(cache_key, True, ttl=60)
@@ -1595,9 +1602,7 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
-    """
-    إبطال كاش الصلاحيات (sync للتوافق).
-    """
+    """إبطال كاش الصلاحيات (sync)."""
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
@@ -1642,7 +1647,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
         return {'can_act': False, 'reason': str(e)[:50]}
 
 # =====================================================================
-# 12. إرسال آمن — 🧠 Exponential backoff
+# 12. إرسال آمن — Exponential backoff
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
@@ -1678,13 +1683,7 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
-    """
-    🧠 v7.8.0: إرسال آمن مع Exponential backoff للـ429.
-
-    - RetryAfter → ينتظر المدة المطلوبة + يعيد المحاولة
-    - TimedOut → محاولة ثانية بعد 1s
-    - BadRequest → بدون parse_mode
-    """
+    """🧠 v7.8.0: إرسال آمن مع Exponential backoff للـ429."""
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -1708,7 +1707,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
 
     caption_text = text[:1024] if media_type else text
 
-    # 🧠 محاولات متعددة
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
@@ -1836,7 +1834,7 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
 # =====================================================================
-# 14. نظام العقوبات — 🧠 Singleton strategies
+# 14. نظام العقوبات — Singleton strategies
 # =====================================================================
 
 class PenaltyStrategy(ABC):
@@ -1931,12 +1929,7 @@ class UnbanPenalty(PenaltyStrategy):
 
 
 class PenaltyFactory:
-    """
-    🧠 v7.8.0: Singleton strategies — instances تُنشأ مرة واحدة.
-
-    قبل: كل apply_penalty() كانت تُنشئ 6 instances (كلها بلا حالة).
-    بعد: instances مشتركة → أقل GC pressure.
-    """
+    """🧠 v7.8.0: Singleton strategies."""
     _strategies: Dict[str, PenaltyStrategy] = {
         'ban': BanPenalty(),
         'mute': MutePenalty(),
@@ -2184,15 +2177,12 @@ def reload_replies_from_file() -> dict:
     return _REPLIES_FROM_FILE
 
 # =====================================================================
-# 17. المهام الخلفية — 🧠 Adaptive
+# 17. المهام الخلفية — Adaptive + Batch
 # =====================================================================
 
 class BackgroundTasks:
     """
-    🧠 v7.8.0: كاش المشرفين بتكيّف TTL.
-
-    - المجموعات النشطة (يُسأل عنها كثيراً) → TTL أطول
-    - المجموعات الخاملة → TTL أقصر
+    🧠 v7.8.1: كاش المشرفين بتكيّف TTL + batch subscriptions.
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
@@ -2201,10 +2191,10 @@ class BackgroundTasks:
 
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
-        """🧠 TTL يتكيف حسب عدد الاستدعاءات الأخيرة."""
+        """🧠 TTL يتكيف حسب عدد الاستدعاءات."""
         access = BackgroundTasks._group_admins_access_count.get(chat_id, 0)
         if access >= 20:
-            return BackgroundTasks._BASE_TTL * 2  # 20 min
+            return BackgroundTasks._BASE_TTL * 2
         if access >= 10:
             return int(BackgroundTasks._BASE_TTL * 1.5)
         if access >= 5:
@@ -2305,11 +2295,19 @@ class BackgroundTasks:
         return None, False
 
     @staticmethod
-    async def _publish_single_channel(bot, ch, sleep_seconds, published_count):
+    async def _publish_single_channel(bot, ch, sleep_seconds, published_count,
+                                       has_sub: bool = None):
+        """
+        🧠 v7.8.1: يقبل has_sub مسبقاً (batch check).
+        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
-            has_sub = await DB.has_active_subscription(user_id) if user_id else False
+            if has_sub is None:
+                has_sub = (
+                    await DB.has_active_subscription(user_id)
+                    if user_id else False
+                )
             if not has_sub:
                 logger.info(f"⏭️ تخطي القناة {ch.get('id')} لانتهاء الاشتراك")
                 return
@@ -2338,26 +2336,20 @@ class BackgroundTasks:
     @staticmethod
     async def auto_publish(bot) -> None:
         """
-        🧠 v7.8.0: Dynamic semaphore — يتكيف مع حجم الحمل.
-
-        - القنوات < 10 → semaphore=5
-        - القنوات 10-20 → semaphore=10
-        - القنوات > 20 → semaphore=15
+        🧠 v7.8.1: batch subscription check + semaphore limit 8.
         """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
         sleep_seconds = min_interval_minutes * 60
 
-        # 🧠 semaphore ديناميكي
         def _get_semaphore_size(n: int) -> int:
+            """🧠 v7.8.1: حد أقصى أقل لضغط Pool."""
             if n <= 5:
-                return 5
+                return 3
             if n <= 10:
-                return 10
-            if n <= 20:
-                return 15
-            return 20
+                return 5
+            return 8
 
         active_tasks: Dict[int, asyncio.Task] = {}
 
@@ -2370,7 +2362,29 @@ class BackgroundTasks:
                     await asyncio.sleep(60)
                     continue
 
-                # 🧠 semaphore بحجم مناسب
+                # ✅ v7.8.1: batch check للاشتراكات (استعلام واحد)
+                user_ids = list({
+                    ch.get('user_id') for ch in channels
+                    if ch.get('user_id')
+                })
+                subs_map: Dict[int, bool] = {}
+                if user_ids:
+                    try:
+                        placeholders = ",".join(["?"] * len(user_ids))
+                        rows = await DB.fetchall(
+                            f"SELECT user_id FROM subscriptions "
+                            f"WHERE user_id IN ({placeholders}) "
+                            f"AND status = 'active' AND end_date > ?",
+                            (*user_ids, TimeUtils.utc_now()),
+                        )
+                        for r in rows:
+                            subs_map[r['user_id']] = True
+                        logger.debug(
+                            f"✅ batch subs: {len(subs_map)}/{len(user_ids)} نشط"
+                        )
+                    except Exception as e:
+                        logger.warning(f"batch subs check failed: {e}")
+
                 sem_size = _get_semaphore_size(len(channels))
                 semaphore = asyncio.Semaphore(sem_size)
 
@@ -2379,19 +2393,22 @@ class BackgroundTasks:
                     if channel_id in active_tasks and not active_tasks[channel_id].done():
                         continue
                     published_count = ch.get('published_count', 0)
+                    has_sub = subs_map.get(ch.get('user_id'), False)
 
                     async def run_publish(ch=ch, bot=bot,
                                           sleep_seconds=sleep_seconds,
                                           published_count=published_count,
-                                          semaphore=semaphore):
+                                          semaphore=semaphore,
+                                          has_sub=has_sub):
                         async with semaphore:
                             await BackgroundTasks._publish_single_channel(
-                                bot, ch, sleep_seconds, published_count
+                                bot, ch, sleep_seconds, published_count,
+                                has_sub=has_sub,
                             )
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
 
                 for cid in list(active_tasks.keys()):
                     if active_tasks[cid].done():
@@ -2614,7 +2631,6 @@ class BackgroundTasks:
         while True:
             await asyncio.sleep(3600)
             try:
-                # 🧠 تنظيف الكاشات الذكية
                 await _security_stats_cache.clear()
                 _banned_words_cache.clear()
                 _banned_words_cache_time.clear()
@@ -2643,19 +2659,12 @@ class BackgroundTasks:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
 # =====================================================================
-# 18. 🧠 Warmup الشامل
+# 18. Warmup الشامل
 # =====================================================================
 
 async def warmup_all() -> Dict[str, Any]:
     """
     🧠 v7.8.0: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
-
-    - كل ملفات اللغات
-    - كل ملفات الأزرار
-    - الكلمات المحظورة العامة
-    - الردود من الملف
-
-    الفائدة: أول تفاعل مستخدم سيكون instant.
     """
     result = {
         'translations_loaded': 0,
