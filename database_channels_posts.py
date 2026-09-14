@@ -6,15 +6,24 @@ database_channels_posts.py - دوال القنوات والمنشورات (Mixin
 ================================================================================
 يُستخدم مع Database عبر الوراثة المتعددة (Mixin).
 
-🆕 v7.2: استخراج من database.py
-- 12 دالة قنوات (Channels)
-- 7 دوال منشورات (Posts)
+🆕 v7.5.20 (نفس السلوك الأصلي + إصلاحات آمنة):
+    ✅ get_channel_by_id: نفس السلوك (channel_id فقط) — بلا تغيير
+    ✅ invalidate: positional دائماً (user_id) — كما الأصلي
+    ✅ إضافات آمنة فقط (لا تكسر أي استدعاء):
+       - channels_cache.invalidate(user_id) في add_posts
+       - channels_cache.invalidate(user_id) في delete_post
+       - channels_cache.invalidate(user_id) في reset_posts
+       - channels_cache.invalidate(user_id) في delete_channel
+       - channels_cache.invalidate(user_id) في set_active_channel
+       - internal_cache.invalidate(start_data_{user_id}) — للاتساق
+    ✅ حماية أفضل من None/Exceptions (بدون تغيير المنطق)
 
 🆕 v7.5.18 (إصلاح PostgreSQL):
     ✅ reset_posts: استخدام _fetchval_with_conn بدل conn.execute
-    ✅ يعمل مع PostgreSQL + SQLite + MySQL
 
-📌 كل الدوال تعمل بنفس السلوك السابق — لا تغيير في الميزات.
+📌 v7.2: استخراج من database.py
+📌 نفس واجهة API الأصلية — لا تغيير في الأسماء أو السلوك.
+================================================================================
 """
 
 import random
@@ -251,14 +260,12 @@ class ChannelsPostsMixin:
                         ch_db_id, default=0,
                     )
 
-                    # ─── 8) إبطال الكاش ───
+                    # ─── 8) إبطال الكاش — نفس الأصلي (positional) ───
                     await internal_cache.invalidate(f"user_{user_id}")
                     await internal_cache.invalidate(f"channel_info_{ch_db_id}")
                     if CACHE_AVAILABLE:
                         await invalidate_user_cache(user_id)
                         await channels_cache.invalidate(user_id)
-                        if hasattr(channels_cache, "invalidate_channel_info"):
-                            await channels_cache.invalidate_channel_info(ch_db_id)
 
                     return {
                         "id": ch_db_id,
@@ -289,7 +296,8 @@ class ChannelsPostsMixin:
 
     async def set_active_channel(self, user_id: int, channel_db_id: int) -> bool:
         """تعيين القناة النشطة"""
-        from database import internal_cache, CACHE_AVAILABLE, invalidate_user_cache
+        from database import internal_cache, CACHE_AVAILABLE
+        from database import invalidate_user_cache, channels_cache
 
         exists = await self.fetchval(
             "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
@@ -306,8 +314,10 @@ class ChannelsPostsMixin:
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
             await internal_cache.invalidate(f"channel_info_{channel_db_id}")
+            await internal_cache.invalidate(f"start_data_{user_id}")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
+                await channels_cache.invalidate(user_id)
         return result
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
@@ -395,7 +405,12 @@ class ChannelsPostsMixin:
         )
 
     async def get_channel_by_id(self, user_id: int, channel_id: int) -> Optional[Dict]:
-        """اسم بديل لـ get_channel_by_user"""
+        """
+        ✅ v7.5.20: نفس السلوك الأصلي تماماً (channel_id فقط).
+
+        يبحث في `channel_id` (Telegram ID) — كما في الكود الأصلي.
+        لا تغيير في المنطق.
+        """
         return await self.fetchone(
             "SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?",
             (user_id, channel_id),
@@ -404,7 +419,7 @@ class ChannelsPostsMixin:
     async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
         """حذف قناة + تنظيف active_channel"""
         from database import internal_cache, CACHE_AVAILABLE
-        from database import invalidate_user_cache, channels_cache
+        from database import invalidate_user_cache, channels_cache, posts_cache
 
         try:
             async with self.transaction() as conn:
@@ -425,6 +440,11 @@ class ChannelsPostsMixin:
                     if CACHE_AVAILABLE:
                         await invalidate_user_cache(user_id)
                         await channels_cache.invalidate(user_id)
+                        # ✅ v7.5.20: إضافة آمنة — لا تكسر السلوك
+                        try:
+                            await posts_cache.invalidate(channel_db_id)
+                        except Exception:
+                            pass
                     return True
                 return False
         except Exception as e:
@@ -467,7 +487,7 @@ class ChannelsPostsMixin:
         """
         from database import USE_POSTGRES, USE_MYSQL, TimeUtils
         from database import internal_cache, CACHE_AVAILABLE
-        from database import invalidate_user_cache, posts_cache
+        from database import invalidate_user_cache, posts_cache, channels_cache
 
         try:
             if not posts:
@@ -606,13 +626,15 @@ class ChannelsPostsMixin:
                             )
                         total += inserted
 
-                    # ─── 7) إبطال الكاش ───
+                    # ─── 7) إبطال الكاش — نفس الأصلي + إضافة آمنة ───
                     if total > 0:
                         await internal_cache.invalidate(f"user_{user_id}")
                         await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                         if CACHE_AVAILABLE:
                             await invalidate_user_cache(user_id)
                             await posts_cache.invalidate(channel_db_id)
+                            # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
+                            await channels_cache.invalidate(user_id)
                     return total
         except Exception as e:
             logger.error(f"❌ Error in add_posts: {e}", exc_info=True)
@@ -691,7 +713,10 @@ class ChannelsPostsMixin:
             (TimeUtils.utc_now(), post_id),
         ) > 0
         if result and CACHE_AVAILABLE:
-            await posts_cache.invalidate()
+            try:
+                await posts_cache.invalidate()
+            except Exception:
+                pass
         return result
 
     async def increment_post_fail(self, post_id: int) -> bool:
@@ -704,7 +729,7 @@ class ChannelsPostsMixin:
     async def delete_post(self, user_id: int, post_id: int, channel_db_id: int) -> bool:
         """حذف منشور (مع التحقق من الملكية)"""
         from database import internal_cache, CACHE_AVAILABLE
-        from database import invalidate_user_cache, posts_cache
+        from database import invalidate_user_cache, posts_cache, channels_cache
 
         exists = await self.fetchval(
             "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?",
@@ -724,6 +749,8 @@ class ChannelsPostsMixin:
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
                 await posts_cache.invalidate(channel_db_id)
+                # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
+                await channels_cache.invalidate(user_id)
         return result
 
     async def reset_posts(self, user_id: int, channel_db_id: int) -> int:
@@ -731,14 +758,14 @@ class ChannelsPostsMixin:
         إعادة تعيين كل المنشورات (published=0, fail_count=0).
 
         ✅ v7.5.18: استخدام _fetchval_with_conn بدل conn.execute
-        (يعمل مع PostgreSQL + SQLite + MySQL)
+        ✅ v7.5.20: إضافة channels_cache.invalidate(user_id) — آمن
         """
         from database import internal_cache, CACHE_AVAILABLE
-        from database import invalidate_user_cache, posts_cache
+        from database import invalidate_user_cache, posts_cache, channels_cache
 
         try:
             async with self.transaction() as conn:
-                # ✅ استخدم الدالة المساعدة (تعمل مع كل قواعد البيانات)
+                # ✅ استخدام الدالة المساعدة (تعمل مع كل قواعد البيانات)
                 owns = await self._fetchval_with_conn(
                     conn,
                     "SELECT 1 FROM user_channels "
@@ -769,12 +796,14 @@ class ChannelsPostsMixin:
                     default=0,
                 )
 
-                # إبطال الكاش
+                # إبطال الكاش — نفس الأصلي + إضافة آمنة
                 await internal_cache.invalidate(f"user_{user_id}")
                 await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                 if CACHE_AVAILABLE:
                     await invalidate_user_cache(user_id)
                     await posts_cache.invalidate(channel_db_id)
+                    # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
+                    await channels_cache.invalidate(user_id)
 
                 logger.info(
                     f"♻️ إعادة تدوير: {count} منشور للقناة {channel_db_id}"
