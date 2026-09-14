@@ -1,45 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_settings.py - دوال الإعدادات العامة (v7.4.7)
+database_settings.py - دوال الإعدادات العامة (v7.4.8)
 ================================================================================
-SettingsMixin:
-  - ensure_settings_unique_constraint : 🆕 v7.4.7 ضمان UNIQUE على key
-  - get_setting                  : جلب إعداد من جدول settings
-  - get_settings_batch           : جلب عدة إعدادات باستعلام واحد
-  - get_start_settings           : إعدادات /start محسّنة
-  - set_setting                  : حفظ/تحديث إعداد (PostgreSQL/MySQL/SQLite)
-  - get_force_subscribe_channel  : قناة الاشتراك الإجباري
-  - get_updates_channel          : قناة التحديثات
-  - get_log_channel              : قناة السجلات
-  - get_publish_interval         : فترة النشر (بالدقائق)
-  - get_auto_backup              : تفعيل النسخ الاحتياطي التلقائي
+🆕 v7.4.8 (إصلاح MySQL — الكلمات المحجوزة):
+    ✅ _q() — helper يضيف backticks لـ MySQL فقط
+    ✅ إصلاح get_setting: SELECT `value` FROM settings WHERE `key` = ?
+    ✅ إصلاح get_settings_batch: SELECT `key`, `value` ... WHERE `key` IN (...)
+    ✅ إصلاح set_setting (MySQL): backticks كاملة حول key/value
+    ✅ إصلاح _set_setting_fallback: backticks شرطية
+    ✅ PostgreSQL/SQLite بلا تغيير (لا يحتاجان backticks)
 
 🆕 v7.4.7 (UNIQUE تلقائي):
-  ✅ ensure_settings_unique_constraint: تُضيف UNIQUE على key إذا لم يكن موجوداً
-    - PostgreSQL: ALTER TABLE settings ADD CONSTRAINT settings_key_unique UNIQUE (key)
-    - MySQL: ALTER TABLE settings ADD UNIQUE KEY settings_key_unique (key)
-    - SQLite: تُتجاهل (PRIMARY KEY كافٍ)
-  ✅ تُستدعى في initialize_db / pre_initialize بعد إنشاء الجداول
+    ✅ ensure_settings_unique_constraint: تُضيف UNIQUE على key إذا لم يكن موجوداً
+    ✅ تُستدعى في initialize_db / pre_initialize بعد إنشاء الجداول
 
 🆕 v7.4.6 (إصلاحات PostgreSQL):
-  ✅ set_setting: يعمل بدون UNIQUE constraint على key
-    - PostgreSQL: يُجرّب ON CONFLICT أولاً
-    - إذا فشل: يستخدم UPDATE + INSERT (آمن)
-    - MySQL: ON DUPLICATE KEY UPDATE
-    - SQLite: INSERT OR REPLACE
-  ✅ get_settings_batch: PostgreSQL يستخدم $1, $2 بدل ?,?
-  ✅ معالجة القيم الفارغة ("" → None)
+    ✅ set_setting: يعمل بدون UNIQUE constraint على key
+    ✅ get_settings_batch: PostgreSQL يستخدم $1, $2 بدل ?,?
+    ✅ معالجة القيم الفارغة ("" → None)
 
 🆕 v7.4.5:
-  ✅ كاش للقيم المفقودة (sentinel __MISSING__)
-  ✅ get_settings_batch — استعلام واحد بدل N
-  ✅ get_start_settings — مُحسّن لـ /start (~50ms)
+    ✅ كاش للقيم المفقودة (sentinel __MISSING__)
+    ✅ get_settings_batch — استعلام واحد بدل N
+    ✅ get_start_settings — مُحسّن لـ /start (~50ms)
 
 📌 يفترض أن الـ Database يوفّر:
-  - self.fetchval / self.fetchall / self.execute
-  - self.CACHE_AVAILABLE
-  - self.settings_cache
+    - self.fetchval / self.fetchall / self.execute
+    - self.CACHE_AVAILABLE
+    - self.settings_cache
 ================================================================================
 """
 
@@ -53,9 +42,13 @@ logger = logging.getLogger(__name__)
 _MISSING_SENTINEL = "__SETTING_MISSING__"
 
 
+# =====================================================================
+# دوال مساعدة للتوافق مع الأنظمة الثلاثة
+# =====================================================================
+
 def _get_db_type() -> str:
     """
-    ✅ v7.4.6: كشف نوع قاعدة البيانات من DATABASE_URL.
+    كشف نوع قاعدة البيانات من DATABASE_URL.
     يُرجع: "postgres" | "mysql" | "sqlite"
     """
     url = os.getenv("DATABASE_URL", "").strip().lower()
@@ -66,25 +59,36 @@ def _get_db_type() -> str:
     return "sqlite"
 
 
+def _q(col: str) -> str:
+    """
+    ✅ v7.4.8: يُرجع اسم العمود مع backticks لـ MySQL فقط.
+
+    السبب: `key` و `value` كلمات محجوزة في MySQL.
+    PostgreSQL/SQLite: لا يحتاجان backticks (كلتاهما non-reserved في PG).
+    """
+    if _get_db_type() == "mysql":
+        return f"`{col}`"
+    return col
+
+
+# =====================================================================
+# SettingsMixin
+# =====================================================================
+
 class SettingsMixin:
     """Mixin يحتوي كل دوال الإعدادات العامة"""
 
     # =====================================================================
-    # 0) 🆕 v7.4.7: ضمان UNIQUE constraint على settings.key
+    # 0) ضمان UNIQUE constraint على settings.key
     # =====================================================================
 
     async def ensure_settings_unique_constraint(self) -> bool:
         """
-        ✅ v7.4.7: تُضمن وجود UNIQUE constraint على settings.key.
+        v7.4.7: تُضمن وجود UNIQUE constraint على settings.key.
 
         - آمنة: تفحص أولاً قبل الإضافة
         - لا تُكرّر الإضافة إذا كان موجوداً
         - تُتجاهل في SQLite (PRIMARY KEY كافٍ)
-        - تُستدعى بعد إنشاء الجداول
-
-        Returns:
-            True إذا كان UNIQUE موجوداً أو أُضيف بنجاح
-            False إذا فشلت الإضافة
         """
         db_type = _get_db_type()
 
@@ -95,22 +99,22 @@ class SettingsMixin:
 
         try:
             if db_type == "postgres":
-                # 1) فحص وجود UNIQUE constraint
+                # 1) فحص وجود UNIQUE constraint بأي اسم
                 exists = await self.fetchval(
                     """
                     SELECT EXISTS (
                         SELECT 1
-                        FROM pg_indexes
-                        WHERE tablename = 'settings'
-                          AND indexdef ILIKE '%unique%'
-                          AND indexdef ILIKE '%(key)%'
+                        FROM pg_constraint c
+                        JOIN pg_class t ON t.oid = c.conrelid
+                        WHERE t.relname = 'settings'
+                          AND c.contype = 'u'
                     )
                     """,
                     default=False,
                 )
 
                 if exists:
-                    logger.debug("✅ UNIQUE على settings.key موجود مسبقاً")
+                    logger.debug("✅ UNIQUE على settings موجود مسبقاً")
                     return True
 
                 # 2) فحص وجود constraint بنفس الاسم
@@ -142,9 +146,10 @@ class SettingsMixin:
                 return True
 
             elif db_type == "mysql":
-                # 1) فحص وجود UNIQUE KEY
+                # 1) فحص وجود UNIQUE KEY بالاسم
                 rows = await self.fetchall(
-                    "SHOW INDEX FROM `settings` WHERE Key_name = 'settings_key_unique'"
+                    "SHOW INDEX FROM `settings` "
+                    "WHERE Key_name = 'settings_key_unique'"
                 )
                 if rows:
                     logger.debug(
@@ -152,10 +157,10 @@ class SettingsMixin:
                     )
                     return True
 
-                # 2) فحص أي UNIQUE على key
+                # 2) فحص أي UNIQUE على `key`
                 rows = await self.fetchall(
-                    "SHOW INDEX FROM `settings` WHERE Column_name = 'key' "
-                    "AND Non_unique = 0"
+                    "SHOW INDEX FROM `settings` "
+                    "WHERE Column_name = 'key' AND Non_unique = 0"
                 )
                 if rows:
                     logger.debug("✅ UNIQUE على settings.key موجود مسبقاً")
@@ -175,14 +180,12 @@ class SettingsMixin:
 
         except Exception as e:
             err_msg = str(e).lower()
-            # ✅ إذا كان constraint موجوداً (خطأ متوقع من سباق)
             if "already exists" in err_msg or "duplicate" in err_msg:
                 logger.debug(
                     f"ℹ️ UNIQUE constraint موجود مسبقاً (سباق): {e}"
                 )
                 return True
 
-            # ✅ خطأ آخر — نسجّله لكن لا نوقف التهيئة
             logger.warning(
                 f"⚠️ فشل إضافة UNIQUE على settings.key: {e}"
             )
@@ -194,10 +197,11 @@ class SettingsMixin:
 
     async def get_setting(self, key: str, default: str = None) -> Optional[str]:
         """
-        ✅ v7.4.5: يجلب إعداداً واحداً مع كاش.
+        v7.4.5: يجلب إعداداً واحداً مع كاش.
 
         - إذا كانت القيمة مفقودة، يخزّن sentinel في الكاش
         - يمنع إعادة الاستعلام عن إعداد غير موجود
+        - ✅ v7.4.8: يستخدم backticks لـ MySQL
         """
         # 1) ابحث في الكاش أولاً
         if self.CACHE_AVAILABLE:
@@ -212,8 +216,12 @@ class SettingsMixin:
 
         # 2) اقرأ من قاعدة البيانات
         try:
+            # ✅ v7.4.8: استخدام _q() للتوافق مع MySQL
+            key_col = _q("key")
+            value_col = _q("value")
+            query = f"SELECT {value_col} FROM settings WHERE {key_col} = ?"
             result = await self.fetchval(
-                "SELECT value FROM settings WHERE key = ?",
+                query,
                 (key,),
                 default=None,
             )
@@ -242,8 +250,11 @@ class SettingsMixin:
         defaults: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Optional[str]]:
         """
-        ✅ v7.4.6: استعلام واحد بدل N استعلامات.
-        يدعم PostgreSQL ($1, $2, ...) بشكل صحيح.
+        v7.4.6: استعلام واحد بدل N استعلامات.
+
+        - PostgreSQL: يستخدم $1, $2, ... (لا يحتاج تعديل من database.py)
+        - MySQL/SQLite: يستخدم ?, ?, ... (يُحوّل تلقائياً)
+        - ✅ v7.4.8: backticks لـ MySQL
         """
         keys_list = list(keys)
         if not keys_list:
@@ -277,16 +288,24 @@ class SettingsMixin:
         try:
             db_type = _get_db_type()
             if db_type == "postgres":
-                # PostgreSQL: $1, $2, ...
                 placeholders = ",".join(
                     [f"${i+1}" for i in range(len(missing_keys))]
                 )
             else:
-                # SQLite/MySQL: ?, ?, ...
+                # SQLite/MySQL: ? يُحوّل تلقائياً في database.py
                 placeholders = ",".join(["?"] * len(missing_keys))
 
-            query = f"SELECT key, value FROM settings WHERE key IN ({placeholders})"
+            # ✅ v7.4.8: استخدام backticks لـ MySQL
+            key_col = _q("key")
+            value_col = _q("value")
+
+            query = (
+                f"SELECT {key_col}, {value_col} FROM settings "
+                f"WHERE {key_col} IN ({placeholders})"
+            )
             rows = await self.fetchall(query, tuple(missing_keys))
+
+            # ✅ v7.4.8: المفاتيح في النتيجة هي key/value بدون backticks
             found = {row["key"]: row["value"] for row in rows} if rows else {}
         except Exception as e:
             logger.error(f"❌ get_settings_batch: {e}")
@@ -312,39 +331,46 @@ class SettingsMixin:
 
     async def set_setting(self, key: str, value: str) -> bool:
         """
-        ✅ v7.4.6: يعمل بدون UNIQUE constraint على key.
+        v7.4.6: يعمل بدون UNIQUE constraint على key.
 
         الاستراتيجية:
         1. جرّب UPSERT (سريع إذا UNIQUE موجود)
         2. إذا فشل، استخدم UPDATE + INSERT (آمن دائماً)
-        3. إذا فشل كل شيء، سجّل الخطأ
 
         PostgreSQL: ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-        MySQL:      ON DUPLICATE KEY UPDATE value = VALUES(value)
+        MySQL:      ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)  ← ✅ backticks
         SQLite:     INSERT OR REPLACE
         """
         db_type = _get_db_type()
 
         try:
+            # ✅ v7.4.8: استخدام backticks لـ MySQL
+            key_col = _q("key")
+            value_col = _q("value")
+
             # ✅ المحاولة 1: UPSERT الأصلي
             if db_type == "postgres":
                 query = (
-                    "INSERT INTO settings (key, value) VALUES ($1, $2) "
-                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+                    f"INSERT INTO settings ({key_col}, {value_col}) "
+                    f"VALUES ($1, $2) "
+                    f"ON CONFLICT ({key_col}) DO UPDATE "
+                    f"SET {value_col} = EXCLUDED.{value_col}"
                 )
                 result = await self.execute(query, (key, value))
 
             elif db_type == "mysql":
                 query = (
-                    "INSERT INTO settings (key, value) VALUES (%s, %s) "
-                    "ON DUPLICATE KEY UPDATE value = VALUES(value)"
+                    f"INSERT INTO settings ({key_col}, {value_col}) "
+                    f"VALUES (%s, %s) "
+                    f"ON DUPLICATE KEY UPDATE "
+                    f"{value_col} = VALUES({value_col})"
                 )
                 result = await self.execute(query, (key, value))
 
             else:  # SQLite
                 query = (
-                    "INSERT OR REPLACE INTO settings (key, value) "
-                    "VALUES (?, ?)"
+                    f"INSERT OR REPLACE INTO settings ({key_col}, {value_col}) "
+                    f"VALUES (?, ?)"
                 )
                 result = await self.execute(query, (key, value))
 
@@ -382,21 +408,24 @@ class SettingsMixin:
 
     async def _set_setting_fallback(self, key: str, value: str) -> bool:
         """
-        ✅ v7.4.6: fallback آمن — UPDATE ثم INSERT.
-
-        يعمل بدون UNIQUE constraint (يُستخدم عند فشل UPSERT).
+        v7.4.6: fallback آمن — UPDATE ثم INSERT.
+        ✅ v7.4.8: يستخدم backticks لـ MySQL.
         """
         try:
+            key_col = _q("key")
+            value_col = _q("value")
+
             # جرّب UPDATE
             updated = await self.execute(
-                "UPDATE settings SET value = ? WHERE key = ?",
+                f"UPDATE settings SET {value_col} = ? WHERE {key_col} = ?",
                 (value, key),
             )
 
             # إذا لم يوجد الصف، أدرِج
             if not updated:
                 await self.execute(
-                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    f"INSERT INTO settings ({key_col}, {value_col}) "
+                    f"VALUES (?, ?)",
                     (key, value),
                 )
 
@@ -421,10 +450,7 @@ class SettingsMixin:
     # =====================================================================
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
-        """
-        جلب قناة الاشتراك الإجباري.
-        تُرجع None إذا لم تكن معينة.
-        """
+        """جلب قناة الاشتراك الإجباري."""
         value = await self.get_setting("force_subscribe_channel")
         if value is None or value == "":
             return None
@@ -481,7 +507,7 @@ class SettingsMixin:
 
     async def get_start_settings(self) -> Dict[str, Any]:
         """
-        ✅ v7.4.6: يجلب كل إعدادات /start باستعلام واحد.
+        v7.4.6: يجلب كل إعدادات /start باستعلام واحد.
         بدل 4+ استعلامات متتالية → 1 استعلام فقط.
         """
         keys = [
@@ -503,7 +529,6 @@ class SettingsMixin:
         except (ValueError, TypeError):
             interval = 12
 
-        # معالجة القيم الفارغة
         def _clean(val):
             if val is None or val == "":
                 return None
