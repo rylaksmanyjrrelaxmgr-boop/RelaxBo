@@ -2,29 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.5)
+handlers_callback.py - المعالج النهائي الكامل (v9.1.0)
 =====================================================================
-✅ v9.0.5 — إصلاحات إضافية:
+✅ v9.1.0 — تحسينات أداء أزرار الأمان:
+  - _get_security_settings_cached (5s TTL) — يوفّر استعلام DB
+  - _handle_group_settings: two-phase rendering
+    * المرحلة 1: عرض فوري بدون إحصائيات (< 500ms)
+    * المرحلة 2: تحميل الإحصائيات في الخلفية + edit
+  - _refresh_security_view: نفس النمط (فوري ثم إحصائيات)
+  - _load_stats_and_edit: helper موحد
+  - _preload_first_group: تسخين cache أول مجموعة عند عرض القائمة
+  - _security_settings_cache + _security_stats_cache محلية
+
+✅ v9.0.5:
   - _handle_language_change: إبطال context.user_data['lang']
-    (كان يبقى اللغة القديمة حتى إعادة التشغيل)
-  - __all__: تصدير _invalidate_sec_auth_cache للاستخدام الخارجي
-    (استدعها من chat_member بعد تغيير المشرفين)
+  - __all__: تصدير _invalidate_sec_auth_cache
 
-✅ v9.0.4 — تحسين أداء زر الردود:
-  - _handle_auto_reply.toggle: كاش في context.user_data
-
-✅ v9.0.3 — إصلاح زر sec_auto_reply_menu:
-  - _handle_security: عرض لوحة الردود مباشرة
-  - _handle_auto_reply: استخراج action صحيح
-
-✅ v9.0.2:
-  - sec_maxlen, sec_act_log, act_pin handlers
-  - HTML escape
-  - posts_cache من cache.py
-  - DB.reconnect() / DB.initialize_db() في admin_restore_file
-
-✅ v9.0.0:
-  - كل الإصلاحات الـ 90+ الموثقة سابقاً
+✅ v9.0.4: كاش في context.user_data
+✅ v9.0.3: إصلاح sec_auto_reply_menu
+✅ v9.0.2: sec_maxlen, act_pin, HTML escape
+✅ v9.0.0: كل الإصلاحات الـ 90+
 =====================================================================
 """
 
@@ -56,12 +53,14 @@ try:
         safe_send, is_authorized_in_group,
         get_text, StateManager, UserState,
         KeyboardFactory, CB, get_ram_usage,
+        SmartCache,
     )
 except ImportError:
     from .utils import (
         safe_send, is_authorized_in_group,
         get_text, StateManager, UserState,
         KeyboardFactory, CB, get_ram_usage,
+        SmartCache,
     )
 
 try:
@@ -127,6 +126,10 @@ ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
 
+# 🧠 v9.1.0: كاشات ذكية للأمان
+SEC_SETTINGS_CACHE_TTL = 5
+SEC_STATS_CACHE_TTL = 30
+
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
@@ -136,6 +139,14 @@ ACTIVE_TASKS: weakref.WeakSet = weakref.WeakSet()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
+
+# 🧠 v9.1.0: كاشات آمنة للأمان
+_security_settings_cache: SmartCache = SmartCache(
+    ttl=SEC_SETTINGS_CACHE_TTL, max_size=500
+)
+_security_stats_cache_local: SmartCache = SmartCache(
+    ttl=SEC_STATS_CACHE_TTL, max_size=500
+)
 
 _CONTEXT_KEYS_TO_CLEAR = (
     'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
@@ -869,6 +880,97 @@ class CallbackHandlers:
             pass
 
     # =================================================================
+    # 🧠 v9.1.0: دوال مساعدة للأمان (Two-Phase + Cache)
+    # =================================================================
+
+    @staticmethod
+    async def _get_security_settings_cached(chat_id: int) -> Dict:
+        """
+        🧠 v9.1.0: جلب إعدادات الأمان مع cache (5s TTL).
+        """
+        key = f"sec_set_{chat_id}"
+        cached = await _security_settings_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            settings = await DB.get_security_settings(chat_id) or {}
+            if not isinstance(settings, dict):
+                settings = _row_to_dict(settings) or {}
+        except Exception as e:
+            logger.error(f"get_security_settings({chat_id}): {e}")
+            settings = {}
+        await _security_settings_cache.set(key, settings, ttl=SEC_SETTINGS_CACHE_TTL)
+        return settings
+
+    @staticmethod
+    async def _invalidate_security_settings_cache(chat_id: int) -> None:
+        """إبطال كاش الإعدادات بعد أي تعديل."""
+        try:
+            await _security_settings_cache.delete(f"sec_set_{chat_id}")
+        except Exception:
+            pass
+        # ✅ إبطال كاش الإحصائيات أيضاً (لأن الإعدادات تغيرت)
+        try:
+            await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _load_stats_and_edit(query, context, chat_id, lang, settings):
+        """
+        🧠 v9.1.0: تحميل الإحصائيات في الخلفية ثم تعديل الرسالة.
+        """
+        try:
+            # فحص cache أولاً
+            cache_key = f"sec_stats_{chat_id}"
+            cached_stats = await _security_stats_cache_local.get(cache_key)
+
+            if cached_stats is not None:
+                stats = cached_stats
+            else:
+                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
+                await _security_stats_cache_local.set(
+                    cache_key, stats, ttl=SEC_STATS_CACHE_TTL
+                )
+
+            text = KeyboardFactory._format_security_text(settings, stats)
+            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
+            await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+        except Exception as e:
+            logger.debug(f"_load_stats_and_edit({chat_id}): {e}")
+
+    @staticmethod
+    async def _render_security_two_phase(query, context, chat_id, lang,
+                                          force_refresh_settings=False):
+        """
+        🧠 v9.1.0: عرض لوحة الأمان على مرحلتين:
+        - المرحلة 1: إعدادات فقط (فوري < 500ms)
+        - المرحلة 2: إحصائيات في الخلفية + edit
+        """
+        try:
+            if force_refresh_settings:
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+
+            settings = await CallbackHandlers._get_security_settings_cached(chat_id)
+
+            # ═══ المرحلة 1: عرض فوري (بدون إحصائيات) ═══
+            text_no_stats = KeyboardFactory._format_security_text(settings, {})
+            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
+            await safe_edit(query, text_no_stats, reply_markup=kb, bot=context.bot)
+
+            # ═══ المرحلة 2: الإحصائيات في الخلفية ═══
+            task = asyncio.create_task(
+                CallbackHandlers._load_stats_and_edit(
+                    query, context, chat_id, lang, settings
+                )
+            )
+            ACTIVE_TASKS.add(task)
+            task.add_done_callback(ACTIVE_TASKS.discard)
+
+        except Exception as e:
+            logger.error(f"_render_security_two_phase: {e}", exc_info=True)
+
+    # =================================================================
     # القائمة الرئيسية
     # =================================================================
 
@@ -978,6 +1080,7 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ العدد يجب أن يكون 1-100", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, max_warnings=count)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
@@ -1046,6 +1149,7 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, warn_penalty=penalty_type)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
@@ -1071,6 +1175,7 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
                 await DB.update_security_settings(chat_id, **{col: duration})
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
@@ -1091,6 +1196,7 @@ class CallbackHandlers:
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
                     return True
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
@@ -1168,6 +1274,7 @@ class CallbackHandlers:
                 action = action.replace("penalty_", "", 1)
                 if action in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, auto_penalty=action)
+                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
@@ -1215,6 +1322,7 @@ class CallbackHandlers:
                 penalty_type = parts[2]
                 if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, antiflood_penalty=penalty_type)
+                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
@@ -1262,6 +1370,7 @@ class CallbackHandlers:
                 action_type = parts[2]
                 if action_type in ('ban', 'mute', 'kick', 'restrict'):
                     await DB.update_security_settings(chat_id, night_mode_action=action_type)
+                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 else:
                     await safe_edit(query, "❌ نوع إجراء غير صالح", bot=context.bot)
@@ -1317,6 +1426,7 @@ class CallbackHandlers:
                 penalty_type = parts[2]
                 if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
                     await DB.update_security_settings(chat_id, violation_penalty=penalty_type)
+                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 else:
                     await safe_edit(query, "❌ نوع عقوبة غير صالح", bot=context.bot)
@@ -1369,21 +1479,21 @@ class CallbackHandlers:
             return True
 
     # =================================================================
-    # Refresh موحد
+    # 🧠 v9.1.0: Refresh موحد (Two-Phase)
     # =================================================================
 
     @staticmethod
     async def _refresh_security_view(query, context, chat_id, lang):
+        """
+        🧠 v9.1.0: عرض فوري بدون إحصائيات + تحميلها في الخلفية.
+        """
         try:
-            settings = await DB.get_security_settings(chat_id) or {}
-            if not isinstance(settings, dict):
-                settings = _row_to_dict(settings) or {}
-            stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-            await safe_edit(
-                query,
-                KeyboardFactory._format_security_text(settings, stats),
-                reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                bot=context.bot,
+            # ✅ إبطال الكاش (الإعدادات تغيرت)
+            await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+
+            # ✅ Two-phase rendering
+            await CallbackHandlers._render_security_two_phase(
+                query, context, chat_id, lang, force_refresh_settings=False
             )
         except Exception as e:
             logger.error(f"_refresh_security_view: {e}", exc_info=True)
@@ -1481,7 +1591,6 @@ class CallbackHandlers:
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, "🌐 اختر اللغة:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
-    # ✅ v9.0.5: إبطال كاش اللغة عند التغيير
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
         data = query.data or ""
@@ -1490,13 +1599,10 @@ class CallbackHandlers:
         if lang_set in valid_langs:
             await DB.set_user_language(user_id, lang_set)
             await invalidate_user_cache(user_id)
-            # ✅ v9.0.5: إبطال كاش اللغة في context.user_data
-            # (بدونه، الرسائل تبقى باللغة القديمة حتى إعادة التشغيل)
             try:
                 context.user_data.pop('lang', None)
             except Exception:
                 pass
-            # ✅ v9.0.5: محاولة استدعاء clear_lang_cache من handlers_message
             try:
                 from handlers_message import clear_lang_cache
                 clear_lang_cache(context)
@@ -1611,26 +1717,25 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_group_settings(update, context, query, user_id, lang, data):
+        """
+        🧠 v9.1.0: نسخة محسّنة بـ Two-Phase rendering.
+        """
         try:
             chat_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
             await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
             return
-        if not await is_authorized_in_group(context.bot, chat_id, user_id):
+
+        if not await _check_sec_auth(context, user_id, chat_id):
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
+
         context.user_data['security_chat_id'] = chat_id
-        try:
-            settings = await DB.get_security_settings(chat_id) or {}
-            if not isinstance(settings, dict):
-                settings = _row_to_dict(settings) or {}
-            stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-            await safe_edit(query, KeyboardFactory._format_security_text(settings, stats),
-                            reply_markup=KeyboardFactory.build("security", chat_id=chat_id, lang=lang),
-                            bot=context.bot)
-        except Exception as e:
-            logger.error(f"_handle_group_settings: {e}", exc_info=True)
-            await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
+
+        # ✅ Two-phase rendering (فوري < 500ms + إحصائيات في الخلفية)
+        await CallbackHandlers._render_security_two_phase(
+            query, context, chat_id, lang, force_refresh_settings=False
+        )
 
     @staticmethod
     async def _handle_channel_select(update, context, query, user_id, data):
@@ -1793,6 +1898,9 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
+        """
+        🧠 v9.1.0: مع preload لأول مجموعة (تسخين cache مسبقاً).
+        """
         groups = await DB.get_user_groups(user_id)
         if not groups:
             kb = InlineKeyboardMarkup([
@@ -1805,12 +1913,15 @@ class CallbackHandlers:
         text = "👥 مجموعاتي\n\n"
         kb = []
         display_idx = 0
+        first_chat_id = None
         for g in groups:
             gd = _row_to_dict(g) or {}
             gid = gd.get('chat_id')
             if gid is None:
                 continue
             display_idx += 1
+            if display_idx == 1:
+                first_chat_id = gid
             name = gd.get('chat_name') or f"Group {gid}"
             status = "⛔" if gd.get('banned') else "✅"
             number = _group_number(display_idx)
@@ -1821,6 +1932,37 @@ class CallbackHandlers:
             ])
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+
+        # ✅ v9.1.0: تسخين cache لأول مجموعة في الخلفية
+        if first_chat_id:
+            task = asyncio.create_task(
+                CallbackHandlers._preload_group_security(first_chat_id)
+            )
+            ACTIVE_TASKS.add(task)
+            task.add_done_callback(ACTIVE_TASKS.discard)
+
+    @staticmethod
+    async def _preload_group_security(chat_id: int) -> None:
+        """
+        🧠 v9.1.0: تسخين cache الإعدادات + الإحصائيات لمجموعة.
+        """
+        try:
+            # settings
+            key = f"sec_set_{chat_id}"
+            cached = await _security_settings_cache.get(key)
+            if cached is None:
+                settings = await DB.get_security_settings(chat_id) or {}
+                if not isinstance(settings, dict):
+                    settings = _row_to_dict(settings) or {}
+                await _security_settings_cache.set(key, settings, ttl=SEC_SETTINGS_CACHE_TTL)
+            # stats
+            stats_key = f"sec_stats_{chat_id}"
+            cached_stats = await _security_stats_cache_local.get(stats_key)
+            if cached_stats is None:
+                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
+                await _security_stats_cache_local.set(stats_key, stats, ttl=SEC_STATS_CACHE_TTL)
+        except Exception as e:
+            logger.debug(f"_preload_group_security({chat_id}): {e}")
 
     @staticmethod
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
@@ -2239,6 +2381,7 @@ class CallbackHandlers:
                     logger.error(f"activate/deactivate failed: {ex}", exc_info=True)
                     await safe_edit(query, "❌ فشل تحديث الإعدادات", bot=context.bot)
                     return
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 try:
                     await DB.execute(
                         "INSERT INTO admin_logs (admin_id, action, chat_id, created_at) "
@@ -2267,9 +2410,7 @@ class CallbackHandlers:
 
             if action in toggle_map:
                 col = toggle_map[action]
-                settings = await DB.get_security_settings(chat_id) or {}
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
+                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
                 new_val = 1 - _coerce_int(settings.get(col, 0))
                 update_data = {col: new_val}
                 if action == "approve_join" and new_val:
@@ -2277,6 +2418,7 @@ class CallbackHandlers:
                 elif action == "reject_join" and new_val:
                     update_data['auto_approve_join'] = 0
                 await DB.update_security_settings(chat_id, **update_data)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
@@ -2296,11 +2438,10 @@ class CallbackHandlers:
                 return
 
             if action == "warn_toggle":
-                settings = await DB.get_security_settings(chat_id) or {}
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
+                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
                 new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
                 await DB.update_security_settings(chat_id, warn_enabled=new_val)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
@@ -2330,11 +2471,10 @@ class CallbackHandlers:
                 return
 
             if action == "toggle_banned_words":
-                settings = await DB.get_security_settings(chat_id) or {}
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
+                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
                 new_val = 1 - _coerce_int(settings.get('delete_banned_words', 0))
                 await DB.update_security_settings(chat_id, delete_banned_words=new_val)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._show_banned_words_menu(update, context, query, chat_id, lang)
                 return
 
@@ -2427,9 +2567,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
-        settings = await DB.get_security_settings(chat_id) or {}
-        if not isinstance(settings, dict):
-            settings = _row_to_dict(settings) or {}
+        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
         current = _coerce_int(settings.get('max_warnings'), 3)
         text = f"🔢 <b>عدد التحذيرات قبل العقوبة</b>\n\nالحالي: <b>{current}</b>\n\nاختر العدد الجديد:"
         counts = [1, 2, 3, 4, 5, 10]
@@ -2459,9 +2597,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_banned_words_menu(update, context, query, chat_id, lang):
-        settings = await DB.get_security_settings(chat_id) or {}
-        if not isinstance(settings, dict):
-            settings = _row_to_dict(settings) or {}
+        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
         is_enabled = _coerce_int(settings.get('delete_banned_words'), 0)
         toggle_text = "❌ تعطيل الحذف" if is_enabled else "✅ تفعيل الحذف"
         kb = InlineKeyboardMarkup([
@@ -2977,6 +3113,11 @@ class CallbackHandlers:
                 _invalidate_sec_auth_cache()
                 try:
                     await invalidate_user_cache(user_id)
+                except Exception:
+                    pass
+                try:
+                    await _security_settings_cache.clear()
+                    await _security_stats_cache_local.clear()
                 except Exception:
                     pass
                 await safe_edit(query, "🔄 تم تحديث الكاش", bot=context.bot)
@@ -3588,6 +3729,7 @@ class CallbackHandlers:
                 penalty_types = {'ban', 'mute', 'kick', 'restrict', 'none'}
                 if action in penalty_types:
                     await DB.update_security_settings(chat_id, auto_penalty=action)
+                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(query, context, chat_id, 'ar')
                     return
                 await safe_edit(query, "⚠️ غير معروف", bot=context.bot)
