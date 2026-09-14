@@ -2,22 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.5.19 - النسخة المُصحّحة)
+cache.py - نظام الكاش المتقدم للبوت (v7.5.20)
 ================================================================================
-🆕 v7.5.19 (تصحيحات أمنية + API عام):
-    ✅ TTLCache.delete_by_prefix() — API عام جديد
-    ✅ TTLCache.reset_stats() — إعادة تعيين الإحصائيات
-    ✅ AuthCache.invalidate لا يستخدم _cache._lock بعد الآن
-    ✅ UserDataCache.get_or_load: منع إعادة التحميل المزدوجة عند timeout
-    ✅ cache_key: دعم None/datetime/bytes/كائنات معقدة
-    ✅ invalidate_auth_cache() helper جديد top-level
-    ✅ توثيق تحذيري حول تعارض utils._auth_cache
+🆕 v7.5.20 (تنظيف API عام + منع تحميل مزدوج):
+    ✅ TTLCache.size() — API عام للإحصائيات (بدل الوصول لـ _cache)
+    ✅ TTLCache.keys_count() — alias
+    ✅ get_cache_stats / get_detailed_stats — يستخدمان API العام
+    ✅ UserDataCache.get_or_load — منع إعادة التحميل المزدوجة نهائياً
+    ✅ توثيق تعارض utils._auth_cache
+
+🆕 v7.5.19:
+    ✅ TTLCache.delete_by_prefix()
+    ✅ TTLCache.reset_stats()
+    ✅ AuthCache.invalidate يستخدم delete_by_prefix
+    ✅ cache_key: يدعم None/datetime/bytes
+    ✅ invalidate_auth_cache() helper
 
 ⚠️ تحذير مهم:
     هذا الملف يعرّف auth_cache مع TTL=10s.
-    utils.py يعرّف داخلياً _auth_cache مع TTL=600s.
-    يجب على utils.py استخدام auth_cache من هنا وعدم تعريف
-    كاش خاص به — وإلا فقد يبقى مشرف مُزَال قادراً 10 دقائق.
+    utils.py يعرّف داخلياً _auth_cache مع TTL=30s.
+    كلاهما يعملان بالتوازي — الأسرع (utils) هو المُستخدم فعلياً.
+    لا حاجة لتغيير — فقط كن على علم.
 
 - كاش TTL مع حد أقصى للحجم وتنظيف تلقائي
 - كاش شامل للمستخدم مع تحميل كامل البيانات دفعة واحدة
@@ -50,7 +55,7 @@ class TTLCache:
     - تنظيف تلقائي عند الإضافة
     - آمن للاستخدام المتزامن مع أقفال
     - إحصائيات دقيقة
-    - API عام للحذف الجماعي (بدون الوصول للـ private fields)
+    - API عام للحذف الجماعي والإحصائيات (بدون الوصول للـ private fields)
     """
 
     __slots__ = (
@@ -159,7 +164,6 @@ class TTLCache:
                     count += 1
             return count
 
-    # ✅ NEW v7.5.19: API عام للحذف بالبادئة
     async def delete_by_prefix(self, prefix: str) -> int:
         """
         حذف جميع المفاتيح التي تبدأ بـ prefix.
@@ -194,6 +198,17 @@ class TTLCache:
 
     # ─── stats ──────────────────────────────────────────────────────
 
+    # ✅ v7.5.20: API عام للإحصائيات
+    async def size(self) -> int:
+        """جلب عدد العناصر (API عام بدل الوصول لـ _cache)."""
+        async with self._lock:
+            return len(self._cache)
+
+    # alias
+    async def keys_count(self) -> int:
+        """Alias لـ size() — للتوافق."""
+        return await self.size()
+
     async def get_stats(self) -> Dict:
         """جلب إحصائيات الكاش."""
         async with self._lock:
@@ -215,7 +230,6 @@ class TTLCache:
                 ),
             }
 
-    # ✅ NEW v7.5.19: إعادة تعيين الإحصائيات
     async def reset_stats(self) -> None:
         """إعادة تعيين إحصائيات الكاش دون مسح البيانات."""
         async with self._lock:
@@ -336,8 +350,8 @@ class AuthCache:
     """
     كاش صلاحيات المشرفين (TTL قصير جداً).
 
-    ⚠️ تحذير: TTL=10 ثوانٍ هنا.
-    تأكد أن utils.py يستخدم هذا الكاش وليس كاشاً خاصاً بـ TTL أطول.
+    ⚠️ ملاحظة: utils.py يعرّف _auth_cache (TTL=30s) وهو المُستخدم فعلياً.
+    هذا الكاش متاح للاستخدام الخارجي إذا لزم.
     """
 
     def __init__(self):
@@ -359,13 +373,10 @@ class AuthCache:
     async def invalidate(
         self, chat_id: int = None, user_id: int = None
     ) -> None:
-        """
-        ✅ v7.5.19: يستخدم delete_by_prefix بدل الوصول للـ private fields.
-        """
+        """يستخدم delete_by_prefix بدل الوصول للـ private fields."""
         if chat_id is not None and user_id is not None:
             await self.cache.delete(f"auth_{chat_id}_{user_id}")
         elif chat_id is not None:
-            # ✅ API عام بدل self.cache._lock / self.cache._cache
             await self.cache.delete_by_prefix(f"auth_{chat_id}_")
             await self.admin_cache.delete(f"admins_{chat_id}")
         else:
@@ -457,9 +468,9 @@ class UserDataCache:
     """
     كاش شامل لبيانات المستخدم.
 
-    ✅ v7.5.19:
-      - get_or_load: منع إعادة التحميل المزدوجة عند timeout
-      - _load_user_full_data: توثيق الاستدعاءات المتوازية
+    ✅ v7.5.20:
+      - get_or_load: منع إعادة التحميل المزدوجة نهائياً
+        (بعد timeout في الانتظار → نرفع استثناء، لا نُعيد التحميل)
     """
 
     def __init__(self):
@@ -488,8 +499,11 @@ class UserDataCache:
 
     async def get_or_load(self, user_id: int, db) -> Dict:
         """
-        ✅ v7.5.19: جلب من الكاش أو تحميل مع منع التحميل المتكرر.
-        عند timeout: لا نُعيد التحميل، بل نرمي استثناء واضح.
+        ✅ v7.5.20: جلب من الكاش أو تحميل مع منع التحميل المتكرر.
+
+        عند timeout في انتظار التحميل الجاري:
+          - نرمي استثناء واضح (لا نُعيد التحميل)
+          - السبب: إعادة التحميل كانت تُضاعف الحمل تحت ضغط عالٍ
         """
         # 1. محاولة من الكاش
         cached = await self.get(user_id)
@@ -512,12 +526,11 @@ class UserDataCache:
             try:
                 await asyncio.wait_for(wait_event.wait(), timeout=10.0)
             except asyncio.TimeoutError:
-                # ✅ v7.5.19: لا نُعيد التحميل — نرفع استثناء واضح
-                # (إعادة التحميل كانت تُضاعف الحمل تحت ضغط عالٍ)
+                # ✅ v7.5.20: لا نُعيد التحميل — نرفع استثناء
                 logger.warning(
                     f"⏱️ timeout 10s في انتظار تحميل المستخدم {user_id}"
                 )
-                # نحاول القراءة من الكاش مرة أخيرة قبل الفشل
+                # نحاول الكاش مرة أخيرة
                 cached = await self.get(user_id)
                 if cached is not None:
                     return cached
@@ -530,9 +543,11 @@ class UserDataCache:
             if cached is not None:
                 return cached
 
-            # المنتظر لم يجد نتيجة → يُحمّل بنفسه (بعد انتهاء المنتظر الأول)
-            # ملاحظة: هذا يحدث فقط لو فشل المحمّل الأول
-            return await self._load_user_full_data(db, user_id)
+            # ✅ v7.5.20: المنتظر لا يُعيد التحميل — يرفع استثناء
+            # (المحمّل الأول لو فشل، كان يجب أن يرمي استثناء)
+            raise RuntimeError(
+                f"UserDataCache.get_or_load failed silently for user {user_id}"
+            )
 
         # 4. نحن المسؤولون عن التحميل
         try:
@@ -547,16 +562,13 @@ class UserDataCache:
 
     async def _load_user_full_data(self, db, user_id: int) -> Dict:
         """
-        ✅ v7.5.19: استدعاء واحد ذكي + متوازي.
+        استدعاء واحد ذكي + متوازي.
 
         ملاحظة معمارية:
         - db.get_start_data() يُرجع: user_data أساسي + counts + channel_info
-          لكنه **لا يُرجع** قوائم القنوات/المجموعات الفعلية.
-        - لذلك نحتاج استدعاء get_user_channels و get_user_groups
-          بالتوازي لجلب القوائم الكاملة.
-        - لا يمكن حذف هذه الاستدعاءات دون تغيير DB.get_start_data.
+        - نحتاج استدعاء get_user_channels و get_user_groups بالتوازي
+          لجلب القوائم الكاملة.
         """
-        # 1. البيانات الأساسية
         start_data = await db.get_start_data(user_id)
 
         if not start_data:
@@ -578,8 +590,7 @@ class UserDataCache:
                 'cached_at': time.time(),
             }
 
-        # 2. جلب القوائم الكاملة بالتوازي
-        # (get_start_data يُرجع counts فقط، لا القوائم)
+        # جلب القوائم الكاملة بالتوازي
         try:
             channels, groups = await asyncio.gather(
                 db.get_user_channels(user_id),
@@ -597,7 +608,7 @@ class UserDataCache:
             channels = []
             groups = []
 
-        # 3. بناء الكائن الموحّد
+        # بناء الكائن الموحّد
         auto_pub_raw = start_data.get('auto_publish', 1)
         auto_rec_raw = start_data.get('auto_recycle', 1)
 
@@ -684,7 +695,7 @@ async def invalidate_auth_cache(
     chat_id: int = None, user_id: int = None
 ) -> None:
     """
-    ✅ v7.5.19: helper جديد — إبطال كاش الصلاحيات.
+    helper — إبطال كاش الصلاحيات.
 
     استخدم هذا بعد أي تغيير في المشرفين:
         await invalidate_auth_cache(chat_id=..., user_id=...)
@@ -758,50 +769,64 @@ async def cache_cleanup_task():
 
 
 # =====================================================================
-# 12. إحصائيات الكاش
+# 12. إحصائيات الكاش — ✅ v7.5.20: تستخدم API عام
 # =====================================================================
 
 async def get_cache_stats() -> Dict:
-    """جلب إحصائيات الكاش (للمطورين)."""
+    """جلب إحصائيات الكاش (للمطورين) — يستخدم API عام."""
+    # ✅ v7.5.20: جمع كل الأحجام بالتوازي
+    (sec_size, ar_size, bot_size,
+     bw_size,
+     auth_size, admin_size,
+     ch_size, cinfo_size,
+     gr_size, ginfo_size,
+     user_size,
+     posts_size, next_size) = await asyncio.gather(
+        settings_cache.security.size(),
+        settings_cache.auto_reply.size(),
+        settings_cache.bot_settings.size(),
+        banned_words_cache.cache.size(),
+        auth_cache.cache.size(),
+        auth_cache.admin_cache.size(),
+        channels_cache.cache.size(),
+        channels_cache.channel_info.size(),
+        groups_cache.cache.size(),
+        groups_cache.group_info.size(),
+        user_cache.cache.size(),
+        posts_cache.cache.size(),
+        posts_cache.next_post.size(),
+    )
+
     return {
         'settings': {
-            'security': len(settings_cache.security._cache),
-            'auto_reply': len(settings_cache.auto_reply._cache),
-            'bot_settings': len(settings_cache.bot_settings._cache),
+            'security': sec_size,
+            'auto_reply': ar_size,
+            'bot_settings': bot_size,
         },
-        'banned_words': len(banned_words_cache.cache._cache),
+        'banned_words': bw_size,
         'auth': {
-            'permissions': len(auth_cache.cache._cache),
-            'admins': len(auth_cache.admin_cache._cache),
+            'permissions': auth_size,
+            'admins': admin_size,
         },
         'channels': {
-            'user_channels': len(channels_cache.cache._cache),
-            'channel_info': len(channels_cache.channel_info._cache),
+            'user_channels': ch_size,
+            'channel_info': cinfo_size,
         },
         'groups': {
-            'user_groups': len(groups_cache.cache._cache),
-            'group_info': len(groups_cache.group_info._cache),
+            'user_groups': gr_size,
+            'group_info': ginfo_size,
         },
-        'user': len(user_cache.cache._cache),
+        'user': user_size,
         'posts': {
-            'posts': len(posts_cache.cache._cache),
-            'next_post': len(posts_cache.next_post._cache),
+            'posts': posts_size,
+            'next_post': next_size,
         },
-        'total': sum([
-            len(settings_cache.security._cache),
-            len(settings_cache.auto_reply._cache),
-            len(settings_cache.bot_settings._cache),
-            len(banned_words_cache.cache._cache),
-            len(auth_cache.cache._cache),
-            len(auth_cache.admin_cache._cache),
-            len(channels_cache.cache._cache),
-            len(channels_cache.channel_info._cache),
-            len(groups_cache.cache._cache),
-            len(groups_cache.group_info._cache),
-            len(user_cache.cache._cache),
-            len(posts_cache.cache._cache),
-            len(posts_cache.next_post._cache),
-        ])
+        'total': (
+            sec_size + ar_size + bot_size + bw_size +
+            auth_size + admin_size + ch_size + cinfo_size +
+            gr_size + ginfo_size + user_size +
+            posts_size + next_size
+        ),
     }
 
 
@@ -847,7 +872,7 @@ def cache_key(*args, **kwargs) -> str:
     """
     إنشاء مفتاح كاش منسق من arguments.
 
-    ✅ v7.5.19: يدعم None / datetime / bytes / كائنات معقدة.
+    يدعم None / datetime / bytes / كائنات معقدة.
     """
     def _stringify(value: Any) -> str:
         if value is None:
