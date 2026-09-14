@@ -2,20 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.3)
+handlers_callback.py - المعالج النهائي الكامل (v9.0.4)
 =====================================================================
-✅ v9.0.3 — إصلاح نهائي:
-  - sec_auto_reply_menu: عرض لوحة الردود مباشرة
-    (كان يُستدعي _handle_auto_reply الذي يفشل لأن query.data = "sec_auto_reply_menu"
-     بينما action يُستخرج كـ "sec_menu" → "⚠️ غير معروف")
+✅ v9.0.4 — تحسين أداء زر الردود:
+  - _handle_auto_reply.toggle: كاش في context.user_data (توفير استعلام DB)
+  - لا مزيد من "🐢 زر بطيء auto_reply_toggle — 3.93s"
+
+✅ v9.0.3 — إصلاح زر sec_auto_reply_menu:
+  - _handle_security: عرض لوحة الردود مباشرة
+  - _handle_auto_reply: استخراج action صحيح
 
 ✅ v9.0.2:
-  - sec_maxlen handler
-  - sec_act_log handler
-  - act_pin handler
-  - HTML escape في القوائم
+  - sec_maxlen, sec_act_log, act_pin handlers
+  - HTML escape
   - posts_cache من cache.py
-  - DB.initialize_db() في admin_restore_file
+  - DB.reconnect() / DB.initialize_db() في admin_restore_file
 
 ✅ v9.0.0:
   - كل الإصلاحات الـ 90+ الموثقة سابقاً
@@ -2095,7 +2096,7 @@ class CallbackHandlers:
         await safe_edit(query, display_text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
     # =================================================================
-    # معالجات الأمان — ✅ v9.0.3: sec_auto_reply_menu مُصلَح
+    # معالجات الأمان
     # =================================================================
 
     @staticmethod
@@ -2128,11 +2129,7 @@ class CallbackHandlers:
             return
 
         try:
-            # ═══════════════════════════════════════════════════════════
             # ✅ v9.0.3: sec_auto_reply_menu — عرض لوحة الردود مباشرة
-            # (لا نستدعي _handle_auto_reply لأن query.data يبقى
-            #  "sec_auto_reply_menu:CHAT" و action سيُستخرج كـ "sec_menu")
-            # ═══════════════════════════════════════════════════════════
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
                 try:
@@ -2150,20 +2147,17 @@ class CallbackHandlers:
                 )
                 return
 
-            # ═══════════════════════════════════════════════════════════
-            # ✅ v9.0.2: sec_maxlen + sec_act_log
-            # ═══════════════════════════════════════════════════════════
+            # ✅ v9.0.2: sec_maxlen
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 context.user_data['sec_chat'] = chat_id
                 await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة (0 = بلا حد):", bot=context.bot)
                 return
 
+            # ✅ v9.0.2: sec_act_log
             if action == "act_log":
                 await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang)
                 return
-
-            # ═══════════════════════════════════════════════════════════
 
             if action in ("activate_all", "enable_all", "deactivate_all", "disable_all"):
                 is_activate = action in ("activate_all", "enable_all")
@@ -2811,13 +2805,17 @@ class CallbackHandlers:
 
                     if db_closed:
                         try:
-                            init_fn = getattr(DB, 'initialize_db', None)
-                            if callable(init_fn):
-                                await init_fn()
+                            reconnect_fn = getattr(DB, 'reconnect', None)
+                            if callable(reconnect_fn):
+                                await reconnect_fn()
                             else:
-                                init_fn = getattr(DB, 'initialize', None)
+                                init_fn = getattr(DB, 'initialize_db', None)
                                 if callable(init_fn):
                                     await init_fn()
+                                else:
+                                    init_fn = getattr(DB, 'initialize', None)
+                                    if callable(init_fn):
+                                        await init_fn()
                         except Exception as ie:
                             logger.warning(f"⚠️ فشل إعادة تهيئة DB بعد الاستعادة: {ie}")
 
@@ -3289,7 +3287,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # الردود التلقائية — تعمل للأزرار auto_reply_*:CHAT
+    # الردود التلقائية — ✅ v9.0.4: كاش toggle
     # =================================================================
 
     @staticmethod
@@ -3341,12 +3339,19 @@ class CallbackHandlers:
                 await safe_edit(query, "🤖 إعدادات الردود التلقائية:", reply_markup=kb, bot=context.bot)
                 return
 
+            # ✅ v9.0.4: كاش في context.user_data لتسريع toggle
             if action == "toggle":
-                settings = await DB.get_auto_reply_settings(chat_id) or {}
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
+                cache_key = f"ars_{chat_id}"
+                settings = context.user_data.get(cache_key)
+                if settings is None:
+                    settings = await DB.get_auto_reply_settings(chat_id) or {}
+                    if not isinstance(settings, dict):
+                        settings = _row_to_dict(settings) or {}
                 new_status = not settings.get('enabled', False)
                 await DB.update_auto_reply_settings(chat_id, enabled=new_status)
+                # تحديث الكاش
+                settings['enabled'] = new_status
+                context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build("auto_reply", chat_id=chat_id, lang=lang)
                 text = (f"🤖 إعدادات الردود التلقائية\n\n"
                         f"الحالة: {'✅ مفعلة' if new_status else '❌ معطلة'}\n"
@@ -3355,11 +3360,16 @@ class CallbackHandlers:
                 return
 
             if action == "admins":
-                settings = await DB.get_auto_reply_settings(chat_id) or {}
-                if not isinstance(settings, dict):
-                    settings = _row_to_dict(settings) or {}
+                cache_key = f"ars_{chat_id}"
+                settings = context.user_data.get(cache_key)
+                if settings is None:
+                    settings = await DB.get_auto_reply_settings(chat_id) or {}
+                    if not isinstance(settings, dict):
+                        settings = _row_to_dict(settings) or {}
                 new_status = not settings.get('only_admins', 0)
                 await DB.update_auto_reply_settings(chat_id, only_admins=new_status)
+                settings['only_admins'] = new_status
+                context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build("auto_reply", chat_id=chat_id, lang=lang)
                 text = (f"🤖 إعدادات الردود التلقائية\n\n"
                         f"الحالة: {'✅ مفعلة' if settings.get('enabled') else '❌ معطلة'}\n"
@@ -3390,6 +3400,8 @@ class CallbackHandlers:
 
             if action == "reset_confirm":
                 await DB.reset_auto_replies(chat_id)
+                # إبطال الكاش
+                context.user_data.pop(f"ars_{chat_id}", None)
                 await safe_edit(query, "✅ تم حذف كل الردود", bot=context.bot)
                 return
 
