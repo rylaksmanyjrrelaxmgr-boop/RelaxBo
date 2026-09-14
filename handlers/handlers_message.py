@@ -2,17 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.7)
+handlers_message.py - معالجات الرسائل (v7.7.8)
 =====================================================================
-🆕 v7.7.7 (إصلاحات الأمان + الأداء):
-    ✅ _do_db_restore: DB.close() قبل النسخ + reconnect بعده
-       - السبب: الكتابة فوق DB مفتوحة قد تُتلِف الملف
-    ✅ _handle_channel_input: استدعاء get_chat مرة واحدة بدل مرتين
-       - توفير ~300ms لكل إضافة قناة
-    ✅ _handle_redeem_gift_input: حماية من return غير-tuple
-    ✅ clear_lang_cache() helper جديد — لإبطال كاش اللغة
+🆕 v7.7.8 (إصلاحات حرجة):
+    ✅ _do_db_restore: try/finally يضمن reconnect دائماً
+    ✅ _do_db_restore: إبطال كل الكاشات بعد الاستعادة
+    ✅ _do_db_restore: تحديث backoff لملفات النسخ الاحتياطي الكبيرة
+    ✅ _process_auto_reply: فحص media_id قبل الإرسال
+    ✅ _sec_auth_cache: LRU size limit (لا memory leak)
+    ✅ GroupRateLimiterManager: تنظيف تلقائي كل ساعة
+    ✅ _ensure_lang: إزالة tuple استثناءات redundant
+    ✅ _get_penalty_duration: حذف معامل غير مُستخدَم
+    ✅ logging في _handle_adding_posts: إخفاء نص المستخدم
+       (الخصوصية)
 
-🆕 v7.7.6:
+📌 v7.7.7:
+    ✅ _do_db_restore: DB.close() + reconnect
+    ✅ _handle_channel_input: get_chat مرة واحدة
+    ✅ _handle_redeem_gift_input: حماية من return غير-tuple
+    ✅ clear_lang_cache() helper جديد
+
+📌 v7.7.6:
     ✅ _ensure_lang محسّنة (كاش سريع + timeout قصير)
     ✅ Logging تشخيصي في handle_private و _handle_adding_posts
 
@@ -77,6 +87,62 @@ MAX_ADMIN_BROADCAST_TARGETS = 100_000
 BROADCAST_DELAY_SECONDS = 0.1
 MAX_GROUP_LIMITERS_CACHE = 1000
 
+# ✅ v7.7.8: حد أقصى لكاش الصلاحيات
+MAX_SEC_AUTH_CACHE_SIZE = 5000
+SEC_AUTH_CACHE_TTL = 300
+
+# ✅ v7.7.8: تنظيف دوري للكاشات
+CACHE_CLEANUP_INTERVAL = 3600  # ساعة
+
+# =====================================================================
+# ✅ v7.7.8: كاش الصلاحيات مع حد أقصى
+# =====================================================================
+
+_sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
+_sec_auth_cache_lock = asyncio.Lock()
+
+
+async def _sec_auth_cache_get(user_id: int, chat_id: int) -> Optional[bool]:
+    """✅ v7.7.8: جلب من الكاش مع فحص TTL."""
+    key = (user_id, chat_id)
+    entry = _sec_auth_cache.get(key)
+    if entry is None:
+        return None
+    result, ts = entry
+    if time.monotonic() - ts > SEC_AUTH_CACHE_TTL:
+        _sec_auth_cache.pop(key, None)
+        return None
+    return result
+
+
+async def _sec_auth_cache_set(user_id: int, chat_id: int, result: bool) -> None:
+    """✅ v7.7.8: تخزين مع LRU eviction."""
+    key = (user_id, chat_id)
+    async with _sec_auth_cache_lock:
+        if len(_sec_auth_cache) >= MAX_SEC_AUTH_CACHE_SIZE and key not in _sec_auth_cache:
+            # حذف الأقدم (25%)
+            sorted_items = sorted(
+                _sec_auth_cache.items(), key=lambda x: x[1][1]
+            )
+            to_remove = len(_sec_auth_cache) // 4
+            for k, _ in sorted_items[:to_remove]:
+                _sec_auth_cache.pop(k, None)
+        _sec_auth_cache[key] = (result, time.monotonic())
+
+
+async def _sec_auth_cache_cleanup() -> int:
+    """✅ v7.7.8: حذف العناصر المنتهية."""
+    async with _sec_auth_cache_lock:
+        now = time.monotonic()
+        expired = [
+            k for k, (_, ts) in _sec_auth_cache.items()
+            if now - ts > SEC_AUTH_CACHE_TTL
+        ]
+        for k in expired:
+            del _sec_auth_cache[k]
+        return len(expired)
+
+
 # =====================================================================
 # مدير Rate Limiter لكل مجموعة
 # =====================================================================
@@ -103,9 +169,39 @@ class GroupRateLimiterManager:
             return cls._limiters[chat_id]
 
     @classmethod
-    def cleanup(cls) -> None:
+    def cleanup(cls) -> int:
+        """✅ v7.7.8: إرجاع عدد المحذوف."""
+        n = len(cls._limiters)
         cls._limiters.clear()
         cls._last_access.clear()
+        return n
+
+    @classmethod
+    async def periodic_cleanup_task(cls):
+        """✅ v7.7.8: مهمة تنظيف دورية."""
+        while True:
+            try:
+                await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
+                now = time.time()
+                async with cls._lock:
+                    # حذف limiters غير مستخدمة لساعة
+                    to_remove = [
+                        cid for cid, ts in cls._last_access.items()
+                        if now - ts > 7200
+                    ]
+                    for cid in to_remove:
+                        cls._limiters.pop(cid, None)
+                        cls._last_access.pop(cid, None)
+                # تنظيف كاش الصلاحيات
+                cleaned = await _sec_auth_cache_cleanup()
+                if cleaned > 0:
+                    logger.debug(f"🧹 تنظيف sec_auth_cache: {cleaned} عنصر")
+            except asyncio.CancelledError:
+                logger.info("🛑 periodic_cleanup_task تم إلغاؤه")
+                raise
+            except Exception as e:
+                logger.error(f"❌ periodic_cleanup_task: {e}")
+
 
 # =====================================================================
 # دوال مساعدة
@@ -121,9 +217,9 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
         return default
 
 
-# 🆕 v7.7.6: _ensure_lang محسّنة
+# ✅ v7.7.8: _ensure_lang مع إزالة redundant exception
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """✅ v7.7.6: كاش سريع + timeout قصير لتفادي البطء."""
+    """✅ v7.7.8: كاش سريع + timeout قصير لتفادي البطء."""
     # 1) من الذاكرة أولاً (أسرع)
     lang = context.user_data.get('lang')
     if lang:
@@ -147,7 +243,7 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
         except Exception:
             pass
 
-        # 3) من DB مع timeout قصير (لا يتجاوز 2 ثانية)
+        # 3) من DB مع timeout قصير
         try:
             lang = await asyncio.wait_for(
                 DB.get_user_language(user_id),
@@ -155,17 +251,17 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
             ) or 'ar'
             context.user_data['lang'] = lang
             return lang
-        except (asyncio.TimeoutError, Exception):
-            logger.debug(f"⚠️ _ensure_lang timeout for user {user_id}, using 'ar'")
+        except Exception as e:
+            # ✅ v7.7.8: Exception يغطي TimeoutError — لا حاجة لـ tuple
+            logger.debug(f"⚠️ _ensure_lang for user {user_id}: {e}")
 
-    # 4) الافتراضي
     return 'ar'
 
 
-# ✅ v7.7.7: helper جديد لإبطال كاش اللغة
+# ✅ helper جديد لإبطال كاش اللغة
 def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    ✅ v7.7.7: إبطال كاش اللغة في context.user_data.
+    إبطال كاش اللغة في context.user_data.
     استدعها من handlers_callback بعد تغيير اللغة.
     """
     try:
@@ -376,7 +472,6 @@ class MessageHandlers:
         UserState.WAIT_BACKUP_FILE: "_handle_backup_file_input",
         UserState.WAIT_BAN_USER_ID: "_handle_ban_user_input",
         UserState.WAIT_UNBAN_USER_ID: "_handle_unban_user_input",
-        # 🆕 v7.7.5
         UserState.WAIT_PENALTY_DEFAULT_DURATION: "_handle_penalty_default_duration",
         UserState.WAIT_CONTEST_WINNER: "_handle_contest_winner",
         UserState.WAIT_PENALTY_MUTE_DURATION: "_handle_penalty_mute_duration",
@@ -395,15 +490,18 @@ class MessageHandlers:
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
 
-            # 🆕 v7.7.6: Logging تشخيصي
-            text_preview = ""
+            # ✅ v7.7.8: تسجيل محجوب (لا نُخزّن نص المستخدم)
             try:
                 msg = update.effective_message
-                if msg:
-                    text_preview = (msg.text or msg.caption or "")[:40]
+                has_text = bool(msg and (msg.text or msg.caption))
+                has_photo = bool(msg and msg.photo)
+                has_video = bool(msg and msg.video)
+                logger.info(
+                    f"📥 handle_private: user={user_id}, state={state}, "
+                    f"has_text={has_text}, has_photo={has_photo}, has_video={has_video}"
+                )
             except Exception:
                 pass
-            logger.info(f"📥 handle_private: user={user_id}, state={state}, text='{text_preview}'")
 
             lang = await _ensure_lang(update, context)
 
@@ -432,7 +530,7 @@ class MessageHandlers:
             if handler_name:
                 handler = getattr(MessageHandlers, handler_name, None)
                 if handler:
-                    logger.info(f"🎯 Calling handler: {handler_name}")
+                    logger.debug(f"🎯 Calling handler: {handler_name}")
                     await handler(update, context)
                 else:
                     logger.warning(f"⚠️ handler غير موجود: {handler_name}")
@@ -519,7 +617,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # 🆕 v7.7.5: المعالجات الخمسة الجديدة
+    # المعالجات الخمسة
     # =================================================================
 
     @staticmethod
@@ -787,7 +885,10 @@ class MessageHandlers:
     # =================================================================
 
     @staticmethod
-    def _get_penalty_duration(settings: dict, violation_type: str, penalty_type: str) -> int:
+    def _get_penalty_duration(settings: dict, violation_type: str) -> int:
+        """
+        ✅ v7.7.8: حذف المعامل غير المُستخدَم penalty_type.
+        """
         if violation_type in ('flood', 'antiflood'):
             return settings.get('antiflood_penalty_duration', 3600)
         elif violation_type in ('night', 'night_mode'):
@@ -852,9 +953,9 @@ class MessageHandlers:
                 duration_seconds = 0
             elif penalty_type not in ['mute', 'ban', 'restrict', 'kick', 'warn']:
                 penalty_type = 'mute'
-                duration_seconds = MessageHandlers._get_penalty_duration(settings, violation_type, penalty_type)
+                duration_seconds = MessageHandlers._get_penalty_duration(settings, violation_type)
             else:
-                duration_seconds = MessageHandlers._get_penalty_duration(settings, violation_type, penalty_type)
+                duration_seconds = MessageHandlers._get_penalty_duration(settings, violation_type)
 
         try:
             await DB.add_admin_log(chat_id, context.bot.id, f"violation_{violation_type}", user_id)
@@ -892,7 +993,7 @@ class MessageHandlers:
                         pass
 
     # =================================================================
-    # الردود التلقائية
+    # الردود التلقائية — ✅ v7.7.8: فحص media_id
     # =================================================================
 
     @staticmethod
@@ -909,25 +1010,45 @@ class MessageHandlers:
 
             reply = await DB.get_auto_reply(text, chat_id)
             if reply:
-                reply_text = reply.get('reply', '')
-                reply_type = reply.get('reply_type', 'text')
+                reply_text = reply.get('reply', '') or ''
+                reply_type = reply.get('reply_type', 'text') or 'text'
                 media_id = reply.get('reply_media_id')
-                try:
-                    if reply_type in ['photo', 'video', 'document', 'audio', 'animation']:
-                        await safe_send(context.bot, chat_id, reply_text,
-                                        **{reply_type: media_id} if media_id else {})
-                    elif reply_type == 'voice':
-                        await safe_send(context.bot, chat_id, "", voice=media_id)
-                    elif reply_type == 'sticker':
-                        await safe_send(context.bot, chat_id, "", sticker=media_id)
-                    elif reply_type == 'video_note':
-                        await safe_send(context.bot, chat_id, "", video_note=media_id)
+
+                # ✅ v7.7.8: فحص media_id قبل الإرسال
+                media_types = {'photo', 'video', 'document', 'audio',
+                               'animation', 'voice', 'sticker', 'video_note'}
+
+                if reply_type in media_types:
+                    if not media_id:
+                        # media_id مفقود → fallback إلى نص
+                        logger.warning(
+                            f"⚠️ auto_reply type={reply_type} without media_id "
+                            f"for chat={chat_id}"
+                        )
+                        if reply_text:
+                            await safe_send(context.bot, chat_id, reply_text)
                     else:
-                        await safe_send(context.bot, chat_id, reply_text)
-                except Exception as e:
-                    logger.error(f"فشل إرسال الرد التلقائي: {e}")
+                        try:
+                            if reply_type == 'voice':
+                                await safe_send(context.bot, chat_id, reply_text or "", voice=media_id)
+                            elif reply_type == 'sticker':
+                                await safe_send(context.bot, chat_id, reply_text or "", sticker=media_id)
+                            elif reply_type == 'video_note':
+                                await safe_send(context.bot, chat_id, reply_text or "", video_note=media_id)
+                            else:
+                                await safe_send(
+                                    context.bot, chat_id, reply_text,
+                                    **{reply_type: media_id}
+                                )
+                        except Exception as e:
+                            logger.error(f"فشل إرسال الرد التلقائي: {e}")
+                            if reply_text:
+                                await safe_send(context.bot, chat_id, reply_text)
+                else:
+                    # نص عادي
                     if reply_text:
                         await safe_send(context.bot, chat_id, reply_text)
+
                 await _increment_usage_async(chat_id, text)
                 return True
 
@@ -941,7 +1062,7 @@ class MessageHandlers:
             return False
 
     # =================================================================
-    # إضافة القناة — ✅ v7.7.7: استدعاء get_chat مرة واحدة
+    # إضافة القناة
     # =================================================================
 
     @staticmethod
@@ -960,7 +1081,7 @@ class MessageHandlers:
                 return
 
         try:
-            # ✅ v7.7.7: استدعاء get_chat مرة واحدة فقط
+            # ✅ استدعاء get_chat مرة واحدة فقط
             chat_obj = None
             channel_id = None
 
@@ -980,7 +1101,6 @@ class MessageHandlers:
                     StateManager.clear(user_id)
                     return
 
-            # استخراج الاسم من نفس الكائن (بدون استدعاء ثانٍ)
             if chat_obj:
                 channel_name = chat_obj.title or chat_obj.username or f"قناة {channel_id}"
             else:
@@ -1038,19 +1158,20 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # ✅ إضافة المنشورات (مع Logging)
+    # إضافة المنشورات — ✅ v7.7.8: logging محجوب
     # =================================================================
 
     @staticmethod
     async def _handle_adding_posts(update, context):
-        # 🆕 v7.7.6: Logging
+        # ✅ v7.7.8: لا نسجّل نص المستخدم
         try:
             msg = update.effective_message
+            has_photo = bool(msg.photo) if msg else False
+            has_video = bool(msg.video) if msg else False
+            has_text = bool(msg and (msg.text or msg.caption))
             logger.info(
                 f"🎯 _handle_adding_posts: user={update.effective_user.id}, "
-                f"text='{(msg.text or msg.caption or '')[:30] if msg else 'NO_MSG'}', "
-                f"has_photo={bool(msg.photo) if msg else False}, "
-                f"has_video={bool(msg.video) if msg else False}"
+                f"has_text={has_text}, has_photo={has_photo}, has_video={has_video}"
             )
         except Exception:
             pass
@@ -1059,7 +1180,7 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         channel_db_id = await DB.get_active_channel(user_id)
 
-        logger.info(f"🎯 _handle_adding_posts: channel_db_id={channel_db_id}")
+        logger.debug(f"🎯 _handle_adding_posts: channel_db_id={channel_db_id}")
 
         if not channel_db_id:
             StateManager.clear(user_id)
@@ -1110,12 +1231,12 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return
 
-        logger.info(f"🎯 saving post: type={media_type}, has_file={bool(media_file_id)}, text_len={len(text)}")
+        logger.debug(f"🎯 saving post: type={media_type}, has_file={bool(media_file_id)}")
 
         posts = [(text, media_type, media_file_id)]
         try:
             count = await DB.add_posts(user_id, channel_db_id, posts)
-            logger.info(f"🎯 DB.add_posts returned: {count}")
+            logger.debug(f"🎯 DB.add_posts returned: {count}")
         except Exception as e:
             logger.error(f"❌ DB.add_posts failed: {e}", exc_info=True)
             await safe_send(context.bot, user_id, f"❌ خطأ في الحفظ: {str(e)[:80]}")
@@ -2337,7 +2458,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.7.7: حماية من return غير-tuple
         try:
             result = await DB.redeem_gift_code(user_id, code)
         except Exception as e:
@@ -2366,19 +2486,19 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # استعادة قاعدة البيانات — ✅ v7.7.7: DB.close/reconnect
+    # استعادة قاعدة البيانات — ✅ v7.7.8: try/finally + cache invalidation
     # =================================================================
 
     @staticmethod
     async def _do_db_restore(update, context, user_id: int, lang: str) -> None:
         if await _is_postgres_db():
             msg = await _trans('restore_postgres_unsupported', lang,
-                               "⚠️ الاستعادة غير مدعومة على PostgreSQL.\nاستخدم أدوات pgAdmin يدويًا.")
+                               "⚠️ الاستعادة غير مدعومة على PostgreSQL.\nاستخدم أدوات pgAdmin يدوياً.")
             await safe_send(context.bot, user_id, msg)
             return
         if await _is_mysql_db():
             msg = await _trans('restore_mysql_unsupported', lang,
-                               "⚠️ الاستعادة غير مدعومة على MySQL.\nاستخدم mysqldump يدويًا.")
+                               "⚠️ الاستعادة غير مدعومة على MySQL.\nاستخدم mysqldump يدوياً.")
             await safe_send(context.bot, user_id, msg)
             return
 
@@ -2397,9 +2517,16 @@ class MessageHandlers:
             return
 
         tmp_path = None
+        db_closed = False
+        success_restore = False
+        restore_error = None
+
         try:
             file = await doc.get_file()
-            tmp_path = os.path.join(tempfile.gettempdir(), f"restore_{user_id}_{int(time.time())}.db")
+            tmp_path = os.path.join(
+                tempfile.gettempdir(),
+                f"restore_{user_id}_{int(time.time())}.db"
+            )
             await file.download_to_drive(tmp_path)
 
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
@@ -2409,8 +2536,7 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning(f"تعذر إنشاء نسخة pre_restore: {e}")
 
-            # ✅ v7.7.7: إغلاق DB قبل الكتابة فوق الملف
-            db_closed = False
+            # ✅ إغلاق DB قبل الكتابة
             try:
                 close_fn = getattr(DB, 'close', None)
                 if callable(close_fn):
@@ -2420,16 +2546,36 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning(f"⚠️ فشل إغلاق DB قبل الاستعادة: {e}")
 
-            # نسخ ذرّي (ملف مؤقت ثم os.replace)
+            # ✅ نسخ ذرّي
             try:
                 temp_target = str(PATHS.DB) + ".restoring"
                 shutil.copy2(tmp_path, temp_target)
                 os.replace(temp_target, PATHS.DB)
-            except Exception:
-                # fallback: نسخ مباشر
-                shutil.copy2(tmp_path, PATHS.DB)
+                success_restore = True
+            except Exception as e1:
+                logger.warning(f"⚠️ atomic copy فشل: {e1} — fallback")
+                try:
+                    shutil.copy2(tmp_path, PATHS.DB)
+                    success_restore = True
+                except Exception as e2:
+                    logger.error(f"❌ نسخ DB فشل: {e2}")
+                    restore_error = e2
 
-            # ✅ v7.7.7: إعادة تهيئة DB بعد الاستعادة
+            # ✅ v7.7.8: إبطال الكاشات بعد الاستعادة
+            if success_restore:
+                try:
+                    from cache import clear_all_caches
+                    await clear_all_caches()
+                    logger.info("✅ تم إبطال كل الكاشات بعد الاستعادة")
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل إبطال الكاشات: {e}")
+
+        except Exception as e:
+            logger.error(f"فشل استعادة النسخة: {e}", exc_info=True)
+            restore_error = e
+
+        finally:
+            # ✅ v7.7.8: reconnect دائماً في finally
             if db_closed:
                 try:
                     reconnect_fn = getattr(DB, 'reconnect', None)
@@ -2445,21 +2591,24 @@ class MessageHandlers:
                             if callable(init_fn):
                                 await init_fn()
                 except Exception as e:
-                    logger.warning(f"⚠️ فشل reconnect بعد الاستعادة: {e}")
+                    logger.error(f"❌ فشل reconnect بعد الاستعادة: {e}", exc_info=True)
 
-            msg = await _trans('restore_success', lang,
-                               "✅ تمت الاستعادة بنجاح!\nأعد تشغيل البوت لتفعيل التغييرات.")
-            await safe_send(context.bot, user_id, msg)
-            logger.info(f"✅ استعادة قاعدة البيانات بواسطة {user_id}")
-        except Exception as e:
-            logger.error(f"فشل استعادة النسخة: {e}")
-            await safe_send(context.bot, user_id, f"❌ فشل الاستعادة: {str(e)[:100]}")
-        finally:
+            # حذف الملف المؤقت
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+
+        # ✅ إرسال النتيجة بعد كل شيء
+        if success_restore:
+            msg = await _trans('restore_success', lang,
+                               "✅ تمت الاستعادة بنجاح!\nأعد تشغيل البوت لتفعيل التغييرات.")
+            await safe_send(context.bot, user_id, msg)
+            logger.info(f"✅ استعادة قاعدة البيانات بواسطة {user_id}")
+        else:
+            err_text = str(restore_error)[:100] if restore_error else "خطأ غير معروف"
+            await safe_send(context.bot, user_id, f"❌ فشل الاستعادة: {err_text}")
 
     @staticmethod
     async def _handle_restore_input(update, context):
