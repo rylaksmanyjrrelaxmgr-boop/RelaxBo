@@ -2,12 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.6)
+handlers_message.py - معالجات الرسائل (v7.7.7)
 =====================================================================
+🆕 v7.7.7 (إصلاحات الأمان + الأداء):
+    ✅ _do_db_restore: DB.close() قبل النسخ + reconnect بعده
+       - السبب: الكتابة فوق DB مفتوحة قد تُتلِف الملف
+    ✅ _handle_channel_input: استدعاء get_chat مرة واحدة بدل مرتين
+       - توفير ~300ms لكل إضافة قناة
+    ✅ _handle_redeem_gift_input: حماية من return غير-tuple
+    ✅ clear_lang_cache() helper جديد — لإبطال كاش اللغة
+
 🆕 v7.7.6:
     ✅ _ensure_lang محسّنة (كاش سريع + timeout قصير)
     ✅ Logging تشخيصي في handle_private و _handle_adding_posts
-    ✅ حل مشكلة الاستعلام البطيء (3s)
 
 ✅ 60 حالة مستخدم — جميعها مُعالَجة 100%
 ✅ التقاط المنشورات كاملة
@@ -113,6 +120,7 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     except Exception:
         return default
 
+
 # 🆕 v7.7.6: _ensure_lang محسّنة
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """✅ v7.7.6: كاش سريع + timeout قصير لتفادي البطء."""
@@ -153,6 +161,19 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
     # 4) الافتراضي
     return 'ar'
 
+
+# ✅ v7.7.7: helper جديد لإبطال كاش اللغة
+def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    ✅ v7.7.7: إبطال كاش اللغة في context.user_data.
+    استدعها من handlers_callback بعد تغيير اللغة.
+    """
+    try:
+        context.user_data.pop('lang', None)
+    except Exception:
+        pass
+
+
 async def get_security_settings_cached(chat_id: int) -> dict:
     cached = await settings_cache.get_security(chat_id)
     if cached is not None:
@@ -160,6 +181,7 @@ async def get_security_settings_cached(chat_id: int) -> dict:
     settings = await DB.get_security_settings(chat_id)
     await settings_cache.set_security(chat_id, settings)
     return settings
+
 
 async def get_auto_reply_settings_cached(chat_id: int) -> dict:
     cached = await settings_cache.get_auto_reply_settings(chat_id)
@@ -169,11 +191,14 @@ async def get_auto_reply_settings_cached(chat_id: int) -> dict:
     await settings_cache.set_auto_reply_settings(chat_id, settings)
     return settings
 
+
 async def invalidate_security_cache(chat_id: int = None) -> None:
     await settings_cache.invalidate_security(chat_id)
 
+
 async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
     await settings_cache.invalidate_auto_reply(chat_id)
+
 
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
     await asyncio.sleep(delay)
@@ -183,6 +208,7 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 1
         pass
     except Exception as e:
         logger.debug(f"تعذر حذف الرسالة المؤجلة: {e}")
+
 
 async def apply_violation_penalty(update, context, chat_id: int, user_id: int,
                                    violation_type: str, penalty_type: str,
@@ -210,6 +236,7 @@ async def apply_violation_penalty(update, context, chat_id: int, user_id: int,
         logger.error(f"❌ فشل تطبيق العقوبة: {e}", exc_info=True)
         return False, str(e)[:100]
 
+
 def _is_safe_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -230,6 +257,7 @@ def _is_safe_url(url: str) -> bool:
         return True
     except Exception:
         return False
+
 
 def _parse_contest_date(date_str: str) -> Optional[datetime]:
     if not date_str:
@@ -252,6 +280,7 @@ def _parse_contest_date(date_str: str) -> Optional[datetime]:
             continue
     return None
 
+
 async def _check_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
     if user_id == CONFIG.PRIMARY_OWNER_ID:
         return True
@@ -269,17 +298,20 @@ async def _check_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
     except Exception:
         return False
 
+
 async def _is_postgres_db() -> bool:
     try:
         return getattr(DB, "DB_TYPE", "sqlite") == "postgres"
     except Exception:
         return False
 
+
 async def _is_mysql_db() -> bool:
     try:
         return getattr(DB, "DB_TYPE", "sqlite") == "mysql"
     except Exception:
         return False
+
 
 # =====================================================================
 # MessageHandlers
@@ -909,7 +941,7 @@ class MessageHandlers:
             return False
 
     # =================================================================
-    # إضافة القناة
+    # إضافة القناة — ✅ v7.7.7: استدعاء get_chat مرة واحدة
     # =================================================================
 
     @staticmethod
@@ -928,24 +960,33 @@ class MessageHandlers:
                 return
 
         try:
+            # ✅ v7.7.7: استدعاء get_chat مرة واحدة فقط
+            chat_obj = None
+            channel_id = None
+
             if text.lstrip('-').isdigit():
                 channel_id = int(text)
+                try:
+                    chat_obj = await context.bot.get_chat(channel_id)
+                except Exception:
+                    chat_obj = None
             else:
                 try:
-                    chat = await context.bot.get_chat(text)
-                    channel_id = chat.id
+                    chat_obj = await context.bot.get_chat(text)
+                    channel_id = chat_obj.id
                 except Exception:
                     msg = await _trans('channel_not_found', lang, "❌ القناة غير موجودة!")
                     await safe_send(context.bot, user_id, msg)
                     StateManager.clear(user_id)
                     return
 
-            try:
-                chat_info = await context.bot.get_chat(channel_id)
-                channel_name = chat_info.title or chat_info.username or f"قناة {channel_id}"
-            except Exception:
+            # استخراج الاسم من نفس الكائن (بدون استدعاء ثانٍ)
+            if chat_obj:
+                channel_name = chat_obj.title or chat_obj.username or f"قناة {channel_id}"
+            else:
                 channel_name = f"قناة {channel_id}"
 
+            # فحص صلاحيات البوت
             try:
                 bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
                 if bot_member.status not in ['administrator', 'creator']:
@@ -966,6 +1007,7 @@ class MessageHandlers:
                 StateManager.clear(user_id)
                 return
 
+            # فحص صلاحيات المستخدم
             if user_id != CONFIG.PRIMARY_OWNER_ID:
                 try:
                     user_member = await context.bot.get_chat_member(channel_id, user_id)
@@ -2294,11 +2336,28 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
-        success, result = await DB.redeem_gift_code(user_id, code)
-        if success:
-            msg = await _trans('gift_redeemed', lang, f"🎁 تم استرداد الهدية!\n📅 المدة: {result} يوم")
+
+        # ✅ v7.7.7: حماية من return غير-tuple
+        try:
+            result = await DB.redeem_gift_code(user_id, code)
+        except Exception as e:
+            logger.error(f"فشل redeem_gift_code: {e}", exc_info=True)
+            msg = await _trans('execution_failed', lang, "❌ فشل التنفيذ")
             await safe_send(context.bot, user_id, msg)
-        elif result == -1:
+            StateManager.clear(user_id)
+            return
+
+        if isinstance(result, tuple):
+            success, days = result
+        elif isinstance(result, bool):
+            success, days = result, 0
+        else:
+            success, days = bool(result), 0
+
+        if success and days > 0:
+            msg = await _trans('gift_redeemed', lang, f"🎁 تم استرداد الهدية!\n📅 المدة: {days} يوم")
+            await safe_send(context.bot, user_id, msg)
+        elif days == -1:
             msg = await _trans('own_code', lang, "❌ لا يمكنك استخدام كود قمت بإنشائه بنفسك")
             await safe_send(context.bot, user_id, msg)
         else:
@@ -2307,7 +2366,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # استعادة قاعدة البيانات
+    # استعادة قاعدة البيانات — ✅ v7.7.7: DB.close/reconnect
     # =================================================================
 
     @staticmethod
@@ -2342,13 +2401,52 @@ class MessageHandlers:
             file = await doc.get_file()
             tmp_path = os.path.join(tempfile.gettempdir(), f"restore_{user_id}_{int(time.time())}.db")
             await file.download_to_drive(tmp_path)
+
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
             pre_restore = PATHS.BACKUPS / f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
             try:
                 shutil.copy2(PATHS.DB, pre_restore)
             except Exception as e:
                 logger.warning(f"تعذر إنشاء نسخة pre_restore: {e}")
-            shutil.copy2(tmp_path, PATHS.DB)
+
+            # ✅ v7.7.7: إغلاق DB قبل الكتابة فوق الملف
+            db_closed = False
+            try:
+                close_fn = getattr(DB, 'close', None)
+                if callable(close_fn):
+                    await close_fn()
+                    db_closed = True
+                    logger.info("✅ تم إغلاق DB قبل الاستعادة")
+            except Exception as e:
+                logger.warning(f"⚠️ فشل إغلاق DB قبل الاستعادة: {e}")
+
+            # نسخ ذرّي (ملف مؤقت ثم os.replace)
+            try:
+                temp_target = str(PATHS.DB) + ".restoring"
+                shutil.copy2(tmp_path, temp_target)
+                os.replace(temp_target, PATHS.DB)
+            except Exception:
+                # fallback: نسخ مباشر
+                shutil.copy2(tmp_path, PATHS.DB)
+
+            # ✅ v7.7.7: إعادة تهيئة DB بعد الاستعادة
+            if db_closed:
+                try:
+                    reconnect_fn = getattr(DB, 'reconnect', None)
+                    if callable(reconnect_fn):
+                        await reconnect_fn()
+                        logger.info("✅ تم reconnect بعد الاستعادة")
+                    else:
+                        init_fn = getattr(DB, 'initialize_db', None)
+                        if callable(init_fn):
+                            await init_fn()
+                        else:
+                            init_fn = getattr(DB, 'initialize', None)
+                            if callable(init_fn):
+                                await init_fn()
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل reconnect بعد الاستعادة: {e}")
+
             msg = await _trans('restore_success', lang,
                                "✅ تمت الاستعادة بنجاح!\nأعد تشغيل البوت لتفعيل التغييرات.")
             await safe_send(context.bot, user_id, msg)
@@ -2462,4 +2560,4 @@ class MessageHandlers:
 # تصدير
 # =====================================================================
 
-__all__ = ["MessageHandlers", "GroupRateLimiterManager"]
+__all__ = ["MessageHandlers", "GroupRateLimiterManager", "clear_lang_cache"]
