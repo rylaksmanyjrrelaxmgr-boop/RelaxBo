@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.0.0)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.1.0)
 ================================================================================
-🆕 v5.0.0 (أمان + إصلاحات دقيقة):
+🆕 v5.1.0 (Warmup + فحص دوال):
+    ✅ warmup_all() عند بدء التشغيل — تحميل كل الموارد مسبقاً
+    ✅ _verify_command_handlers() — فحص دوال CommandHandlers
+    ✅ قياس زمن warmup في السجلّات
+
+🆕 v5.0.0 (أمان + إصلاحات):
     🔒 تصفية httpx/httpcore logs — منع تسريب BOT_TOKEN
     🔒 إخفاء التوكن من سجلات Webhook URL
-    🔒 دعم BOT_TOKEN من متغيرات البيئة (مع fallback لـ CONFIG)
-    ✅ إصلاح خطأ حساب زمن التطبيق (كان يستخدم t0)
-    ✅ إصلاح plan['days'] → plan.get('duration_days') للخطط
+    🔒 دعم BOT_TOKEN من متغيرات البيئة
+    ✅ إصلاح حساب زمن التطبيق
+    ✅ إصلاح plan['days'] → plan.get('duration_days')
     ✅ حماية من فشل DB.get_invoice داخل _validate_invoice
-    ✅ حماية keep_alive عند غياب RENDER_EXTERNAL_URL
-
-📌 v4.x:
-    ✅ قائمة القنوات + NAV_FIX + keep_alive + ChatMemberHandler
 ================================================================================
 """
 
@@ -24,6 +25,7 @@ import logging
 import traceback
 import json
 import time
+from urllib.parse import urlparse
 from aiohttp import web
 
 from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
@@ -48,7 +50,8 @@ from handlers.handlers_nav_fix import register_nav_fix
 
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
-    ErrorHandler, setup_webhook, safe_send
+    ErrorHandler, setup_webhook, safe_send,
+    warmup_all,  # 🧠 v5.1.0
 )
 from cache import cache_cleanup_task, user_cache, invalidate_user_cache
 
@@ -85,11 +88,11 @@ ALLOWED_UPDATES = [
 
 
 # =====================================================================
-# 🔒 v5.0.0: دوال إخفاء التوكن في السجلات
+# 🔒 v5.0.0: دوال إخفاء التوكن
 # =====================================================================
 
 def _redact_token(text: str, token: str = None) -> str:
-    """استبدال التوكن بـ *** في أي نص (للطباعة الآمنة)."""
+    """استبدال التوكن بـ *** في أي نص."""
     if not text:
         return text
     if token is None:
@@ -103,11 +106,7 @@ def _redact_token(text: str, token: str = None) -> str:
 
 
 def _get_bot_token() -> str:
-    """
-    ✅ v5.0.0: قراءة التوكن من البيئة أولاً، ثم CONFIG.
-
-    يُفضَّل استخدام BOT_TOKEN في Render Dashboard.
-    """
+    """قراءة التوكن من البيئة أولاً، ثم CONFIG."""
     env_token = os.getenv("BOT_TOKEN", "").strip()
     if env_token:
         return env_token
@@ -117,6 +116,48 @@ def _get_bot_token() -> str:
 def _safe_url(url: str) -> str:
     """إخفاء التوكن من URL للطباعة."""
     return _redact_token(url)
+
+
+# =====================================================================
+# 🛡️ v5.1.0: فحص دوال CommandHandlers
+# =====================================================================
+
+def _verify_command_handlers() -> bool:
+    """
+    التحقق من أن كل دالة مطلوبة موجودة في CommandHandlers.
+
+    يُنفَّذ قبل التسجيل — يمنع AttributeError مفاجئ.
+    """
+    required = [
+        # الأوامر الخاصة
+        "start", "help_command", "trial", "subscribe", "support",
+        "developer", "stats", "language", "contests", "replies_command",
+        "grant", "set_min_interval", "gift_plans", "redeem_gift",
+        "mood", "admin", "broadcast", "set_force", "set_update_ch",
+        "set_log_ch", "add_admin", "remove_admin",
+        "export_replies", "import_replies", "backup", "restore",
+        "auto_publish", "auto_recycle", "channels", "posts",
+        # أوامر المجموعة
+        "syncgroup", "security", "panel", "lock", "unlock",
+        "ban", "mute", "warn", "kick", "restrict", "unban", "pin",
+        # أوامر المشرفين المخفيين
+        "register_hidden_owner", "remove_hidden_owner",
+        "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
+    ]
+
+    missing = []
+    for name in required:
+        if not hasattr(CommandHandlers, name):
+            missing.append(name)
+
+    if missing:
+        logger.error(
+            f"❌ دوال مفقودة في CommandHandlers ({len(missing)}): {missing}"
+        )
+        return False
+
+    logger.info(f"✅ كل {len(required)} دالة CommandHandlers موجودة")
+    return True
 
 
 # =====================================================================
@@ -135,7 +176,6 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
     if not invoice_number:
         return None, None, None
 
-    # ✅ v5.0.0: حماية من فشل DB.get_invoice
     try:
         invoice = await DB.get_invoice(invoice_number)
     except Exception as e:
@@ -272,7 +312,6 @@ async def successful_payment(update, context):
                 plan_id=plan['id'], creator_id=user_id
             )
             if code:
-                # ✅ v5.0.0: دعم duration_days و days
                 duration = (
                     plan.get('duration_days')
                     or plan.get('days')
@@ -304,7 +343,7 @@ async def health_check(request):
 
 
 # =====================================================================
-# keep-alive لمنع cold start على Render Free tier
+# keep-alive
 # =====================================================================
 
 async def keep_alive():
@@ -354,7 +393,7 @@ async def main():
         logger.error(f"❌ {e}")
         raise SystemExit(1)
 
-    # 🔒 v5.0.0: استخدام BOT_TOKEN من البيئة إن وُجد
+    # 🔒 v5.0.0: BOT_TOKEN من البيئة إن وُجد
     bot_token = _get_bot_token()
     if not bot_token:
         logger.error("❌ BOT_TOKEN غير محدّد (بيئة أو CONFIG.TOKEN)")
@@ -363,13 +402,19 @@ async def main():
     logger.info(f"🌿 {CONFIG.BOT_NAME}")
     logger.info(f"👨‍💼 المالك: {CONFIG.PRIMARY_OWNER_ID}")
 
+    # 🛡️ v5.1.0: فحص دوال الأوامر
+    if not _verify_command_handlers():
+        logger.error("❌ فشل فحص دوال الأوامر — الخروج")
+        raise SystemExit(1)
+
     # ═══ تهيئة قاعدة البيانات ═══
     t0 = time.monotonic()
     if hasattr(DB, 'pre_initialize'):
         await DB.pre_initialize()
     else:
         await initialize_db()
-    logger.info(f"⏱️ قاعدة البيانات تمت تهيئتها في {time.monotonic()-t0:.2f} ثانية")
+    db_time = time.monotonic() - t0
+    logger.info(f"⏱️ قاعدة البيانات تمت تهيئتها في {db_time:.2f} ثانية")
 
     # ═══ تسجيل المطورين والمالك ═══
     for dev_id in CONFIG.DEVELOPER_IDS:
@@ -393,6 +438,19 @@ async def main():
         f"{time.monotonic()-t1:.2f} ثانية"
     )
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🧠 v5.1.0: Warmup الشامل — تحميل كل الموارد مسبقاً
+    # ═══════════════════════════════════════════════════════════════
+    t_warmup = time.monotonic()
+    try:
+        warmup_result = await warmup_all()
+        logger.info(
+            f"⏱️ Warmup اكتمل في "
+            f"{time.monotonic()-t_warmup:.2f} ثانية"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Warmup فشل (سيتم المتابعة): {e}")
+
     # ═══ المنفذ ═══
     port = int(os.getenv("PORT", CONFIG.WEB_PORT))
 
@@ -406,11 +464,10 @@ async def main():
     )
     # إزالة https:// من hostname إن وُجد
     if hostname and hostname.startswith("http"):
-        from urllib.parse import urlparse
         hostname = urlparse(hostname).netloc
 
     # ═══ بناء التطبيق ═══
-    t_app = time.monotonic()  # ✅ v5.0.0: بدء حساب زمن التطبيق بدقة
+    t_app = time.monotonic()
     app = Application.builder().token(bot_token).build()
     app.bot_data['start_time'] = time.monotonic()
     await app.initialize()
@@ -621,7 +678,6 @@ async def main():
     # ========== بدء التشغيل ==========
     try:
         if hostname:
-            # ✅ v5.0.0: Webhook — Telegram يستخدم token كجزء من المسار (طبيعي)
             webhook_url = f"https://{hostname}/{bot_token}"
             logger.info(f"🔗 Webhook: {_safe_url(webhook_url)}")
 
@@ -630,13 +686,12 @@ async def main():
                 url=webhook_url,
                 drop_pending_updates=True,
                 allowed_updates=ALLOWED_UPDATES,
-                secret_token=None,  # يمكن تعيينه لاحقاً للتحقق الإضافي
             )
             logger.info("✅ Webhook تم التعيين")
 
             runner = await setup_webhook(app, port)
 
-            # تسخين
+            # تسخين الخادم
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
