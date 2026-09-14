@@ -2,22 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.0.1)
 ================================================================================
-- عرض كل القنوات مع إحصائياتها
-- تبديل القناة النشطة
-- حذف قناة (مع تأكيد)
-- إعادة تدوير المنشورات
-- تعديل الجدولة
-- عرض تفاصيل قناة
-- رجوع للقائمة الرئيسية
-- إضافة قناة (@username / t.me)
-- إضافة منشورات (سريع ⚡)
+🆕 v2.0.1 (إصلاح answer() المزدوج في 4 دوال):
+    ✅ channel_delete_menu_callback: answer بعد فحص القنوات
+    ✅ channel_delete_confirm_callback: answer بعد فحص القناة
+    ✅ channel_schedule_callback: answer بعد فحص الملكية
+    ✅ channel_delete_execute_callback: answer بالنتيجة النهائية فقط
+
+🆕 v2.0.0 (إصلاح أخطاء حرجة):
+    ✅ إصلاح query.answer() المزدوج في recycle/schedule_set
+    ✅ استخراج _render_channel_info (helper مشترك)
+    ✅ حماية DB=None في كل handler
+    ✅ تضييق regex t.me ليطابق الروابط النقية فقط
+    ✅ stats/channel_info محميّة ضد None
+    ✅ استعلام واحد بدل اثنين في posts_add_callback
+    ✅ نقل timedelta إلى imports المستوى الأعلى
+    ✅ تبسيط _send_main_menu_fallback
+    ✅ توحيد معالجة الأخطاء
 ================================================================================
 """
 
 import logging
 import re
+from datetime import timedelta
+from typing import Optional
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -46,13 +56,69 @@ except (ImportError, AttributeError):
 
 
 # =====================================================================
+# 0. أدوات مساعدة
+# =====================================================================
+
+def _db_ready() -> bool:
+    """✅ v2.0.0: فحص موحّد لجهوزية DB."""
+    if DB is None:
+        logger.error("❌ DB غير مهيأة — تخطي handler")
+        return False
+    return True
+
+
+async def _safe_answer(query, text: str = None, show_alert: bool = False) -> None:
+    """✅ v2.0.0: answer() آمن (يُتجاهل إذا أُجيب مسبقاً)."""
+    try:
+        if text is not None:
+            await query.answer(text, show_alert=show_alert)
+        else:
+            await query.answer()
+    except Exception as e:
+        logger.debug(f"_safe_answer: {e}")
+
+
+def _format_date(dt_value) -> str:
+    """تنسيق التاريخ للتوقيت المحلي (مكة +3)."""
+    if not dt_value:
+        return "غير محدد"
+    if TimeUtils is None:
+        return str(dt_value)
+    try:
+        dt = TimeUtils.safe_parse_iso(dt_value)
+        if not dt:
+            return "غير محدد"
+        local_dt = dt + timedelta(hours=3)
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(dt_value)
+
+
+async def _get_active_channel_id(user_id: int) -> Optional[int]:
+    """
+    ✅ v2.0.0: استعلام مباشر بدل الاعتماد على DB.get_active_channel.
+    """
+    try:
+        return await DB.fetchval(
+            "SELECT active_channel FROM users WHERE user_id = ?",
+            (user_id,),
+            default=None,
+        )
+    except Exception as e:
+        logger.debug(f"_get_active_channel_id({user_id}): {e}")
+        return None
+
+
+# =====================================================================
 # 1. عرض قائمة القنوات
 # =====================================================================
 
 async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض قائمة كل القنوات مع حالتها."""
-    user_id = update.effective_user.id
+    if not _db_ready():
+        return
 
+    user_id = update.effective_user.id
     channels = await _get_channels_with_stats(user_id)
 
     if not channels:
@@ -65,37 +131,28 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("↩️ رجوع للقائمة الرئيسية", callback_data="main_menu")],
         ])
     else:
-        active_channel_id = await DB.get_active_channel(user_id)
+        active_channel_id = await _get_active_channel_id(user_id)
         text = _build_channels_text(channels, active_channel_id)
         keyboard = _build_channels_keyboard(channels, active_channel_id)
 
     if update.callback_query:
-        try:
-            await update.callback_query.answer()
-        except Exception:
-            pass
+        await _safe_answer(update.callback_query)
         try:
             await update.callback_query.edit_message_text(
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
+                text, reply_markup=keyboard, parse_mode="HTML",
             )
         except Exception as e:
             logger.warning(f"edit_message_text: {e}")
             try:
                 await update.callback_query.message.reply_text(
-                    text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                    text, reply_markup=keyboard, parse_mode="HTML",
                 )
             except Exception as e2:
                 logger.error(f"reply_text fallback: {e2}")
     else:
         try:
             await update.message.reply_text(
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
+                text, reply_markup=keyboard, parse_mode="HTML",
             )
         except Exception as e:
             logger.error(f"reply_text: {e}")
@@ -104,19 +161,19 @@ async def show_channels_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def _get_channels_with_stats(user_id: int):
     """جلب كل قنوات المستخدم مع إحصائياتها."""
     query = """
-        SELECT 
+        SELECT
             uc.id AS channel_db_id,
             uc.channel_id,
             uc.channel_name,
             uc.banned,
             uc.created_at,
-            (SELECT COUNT(*) FROM posts p 
+            (SELECT COUNT(*) FROM posts p
              WHERE p.channel_db_id = uc.id AND p.published = 0
             ) AS unpublished,
-            (SELECT COUNT(*) FROM posts p 
+            (SELECT COUNT(*) FROM posts p
              WHERE p.channel_db_id = uc.id AND p.published = 1
             ) AS published,
-            (SELECT MAX(next_publish_date) FROM schedule s 
+            (SELECT s.next_publish_date FROM schedule s
              WHERE s.channel_db_id = uc.id
             ) AS next_publish
         FROM user_channels uc
@@ -131,7 +188,7 @@ async def _get_channels_with_stats(user_id: int):
 
 
 def _build_channels_text(channels, active_channel_id) -> str:
-    """بناء نص قائمة القنوات"""
+    """بناء نص قائمة القنوات."""
     lines = [f"📡 <b>قنواتك ({len(channels)})</b>\n"]
 
     total_unpub = sum(c.get("unpublished", 0) or 0 for c in channels)
@@ -218,141 +275,153 @@ def _build_channels_keyboard(channels, active_channel_id):
 async def channel_select_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عند الضغط على قناة لتعيينها نشطة"""
+    """عند الضغط على قناة لتعيينها نشطة."""
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
 
     try:
         ch_db_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
 
-    owns = await DB.is_channel_owner(user_id, ch_db_id)
-    if not owns:
-        await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
-        return
+    try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
 
-    success = await DB.set_active_channel(user_id, ch_db_id)
-    if success:
-        await query.answer("✅ تم تعيينها كقناة نشطة")
-        await show_channels_list(update, context)
-    else:
-        await query.answer("⚠️ فشل التحديث", show_alert=True)
+        success = await DB.set_active_channel(user_id, ch_db_id)
+        if success:
+            await _safe_answer(query, "✅ تم تعيينها كقناة نشطة")
+            await show_channels_list(update, context)
+        else:
+            await _safe_answer(query, "⚠️ فشل التحديث", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ channel_select: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
 
 
 # =====================================================================
-# 3. تفاصيل قناة
+# 3. تفاصيل قناة (helper مشترك)
 # =====================================================================
 
-async def channel_info_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    """عند الضغط على ℹ️ - عرض تفاصيل القناة"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    await query.answer()
+async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
+    """
+    ✅ v2.0.0: helper مشترك لعرض تفاصيل القناة.
 
+    يفترض أن query.answer() تم استدعاؤه بالفعل (لا يُعيد الاستدعاء).
+    """
     try:
-        ch_db_id = int(query.data.split(":")[1])
-    except (ValueError, IndexError):
-        return
+        ch = await DB.get_channel_by_id(user_id, ch_db_id)
+        if not ch:
+            await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
+            return
 
-    ch = await DB.get_channel_by_id(user_id, ch_db_id)
-    if not ch:
-        await query.answer("⚠️ القناة غير موجودة", show_alert=True)
-        return
+        stats = await DB.get_channel_stats(user_id, ch_db_id) or {}
+        active_channel_id = await _get_active_channel_id(user_id)
 
-    stats = await DB.get_channel_stats(user_id, ch_db_id)
-    active_channel_id = await DB.get_active_channel(user_id)
+        try:
+            schedule = await DB.get_schedule(ch_db_id)
+            interval_min = schedule.get("interval_minutes", 12) if schedule else 12
+            next_publish = schedule.get("next_publish_date") if schedule else None
+        except Exception:
+            interval_min = 12
+            next_publish = None
 
-    try:
-        schedule = await DB.get_schedule(ch_db_id)
-        interval_min = schedule.get("interval_minutes", 12) if schedule else 12
-        next_publish = schedule.get("next_publish_date") if schedule else None
-    except Exception:
-        interval_min = 12
-        next_publish = None
+        name = ch.get("channel_name", "قناة بدون اسم")
+        ch_telegram_id = ch.get("channel_id", "غير معروف")
+        banned = ch.get("banned", 0)
 
-    name = ch.get("channel_name", "قناة بدون اسم")
-    ch_telegram_id = ch.get("channel_id", "غير معروف")
-    banned = ch.get("banned", 0)
+        status_icon = "🚫 محظورة" if banned else (
+            "🟢 نشطة" if ch_db_id == active_channel_id else "⚪ غير نشطة"
+        )
 
-    status_icon = "🚫 محظورة" if banned else (
-        "🟢 نشطة" if ch_db_id == active_channel_id else "⚪ غير نشطة"
-    )
+        text = (
+            f"📡 <b>{name}</b>\n\n"
+            f"<b>المعرف:</b> <code>{ch_telegram_id}</code>\n"
+            f"<b>الحالة:</b> {status_icon}\n\n"
+            f"<b>📊 الإحصائيات:</b>\n"
+            f"├ 📝 إجمالي: <b>{stats.get('total', 0)}</b>\n"
+            f"├ 📥 غير منشور: <b>{stats.get('unpublished', 0)}</b>\n"
+            f"└ 📤 منشور: <b>{stats.get('published', 0)}</b>\n\n"
+            f"<b>⚙️ الجدولة:</b>\n"
+            f"├ ⏱ كل: <b>{interval_min} دقيقة</b>\n"
+            f"└ 📅 التالي: <b>{_format_date(next_publish)}</b>"
+        )
 
-    text = (
-        f"📡 <b>{name}</b>\n\n"
-        f"<b>المعرف:</b> <code>{ch_telegram_id}</code>\n"
-        f"<b>الحالة:</b> {status_icon}\n\n"
-        f"<b>📊 الإحصائيات:</b>\n"
-        f"├ 📝 إجمالي: <b>{stats.get('total', 0)}</b>\n"
-        f"├ 📥 غير منشور: <b>{stats.get('unpublished', 0)}</b>\n"
-        f"└ 📤 منشور: <b>{stats.get('published', 0)}</b>\n\n"
-        f"<b>⚙️ الجدولة:</b>\n"
-        f"├ ⏱ كل: <b>{interval_min} دقيقة</b>\n"
-        f"└ 📅 التالي: <b>{_format_date(next_publish)}</b>"
-    )
+        buttons = []
 
-    buttons = []
+        if ch_db_id != active_channel_id and not banned:
+            buttons.append([
+                InlineKeyboardButton(
+                    "✅ تعيين نشطة",
+                    callback_data=f"ch_select:{ch_db_id}"
+                )
+            ])
 
-    if ch_db_id != active_channel_id and not banned:
         buttons.append([
             InlineKeyboardButton(
-                "✅ تعيين نشطة",
-                callback_data=f"ch_select:{ch_db_id}"
-            )
+                "⚙️ تعديل الجدولة",
+                callback_data=f"ch_schedule:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                "♻️ إعادة تدوير الآن",
+                callback_data=f"ch_recycle:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                "🗑️ حذف القناة",
+                callback_data=f"ch_delete_confirm:{ch_db_id}"
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
+        ])
+        buttons.append([
+            InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")
         ])
 
-    buttons.append([
-        InlineKeyboardButton(
-            "⚙️ تعديل الجدولة",
-            callback_data=f"ch_schedule:{ch_db_id}"
-        ),
-    ])
-    buttons.append([
-        InlineKeyboardButton(
-            "♻️ إعادة تدوير الآن",
-            callback_data=f"ch_recycle:{ch_db_id}"
-        ),
-    ])
-    buttons.append([
-        InlineKeyboardButton(
-            "🗑️ حذف القناة",
-            callback_data=f"ch_delete_confirm:{ch_db_id}"
-        ),
-    ])
-    buttons.append([
-        InlineKeyboardButton("↩️ رجوع للقائمة", callback_data="ch_list")
-    ])
-    buttons.append([
-        InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")
-    ])
-
-    try:
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.warning(f"edit_message_text: {e}")
+        logger.error(f"❌ _render_channel_info: {e}", exc_info=True)
+        try:
+            await query.message.reply_text(
+                "⚠️ فشل عرض تفاصيل القناة. حاول لاحقاً.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
-def _format_date(dt_value) -> str:
-    """تنسيق التاريخ للتوقيت المحلي (مكة +3)"""
-    if not dt_value:
-        return "غير محدد"
+async def channel_info_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """عند الضغط على ℹ️ - عرض تفاصيل القناة."""
+    if not _db_ready():
+        return
+
+    query = update.callback_query
+    user_id = query.from_user.id
+
     try:
-        dt = TimeUtils.safe_parse_iso(dt_value)
-        if not dt:
-            return "غير محدد"
-        from datetime import timedelta
-        local_dt = dt + timedelta(hours=3)
-        return local_dt.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return str(dt_value)
+        ch_db_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
+        return
+
+    await _safe_answer(query)
+    await _render_channel_info(query, user_id, ch_db_id)
 
 
 # =====================================================================
@@ -362,15 +431,24 @@ def _format_date(dt_value) -> str:
 async def channel_delete_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عرض قائمة القنوات للحذف"""
+    """
+    عرض قائمة القنوات للحذف.
+
+    ✅ v2.0.1: answer بعد فحص القنوات (كان مُزدوجاً).
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
 
     channels = await _get_channels_with_stats(user_id)
     if not channels:
-        await query.answer("📭 لا توجد قنوات", show_alert=True)
+        # ✅ الإجابة الوحيدة — قبل أي شيء آخر
+        await _safe_answer(query, "📭 لا توجد قنوات", show_alert=True)
         return
+
+    await _safe_answer(query)
 
     text = (
         "🗑️ <b>حذف قناة</b>\n\n"
@@ -409,82 +487,107 @@ async def channel_delete_menu_callback(
 async def channel_delete_confirm_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تأكيد الحذف"""
+    """
+    تأكيد الحذف.
+
+    ✅ v2.0.1: answer بعد فحص القناة (كان مُزدوجاً).
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
 
     try:
         ch_db_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
-
-    ch = await DB.get_channel_by_id(user_id, ch_db_id)
-    if not ch:
-        await query.answer("⚠️ القناة غير موجودة", show_alert=True)
-        return
-
-    name = ch.get("channel_name", "قناة")
-    stats = await DB.get_channel_stats(user_id, ch_db_id)
-
-    text = (
-        f"⚠️ <b>تأكيد الحذف</b>\n\n"
-        f"هل أنت متأكد من حذف القناة:\n"
-        f"<b>{name}</b>\n\n"
-        f"<b>سيتم حذف:</b>\n"
-        f"├ 📝 {stats.get('total', 0)} منشور\n"
-        f"├ 📥 {stats.get('unpublished', 0)} غير منشور\n"
-        f"└ 📤 {stats.get('published', 0)} منشور\n\n"
-        f"<i>⚠️ لا يمكن التراجع!</i>"
-    )
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                "🗑️ نعم، احذف",
-                callback_data=f"ch_delete_execute:{ch_db_id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ إلغاء",
-                callback_data=f"ch_info:{ch_db_id}"
-            ),
-        ],
-    ]
 
     try:
+        ch = await DB.get_channel_by_id(user_id, ch_db_id)
+        if not ch:
+            # ✅ الوحيدة
+            await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
+            return
+
+        await _safe_answer(query)
+
+        name = ch.get("channel_name", "قناة")
+        stats = await DB.get_channel_stats(user_id, ch_db_id) or {}
+
+        text = (
+            f"⚠️ <b>تأكيد الحذف</b>\n\n"
+            f"هل أنت متأكد من حذف القناة:\n"
+            f"<b>{name}</b>\n\n"
+            f"<b>سيتم حذف:</b>\n"
+            f"├ 📝 {stats.get('total', 0)} منشور\n"
+            f"├ 📥 {stats.get('unpublished', 0)} غير منشور\n"
+            f"└ 📤 {stats.get('published', 0)} منشور\n\n"
+            f"<i>⚠️ لا يمكن التراجع!</i>"
+        )
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "🗑️ نعم، احذف",
+                    callback_data=f"ch_delete_execute:{ch_db_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ إلغاء",
+                    callback_data=f"ch_info:{ch_db_id}"
+                ),
+            ],
+        ]
+
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.warning(f"edit_message_text: {e}")
+        logger.error(f"❌ channel_delete_confirm: {e}", exc_info=True)
 
 
 async def channel_delete_execute_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تنفيذ الحذف"""
+    """
+    تنفيذ الحذف.
+
+    ✅ v2.0.1: answer بالنتيجة النهائية فقط (كان "⏳" يستهلك الـanswer).
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer("⏳ جاري الحذف...")
 
     try:
         ch_db_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
 
-    success = await DB.delete_channel(user_id, ch_db_id)
-    if success:
-        try:
-            await query.answer("✅ تم الحذف", show_alert=True)
-        except Exception:
-            pass
+    try:
+        # لا نُجيب مسبقاً بـ "⏳"
+        success = await DB.delete_channel(user_id, ch_db_id)
+
+        if not success:
+            # ✅ الوحيدة
+            await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
+            return
+
+        # نجاح — الوحيدة
+        await _safe_answer(query, "✅ تم الحذف", show_alert=True)
+        logger.info(f"✅ حُذفت القناة {ch_db_id} بواسطة {user_id}")
+
         await show_channels_list(update, context)
-    else:
-        await query.answer("⚠️ فشل الحذف", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ channel_delete_execute: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
 
 
 # =====================================================================
@@ -494,32 +597,43 @@ async def channel_delete_execute_callback(
 async def channel_recycle_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """إعادة تدوير المنشورات لقناة محددة"""
+    """
+    إعادة تدوير المنشورات لقناة محددة.
+
+    ✅ v2.0.0: تم إصلاح answer() المزدوج.
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer("⏳ جاري إعادة التدوير...")
 
     try:
         ch_db_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
-
-    owns = await DB.is_channel_owner(user_id, ch_db_id)
-    if not owns:
-        await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
-        return
-
-    count = await DB.reset_posts(user_id, ch_db_id)
 
     try:
-        await query.answer(
-            f"✅ تم إعادة تدوير {count} منشور",
-            show_alert=True
-        )
-    except Exception:
-        pass
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
 
-    await channel_info_callback(update, context)
+        count = await DB.reset_posts(user_id, ch_db_id)
+
+        # ✅ answer واحد فقط
+        await _safe_answer(
+            query,
+            f"✅ تم إعادة تدوير {count} منشور",
+            show_alert=True,
+        )
+
+        # ✅ عرض التفاصيل بدون استدعاء answer مرة أخرى
+        await _render_channel_info(query, user_id, ch_db_id)
+    except Exception as e:
+        logger.error(f"❌ channel_recycle: {e}", exc_info=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
 
 
 # =====================================================================
@@ -529,75 +643,92 @@ async def channel_recycle_callback(
 async def channel_schedule_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عرض خيارات الجدولة لقناة"""
+    """
+    عرض خيارات الجدولة لقناة.
+
+    ✅ v2.0.1: answer بعد فحص الملكية (كان مُزدوجاً).
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
 
     try:
         ch_db_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
-        return
-
-    owns = await DB.is_channel_owner(user_id, ch_db_id)
-    if not owns:
-        await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
 
     try:
-        schedule = await DB.get_schedule(ch_db_id)
-        current = schedule.get("interval_minutes", 12) if schedule else 12
-    except Exception:
-        current = 12
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            # ✅ الوحيدة
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
 
-    text = (
-        f"⚙️ <b>تعديل الجدولة</b>\n\n"
-        f"التردد الحالي: <b>{current} دقيقة</b>\n\n"
-        f"اختر التردد الجديد:"
-    )
+        await _safe_answer(query)
 
-    intervals = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
-    buttons = []
-    row = []
+        try:
+            schedule = await DB.get_schedule(ch_db_id)
+            current = schedule.get("interval_minutes", 12) if schedule else 12
+        except Exception:
+            current = 12
 
-    for minutes in intervals:
-        if minutes < 60:
-            label = f"{minutes} د"
-        elif minutes < 1440:
-            label = f"{minutes // 60} س"
-        else:
-            label = "يوم"
+        text = (
+            f"⚙️ <b>تعديل الجدولة</b>\n\n"
+            f"التردد الحالي: <b>{current} دقيقة</b>\n\n"
+            f"اختر التردد الجديد:"
+        )
 
-        row.append(InlineKeyboardButton(
-            label,
-            callback_data=f"ch_sched_set:{ch_db_id}:{minutes}"
-        ))
+        intervals = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
+        buttons = []
+        row = []
 
-        if len(row) == 3:
+        for minutes in intervals:
+            if minutes < 60:
+                label = f"{minutes} د"
+            elif minutes < 1440:
+                label = f"{minutes // 60} س"
+            else:
+                label = "يوم"
+
+            row.append(InlineKeyboardButton(
+                label,
+                callback_data=f"ch_sched_set:{ch_db_id}:{minutes}"
+            ))
+
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+
+        if row:
             buttons.append(row)
-            row = []
 
-    if row:
-        buttons.append(row)
+        buttons.append([
+            InlineKeyboardButton("↩️ رجوع", callback_data=f"ch_info:{ch_db_id}")
+        ])
 
-    buttons.append([
-        InlineKeyboardButton("↩️ رجوع", callback_data=f"ch_info:{ch_db_id}")
-    ])
-
-    try:
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.warning(f"edit_message_text: {e}")
+        logger.error(f"❌ channel_schedule: {e}", exc_info=True)
 
 
 async def channel_schedule_set_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """تعيين التردد الجديد"""
+    """
+    تعيين التردد الجديد.
+
+    ✅ v2.0.0: تم إصلاح answer() المزدوج.
+    """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -606,34 +737,42 @@ async def channel_schedule_set_callback(
         ch_db_id = int(parts[1])
         minutes = int(parts[2])
     except (ValueError, IndexError):
-        await query.answer("⚠️ خطأ في البيانات", show_alert=True)
+        await _safe_answer(query, "⚠️ بيانات غير صالحة", show_alert=True)
         return
 
-    owns = await DB.is_channel_owner(user_id, ch_db_id)
-    if not owns:
-        await query.answer("⚠️ لا تملك هذه القناة", show_alert=True)
+    if minutes <= 0 or minutes > 30 * 24 * 60:
+        await _safe_answer(query, "⚠️ قيمة غير مسموحة", show_alert=True)
         return
 
     try:
+        owns = await DB.is_channel_owner(user_id, ch_db_id)
+        if not owns:
+            await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
+            return
+
         success = await DB.update_schedule(
             ch_db_id,
             schedule_type="interval_minutes",
             interval_minutes=minutes,
         )
-        if success:
-            try:
-                await DB.update_next_publish(ch_db_id)
-            except Exception:
-                pass
 
-        if success:
-            await query.answer(f"✅ التردد الجديد: {minutes} دقيقة")
-            await channel_info_callback(update, context)
-        else:
-            await query.answer("⚠️ فشل التحديث", show_alert=True)
+        if not success:
+            await _safe_answer(query, "⚠️ فشل التحديث", show_alert=True)
+            return
+
+        try:
+            await DB.update_next_publish(ch_db_id)
+        except Exception as e:
+            logger.debug(f"update_next_publish: {e}")
+
+        # ✅ answer واحد فقط
+        await _safe_answer(query, f"✅ التردد الجديد: {minutes} دقيقة")
+
+        # ✅ عرض التفاصيل بدون استدعاء answer آخر
+        await _render_channel_info(query, user_id, ch_db_id)
     except Exception as e:
         logger.error(f"❌ channel_schedule_set: {e}", exc_info=True)
-        await query.answer("⚠️ خطأ غير متوقع", show_alert=True)
+        await _safe_answer(query, "⚠️ خطأ غير متوقع", show_alert=True)
 
 
 # =====================================================================
@@ -643,13 +782,9 @@ async def channel_schedule_set_callback(
 async def back_to_main_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """الرجوع للقائمة الرئيسية"""
+    """الرجوع للقائمة الرئيسية."""
     query = update.callback_query
-
-    try:
-        await query.answer()
-    except Exception:
-        pass
+    await _safe_answer(query)
 
     try:
         await query.message.delete()
@@ -661,65 +796,39 @@ async def back_to_main_menu_callback(
 
         try:
             await CommandHandlers.start(update, context)
-        except (AttributeError, TypeError):
-            await _send_main_menu_fallback(context, query.from_user.id)
+            return
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"CommandHandlers.start فشل: {e}")
+    except ImportError as e:
+        logger.debug(f"handlers.handlers_command غير متاح: {e}")
 
+    # fallback
+    try:
+        await _send_main_menu_fallback(context, query.from_user.id)
     except Exception as e:
-        logger.error(f"❌ back_to_main_menu: {e}", exc_info=True)
+        logger.error(f"❌ back_to_main_menu fallback: {e}", exc_info=True)
         try:
-            await _send_main_menu_fallback(context, query.from_user.id)
-        except Exception as e2:
-            logger.error(f"❌ fallback فشل: {e2}")
-            try:
-                await context.bot.send_message(
-                    query.from_user.id,
-                    "⚠️ فشل عرض القائمة الرئيسية.\nأرسل /start",
-                )
-            except Exception:
-                pass
+            await context.bot.send_message(
+                query.from_user.id,
+                "⚠️ فشل عرض القائمة الرئيسية.\nأرسل /start",
+            )
+        except Exception:
+            pass
 
 
 async def _send_main_menu_fallback(context, user_id: int):
-    """إرسال القائمة الرئيسية بطريقة احتياطية"""
-    try:
-        from utils import KeyboardFactory
-
-        keyboard = None
-        for method_name in ("main_menu", "start_keyboard", "get_main_menu"):
-            if hasattr(KeyboardFactory, method_name):
-                try:
-                    method = getattr(KeyboardFactory, method_name)
-                    keyboard = method() if callable(method) else method
-                    break
-                except Exception:
-                    continue
-
-        text = "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:"
-
-        if keyboard:
-            await context.bot.send_message(
-                user_id,
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-        else:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
-                [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
-                [InlineKeyboardButton("💎 اشتراكي", callback_data="subscription_info")],
-                [InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings_menu")],
-                [InlineKeyboardButton("❓ مساعدة", callback_data="help_menu")],
-            ])
-            await context.bot.send_message(
-                user_id,
-                text,
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-    except Exception as e:
-        logger.error(f"_send_main_menu_fallback: {e}", exc_info=True)
-        raise
+    """إرسال القائمة الرئيسية بطريقة احتياطية."""
+    text = "🌿 <b>Relax Manager</b>\n\nاختر من القائمة:"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
+        [InlineKeyboardButton("📋 منشوراتي", callback_data="posts_menu")],
+        [InlineKeyboardButton("💎 اشتراكي", callback_data="subscription_info")],
+        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings_menu")],
+        [InlineKeyboardButton("❓ مساعدة", callback_data="help_menu")],
+    ])
+    await context.bot.send_message(
+        user_id, text, reply_markup=kb, parse_mode="HTML",
+    )
 
 
 # =====================================================================
@@ -731,12 +840,7 @@ async def add_channel_redirect_callback(
 ):
     """عرض تعليمات إضافة قناة."""
     query = update.callback_query
-    user_id = query.from_user.id
-
-    try:
-        await query.answer()
-    except Exception:
-        pass
+    await _safe_answer(query)
 
     if context.user_data is not None:
         context.user_data["awaiting_channel_add"] = True
@@ -761,9 +865,7 @@ async def add_channel_redirect_callback(
         ])
 
         await query.edit_message_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
+            text, reply_markup=keyboard, parse_mode="HTML",
         )
     except Exception as e:
         logger.error(f"❌ add_channel_redirect: {e}", exc_info=True)
@@ -773,10 +875,37 @@ async def add_channel_redirect_callback(
 # 9. معالج الرسائل النصية لإضافة قناة
 # =====================================================================
 
+# ✅ v2.0.0: regex مُضيَّق — يطابق فقط @channel أو t.me/channel منفردين
+_USERNAME_RE = re.compile(r"^@([a-zA-Z0-9_]{4,})$")
+_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})/?$",
+    re.IGNORECASE,
+)
+
+
+def _extract_channel_username(text: str) -> Optional[str]:
+    """استخراج اسم القناة من النص (فقط إذا كان النص قناة نقية)."""
+    text = text.strip()
+    m = _USERNAME_RE.match(text)
+    if m:
+        return m.group(1)
+    m = _URL_RE.match(text)
+    if m:
+        return m.group(1)
+    return None
+
+
 async def add_channel_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """معالج الرسائل النصية لإضافة قناة."""
+    """
+    معالج الرسائل النصية لإضافة قناة.
+
+    ✅ v2.0.0: يعمل فقط إذا كان النص قناة نقية (@username أو t.me/…).
+    """
+    if not _db_ready():
+        return
+
     message = update.message
     if not message or not message.text:
         return
@@ -784,21 +913,9 @@ async def add_channel_from_message(
     text = message.text.strip()
     user_id = message.from_user.id
 
-    # ═══ استخراج اسم القناة ═══
-    channel_username = None
-
-    match = re.match(r"^@([a-zA-Z0-9_]{4,})$", text)
-    if match:
-        channel_username = match.group(1)
-    else:
-        match = re.search(
-            r"(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})(?:/|$|\?)",
-            text,
-        )
-        if match:
-            channel_username = match.group(1)
-
+    channel_username = _extract_channel_username(text)
     if not channel_username:
+        # إذا كان المستخدم في وضع الإضافة، أخبره بالصيغة
         if context.user_data and context.user_data.get("awaiting_channel_add"):
             try:
                 await message.reply_text(
@@ -936,8 +1053,8 @@ async def add_channel_from_message(
 
     # ═══ النتيجة ═══
     if result:
-        channel_name = result.get("channel_name", chat.title)
-        posts_count = result.get("posts_count", 0)
+        channel_name = result.get("channel_name", chat.title) if isinstance(result, dict) else chat.title
+        posts_count = result.get("posts_count", 0) if isinstance(result, dict) else 0
 
         success_text = (
             f"✅ <b>تم إضافة القناة بنجاح!</b>\n\n"
@@ -957,28 +1074,24 @@ async def add_channel_from_message(
         try:
             if processing_msg:
                 await processing_msg.edit_text(
-                    success_text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                    success_text, reply_markup=keyboard, parse_mode="HTML",
                 )
             else:
                 await message.reply_text(
-                    success_text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                    success_text, reply_markup=keyboard, parse_mode="HTML",
                 )
         except Exception:
-            await message.reply_text(
-                success_text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
+            try:
+                await message.reply_text(
+                    success_text, reply_markup=keyboard, parse_mode="HTML",
+                )
+            except Exception:
+                pass
 
         logger.info(f"✅ تم إضافة القناة @{channel_username} للمستخدم {user_id}")
 
         if context.user_data:
             context.user_data.pop("awaiting_channel_add", None)
-
     else:
         await _edit_or_send(
             processing_msg, message,
@@ -988,7 +1101,7 @@ async def add_channel_from_message(
 
 
 async def _edit_or_send(processing_msg, message, text: str):
-    """تعديل الرسالة أو إرسال جديدة"""
+    """تعديل الرسالة أو إرسال جديدة."""
     try:
         if processing_msg:
             await processing_msg.edit_text(text, parse_mode="HTML")
@@ -1002,7 +1115,7 @@ async def _edit_or_send(processing_msg, message, text: str):
 
 
 # =====================================================================
-# 10. ⚡ معالج سريع لزر "إضافة منشورات" (كان بطيئاً 2s)
+# 10. ⚡ معالج سريع لزر "إضافة منشورات"
 # =====================================================================
 
 async def posts_add_callback(
@@ -1010,36 +1123,34 @@ async def posts_add_callback(
 ):
     """
     ⚡ معالج سريع لزر إضافة منشورات.
-    - يستعلم مباشرة عن active_channel
-    - استعلام واحد فقط للقناة النشطة
-    - لا يستدعي CommandHandlers (يتجنب البطء)
+
+    ✅ v2.0.0: استعلام واحد فقط بدل اثنين.
     """
+    if not _db_ready():
+        return
+
     query = update.callback_query
     user_id = query.from_user.id
+    await _safe_answer(query)
 
-    # 1) الإجابة الفورية على الـ callback
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    # 2) استعلام واحد سريع فقط
+    # ✅ استعلام واحد يجلب اسم القناة النشطة إن وُجدت
     ch_name = None
     try:
-        active_id = await DB.fetchval(
-            "SELECT active_channel FROM users WHERE user_id = ?",
-            (user_id,), default=None,
+        row = await DB.fetchone(
+            """
+            SELECT uc.channel_name
+            FROM users u
+            JOIN user_channels uc ON uc.id = u.active_channel
+            WHERE u.user_id = ? AND uc.banned = 0
+            """,
+            (user_id,),
         )
-        if active_id:
-            ch_name = await DB.fetchval(
-                "SELECT channel_name FROM user_channels "
-                "WHERE id = ? AND banned = 0",
-                (active_id,), default=None,
-            )
+        if row:
+            ch_name = row.get("channel_name")
     except Exception as e:
         logger.error(f"posts_add_callback query: {e}")
 
-    # 3) بناء النص — سريع
+    # بناء النص
     if ch_name:
         text = (
             f"➕ <b>إضافة منشورات</b>\n\n"
@@ -1056,26 +1167,20 @@ async def posts_add_callback(
             "اختر قناة أولاً من قائمة قنواتك."
         )
 
-    # 4) الأزرار
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📡 قنواتي", callback_data="ch_list")],
         [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
     ])
 
-    # 5) تعديل الرسالة فوراً
     try:
         await query.edit_message_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
+            text, reply_markup=keyboard, parse_mode="HTML",
         )
     except Exception as e:
         logger.debug(f"edit_message_text: {e}")
         try:
             await query.message.reply_text(
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
+                text, reply_markup=keyboard, parse_mode="HTML",
             )
         except Exception as e2:
             logger.error(f"reply_text: {e2}")
@@ -1104,7 +1209,7 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ ⚡ إضافة منشورات (سريع — يسبق CallbackHandlers.handle) ═══
+        # ═══ ⚡ إضافة منشورات (سريع) ═══
         application.add_handler(
             CallbackQueryHandler(
                 posts_add_callback,
@@ -1167,16 +1272,16 @@ def register_channels_list_handlers(application):
                 filters.TEXT
                 & filters.ChatType.PRIVATE
                 & ~filters.COMMAND
-                & (
-                    filters.Regex(r"^@[a-zA-Z0-9_]{4,}$")
-                    | filters.Regex(r"^.*t\.me/[a-zA-Z0-9_]{4,}.*$")
+                & filters.Regex(
+                    r"^(?:@[a-zA-Z0-9_]{4,}|"
+                    r"(?:https?://)?(?:www\.)?t\.me/[a-zA-Z0-9_]{4,}/?)$"
                 ),
                 add_channel_from_message,
             ),
             group=-1,
         )
 
-        logger.info("✅ تم تسجيل handlers قائمة القنوات")
+        logger.info("✅ تم تسجيل handlers قائمة القنوات (v2.0.1)")
         return True
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers: {e}", exc_info=True)
