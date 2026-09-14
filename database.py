@@ -2,36 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.26)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.27)
 ================================================================================
-🆕 v7.5.26 (Bootstrap Hash — تسريع إضافي):
-    ✅ BOOTSTRAP_DATA_VERSION — ثابت جديد لرفع النسخة عند تعديل default_plans
-    ✅ _compute_bootstrap_hash() — hash موحّد لـ schema + bootstrap_data
+🆕 v7.5.27 (إصلاح MySQL — الكلمات المحجوزة):
+    ✅ _sql_get_setting_value() — helper يرجع الاستعلام حسب نوع DB
+    ✅ إصلاح 3 استعلامات: bootstrap_hash / banned_words_hash / auto_replies_hash
+       (كانت "SELECT value FROM settings WHERE key = ?"
+        وهي تفشل في MySQL لأن `key` و `value` كلمات محجوزة)
+    ✅ دعم كامل للنظم الثلاثة (SQLite + PostgreSQL + MySQL)
+
+📌 v7.5.26 (Bootstrap Hash — تسريع إضافي):
+    ✅ BOOTSTRAP_DATA_VERSION — ثابت لرفع النسخة عند تعديل default_plans
+    ✅ _compute_bootstrap_hash() — hash موحّد
     ✅ _bootstrap: فحص bootstrap_hash لتخطي _migrate_schema + _init_default_data
-       الفائدة: تخفيض زمن التهيئة من ~12s إلى ~4s في كل تشغيل
 
-📌 v7.5.25 (إصلاح تعارض الفهارس + تبسيط التهيئة):
-    ✅ _get_secondary_indexes: قائمة فارغة
-    ✅ _create_secondary_indexes: تخطي إذا كانت القائمة فارغة
-    ✅ initialize_db / pre_initialize: دُمجتا في _bootstrap
-    ✅ reconnect: يستأنف cache_cleanup_task
-    ✅ _import_banned_words: checksum
-    ✅ _import_auto_replies: checksum
-
-📌 v7.5.24 (إصلاحات استعادة النسخة الاحتياطية):
-    ✅ DB.reconnect() — method جديد كان مفقوداً
-    ✅ DB.close() — إعادة تعيين _initialized + tasks بشكل كامل
-    ✅ __init__: self.posts_cache = posts_cache
-    ✅ initialize_db() — logs أفضل
-
-📌 v7.5.23 (إصلاح عدّاد المنشورات):
-    ✅ get_start_data: unpublished_posts = للقناة النشطة فقط
-    ✅ get_user_full_data: unpublished_posts = للقناة النشطة فقط
-    ✅ حماية ضد active_channel = NULL عبر COALESCE
-
-📌 v7.5.22 (ضمان UNIQUE على settings.key)
-📌 v7.5.21 (إصلاح register_user + TIMESTAMP)
-📌 v7.5.20 (إصلاح asyncpg datetime + تحسينات أداء)
+📌 v7.5.25: تبسيط التهيئة + reconnect يستأنف cache_cleanup
+📌 v7.5.24: DB.reconnect() + إعادة تعيين كاملة في close()
+📌 v7.5.23: unpublished_posts = للقناة النشطة فقط
+📌 v7.5.22: ضمان UNIQUE على settings.key
+📌 v7.5.21: إصلاح register_user + TIMESTAMP
+📌 v7.5.20: إصلاح asyncpg datetime + تحسينات أداء
 ================================================================================
 """
 
@@ -693,6 +683,19 @@ async def _create_pool_with_retry(
     raise RuntimeError(f"فشل الاتصال بـ {name} — لا استثناء مسجل")
 
 
+# ✅ v7.5.27: helper للاستعلام عن settings (MySQL يحتاج backticks)
+def _sql_get_setting_value() -> str:
+    """
+    ✅ v7.5.27: يُرجع استعلام جلب قيمة من settings حسب نوع DB.
+
+    MySQL يحتاج backticks حول `key` و `value` لأن كليهما كلمات محجوزة.
+    SQLite/PostgreSQL: لا يحتاجان.
+    """
+    if USE_MYSQL:
+        return "SELECT `value` FROM settings WHERE `key` = ?"
+    return "SELECT value FROM settings WHERE key = ?"
+
+
 async def _get_unique_columns(table: str, conn) -> List[str]:
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
@@ -1108,9 +1111,7 @@ def _convert_upsert(query: str) -> str:
 
 
 def _adapt_params(params: tuple, query: str = "") -> tuple:
-    """
-    ✅ v7.5.20: تحويل datetime → النوع المناسب لـ DB.
-    """
+    """تحويل datetime → النوع المناسب لـ DB."""
     if params is None:
         return ()
     new_params = []
@@ -1395,7 +1396,6 @@ class Database(
         self.settings_cache = settings_cache
         self.groups_cache = groups_cache
         self.auth_cache = auth_cache
-        # ✅ v7.5.24 FIX
         self.posts_cache = posts_cache
         self.CONFIG = CONFIG
         self.PATHS = PATHS
@@ -1530,9 +1530,7 @@ class Database(
             return None
 
     async def close(self):
-        """
-        ✅ v7.5.24: إعادة تعيين كاملة.
-        """
+        """إعادة تعيين كاملة."""
         tasks = []
         if self._cleanup_task:
             self._cleanup_task.cancel()
@@ -1579,17 +1577,13 @@ class Database(
         except Exception as e:
             logger.debug(f"clear_all_caches on close: {e}")
 
-        # ✅ v7.5.24 FIX: إعادة تعيين كاملة
         self._initialized = False
         self._cleanup_task = None
         self._secondary_index_task = None
         self._cache_cleanup_task = None
 
     async def reconnect(self):
-        """
-        ✅ v7.5.25: إعادة الاتصال + استئناف cache_cleanup_task.
-        يُستخدم بعد استعادة نسخة احتياطية — يُغلق ويعيد التهيئة كاملاً.
-        """
+        """إعادة الاتصال + استئناف cache_cleanup_task."""
         try:
             logger.info("🔄 بدء إعادة الاتصال بقاعدة البيانات...")
             try:
@@ -1606,7 +1600,6 @@ class Database(
             except Exception as e:
                 logger.warning(f"⚠️ فشل re-migrate بعد reconnect: {e}")
 
-            # ✅ v7.5.25: استئناف cache_cleanup_task بعد reconnect
             if CACHE_AVAILABLE and (
                 self._cache_cleanup_task is None
                 or self._cache_cleanup_task.done()
@@ -2722,12 +2715,7 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
-        """
-        ✅ v7.5.25: لا تعمل إلا إذا وُجدت فهارس فعلية.
-
-        في v7.5.25، انتقلت كل الفهارس إلى database_tables.py (COMMON_INDEXES).
-        القائمة فارغة → تخطي مباشر.
-        """
+        """لا تعمل إلا إذا وُجدت فهارس فعلية."""
         if not indexes:
             logger.debug("ℹ️ لا فهارس ثانوية — تخطي")
             return
@@ -2971,17 +2959,13 @@ class Database(
                     )
 
     async def _import_banned_words(self, conn):
-        """
-        ✅ v7.5.25: فحص checksum بدل عتبة عددية.
-        يضمن استيراد الإضافات الجديدة إلى banned_words.py.
-        """
+        """فحص checksum بدل عتبة عددية."""
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
             if not BANNED_WORDS:
                 return
 
-            # ✅ حساب checksum
             words_snapshot = "\n".join(
                 str(w).strip().lower()
                 for w in BANNED_WORDS
@@ -2991,9 +2975,10 @@ class Database(
                 words_snapshot.encode("utf-8")
             ).hexdigest()
 
+            # ✅ v7.5.27: استخدام helper للتوافق مع MySQL
             stored_hash = await self._fetchval_with_conn(
                 conn,
-                "SELECT value FROM settings WHERE key = ?",
+                _sql_get_setting_value(),
                 "banned_words_hash",
             )
             if stored_hash == current_hash:
@@ -3028,7 +3013,6 @@ class Database(
                     f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة"
                 )
 
-                # ✅ تخزين الـhash
                 try:
                     if USE_POSTGRES:
                         await conn.execute(
@@ -3062,9 +3046,7 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الكلمات المحظورة: {e}")
 
     async def _import_auto_replies(self, conn):
-        """
-        ✅ v7.5.25: فحص checksum بدل عتبة عددية.
-        """
+        """فحص checksum بدل عتبة عددية."""
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -3078,15 +3060,15 @@ class Database(
                 logger.warning("⚠️ AUTO_REPLIES يجب أن يكون قائمة أو قاموساً")
                 return
 
-            # ✅ حساب checksum من repr الملف
             snapshot = repr(auto_replies_list)
             current_hash = hashlib.sha256(
                 snapshot.encode("utf-8")
             ).hexdigest()
 
+            # ✅ v7.5.27: استخدام helper للتوافق مع MySQL
             stored_hash = await self._fetchval_with_conn(
                 conn,
-                "SELECT value FROM settings WHERE key = ?",
+                _sql_get_setting_value(),
                 "auto_replies_hash",
             )
             if stored_hash == current_hash:
@@ -3163,7 +3145,6 @@ class Database(
                     f"✅ تم استيراد {len(replies_to_insert)} رد تلقائي"
                 )
 
-                # ✅ تخزين الـhash
                 try:
                     if USE_POSTGRES:
                         await conn.execute(
@@ -3192,16 +3173,11 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     # =====================================================================
-    # الفهارس الثانوية — ✅ v7.5.25: انتقلت كل الفهارس إلى database_tables.py
+    # الفهارس الثانوية
     # =====================================================================
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """
-        ✅ v7.5.25: قائمة فارغة.
-
-        جميع الفهارس انتقلت إلى database_tables.py (COMMON_INDEXES v7.6.1).
-        هذا يمنع التعارض مع DEPRECATED_INDEXES و Fast-path.
-        """
+        """قائمة فارغة — كل الفهارس في database_tables.py."""
         return []
 
     # =====================================================================
@@ -3209,13 +3185,7 @@ class Database(
     # =====================================================================
 
     def _compute_bootstrap_hash(self) -> str:
-        """
-        ✅ v7.5.26: hash يجمع schema_version مع bootstrap_data_version.
-
-        - عند ترقية schema_version → hash يتغيّر → ترحيل يعمل مرة
-        - عند تعديل default_plans يدوياً → ارفع BOOTSTRAP_DATA_VERSION
-        - عند تطابق hash → تخطي migrate + default_data (~7s توفير)
-        """
+        """hash يجمع schema_version مع bootstrap_data_version."""
         data = {
             "schema": CURRENT_SCHEMA_VERSION,
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
@@ -3267,35 +3237,36 @@ class Database(
                 logger.debug(f"invalidate_subscription_cache: {e}")
 
     # =====================================================================
-    # التهيئة الكاملة — ✅ v7.5.26: bootstrap_hash للـfast-path
+    # التهيئة الكاملة — v7.5.27
     # =====================================================================
 
     async def _bootstrap(self, *, with_background: bool = True) -> bool:
         """
-        ✅ v7.5.26: تهيئة موحّدة مع bootstrap_hash للـfast-path.
+        ✅ v7.5.27: تهيئة موحّدة مع bootstrap_hash للـfast-path.
 
-        التسلسل الذكي:
+        التسلسل:
         1. initialize() — pool جاهز
         2. _create_tables() — Fast-path داخلي
         3. فحص bootstrap_hash:
-           - مطابق  → تخطي migrate + default_data (~7s توفير)
-           - مختلف  → شغّل migrate + default_data + خزّن hash
-        4. _import_banned_words() — له checksum خاص
-        5. _import_auto_replies() — له checksum خاص
-        6. جدولة المهام الخلفية
+           - مطابق  → تخطي migrate + default_data
+           - مختلف  → شغّل + خزّن hash
+        4. _import_banned_words() — checksum خاص
+        5. _import_auto_replies() — checksum خاص
+        6. المهام الخلفية
         """
         try:
             await self.initialize()
 
             async with self.connection() as conn:
-                # 1) الجداول (Fast-path داخلي)
+                # 1) الجداول
                 await self._create_tables()
 
                 # 2) فحص bootstrap_hash
                 current_hash = self._compute_bootstrap_hash()
+                # ✅ v7.5.27: استخدام helper للتوافق مع MySQL
                 stored_hash = await self._fetchval_with_conn(
                     conn,
-                    "SELECT value FROM settings WHERE key = ?",
+                    _sql_get_setting_value(),
                     "bootstrap_hash",
                 )
 
@@ -3304,14 +3275,12 @@ class Database(
                         "⏩ bootstrap محدّث — تخطي الترحيل والبيانات الافتراضية"
                     )
                 else:
-                    # تشغيل الترحيل والبيانات الافتراضية
                     t_mig = time.monotonic()
                     await self._migrate_schema(conn)
                     await self._ensure_text_hash_column(conn)
                     await self._init_default_data(conn)
                     elapsed = time.monotonic() - t_mig
 
-                    # تخزين hash الجديد
                     try:
                         if USE_POSTGRES:
                             await conn.execute(
@@ -3339,7 +3308,7 @@ class Database(
                         f"✅ تم الترحيل + البيانات الافتراضية في {elapsed:.2f}s"
                     )
 
-                # 3) الاستيراد (لهما checksums خاصة)
+                # 3) الاستيراد
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
 
@@ -3393,11 +3362,7 @@ class Database(
     # =====================================================================
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
-        """
-        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
-        ✅ total_unpublished_posts = إجمالي كل القنوات.
-        ✅ حماية من active_channel = NULL عبر COALESCE.
-        """
+        """unpublished_posts = للقناة النشطة فقط."""
         cache_key = f"start_data_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
@@ -3483,9 +3448,7 @@ class Database(
     async def get_user_full_data(
         self, user_id: int, include_stats: bool = True
     ) -> Optional[Dict]:
-        """
-        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
-        """
+        """unpublished_posts = للقناة النشطة فقط."""
         try:
             if include_stats:
                 row = await self.fetchone(
@@ -3582,9 +3545,7 @@ class Database(
     async def get_user(
         self, user_id: int, include_stats: bool = False
     ) -> Optional[Dict]:
-        """
-        ✅ v7.5.23: unpublished_posts = للقناة النشطة فقط.
-        """
+        """unpublished_posts = للقناة النشطة فقط."""
         try:
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
@@ -3744,9 +3705,7 @@ class Database(
         first_name: str = "",
         force: bool = False,
     ) -> bool:
-        """
-        ✅ v7.5.21: إصلاح TIMESTAMP — استخدام TimeUtils.utc_now() بدل TimeUtils.sql_iso()
-        """
+        """إصلاح TIMESTAMP — استخدام TimeUtils.utc_now() بدل TimeUtils.sql_iso()"""
         try:
             async with await self._get_user_lock(user_id):
                 if not force:
