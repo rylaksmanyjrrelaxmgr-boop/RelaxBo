@@ -2,19 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.3)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.4)
 ================================================================================
+🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
+  ✅ _normalize_columns_mysql() — يُزيل ASC/DESC من الأعمدة
+  ✅ _ensure_index_definitions_match_mysql: يستخدم الـhelper الجديد
+  ✅ يمنع churn 6 فهارس (DESC) عند انتهاء الـfast-path
+  ✅ CURRENT_SCHEMA_VERSION يبقى 5
+
 🚀 v7.6.3 (الحل الذكي — فحص التعريفات):
   ✅ _ensure_index_definitions_match_postgres/sqlite/mysql
-     - يفحص كل فهرس في COMMON_INDEXES
-     - يحذف فقط عند اختلاف التعريف (أعمدة مختلفة)
-     - لا churn للفهارس المطابقة
   ✅ CURRENT_SCHEMA_VERSION = 5
 
-🚀 v7.6.2:
-  ✅ حذف 11 فهرساً من DEPRECATED_INDEXES (كانت مكررة)
-  ✅ CURRENT_SCHEMA_VERSION = 4
-
+🚀 v7.6.2: حذف 11 فهرساً من DEPRECATED_INDEXES
 🚀 v7.6.1: توحيد الفهارس + 3 فهارس من database.py
 🚀 v7.6.0: Fast-path (~0.5s بدل ~31s)
 ================================================================================
@@ -208,7 +208,7 @@ COMMON_INDEXES = [
      "user_reminder_settings(subscription_reminder)"),
 ]
 
-# ✅ v7.6.2: الفهارس القديمة (بعد إزالة 11 فهرساً مكرراً)
+# ✅ v7.6.2: الفهارس القديمة
 DEPRECATED_INDEXES = [
     # ═══ posts ═══
     "idx_posts_channel_pub_fail_created_optimized",
@@ -354,17 +354,34 @@ def _is_valid_index_name(name: str) -> bool:
 
 
 def _normalize_columns(col_str: str) -> str:
-    """
-    ✅ v7.6.3: تطبيع قائمة الأعمدة للمقارنة.
-
-    - إزالة المسافات
-    - lowercase
-    - إزالة public. prefix
-    """
+    """تطبيع قائمة الأعمدة للمقارنة (SQLite + PostgreSQL)."""
     if not col_str:
         return ""
     s = col_str.replace(" ", "").lower()
     s = s.replace("public.", "")
+    return s
+
+
+def _normalize_columns_mysql(col_str: str) -> str:
+    """
+    ✅ v7.6.4: تطبيع خاص بـ MySQL.
+
+    MySQL لا يعيد اتجاه ASC/DESC في SHOW INDEX (أو يعيده في عمود منفصل).
+    لذا يجب إزالة ASC/DESC من الطرفين لتفادي mismatch دائم مع الفهارس
+    التي تحتوي على DESC في COMMON_INDEXES (6 فهارس).
+
+    الطريقة:
+      1. lowercase
+      2. إزالة " asc" و " desc" من النهاية أو قبل الفاصلة
+      3. إزالة المسافات
+    """
+    if not col_str:
+        return ""
+    s = col_str.lower()
+    # إزالة " asc" أو " desc" (مع كلمة الفصل)
+    s = re.sub(r"\s+(asc|desc)\b", "", s)
+    # إزالة أي مسافات متبقية
+    s = s.replace(" ", "")
     return s
 
 
@@ -485,14 +502,11 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 
 
 # =====================================================================
-# ✅ v7.6.3: فحص تعريفات الفهارس (Smart Check)
+# فحص تعريفات الفهارس (Smart Check)
 # =====================================================================
 
 async def _ensure_index_definitions_match_postgres(conn, logger):
-    """
-    ✅ v7.6.3: يفحص تعريف كل فهرس في COMMON_INDEXES.
-    يحذف فقط عند اختلاف الأعمدة الفعلية عن المتوقعة.
-    """
+    """v7.6.3: يفحص تعريف كل فهرس في PostgreSQL."""
     checked = 0
     dropped = 0
     missing = 0
@@ -513,7 +527,6 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
                 continue
 
             actual_def = existing[idx_name]
-            # استخراج الأعمدة من "USING btree (col1, col2 DESC)"
             m = re.search(
                 r"USING\s+\w+\s+\(([^)]+)\)",
                 actual_def,
@@ -554,7 +567,7 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
 
 
 async def _ensure_index_definitions_match_sqlite(conn, logger):
-    """✅ v7.6.3: SQLite version."""
+    """v7.6.3: SQLite version."""
     checked = 0
     dropped = 0
     missing = 0
@@ -581,7 +594,6 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
                 continue
 
             sql_def = existing[idx_name]
-            # SQLite: "CREATE INDEX name ON table(col1, col2)"
             m = re.search(
                 r"ON\s+\w+\s*\(([^)]+)\)",
                 sql_def,
@@ -615,7 +627,13 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
 
 
 async def _ensure_index_definitions_match_mysql(conn, logger):
-    """✅ v7.6.3: MySQL version — يعتمد على SHOW INDEX (اسم الأعمدة فقط)."""
+    """
+    ✅ v7.6.4: MySQL version مع إزالة ASC/DESC من المقارنة.
+
+    السبب: MySQL < 8.0 لا يدعم DESC في INDEX أصلاً، و MySQL 8.0+
+    يعرضه في عمود Collation منفصل في SHOW INDEX.
+    المقارنة النصية المباشرة تفشل مع DESC → churn للـ6 فهارس.
+    """
     checked = 0
     dropped = 0
     missing = 0
@@ -636,6 +654,7 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
             # SHOW INDEX columns:
             # 0=Table, 1=Non_unique, 2=Key_name, 3=Seq_in_index, 4=Column_name
+            # (5=Collation, 6=Cardinality, ...)
             by_key = {}
             for r in rows:
                 key_name = r[2]
@@ -653,16 +672,18 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     continue
 
                 sorted_cols = sorted(by_key[idx_name], key=lambda x: x[0])
-                actual_cols = _normalize_columns(
+                # ✅ v7.6.4: استخدام _normalize_columns_mysql
+                actual_cols = _normalize_columns_mysql(
                     ",".join(c for _, c in sorted_cols)
                 )
-                expected_cols = _normalize_columns(
+                expected_cols = _normalize_columns_mysql(
                     _parse_expected_columns(cols)
                 )
 
                 if actual_cols != expected_cols:
                     logger.warning(
-                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف — يُحذف"
+                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف "
+                        f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
                     )
                     try:
                         await conn.execute(
@@ -893,8 +914,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         if logger:
             logger.info(
-                f"⏩ SQLite: schema v{current} محدّث — "
-                f"تخطي (fast-path)"
+                f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
             )
         return
 
@@ -1467,7 +1487,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.3: فحص التعريفات → حذف → إنشاء
     await _drop_deprecated_indexes_sqlite(conn, logger)
     await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
@@ -2075,7 +2094,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.3: 3 خطوات
     await _drop_deprecated_indexes_postgres(conn, logger)
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
@@ -2692,7 +2710,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.3: 3 خطوات
         await _drop_deprecated_indexes_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
