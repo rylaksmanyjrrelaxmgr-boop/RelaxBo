@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.24)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.25)
 ================================================================================
+🆕 v7.5.25 (إصلاح تعارض الفهارس + تبسيط التهيئة):
+    ✅ _get_secondary_indexes: قائمة فارغة (انتقلت كل الفهارس إلى
+       database_tables.py COMMON_INDEXES v7.6.1)
+    ✅ _create_secondary_indexes: تخطي إذا كانت القائمة فارغة
+    ✅ initialize_db / pre_initialize: دُمجتا في _bootstrap
+    ✅ reconnect: يستأنف cache_cleanup_task بعد الاستعادة
+    ✅ _import_banned_words: checksum بدل عتبة ≥100
+    ✅ _import_auto_replies: checksum بدل عتبة ≥100
+
 🆕 v7.5.24 (إصلاحات استعادة النسخة الاحتياطية):
     ✅ DB.reconnect() — method جديد كان مفقوداً
     ✅ DB.close() — إعادة تعيين _initialized + tasks بشكل كامل
@@ -1570,7 +1579,7 @@ class Database(
 
     async def reconnect(self):
         """
-        ✅ v7.5.24 NEW: إعادة الاتصال بقاعدة البيانات.
+        ✅ v7.5.25: إعادة الاتصال + استئناف cache_cleanup_task.
         يُستخدم بعد استعادة نسخة احتياطية — يُغلق ويعيد التهيئة كاملاً.
         """
         try:
@@ -1588,6 +1597,15 @@ class Database(
                     await self._migrate_schema(conn)
             except Exception as e:
                 logger.warning(f"⚠️ فشل re-migrate بعد reconnect: {e}")
+
+            # ✅ v7.5.25: استئناف cache_cleanup_task بعد reconnect
+            if CACHE_AVAILABLE and (
+                self._cache_cleanup_task is None
+                or self._cache_cleanup_task.done()
+            ):
+                self._cache_cleanup_task = asyncio.create_task(
+                    cache_cleanup_task()
+                )
 
             logger.info("✅ تم إعادة الاتصال بقاعدة البيانات بنجاح")
             return True
@@ -2696,6 +2714,15 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
+        """
+        ✅ v7.5.25: لا تعمل إلا إذا وُجدت فهارس فعلية.
+
+        في v7.5.25، انتقلت كل الفهارس إلى database_tables.py (COMMON_INDEXES).
+        القائمة فارغة → تخطي مباشر.
+        """
+        if not indexes:
+            logger.debug("ℹ️ لا فهارس ثانوية — تخطي")
+            return
         try:
             async with self.connection() as conn:
                 created = 0
@@ -2710,8 +2737,10 @@ class Database(
                         logger.info(f"✅ تم إنشاء فهرس ثانوي {idx_name}")
                         created += 1
                     except Exception as e:
-                        if "duplicate" not in str(e).lower() and \
-                           "already exists" not in str(e).lower():
+                        msg = str(e).lower()
+                        if "duplicate" in msg or "already exists" in msg:
+                            skipped += 1
+                        else:
                             logger.warning(f"⚠️ فشل إنشاء فهرس {idx_name}: {e}")
                             failed += 1
                 logger.info(
@@ -2934,27 +2963,40 @@ class Database(
                     )
 
     async def _import_banned_words(self, conn):
+        """
+        ✅ v7.5.25: فحص checksum بدل عتبة عددية.
+        يضمن استيراد الإضافات الجديدة إلى banned_words.py.
+        """
         try:
-            existing_count = await self._fetchval_with_conn(
-                conn,
-                "SELECT COUNT(*) FROM banned_words WHERE chat_id = -1",
-                default=0,
-            )
-            if existing_count and existing_count >= 100:
-                logger.info(
-                    f"ℹ️ تم تخطي استيراد الكلمات المحظورة "
-                    f"({existing_count} موجودة مسبقاً)"
-                )
-                return
-
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
             if not BANNED_WORDS:
                 return
+
+            # ✅ حساب checksum
+            words_snapshot = "\n".join(
+                str(w).strip().lower()
+                for w in BANNED_WORDS
+                if 2 <= len(str(w).strip()) <= 100
+            )
+            current_hash = hashlib.sha256(
+                words_snapshot.encode("utf-8")
+            ).hexdigest()
+
+            stored_hash = await self._fetchval_with_conn(
+                conn,
+                "SELECT value FROM settings WHERE key = ?",
+                "banned_words_hash",
+            )
+            if stored_hash == current_hash:
+                logger.info("ℹ️ الكلمات المحظورة لم تتغيّر — تخطي الاستيراد")
+                return
+
             owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", None)
             if not owner_id:
                 logger.warning("⚠️ PRIMARY_OWNER_ID غير محدد — استخدام 1")
                 owner_id = 1
+
             words_to_insert = []
             for word in BANNED_WORDS:
                 word = str(word).strip().lower()
@@ -2962,6 +3004,7 @@ class Database(
                     words_to_insert.append(
                         (word, -1, owner_id, TimeUtils.utc_now())
                     )
+
             if words_to_insert:
                 batch_size = 500
                 for i in range(0, len(words_to_insert), batch_size):
@@ -2976,6 +3019,31 @@ class Database(
                 logger.info(
                     f"✅ تم استيراد {len(words_to_insert)} كلمة محظورة"
                 )
+
+                # ✅ تخزين الـhash
+                try:
+                    if USE_POSTGRES:
+                        await conn.execute(
+                            "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                            "banned_words_hash", current_hash,
+                        )
+                    elif USE_MYSQL:
+                        await conn.execute(
+                            "INSERT INTO settings (`key`, `value`) "
+                            "VALUES (%s, %s) "
+                            "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                            ("banned_words_hash", current_hash),
+                        )
+                    else:
+                        await conn.execute(
+                            "INSERT INTO settings (key, value) VALUES (?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            ("banned_words_hash", current_hash),
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل تخزين banned_words_hash: {e}")
+
                 if hasattr(self, "_invalidate_banned_words_local_cache"):
                     await self._invalidate_banned_words_local_cache()
                 if CACHE_AVAILABLE:
@@ -2986,28 +3054,35 @@ class Database(
             logger.error(f"❌ خطأ في استيراد الكلمات المحظورة: {e}")
 
     async def _import_auto_replies(self, conn):
+        """
+        ✅ v7.5.25: فحص checksum بدل عتبة عددية.
+        """
         try:
-            existing_count = await self._fetchval_with_conn(
-                conn,
-                "SELECT COUNT(*) FROM auto_replies WHERE chat_id = -1",
-                default=0,
-            )
-            if existing_count and existing_count >= 100:
-                logger.info(
-                    f"ℹ️ تم تخطي استيراد الردود التلقائية "
-                    f"({existing_count} موجودة مسبقاً)"
-                )
-                return
-
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
                 return
+
             if isinstance(AUTO_REPLIES, dict):
                 auto_replies_list = [AUTO_REPLIES]
             elif isinstance(AUTO_REPLIES, (list, tuple)):
                 auto_replies_list = AUTO_REPLIES
             else:
                 logger.warning("⚠️ AUTO_REPLIES يجب أن يكون قائمة أو قاموساً")
+                return
+
+            # ✅ حساب checksum من repr الملف
+            snapshot = repr(auto_replies_list)
+            current_hash = hashlib.sha256(
+                snapshot.encode("utf-8")
+            ).hexdigest()
+
+            stored_hash = await self._fetchval_with_conn(
+                conn,
+                "SELECT value FROM settings WHERE key = ?",
+                "auto_replies_hash",
+            )
+            if stored_hash == current_hash:
+                logger.info("ℹ️ الردود التلقائية لم تتغيّر — تخطي الاستيراد")
                 return
 
             replies_to_insert = []
@@ -3079,99 +3154,47 @@ class Database(
                 logger.info(
                     f"✅ تم استيراد {len(replies_to_insert)} رد تلقائي"
                 )
+
+                # ✅ تخزين الـhash
+                try:
+                    if USE_POSTGRES:
+                        await conn.execute(
+                            "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                            "auto_replies_hash", current_hash,
+                        )
+                    elif USE_MYSQL:
+                        await conn.execute(
+                            "INSERT INTO settings (`key`, `value`) "
+                            "VALUES (%s, %s) "
+                            "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                            ("auto_replies_hash", current_hash),
+                        )
+                    else:
+                        await conn.execute(
+                            "INSERT INTO settings (key, value) VALUES (?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            ("auto_replies_hash", current_hash),
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل تخزين auto_replies_hash: {e}")
         except ImportError:
             logger.info("ℹ️ لا يوجد ملف auto_replies.py")
         except Exception as e:
             logger.error(f"❌ خطأ في استيراد الردود التلقائية: {e}")
 
     # =====================================================================
-    # الفهارس الثانوية
+    # الفهارس الثانوية — ✅ v7.5.25: انتقلت كل الفهارس إلى database_tables.py
     # =====================================================================
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        if USE_MYSQL:
-            return [
-                ("posts", "idx_posts_fail_count",
-                 "CREATE INDEX idx_posts_fail_count ON posts(fail_count)"),
-                ("posts", "idx_posts_created_at",
-                 "CREATE INDEX idx_posts_created_at ON posts(created_at)"),
-                ("users", "idx_users_trial_used",
-                 "CREATE INDEX idx_users_trial_used ON users(trial_used)"),
-                ("banned_words", "idx_banned_words_word",
-                 "CREATE INDEX idx_banned_words_word ON banned_words(word)"),
-                ("auto_replies", "idx_auto_replies_keyword",
-                 "CREATE INDEX idx_auto_replies_keyword ON auto_replies(keyword)"),
-                ("referral_rewards", "idx_referral_rewards_count",
-                 "CREATE INDEX idx_referral_rewards_count ON referral_rewards(referral_count)"),
-                ("contest_participants", "idx_contest_participants_contest",
-                 "CREATE INDEX idx_contest_participants_contest ON contest_participants(contest_id)"),
-                ("gift_codes", "idx_gift_codes_plan",
-                 "CREATE INDEX idx_gift_codes_plan ON gift_codes(plan_id)"),
-                ("user_penalties", "idx_user_penalties_active_end",
-                 "CREATE INDEX idx_user_penalties_active_end "
-                 "ON user_penalties(status, end_time)"),
-                ("posts", "idx_posts_published",
-                 "CREATE INDEX idx_posts_published ON posts(published, published_at)"),
-                ("posts", "idx_posts_channel_published",
-                 "CREATE INDEX idx_posts_channel_published "
-                 "ON posts(channel_db_id, published)"),
-                ("subscriptions", "idx_subscriptions_active_end",
-                 "CREATE INDEX idx_subscriptions_active_end "
-                 "ON subscriptions(user_id, status, end_date)"),
-                ("user_reminder_settings", "idx_reminders_subscription",
-                 "CREATE INDEX idx_reminders_subscription "
-                 "ON user_reminder_settings(subscription_reminder, last_reminder_sent)"),
-                ("user_violations", "idx_violations_user_chat",
-                 "CREATE INDEX idx_violations_user_chat ON user_violations(user_id, chat_id)"),
-            ]
-        else:
-            return [
-                ("posts", "idx_posts_fail_count",
-                 "CREATE INDEX IF NOT EXISTS idx_posts_fail_count ON posts(fail_count)"),
-                ("posts", "idx_posts_created_at",
-                 "CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at)"),
-                ("users", "idx_users_trial_used",
-                 "CREATE INDEX IF NOT EXISTS idx_users_trial_used ON users(trial_used)"),
-                ("banned_words", "idx_banned_words_word",
-                 "CREATE INDEX IF NOT EXISTS idx_banned_words_word ON banned_words(word)"),
-                ("auto_replies", "idx_auto_replies_keyword",
-                 "CREATE INDEX IF NOT EXISTS idx_auto_replies_keyword ON auto_replies(keyword)"),
-                ("referral_rewards", "idx_referral_rewards_count",
-                 "CREATE INDEX IF NOT EXISTS idx_referral_rewards_count "
-                 "ON referral_rewards(referral_count)"),
-                ("contest_participants", "idx_contest_participants_contest",
-                 "CREATE INDEX IF NOT EXISTS idx_contest_participants_contest "
-                 "ON contest_participants(contest_id)"),
-                ("gift_codes", "idx_gift_codes_plan",
-                 "CREATE INDEX IF NOT EXISTS idx_gift_codes_plan ON gift_codes(plan_id)"),
-                ("user_penalties", "idx_user_penalties_active_end",
-                 "CREATE INDEX IF NOT EXISTS idx_user_penalties_active_end "
-                 "ON user_penalties(status, end_time) WHERE status = 'active'"),
-                ("posts", "idx_posts_published",
-                 "CREATE INDEX IF NOT EXISTS idx_posts_published "
-                 "ON posts(published, published_at)"),
-                ("posts", "idx_posts_channel_published",
-                 "CREATE INDEX IF NOT EXISTS idx_posts_channel_published "
-                 "ON posts(channel_db_id, published)"),
-                ("subscriptions", "idx_subscriptions_active_end",
-                 "CREATE INDEX IF NOT EXISTS idx_subscriptions_active_end "
-                 "ON subscriptions(user_id, status, end_date) WHERE status = 'active'"),
-                ("user_reminder_settings", "idx_reminders_subscription",
-                 "CREATE INDEX IF NOT EXISTS idx_reminders_subscription "
-                 "ON user_reminder_settings(subscription_reminder, last_reminder_sent)"),
-                ("user_violations", "idx_violations_user_chat",
-                 "CREATE INDEX IF NOT EXISTS idx_violations_user_chat "
-                 "ON user_violations(user_id, chat_id)"),
-                ("user_channels", "idx_uc_user_banned",
-                 "CREATE INDEX IF NOT EXISTS idx_uc_user_banned "
-                 "ON user_channels(user_id, banned)"),
-                ("user_groups_link", "idx_ugl_user",
-                 "CREATE INDEX IF NOT EXISTS idx_ugl_user "
-                 "ON user_groups_link(user_id)"),
-                ("posts", "idx_posts_channel_pub",
-                 "CREATE INDEX IF NOT EXISTS idx_posts_channel_pub "
-                 "ON posts(channel_db_id, published, fail_count)"),
-            ]
+        """
+        ✅ v7.5.25: قائمة فارغة.
+
+        جميع الفهارس انتقلت إلى database_tables.py (COMMON_INDEXES v7.6.1).
+        هذا يمنع التعارض مع DEPRECATED_INDEXES و Fast-path.
+        """
+        return []
 
     # =====================================================================
     # has_active_subscription
@@ -3216,82 +3239,70 @@ class Database(
                 logger.debug(f"invalidate_subscription_cache: {e}")
 
     # =====================================================================
-    # التهيئة الكاملة
+    # التهيئة الكاملة — ✅ v7.5.25: دالة _bootstrap موحّدة
     # =====================================================================
 
-    async def initialize_db(self) -> bool:
+    async def _bootstrap(self, *, with_background: bool = True) -> bool:
+        """
+        ✅ v7.5.25: تهيئة موحّدة (استُخرجت من initialize_db/pre_initialize).
+
+        with_background=True  → جدولة الفهارس الثانوية + cache_cleanup
+        with_background=False → فقط التهيئة المتزامنة
+        """
         try:
             await self.initialize()
 
             async with self.connection() as conn:
                 await self._create_tables()
                 await self._migrate_schema(conn)
+                await self._ensure_text_hash_column(conn)
                 await self._init_default_data(conn)
                 await self._import_banned_words(conn)
                 await self._import_auto_replies(conn)
-                await self._ensure_text_hash_column(conn)
 
-            if self._secondary_index_task is None or self._secondary_index_task.done():
+            if with_background:
                 secondary_indexes = self._get_secondary_indexes()
-                logger.info(
-                    f"📊 جدولة إنشاء {len(secondary_indexes)} فهرس ثانوي "
-                    f"(DB={DB_TYPE.upper()})..."
-                )
-                self._secondary_index_task = asyncio.create_task(
-                    self._create_secondary_indexes(secondary_indexes)
-                )
+                if secondary_indexes:
+                    if (
+                        self._secondary_index_task is None
+                        or self._secondary_index_task.done()
+                    ):
+                        logger.info(
+                            f"📊 جدولة إنشاء {len(secondary_indexes)} فهرس ثانوي..."
+                        )
+                        self._secondary_index_task = asyncio.create_task(
+                            self._create_secondary_indexes(secondary_indexes)
+                        )
 
-            if CACHE_AVAILABLE and (
-                self._cache_cleanup_task is None
-                or self._cache_cleanup_task.done()
-            ):
-                self._cache_cleanup_task = asyncio.create_task(
-                    cache_cleanup_task()
-                )
+                if CACHE_AVAILABLE and (
+                    self._cache_cleanup_task is None
+                    or self._cache_cleanup_task.done()
+                ):
+                    self._cache_cleanup_task = asyncio.create_task(
+                        cache_cleanup_task()
+                    )
 
-            logger.info("✅ تم تهيئة قاعدة البيانات بنجاح (مع المهام الخلفية)")
             return True
 
         except Exception as e:
-            logger.error(
-                f"❌ فشل تهيئة قاعدة البيانات: {e}", exc_info=True
-            )
+            logger.error(f"❌ فشل التهيئة: {e}", exc_info=True)
             return False
 
-    async def pre_initialize(self):
-        try:
-            await self.initialize()
+    async def initialize_db(self) -> bool:
+        """التهيئة الكاملة (مع مهام خلفية)."""
+        result = await self._bootstrap(with_background=True)
+        if result:
+            logger.info("✅ تم تهيئة قاعدة البيانات بنجاح (مع المهام الخلفية)")
+        return result
 
-            async with self.connection() as conn:
-                await self._create_tables()
-                await self._migrate_schema(conn)
-                await self._ensure_text_hash_column(conn)
-                await self._init_default_data(conn)
-                await self._import_banned_words(conn)
-                await self._import_auto_replies(conn)
-
-            if self._secondary_index_task is None or self._secondary_index_task.done():
-                secondary_indexes = self._get_secondary_indexes()
-                self._secondary_index_task = asyncio.create_task(
-                    self._create_secondary_indexes(secondary_indexes)
-                )
-
-            if CACHE_AVAILABLE and (
-                self._cache_cleanup_task is None
-                or self._cache_cleanup_task.done()
-            ):
-                self._cache_cleanup_task = asyncio.create_task(
-                    cache_cleanup_task()
-                )
-
+    async def pre_initialize(self) -> bool:
+        """التهيئة المبكرة (مع مهام خلفية — سلوك متطابق)."""
+        result = await self._bootstrap(with_background=True)
+        if result:
             logger.info(
                 "✅ تم التهيئة المبكرة لقاعدة البيانات (مع المهام الخلفية)"
             )
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ فشل التهيئة المبكرة: {e}", exc_info=True)
-            return False
+        return result
 
     # =====================================================================
     # دوال المستخدمين
