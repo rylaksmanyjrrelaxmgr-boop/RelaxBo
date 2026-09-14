@@ -2,13 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.27)
+database.py - قاعدة البيانات المتكاملة للبوت (النسخة v7.5.28)
 ================================================================================
-🆕 v7.5.27 (إصلاح MySQL — الكلمات المحجوزة):
+🆕 v7.5.28 (إصلاح MySQL النهائي):
+    ✅ _mysql_random() — دالة عشوائية متوافقة مع 3 أنظمة
+    ✅ _convert_insert_or_replace: MySQL يستخدم ON DUPLICATE KEY UPDATE
+       بدل REPLACE (الذي يحذف الصف → FK cascade)
+    ✅ _convert_insert_or_replace: PostgreSQL يستخدم KNOWN_UNIQUE_FALLBACK
+       بدل DO NOTHING الصامت
+    ✅ __all__ محدّث
+
+📌 v7.5.27 (إصلاح MySQL — الكلمات المحجوزة):
     ✅ _sql_get_setting_value() — helper يرجع الاستعلام حسب نوع DB
     ✅ إصلاح 3 استعلامات: bootstrap_hash / banned_words_hash / auto_replies_hash
-       (كانت "SELECT value FROM settings WHERE key = ?"
-        وهي تفشل في MySQL لأن `key` و `value` كلمات محجوزة)
     ✅ دعم كامل للنظم الثلاثة (SQLite + PostgreSQL + MySQL)
 
 📌 v7.5.26 (Bootstrap Hash — تسريع إضافي):
@@ -696,6 +702,17 @@ def _sql_get_setting_value() -> str:
     return "SELECT value FROM settings WHERE key = ?"
 
 
+# ✅ v7.5.28: helper للدالة العشوائية حسب نوع DB
+def _mysql_random() -> str:
+    """
+    ✅ v7.5.28: دالة RANDOM الصحيحة حسب نوع DB.
+
+    - SQLite / PostgreSQL: RANDOM()
+    - MySQL: RAND()  (RANDOM() غير موجودة في MySQL)
+    """
+    return "RAND()" if USE_MYSQL else "RANDOM()"
+
+
 async def _get_unique_columns(table: str, conn) -> List[str]:
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
@@ -991,84 +1008,181 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
 
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
+    """
+    ✅ v7.5.28: إصلاحات MySQL
+    - لا يستخدم REPLACE (يحذف الصف → FK cascade)
+    - يستخدم ON DUPLICATE KEY UPDATE بدلاً منه
+    - Postgres: fallback آمن عند غياب unique index (لا DO NOTHING صامت)
+    """
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
     if not upper_query.startswith("INSERT OR REPLACE"):
         return query
+
+    # ══════════════ PostgreSQL ══════════════
     if USE_POSTGRES:
         new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
         match = re.search(
-            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES", new_query, re.IGNORECASE
+            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+VALUES",
+            new_query, re.IGNORECASE,
         )
         if not match:
-            return new_query + " ON CONFLICT DO NOTHING"
+            logger.error(
+                "❌ INSERT OR REPLACE بلا قائمة أعمدة — لن يُحوَّل"
+            )
+            return new_query
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
+
         best_cols = None
         if conn:
             try:
-                best_cols = await _find_best_conflict_target(table, conn, columns)
+                best_cols = await _find_best_conflict_target(
+                    table, conn, columns
+                )
             except Exception as e:
-                logger.warning(f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}")
+                logger.warning(
+                    f"⚠️ فشل جلب المفاتيح الفريدة لـ {table}: {e}"
+                )
+
+        # ✅ fallback: استخدم KNOWN_UNIQUE_FALLBACK قبل الاستسلام
         if not best_cols:
-            values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
-            if values_match:
-                end_pos = values_match.end()
-                return new_query[:end_pos] + " ON CONFLICT DO NOTHING" + new_query[end_pos:]
-            return new_query + " ON CONFLICT DO NOTHING"
+            fallback = KNOWN_UNIQUE_FALLBACK.get(table, [])
+            usable = [c for c in fallback if c in columns]
+            if usable:
+                best_cols = ", ".join(usable)
+                logger.info(
+                    f"ℹ️ استخدام fallback UNIQUE لـ {table}: {best_cols}"
+                )
+            else:
+                # ❌ لا DO NOTHING صامت — رقّ إلى خطأ واضح
+                logger.error(
+                    f"❌ INSERT OR REPLACE على {table} بلا unique index "
+                    f"معروف وأعمدة الإدراج: {columns}. "
+                    f"سيُحوَّل إلى INSERT عادي (قد يفشل عند التعارض)."
+                )
+                return new_query
+
         pk_list = [c.strip() for c in best_cols.split(",") if c.strip()]
         pk_set = set(pk_list)
         set_columns = [col for col in columns if col not in pk_set]
+
         if not set_columns:
-            values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+            values_match = re.search(
+                r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE
+            )
             if values_match:
                 end_pos = values_match.end()
-                new_query = new_query[:end_pos] + f" ON CONFLICT ({best_cols}) DO NOTHING" + new_query[end_pos:]
-            else:
-                new_query = new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
-            return new_query
-        existing_columns = set()
-        try:
-            if USE_POSTGRES:
-                rows = await conn.fetch(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name = $1",
-                    table,
+                return (
+                    new_query[:end_pos]
+                    + f" ON CONFLICT ({best_cols}) DO NOTHING"
+                    + new_query[end_pos:]
                 )
-                existing_columns = {row["column_name"] for row in rows}
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                await cursor.execute(f"SHOW COLUMNS FROM `{table}`")
-                rows = await cursor.fetchall()
-                existing_columns = {row[0] for row in rows}
-                await cursor.close()
-            else:
-                cursor = await conn.execute(f"PRAGMA table_info({table})")
-                rows = await cursor.fetchall()
-                existing_columns = {row[1] for row in rows}
+            return new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
+
+        # فلترة set_columns حسب الأعمدة الفعلية في الجدول
+        existing_columns: set = set()
+        try:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = $1",
+                table,
+            )
+            existing_columns = {row["column_name"] for row in rows}
         except Exception:
             pass
-        set_columns = [col for col in set_columns if col in existing_columns]
+
+        set_columns = [
+            col for col in set_columns
+            if (not existing_columns) or (col in existing_columns)
+        ]
+
         if not set_columns:
-            values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+            values_match = re.search(
+                r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE
+            )
             if values_match:
                 end_pos = values_match.end()
-                new_query = new_query[:end_pos] + f" ON CONFLICT ({best_cols}) DO NOTHING" + new_query[end_pos:]
-            else:
-                new_query = new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
-            return new_query
-        set_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in set_columns])
-        values_match = re.search(r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE)
+                return (
+                    new_query[:end_pos]
+                    + f" ON CONFLICT ({best_cols}) DO NOTHING"
+                    + new_query[end_pos:]
+                )
+            return new_query + f" ON CONFLICT ({best_cols}) DO NOTHING"
+
+        set_clause = ", ".join(
+            [f"{col} = EXCLUDED.{col}" for col in set_columns]
+        )
+        values_match = re.search(
+            r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE
+        )
         if values_match:
             end_pos = values_match.end()
-            new_query = new_query[:end_pos] + f" ON CONFLICT ({best_cols}) DO UPDATE SET {set_clause}" + new_query[end_pos:]
-        else:
-            new_query = new_query + f" ON CONFLICT ({best_cols}) DO UPDATE SET {set_clause}"
-        return new_query
+            return (
+                new_query[:end_pos]
+                + f" ON CONFLICT ({best_cols}) DO UPDATE SET {set_clause}"
+                + new_query[end_pos:]
+            )
+        return (
+            new_query
+            + f" ON CONFLICT ({best_cols}) DO UPDATE SET {set_clause}"
+        )
+
+    # ══════════════ MySQL ══════════════
     elif USE_MYSQL:
-        return query.replace("INSERT OR REPLACE", "REPLACE", 1)
-    else:
-        return query
+        # ✅ لا نستخدم REPLACE — نحوّله إلى INSERT ... ON DUPLICATE KEY UPDATE
+        new_query = query.replace("INSERT OR REPLACE", "INSERT", 1)
+        match = re.search(
+            r"INSERT\s+INTO\s+`?(\w+)`?\s*\(([^)]+)\)\s+VALUES",
+            new_query, re.IGNORECASE,
+        )
+        if not match:
+            logger.error(
+                "❌ INSERT OR REPLACE بلا قائمة أعمدة على MySQL"
+            )
+            return new_query
+
+        table = match.group(1)
+        columns = [
+            c.strip().strip("`") for c in match.group(2).split(",")
+            if c.strip()
+        ]
+
+        # حدّد أعمدة المفتاح من KNOWN_UNIQUE_FALLBACK
+        key_cols = KNOWN_UNIQUE_FALLBACK.get(table, [])
+        if not key_cols:
+            # جرّب جلبها من DB إن أمكن
+            if conn:
+                try:
+                    key_cols = await _get_unique_columns(table, conn)
+                except Exception:
+                    key_cols = []
+
+        key_set = set(key_cols)
+        update_cols = [c for c in columns if c not in key_set]
+
+        if not update_cols:
+            # لا شيء لتحديثه — استخدم INSERT IGNORE بدل REPLACE
+            new_query = new_query.replace("INSERT", "INSERT IGNORE", 1)
+            return new_query
+
+        set_clause = ", ".join(
+            f"`{c}` = VALUES(`{c}`)" for c in update_cols
+        )
+        values_match = re.search(
+            r"VALUES\s*\([^)]*\)", new_query, re.IGNORECASE
+        )
+        if values_match:
+            end_pos = values_match.end()
+            return (
+                new_query[:end_pos]
+                + f" ON DUPLICATE KEY UPDATE {set_clause}"
+                + new_query[end_pos:]
+            )
+        return new_query + f" ON DUPLICATE KEY UPDATE {set_clause}"
+
+    return query
 
 
 def _convert_upsert(query: str) -> str:
@@ -3237,12 +3351,12 @@ class Database(
                 logger.debug(f"invalidate_subscription_cache: {e}")
 
     # =====================================================================
-    # التهيئة الكاملة — v7.5.27
+    # التهيئة الكاملة — v7.5.28
     # =====================================================================
 
     async def _bootstrap(self, *, with_background: bool = True) -> bool:
         """
-        ✅ v7.5.27: تهيئة موحّدة مع bootstrap_hash للـfast-path.
+        ✅ v7.5.28: تهيئة موحّدة مع bootstrap_hash للـfast-path.
 
         التسلسل:
         1. initialize() — pool جاهز
@@ -4733,3 +4847,55 @@ async def get_db() -> Database:
 
 async def initialize_db() -> bool:
     return await DB.initialize_db()
+
+
+# =====================================================================
+# ✅ v7.5.28: __all__ — يشمل _mysql_random
+# =====================================================================
+
+__all__ = [
+    # الكائن العالمي
+    "DB",
+    "Database",
+    "TimeUtils",
+    "get_db",
+    "initialize_db",
+    # الثوابت
+    "DB_TYPE",
+    "USE_POSTGRES",
+    "USE_MYSQL",
+    "DATABASE_URL",
+    "UTC",
+    # الكاش
+    "internal_cache",
+    "InternalQueryCache",
+    "SimpleCache",
+    "SettingsCache",
+    "user_cache",
+    "banned_words_cache",
+    "settings_cache",
+    "channels_cache",
+    "groups_cache",
+    "auth_cache",
+    "posts_cache",
+    "invalidate_user_cache",
+    "clear_all_caches",
+    "get_cache_stats",
+    "cache_cleanup_task",
+    "CACHE_AVAILABLE",
+    # Helpers
+    "KNOWN_UNIQUE_FALLBACK",
+    "_validate_column_def",
+    "_clone_start_data",
+    "_create_pool_with_retry",
+    "_sql_get_setting_value",
+    "_mysql_random",
+    "_get_unique_columns",
+    "_find_best_conflict_target",
+    "_convert_placeholders",
+    "_convert_insert_or_ignore",
+    "_convert_insert_or_replace",
+    "_convert_upsert",
+    "_adapt_params",
+    "_table_exists",
+]
