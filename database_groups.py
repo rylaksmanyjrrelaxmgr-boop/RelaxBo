@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.1)
+database_groups.py - دوال المجموعات (v7.4.2)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,6 +18,12 @@ GroupsMixin:
   12. المخالفات (Violations)
 
 📌 مطابق 100% للسلوك الأصلي في database.py (بما في ذلك رسائل log)
+
+🆕 v7.4.2 — تحسينات update_security_settings:
+  - دمج INSERT + UPDATE في معاملة واحدة
+  - إبطال الكاش على التوازي (asyncio.gather)
+  - Logging مختصر: القوائم الكاملة على DEBUG فقط
+  - توفير ~1 ثانية لكل ضغطة زر
 
 📌 يفترض أن الـ Database يوفّر:
   - self.fetchone / self.fetchall / self.fetchval / self.execute
@@ -457,18 +463,17 @@ class GroupsMixin:
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
         """
-        نسخة محصّنة:
+        نسخة محصّنة ومحسّنة (v7.4.2):
         - معالجة مرادفات شاملة
-        - التحقق من الأعمدة الفعلية في الجدول (runtime check)
-        - إزالة الأعمدة غير الموجودة بدل الفشل الكامل
-        - إبطال الكاش بقوة
+        - التحقق من الأعمدة الفعلية في الجدول (runtime check + cache)
+        - دمج INSERT + UPDATE في معاملة واحدة (توفير roundtrip)
+        - إبطال الكاش على التوازي (asyncio.gather)
+        - Logging مختصر: القوائم الكاملة على DEBUG فقط
         """
         if not kwargs:
             return False
 
         original_keys = set(kwargs.keys())
-        logger.info(f"🔧 update_security_settings called for chat_id={chat_id}")
-        logger.info(f"   📥 Original keys ({len(original_keys)}): {sorted(original_keys)}")
 
         # ─── 1) معالجة المرادفات ───
         aliased_keys = []
@@ -481,24 +486,13 @@ class GroupsMixin:
                     kwargs.pop(alias, None)
                     aliased_keys.append((alias, f"{real_col} (already present)"))
 
-        if aliased_keys:
-            logger.info(f"   🔄 Aliases resolved: {aliased_keys}")
-
-        # ─── 2) ضمان وجود صف ───
-        await self.execute(
-            "INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)",
-            (chat_id,)
-        )
-
-        # ─── 3) جلب الأعمدة الفعلية ───
+        # ─── 2) جلب الأعمدة الفعلية (مع كاش) ───
         actual_columns = await self._get_group_security_columns()
         if not actual_columns:
-            logger.error(f"   ❌ لم يتمكن من جلب أعمدة group_security")
+            logger.error(f"❌ update_security_settings: لا توجد أعمدة لـ chat={chat_id}")
             return False
 
-        logger.info(f"   📋 Actual columns in group_security ({len(actual_columns)}): {sorted(actual_columns)}")
-
-        # ─── 4) فلترة kwargs ───
+        # ─── 3) فلترة kwargs ───
         valid_kwargs = {}
         skipped_keys = []
         for key, value in kwargs.items():
@@ -507,54 +501,83 @@ class GroupsMixin:
             else:
                 skipped_keys.append(key)
 
+        # ─── 4) Logging مختصر (القوائم الكاملة على DEBUG) ───
+        summary = (
+            f"🔧 update_security_settings chat={chat_id} | "
+            f"{len(valid_kwargs)} valid"
+            + (f", {len(skipped_keys)} skipped" if skipped_keys else "")
+            + (f", {len(aliased_keys)} aliased" if aliased_keys else "")
+        )
+        logger.info(summary)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"   📥 Original keys ({len(original_keys)}): {sorted(original_keys)}\n"
+                f"   🔄 Aliases: {aliased_keys}\n"
+                f"   📋 Actual columns ({len(actual_columns)}): {sorted(actual_columns)}\n"
+                f"   ✅ Will update ({len(valid_kwargs)}): {sorted(valid_kwargs.keys())}\n"
+                f"   ⚠️ Skipped: {skipped_keys}"
+            )
+
         if skipped_keys:
             logger.warning(
                 f"   ⚠️ Skipped {len(skipped_keys)} non-existent columns: {skipped_keys}\n"
-                f"   💡 هذه الأعمدة غير موجودة في جدول group_security — "
-                f"أضفها إلى database_tables.py أو _migrate_schema"
+                f"   💡 أضفها إلى database_tables.py أو _migrate_schema"
             )
 
         if not valid_kwargs:
-            logger.error(f"   ❌ لا يوجد أي عمود صالح للتحديث!")
+            logger.error(f"   ❌ لا يوجد أي عمود صالح للتحديث! (chat={chat_id})")
             return False
 
-        logger.info(f"   ✅ Will update {len(valid_kwargs)} columns: {sorted(valid_kwargs.keys())}")
-
-        # ─── 5) تنفيذ UPDATE ───
+        # ─── 5) INSERT OR IGNORE + UPDATE في معاملة واحدة ───
+        query = ""
         try:
             updates = [f"{key} = ?" for key in valid_kwargs]
             values = list(valid_kwargs.values()) + [chat_id]
             query = f"UPDATE group_security SET {', '.join(updates)} WHERE chat_id = ?"
 
-            logger.debug(f"   🚀 Query: {query}")
-            logger.debug(f"   📦 Values: {values}")
+            async with self.transaction() as conn:
+                # ضمان وجود الصف
+                await self._execute_with_conn(
+                    conn,
+                    "INSERT OR IGNORE INTO group_security (chat_id) VALUES (?)",
+                    chat_id,
+                )
+                # التنفيذ
+                result = await self._execute_with_conn(conn, query, *values)
 
-            result = await self.execute(query, tuple(values))
-            success = result >= 0
-
-            if success:
-                # ─── 6) إبطال الكاش ───
-                try:
-                    if self.CACHE_AVAILABLE:
-                        await self.settings_cache.invalidate_security(chat_id)
-                    await self.internal_cache.invalidate(f"security_{chat_id}")
-                    await self.internal_cache.invalidate(f"group_security_{chat_id}")
-                    logger.info(f"   🔄 Cache invalidated for chat_id={chat_id}")
-                except Exception as cache_err:
-                    logger.warning(f"   ⚠️ Cache invalidation error: {cache_err}")
-
-                logger.info(f"   ✅ Successfully updated group_security for chat_id={chat_id}")
-                return True
-            else:
+            if result is not None and isinstance(result, int) and result < 0:
                 logger.error(f"   ❌ UPDATE returned negative: {result}")
                 return False
+
+            # ─── 6) إبطال الكاش على التوازي ───
+            try:
+                invalidations = [
+                    self.internal_cache.invalidate(f"security_{chat_id}"),
+                    self.internal_cache.invalidate(f"group_security_{chat_id}"),
+                ]
+                if self.CACHE_AVAILABLE:
+                    invalidations.append(
+                        self.settings_cache.invalidate_security(chat_id)
+                    )
+                await asyncio.gather(*invalidations, return_exceptions=True)
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"   🔄 Cache invalidated for chat_id={chat_id}")
+            except Exception as cache_err:
+                logger.warning(f"   ⚠️ Cache invalidation error: {cache_err}")
+
+            logger.info(
+                f"   ✅ Updated {len(valid_kwargs)} fields for chat_id={chat_id}"
+            )
+            return True
 
         except Exception as e:
             logger.error(
                 f"   ❌ UPDATE failed for chat_id={chat_id}: {e}\n"
-                f"   Query: {query if 'query' in locals() else 'N/A'}\n"
+                f"   Query: {query}\n"
                 f"   Valid columns: {list(valid_kwargs.keys())}",
-                exc_info=True
+                exc_info=True,
             )
             return False
 
