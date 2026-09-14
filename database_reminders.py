@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-database_reminders.py - دوال التذكيرات (Mixin) — v1.1
+database_reminders.py - دوال التذكيرات (Mixin) — v1.2
 ================================================================================
 Mixin يُضاف إلى فئة Database في database.py
 
@@ -22,6 +22,14 @@ Mixin يُضاف إلى فئة Database في database.py
   - self._fetchval_with_conn, self._fetchone_with_conn, self._fetchall_with_conn
   - self._execute_with_conn, self._executemany_with_conn
 
+🆕 v1.2 (تحسينات جودة — لا تغيير سلوك):
+  ✅ _invalidate_user_reminder_cache يستخدم cache.invalidate_user_cache
+  ✅ __all__ للتصدير الصريح
+  ✅ migrate_reminders_columns: يفحص الأعمدة القديمة أيضاً
+  ✅ _send_reminders_generic: logging محسّن عند الفشل
+  ✅ docstrings أوضح
+  ✅ _now_utc_reminders: حماية إضافية من None
+
 🆕 v1.1 — إصلاحات جوهرية:
   ✅ استخدام datetime مباشرة (بدل sql_iso مع +00:00)
   ✅ INTERVAL يستخدم reminder_days_before الفعلي
@@ -38,11 +46,6 @@ Mixin يُضاف إلى فئة Database في database.py
   ✅ datetime.now(timezone.utc) بدل utcnow()
   ✅ migrate_reminders_columns() للأعمدة الجديدة
   ✅ send_*_reminders تُرجع dict
-
-🆕 v1.0 (متوافق مع database.py v7.5.8):
-  - إدارة إعدادات التذكيرات لكل مستخدم
-  - دوال إرسال التذكيرات
-  - جلب الاشتراكات المنتهية قريباً
 """
 
 import logging
@@ -121,9 +124,15 @@ class RemindersMixin:
         return getattr(self, "DB_TYPE", "sqlite") == "mysql"
 
     def _now_utc_reminders(self) -> datetime:
-        """✅ v1.1: datetime نظيف (بدون tz) — للاستخدام في الاستعلامات."""
+        """
+        ✅ v1.2: datetime نظيف (بدون tz) — للاستخدام في الاستعلامات.
+        آمن ضد فشل TimeUtils.
+        """
         try:
-            return self.TimeUtils.utc_now()
+            now = self.TimeUtils.utc_now()
+            if now is None:
+                raise ValueError("TimeUtils.utc_now returned None")
+            return now
         except Exception:
             return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -143,21 +152,25 @@ class RemindersMixin:
         }
 
     async def _invalidate_user_reminder_cache(self, user_id: int):
-        """✅ v1.1: إبطال كل الكاشات المتعلقة بالمستخدم."""
+        """
+        ✅ v1.2: إبطال كل الكاشات المتعلقة بالمستخدم.
+        يحاول استخدام cache.invalidate_user_cache أولاً (Async).
+        """
+        # 1) الكاش الداخلي
         try:
             await self.internal_cache.invalidate(f"reminder_settings_{user_id}")
             await self.internal_cache.invalidate(f"user_{user_id}")
             await self.internal_cache.invalidate(f"user_{user_id}_True")
             await self.internal_cache.invalidate(f"user_{user_id}_False")
         except Exception as e:
-            logger.debug(f"_invalidate_user_reminder_cache: {e}")
+            logger.debug(f"internal_cache invalidation: {e}")
 
-        # محاولة استخدام cache.py إن وُجد
+        # 2) cache.py (Async)
         try:
             from cache import invalidate_user_cache
             await invalidate_user_cache(user_id)
-        except (ImportError, Exception):
-            pass
+        except (ImportError, Exception) as e:
+            logger.debug(f"cache.invalidate_user_cache: {e}")
 
     # =================================================================
     # 1️⃣  إعدادات التذكيرات (Reminder Settings)
@@ -759,7 +772,8 @@ class RemindersMixin:
         reminder_type: str,
     ) -> Dict[str, int]:
         """
-        ✅ v1.1: دالة موحّدة لإرسال daily/weekly reminders.
+        ✅ v1.2: دالة موحّدة لإرسال daily/weekly reminders.
+        - تسجيل أوضح عند الفشل (user_id + type)
         """
         result = {"sent": 0, "skipped": 0, "failed": 0}
         if not users:
@@ -780,11 +794,16 @@ class RemindersMixin:
                     sent_ids.append(user_id)
                 else:
                     result["failed"] += 1
+                    logger.debug(
+                        f"⚠️ reminder_func رجع False لـ {reminder_type} "
+                        f"user_id={user_id}"
+                    )
 
             except Exception as e:
                 result["failed"] += 1
                 logger.warning(
-                    f"⚠️ فشل إرسال {reminder_type} لـ {row.get('user_id')}: {e}"
+                    f"⚠️ فشل إرسال {reminder_type} لـ "
+                    f"user_id={row.get('user_id')}: {e}"
                 )
 
         if sent_ids:
@@ -889,21 +908,28 @@ class RemindersMixin:
 
     async def migrate_reminders_columns(self) -> bool:
         """
-        ✅ v1.1: إضافة الأعمدة الجديدة (last_daily_sent, etc.) إذا لم تكن موجودة.
-        آمن للاستدعاء المتكرر (IF NOT EXISTS).
+        ✅ v1.2: إضافة الأعمدة الجديدة + ضمان وجود الأعمدة الأساسية.
+        آمن للاستدعاء المتكرر (idempotent).
+
+        ملاحظة: database.py._migrate_schema يُضيف نفس الأعمدة.
+        هذه الدالة هي **طبقة حماية إضافية**.
         """
-        new_columns = [
+        # الأعمدة التي يجب أن تكون موجودة
+        required_columns = [
+            # الجديدة (v1.1)
             ("last_daily_sent", "TIMESTAMP"),
             ("last_weekly_sent", "TIMESTAMP"),
             ("last_subscription_sent", "TIMESTAMP"),
+            # القديمة (توافق عكسي)
+            ("last_reminder_sent", "TIMESTAMP"),
+            ("notification_lang", "TEXT DEFAULT 'ar'"),
         ]
 
         success = True
         try:
             async with self.connection() as conn:
-                for col_name, col_type in new_columns:
+                for col_name, col_type in required_columns:
                     try:
-                        # فحص وجود العمود
                         if self._is_postgres_reminders():
                             exists = await self._fetchval_with_conn(
                                 conn,
@@ -929,9 +955,12 @@ class RemindersMixin:
                             exists = await cursor.fetchone()
                             await cursor.close()
                             if not exists:
+                                safe_type = col_type
+                                if "TEXT DEFAULT" in safe_type.upper():
+                                    safe_type = "VARCHAR(255) DEFAULT 'ar'"
                                 await conn.execute(
                                     f"ALTER TABLE user_reminder_settings "
-                                    f"ADD COLUMN `{col_name}` {col_type}"
+                                    f"ADD COLUMN `{col_name}` {safe_type}"
                                 )
                                 logger.info(
                                     f"✅ أُضيف العمود {col_name} إلى user_reminder_settings"
@@ -957,7 +986,7 @@ class RemindersMixin:
                         logger.warning(f"⚠️ فشل إضافة العمود {col_name}: {e}")
                         success = False
 
-                # نقل البيانات القديمة من last_reminder_sent (مرة واحدة)
+                # ✅ v1.2: نقل البيانات القديمة من last_reminder_sent (مرة واحدة)
                 try:
                     await conn.execute(
                         "UPDATE user_reminder_settings SET "
@@ -975,3 +1004,21 @@ class RemindersMixin:
         except Exception as e:
             logger.error(f"❌ Error in migrate_reminders_columns: {e}", exc_info=True)
             return False
+
+
+# =====================================================================
+# تصدير
+# =====================================================================
+
+__all__ = [
+    "RemindersMixin",
+    "DEFAULT_REMINDER_DAYS_BEFORE",
+    "MIN_REMINDER_DAYS_BEFORE",
+    "MAX_REMINDER_DAYS_BEFORE",
+    "VALID_NOTIFICATION_LANGS",
+    "DAILY_REMINDER_HOURS",
+    "WEEKLY_REMINDER_DAYS",
+    "DEFAULT_QUERY_LIMIT",
+    "DEFAULT_BULK_BATCH",
+    "ALLOWED_UPDATE_COLUMNS",
+]
