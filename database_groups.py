@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.2)
+database_groups.py - دوال المجموعات (v7.4.3)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -17,36 +17,20 @@ GroupsMixin:
   11. إعدادات العقوبات (Penalty Settings)
   12. المخالفات (Violations)
 
-📌 مطابق 100% للسلوك الأصلي في database.py (بما في ذلك رسائل log)
+🆕 v7.4.3 — إصلاحات:
+  ✅ register_group: transaction() بدل connection() للذرّية
+  ✅ get_user_groups (Postgres): LIMIT 100 للتوافق
+  ✅ update_auto_reply_settings: إزالة updated_at غير المضمون
+  ✅ remove_hidden_admin: يُزيل فقط من hidden_admins (كان يحذف hidden_owner_groups)
+  ✅ add_banned_word: cache invalidation بعد commit (خارج transaction)
+  ✅ get_violation_count: .get() بدل [] لتجنب KeyError
+  ✅ add/remove_hidden_admin: إبطال auth_cache
+  ✅ توثيق كامل للسلوك
 
-🆕 v7.4.2 — تحسينات update_security_settings:
+📌 v7.4.2 — تحسينات update_security_settings:
   - دمج INSERT + UPDATE في معاملة واحدة
   - إبطال الكاش على التوازي (asyncio.gather)
-  - Logging مختصر: القوائم الكاملة على DEBUG فقط
-  - توفير ~1 ثانية لكل ضغطة زر
-
-📌 يفترض أن الـ Database يوفّر:
-  - self.fetchone / self.fetchall / self.fetchval / self.execute
-  - self.transaction() / self.connection()
-  - self._fetchone_with_conn / self._fetchall_with_conn /
-    self._fetchval_with_conn / self._execute_with_conn /
-    self._executemany_with_conn
-  - self._get_group_lock
-  - self.TimeUtils
-  - self.internal_cache
-  - self.CACHE_AVAILABLE
-  - self.banned_words_cache / self.settings_cache /
-    self.groups_cache / self.auth_cache
-  - self.CONFIG / self.PATHS
-  - self.COLUMN_ALIASES
-  - self.VALID_VIOLATION_TYPES / self.VALID_PENALTY_TYPES /
-    self.VALID_REPLY_TYPES / self.MAX_PENALTY_DURATION
-  - self._group_security_columns_cache
-  - self._banned_words_local_cache / self._banned_words_cache_ttl /
-    self._global_banned_words_cache / self._global_banned_words_loaded /
-    self._global_words_lock
-  - self.USE_POSTGRES / self.USE_MYSQL / self.DB_TYPE
-  - self._lock
+  - Logging مختصر
 ================================================================================
 """
 
@@ -94,8 +78,12 @@ class GroupsMixin:
 
     async def register_group(self, chat_id: int, chat_name: str, user_id: int,
                               username: str = None) -> bool:
+        """
+        ✅ v7.4.3: transaction() بدل connection() لضمان الذرّية
+        (كان يمكن أن يُسجَّل bot_groups دون user_groups_link لو فشل الثاني)
+        """
         try:
-            async with self.connection() as conn:
+            async with self.transaction() as conn:
                 if self.USE_POSTGRES:
                     await self._execute_with_conn(
                         conn,
@@ -146,10 +134,10 @@ class GroupsMixin:
                         "INSERT OR IGNORE INTO user_groups_link (user_id, chat_id) VALUES (?,?)",
                         user_id, chat_id,
                     )
-                logger.info(f"✅ تم تسجيل المجموعة {chat_id} بواسطة المستخدم {user_id}")
-                if self.CACHE_AVAILABLE:
-                    await self.groups_cache.invalidate(user_id)
-                await self.internal_cache.invalidate(f"groups_{user_id}")
+            logger.info(f"✅ تم تسجيل المجموعة {chat_id} بواسطة المستخدم {user_id}")
+            if self.CACHE_AVAILABLE:
+                await self.groups_cache.invalidate(user_id)
+            await self.internal_cache.invalidate(f"groups_{user_id}")
             return True
         except Exception as e:
             logger.error(f"❌ Error in register_group: {e}", exc_info=True)
@@ -165,6 +153,7 @@ class GroupsMixin:
             return cached
 
         if self.USE_POSTGRES:
+            # ✅ v7.4.3: LIMIT 100 (كان مفقوداً في Postgres)
             query = """
                 SELECT DISTINCT chat_id, chat_name, username, banned
                 FROM (
@@ -189,7 +178,7 @@ class GroupsMixin:
                     SELECT bg.chat_id, bg.chat_name, bg.username, bg.banned
                     FROM bot_groups bg JOIN anonymous_admins aa ON bg.chat_id = aa.chat_id
                     WHERE aa.user_id = $1 OR aa.anonymous_id = $1
-                ) AS groups ORDER BY chat_id
+                ) AS groups ORDER BY chat_id LIMIT 100
             """
             groups = await self.fetchall(query, (user_id,))
         else:
@@ -287,23 +276,36 @@ class GroupsMixin:
     # =====================================================================
 
     async def add_hidden_admin(self, chat_id: int, admin_id: int, added_by: int) -> bool:
-        return await self.execute(
-            "INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, added_at) VALUES (?,?,?,?)",
-            (chat_id, admin_id, added_by, self.TimeUtils.utc_now()),
-        ) > 0
+        """
+        ✅ v7.4.3: إبطال auth_cache بعد الإضافة
+        (كان المُستخدم يحتاج انتظار TTL لكاش الصلاحيات)
+        """
+        try:
+            result = await self.execute(
+                "INSERT OR IGNORE INTO hidden_admins (chat_id, admin_id, added_by, added_at) VALUES (?,?,?,?)",
+                (chat_id, admin_id, added_by, self.TimeUtils.utc_now()),
+            ) > 0
+            if result and self.CACHE_AVAILABLE:
+                await self.auth_cache.invalidate(chat_id, admin_id)
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error in add_hidden_admin: {e}", exc_info=True)
+            return False
 
     async def remove_hidden_admin(self, chat_id: int, admin_id: int) -> bool:
+        """
+        ✅ v7.4.3: يُزيل فقط من hidden_admins
+        (كان يحذف أيضاً من hidden_owner_groups — وهو خطأ لأن المالك والمشرف دورين مختلفين)
+        """
         try:
-            async with self.transaction() as conn:
-                await self._execute_with_conn(
-                    conn, "DELETE FROM hidden_owner_groups WHERE chat_id = ? AND owner_id = ?",
-                    chat_id, admin_id,
-                )
-                await self._execute_with_conn(
+            async with self.connection() as conn:
+                deleted = await self._execute_with_conn(
                     conn, "DELETE FROM hidden_admins WHERE chat_id = ? AND admin_id = ?",
                     chat_id, admin_id,
                 )
-            return True
+            if deleted > 0 and self.CACHE_AVAILABLE:
+                await self.auth_cache.invalidate(chat_id, admin_id)
+            return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_hidden_admin: {e}", exc_info=True)
             return False
@@ -320,10 +322,17 @@ class GroupsMixin:
 
     async def add_anonymous_admin(self, chat_id: int, anonymous_id: int,
                                    added_by: int = None, user_id: int = None) -> bool:
-        return await self.execute(
-            "INSERT OR IGNORE INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at) VALUES (?,?,?,?,?)",
-            (chat_id, anonymous_id, added_by, user_id, self.TimeUtils.utc_now()),
-        ) > 0
+        try:
+            result = await self.execute(
+                "INSERT OR IGNORE INTO anonymous_admins (chat_id, anonymous_id, added_by, user_id, added_at) VALUES (?,?,?,?,?)",
+                (chat_id, anonymous_id, added_by, user_id, self.TimeUtils.utc_now()),
+            ) > 0
+            if result and self.CACHE_AVAILABLE:
+                await self.auth_cache.invalidate(chat_id)
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error in add_anonymous_admin: {e}", exc_info=True)
+            return False
 
     async def remove_anonymous_admin(self, chat_id: int, anonymous_id: int) -> bool:
         try:
@@ -332,7 +341,9 @@ class GroupsMixin:
                     conn, "DELETE FROM anonymous_admins WHERE chat_id = ? AND anonymous_id = ?",
                     chat_id, anonymous_id,
                 )
-                return deleted > 0
+            if deleted > 0 and self.CACHE_AVAILABLE:
+                await self.auth_cache.invalidate(chat_id)
+            return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_anonymous_admin: {e}", exc_info=True)
             return False
@@ -463,7 +474,7 @@ class GroupsMixin:
 
     async def update_security_settings(self, chat_id: int, **kwargs) -> bool:
         """
-        نسخة محصّنة ومحسّنة (v7.4.2):
+        نسخة محصّنة ومحسّنة (v7.4.3):
         - معالجة مرادفات شاملة
         - التحقق من الأعمدة الفعلية في الجدول (runtime check + cache)
         - دمج INSERT + UPDATE في معاملة واحدة (توفير roundtrip)
@@ -501,7 +512,7 @@ class GroupsMixin:
             else:
                 skipped_keys.append(key)
 
-        # ─── 4) Logging مختصر (القوائم الكاملة على DEBUG) ───
+        # ─── 4) Logging مختصر ───
         summary = (
             f"🔧 update_security_settings chat={chat_id} | "
             f"{len(valid_kwargs)} valid"
@@ -641,16 +652,20 @@ class GroupsMixin:
         return settings if settings else {"enabled": 0, "only_admins": 0, "ignore_bots": 1}
 
     async def update_auto_reply_settings(self, chat_id: int, **kwargs) -> bool:
+        """
+        ✅ v7.4.3: أُزيل `updated_at` — غير مضمون في المخطط
+        (كان يسبب فشل UPDATE على قواعد بيانات ليس فيها العمود)
+        """
         if not kwargs:
             return False
         await self.execute("INSERT OR IGNORE INTO auto_reply_settings (chat_id) VALUES (?)", (chat_id,))
-        allowed_columns = {"enabled", "only_admins", "ignore_bots", "updated_at"}
+
+        allowed_columns = {"enabled", "only_admins", "ignore_bots"}
         for key in kwargs:
             if key not in allowed_columns:
                 logger.error(f"❌ Invalid column: {key}")
                 return False
-        if "updated_at" not in kwargs:
-            kwargs["updated_at"] = self.TimeUtils.utc_now()
+
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [chat_id]
         query = f"UPDATE auto_reply_settings SET {', '.join(updates)} WHERE chat_id = ?"
@@ -847,10 +862,15 @@ class GroupsMixin:
 
     async def add_banned_word(self, word: str, chat_id: int,
                                added_by: int) -> Tuple[bool, bool]:
+        """
+        ✅ v7.4.3: cache invalidation بعد commit (خارج transaction)
+        (كان يُبطل الكاش داخل transaction — قد يُبطل كاش بدون commit)
+        """
         try:
             word = word.strip().lower()
             if not word:
                 return False, False
+
             async with self.transaction() as conn:
                 if chat_id == -1:
                     count = await self._fetchval_with_conn(
@@ -877,14 +897,16 @@ class GroupsMixin:
                             "INSERT INTO banned_words (word, chat_id, added_by, added_at) VALUES (?,?,?,?)",
                             word, chat_id, added_by, self.TimeUtils.sql_iso(),
                         )
-                    await self._invalidate_banned_words_local_cache(chat_id)
-                    if self.CACHE_AVAILABLE:
-                        await self.banned_words_cache.invalidate(chat_id)
-                    return True, False
                 except Exception as e:
                     if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                         return False, True
                     raise
+
+            # ✅ v7.4.3: بعد commit
+            await self._invalidate_banned_words_local_cache(chat_id)
+            if self.CACHE_AVAILABLE:
+                await self.banned_words_cache.invalidate(chat_id)
+            return True, False
         except Exception as e:
             logger.error(f"❌ Error in add_banned_word: {e}", exc_info=True)
             return False, False
@@ -897,11 +919,11 @@ class GroupsMixin:
                     conn, "DELETE FROM banned_words WHERE word = ? AND chat_id = ?",
                     word, chat_id
                 )
-                if deleted > 0:
-                    await self._invalidate_banned_words_local_cache(chat_id)
-                    if self.CACHE_AVAILABLE:
-                        await self.banned_words_cache.invalidate(chat_id)
-                return deleted > 0
+            if deleted > 0:
+                await self._invalidate_banned_words_local_cache(chat_id)
+                if self.CACHE_AVAILABLE:
+                    await self.banned_words_cache.invalidate(chat_id)
+            return deleted > 0
         except Exception as e:
             logger.error(f"❌ Error in remove_banned_word: {e}", exc_info=True)
             return False
@@ -915,9 +937,9 @@ class GroupsMixin:
             if not BANNED_WORDS:
                 return True
             owner_id = getattr(self.CONFIG, "PRIMARY_OWNER_ID", None) or 1
+            words_to_insert = []
             async with self.transaction() as conn:
                 await self._execute_with_conn(conn, "DELETE FROM banned_words WHERE chat_id = -1")
-                words_to_insert = []
                 for word in BANNED_WORDS:
                     word = str(word).strip().lower()
                     if len(word) >= 2:
@@ -1024,21 +1046,26 @@ class GroupsMixin:
         return result
 
     async def get_violation_count(self, user_id: int, chat_id: int) -> int:
+        """
+        ✅ v7.4.3: .get() بدل [] لتجنب KeyError
+        """
         violation = await self.fetchone(
             "SELECT violation_count, last_violation_time FROM user_violations WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id),
         )
         if not violation:
             return 0
-        last_time = self.TimeUtils.safe_parse_iso(violation["last_violation_time"])
-        if last_time:
-            if self.TimeUtils.utc_now() - last_time > timedelta(hours=24):
+
+        last_time_str = violation.get("last_violation_time")
+        if last_time_str:
+            last_time = self.TimeUtils.safe_parse_iso(last_time_str)
+            if last_time and self.TimeUtils.utc_now() - last_time > timedelta(hours=24):
                 await self.execute(
                     "UPDATE user_violations SET violation_count = 0 WHERE user_id = ? AND chat_id = ?",
                     (user_id, chat_id),
                 )
                 return 0
-        return violation["violation_count"]
+        return violation.get("violation_count", 0) or 0
 
     async def increment_violation_count(self, user_id: int, chat_id: int) -> int:
         async with self._lock:
