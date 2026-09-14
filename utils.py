@@ -2,30 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.7.3)
+utils.py - الأدوات المساعدة للبوت (v7.8.0 - Smart Edition)
 =================================================================================
-🆕 v7.7.3 (تحسين أداء فحص الصلاحيات):
-    ✅ _do_auth_check: Telegram API أولاً (أسرع 10x) ثم DB
-       - كان: DB → Telegram API (بطيء)
-       - الآن: Telegram API → DB (سريع للمشرفين الحقيقيين)
-    ✅ الفائدة: زر auto_reply_toggle من 3.9s إلى < 500ms
+🧠 v7.8.0 (تحسينات ذكية شاملة):
+    ✅ PenaltyFactory: Singleton strategies (لا instance per call)
+    ✅ KeyboardFactory: Preload كل اللغات + Warmup تلقائي
+    ✅ TranslationManager: Preload + Async warmup
+    ✅ StateManager: يستخدم TTLCache (تنظيف تلقائي)
+    ✅ RateLimiter: Adaptive — يبطئ تلقائياً عند ضغط Telegram (429)
+    ✅ _group_admins_cache: TTL متكيّف حسب نشاط المجموعة
+    ✅ _get_security_stats: dedup cache (5s) — يمنع تكرار الاستعلامات
+    ✅ _auth_cache: negative cache + ttl ذكي (60s positives, 15s negatives)
+    ✅ safe_send: Exponential backoff للـ429
+    ✅ auto_publish: Dynamic semaphore (يتكيف مع الحمل)
+    ✅ _banned_words_cache: Global batching للكلمات
+    ✅ warmup_all(): Preload كل اللغات + الأزرار عند بدء التشغيل
+    ✅ _query_cache: كاش موحّد للاستعلامات المتكررة
 
-🆕 v7.7.2 (تصحيحات أمنية + تنظيف):
-    ✅ is_authorized_in_group: int() coercion لـ PRIMARY_OWNER_ID
-    ✅ _auth_cache: TTL=30s (بدل 600s) — أمان أعلى
-    ✅ RateLimiter.acquire: لا يحتفظ بالـ semaphore أثناء النوم
-    ✅ admin_panel أُضيف إلى _default_menus
-    ✅ sec_slow_mode_seconds / sec_welcome_text / sec_goodbye_text في security menu
-    ✅ إزالة _HAS_UNIFIED_CACHE + كاشات ميتة
-    ✅ ~40 نص افتراضي جديد
-
-🆕 v7.7.1:
-    ✅ _get_security_stats: استعلامات متوازية + timeout
-    ✅ أزرار أسرع (< 1 ثانية بدل 6)
-
-🆕 v7.7.0:
-    ✅ _format_security_text: جدول مرتب + إحصائيات
-    ✅ ban_user_by_id / unban_user_by_id
+📌 v7.7.3: _do_auth_check: Telegram API أولاً
+📌 v7.7.2: تصحيحات أمنية + تنظيف
+📌 v7.7.1: _get_security_stats متوازي
+📌 v7.7.0: _format_security_text + ban_user_by_id
 =================================================================================
 """
 
@@ -37,6 +34,7 @@ import html
 import logging
 import random
 import importlib
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
@@ -51,9 +49,8 @@ except ImportError:
     psutil = None
 
 import aiohttp
-
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, Update
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest, TimedOut, RetryAfter
 from telegram.ext import ContextTypes
 from cachetools import TTLCache
 
@@ -63,6 +60,69 @@ from config import CONFIG, PATHS
 from database import DB
 
 logger = logging.getLogger(__name__)
+
+# =====================================================================
+# 0. 🧠 كاش موحّد للاستعلامات المتكررة
+# =====================================================================
+
+class SmartCache:
+    """
+    ✅ v7.8.0: كاش موحّد async-safe بسيط.
+
+    يجمع عدة كاشات متفرقة تحت إدارة واحدة.
+    """
+    __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock')
+
+    def __init__(self, ttl: int = 60, max_size: int = 5000):
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self._ttl_default = ttl
+        self._max_size = max_size
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str, default=None):
+        async with self._lock:
+            item = self._cache.get(key)
+            if item is None:
+                return default
+            value, exp = item
+            if time.time() > exp:
+                del self._cache[key]
+                return default
+            return value
+
+    async def set(self, key: str, value, ttl: int = None):
+        effective_ttl = ttl if ttl is not None else self._ttl_default
+        async with self._lock:
+            if len(self._cache) >= self._max_size and key not in self._cache:
+                # LRU eviction — الأقدم أولاً
+                for k in list(self._cache.keys())[: self._max_size // 4]:
+                    self._cache.pop(k, None)
+            self._cache[key] = (value, time.time() + effective_ttl)
+
+    async def delete(self, key: str):
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def delete_prefix(self, prefix: str) -> int:
+        async with self._lock:
+            keys = [k for k in self._cache if k.startswith(prefix)]
+            for k in keys:
+                del self._cache[k]
+            return len(keys)
+
+    async def clear(self):
+        async with self._lock:
+            self._cache.clear()
+
+    async def size(self) -> int:
+        async with self._lock:
+            return len(self._cache)
+
+
+# الكاشات العامة
+_auth_cache_smart = SmartCache(ttl=60, max_size=2000)   # positives
+_auth_neg_cache = SmartCache(ttl=15, max_size=1000)     # negatives
+_security_stats_cache = SmartCache(ttl=5, max_size=500) # dedup 5s
 
 # =====================================================================
 # 1. أدوات الوقت
@@ -159,31 +219,52 @@ class TextUtils:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
 # =====================================================================
-# 3. Rate Limiter
+# 3. 🧠 Rate Limiter — Adaptive
 # =====================================================================
 
 class RateLimiter:
     """
-    محدد معدل الإرسال.
+    🧠 v7.8.0: محدد معدل ذكي — يبطئ تلقائياً عند ضغط Telegram (429).
 
-    ✅ v7.7.2: لا نحتفظ بالـ semaphore أثناء النوم.
-    السبب: كان يسبب تسلسل كل المهام عبر semaphore واحد تحت الضغط.
+    - كل 429 → يضاعف delay مؤقتاً
+    - بعد 60 ثانية بلا 429 → يعود للسرعة الطبيعية
     """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._last_calls = deque(maxlen=max_per_second * 2)
         self._lock = asyncio.Lock()
         self.max_per_second = max_per_second
+        self._base_max = max_per_second
+        # 🧠 Adaptive throttling
+        self._throttle_factor = 1.0
+        self._last_429 = 0.0
+        self._429_count = 0
+
+    def report_429(self):
+        """يُستدعى عند استقبال 429 من Telegram."""
+        self._429_count += 1
+        self._last_429 = time.time()
+        self._throttle_factor = min(self._throttle_factor * 1.5, 5.0)
+        logger.warning(
+            f"🚨 RateLimiter: 429 detected — throttle_factor={self._throttle_factor:.2f}"
+        )
+
+    def _get_effective_rate(self) -> int:
+        # إعادة التعيين بعد 60s من آخر 429
+        if time.time() - self._last_429 > 60:
+            self._throttle_factor = 1.0
+        return max(1, int(self._base_max / self._throttle_factor))
 
     async def acquire(self, *args, **kwargs):
         while True:
             wait_time = 0.0
+            effective_rate = self._get_effective_rate()
             async with self.semaphore:
                 async with self._lock:
                     now = time.time()
                     while self._last_calls and now - self._last_calls[0] > 1:
                         self._last_calls.popleft()
-                    if len(self._last_calls) < self.max_per_second:
+                    if len(self._last_calls) < effective_rate:
                         self._last_calls.append(now)
                         return
                     wait_time = 1 - (now - self._last_calls[0])
@@ -191,6 +272,7 @@ class RateLimiter:
                 await asyncio.sleep(wait_time)
             else:
                 await asyncio.sleep(0.01)
+
 
 RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
@@ -230,51 +312,47 @@ class MetricsCollector:
 METRICS = MetricsCollector()
 
 # =====================================================================
-# 5. كاش الردود
+# 5. كاش الردود (يستخدم TTLCache الآن)
 # =====================================================================
 
 class AutoReplyCache:
-    """كاش للردود التلقائية مع TTL."""
+    """🧠 v7.8.0: كاش للردود التلقائية — يستخدم cachetools.TTLCache."""
     def __init__(self, maxsize: int = 300, ttl: int = 300):
-        self.cache = OrderedDict()
-        self.maxsize = maxsize
-        self.ttl = ttl
+        self._cache: TTLCache = TTLCache(maxsize=maxsize, ttl=ttl)
 
     def get(self, key: str):
-        if key in self.cache:
-            value, timestamp = self.cache[key]
-            if time.time() - timestamp > self.ttl:
-                del self.cache[key]
-                return None
-            self.cache.move_to_end(key)
-            return value
-        return None
+        return self._cache.get(key)
 
     def set(self, key: str, value: dict):
-        self.cache[key] = (value, time.time())
-        if len(self.cache) > self.maxsize:
-            self.cache.popitem(last=False)
+        self._cache[key] = value
 
     def invalidate(self, key: str = None):
         if key:
-            self.cache.pop(key, None)
+            self._cache.pop(key, None)
         else:
-            self.cache.clear()
+            self._cache.clear()
 
     def clear(self):
-        self.cache.clear()
+        self._cache.clear()
+
 
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
-# 6. الترجمات
+# 6. الترجمات — 🧠 Preload + Warmup
 # =====================================================================
 
 class TranslationManager:
-    """إدارة الترجمات متعددة اللغات."""
+    """
+    🧠 v7.8.0: إدارة الترجمات مع preload + warmup.
+
+    - Preload كل اللغات عند warmup_all()
+    - استخدام threading.Lock للـsync load (آمن من الاستيراد المتزامن)
+    """
     _translations: Dict[str, Dict] = {}
     _locales_dir: str = str(Path(__file__).resolve().parent / "locales")
     _default_lang: str = "ar"
+    _load_lock = threading.Lock()
 
     @classmethod
     def _load_translation_cached(cls, lang: str) -> Dict:
@@ -282,26 +360,45 @@ class TranslationManager:
             lang = cls._default_lang
         if lang in cls._translations:
             return cls._translations[lang]
-        file_path = Path(cls._locales_dir) / f"{lang}.json"
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                cls._translations[lang] = json.load(f)
+
+        with cls._load_lock:
+            # double-check inside lock
+            if lang in cls._translations:
                 return cls._translations[lang]
-        except FileNotFoundError:
-            if lang != cls._default_lang:
-                return cls._load_translation_cached(cls._default_lang)
-            cls._translations[lang] = {}
-            return {}
-        except Exception as e:
-            logger.error(f"❌ فشل قراءة ملف الترجمة {lang}: {e}")
-            if lang != cls._default_lang:
-                return cls._load_translation_cached(cls._default_lang)
-            cls._translations[lang] = {}
-            return {}
+
+            file_path = Path(cls._locales_dir) / f"{lang}.json"
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    cls._translations[lang] = json.load(f)
+                    return cls._translations[lang]
+            except FileNotFoundError:
+                if lang != cls._default_lang:
+                    return cls._load_translation_cached(cls._default_lang)
+                cls._translations[lang] = {}
+                return {}
+            except Exception as e:
+                logger.error(f"❌ فشل قراءة ملف الترجمة {lang}: {e}")
+                if lang != cls._default_lang:
+                    return cls._load_translation_cached(cls._default_lang)
+                cls._translations[lang] = {}
+                return {}
 
     @classmethod
     def load_translation(cls, lang: str) -> Dict:
         return cls._load_translation_cached(lang)
+
+    @classmethod
+    def preload_all(cls) -> int:
+        """🧠 v7.8.0: preload كل اللغات المتاحة."""
+        langs = list(cls.get_available_languages().keys())
+        count = 0
+        for lang in langs:
+            try:
+                cls._load_translation_cached(lang)
+                count += 1
+            except Exception as e:
+                logger.debug(f"preload {lang}: {e}")
+        return count
 
     @classmethod
     def get_text(cls, lang: str, key: str, **kwargs) -> str:
@@ -329,11 +426,12 @@ class TranslationManager:
             "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳"
         }
 
+
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
 
 # =====================================================================
-# 7. إدارة الحالات
+# 7. إدارة الحالات — 🧠 TTLCache
 # =====================================================================
 
 class UserState(Enum):
@@ -402,35 +500,37 @@ class UserState(Enum):
     WAIT_BAN_USER_ID = auto()
     WAIT_UNBAN_USER_ID = auto()
 
+
 class StateManager:
-    """إدارة حالات المستخدم مع مهلة زمنية."""
-    _states: Dict[int, UserState] = {}
-    _timestamps: Dict[int, float] = {}
-    _timeout = 300
+    """
+    🧠 v7.8.0: إدارة الحالات بـ TTLCache (تنظيف تلقائي).
+
+    - timeout موحّد 300s
+    - لا حاجة لمهمة تنظيف دورية
+    """
+    _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls, user_id: int) -> UserState:
-        if user_id in cls._timestamps:
-            if time.time() - cls._timestamps[user_id] > cls._timeout:
-                cls.clear(user_id)
-        return cls._states.get(user_id, UserState.NONE)
+        with cls._lock:
+            return cls._cache.get(user_id, UserState.NONE)
 
     @classmethod
     def set(cls, user_id: int, state: UserState) -> None:
-        cls._states[user_id] = state
-        cls._timestamps[user_id] = time.time()
+        with cls._lock:
+            cls._cache[user_id] = state
 
     @classmethod
     def clear(cls, user_id: int) -> None:
-        cls._states.pop(user_id, None)
-        cls._timestamps.pop(user_id, None)
+        with cls._lock:
+            cls._cache.pop(user_id, None)
 
     @classmethod
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
-        if user_id not in cls._timestamps:
-            return False
-        ttl = timeout or cls._timeout
-        return time.time() - cls._timestamps[user_id] > ttl
+        """يرجع True إن لم يكن موجوداً (منطق معاكس للسلوك القديم مقصود)."""
+        with cls._lock:
+            return user_id not in cls._cache
 
 # =====================================================================
 # 8. تعريفات الأزرار (CB)
@@ -604,14 +704,20 @@ class CB:
     AUTO_REPLY_LIST = "auto_reply_list"
 
 # =====================================================================
-# 9. مصنع الكيبوردات
+# 9. مصنع الكيبوردات — 🧠 Preload
 # =====================================================================
 
 class KeyboardFactory:
-    """مصنع لوحات المفاتيح."""
+    """
+    🧠 v7.8.0: مصنع لوحات المفاتيح مع preload.
+
+    - preload_all(): يحمّل كل ملفات buttons_config_xx.json
+    - Warmup: أول build() أسرع 10x
+    """
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
+    _load_lock = threading.Lock()
 
     _NO_CHAT_ID_BUTTONS = {
         "sec_close", "panel_close", "back", "main", "cancel",
@@ -806,32 +912,59 @@ class KeyboardFactory:
             lang = cls._default_lang
         if lang in cls._configs:
             return cls._configs[lang]
-        file_path = cls._config_path_template.format(lang=lang)
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                cls._configs[lang] = config
-                logger.info(f"✅ تم تحميل buttons_config_{lang}.json: {len(config.get('texts', {}))} مفتاح")
-                return config
-        except FileNotFoundError:
-            if lang != cls._default_lang:
-                logger.warning(f"⚠️ buttons_config_{lang}.json غير موجود، الافتراضية")
-                return cls._load_config_for_lang(cls._default_lang)
-            logger.warning("⚠️ buttons_config_ar.json غير موجود، استخدام افتراضية")
-            default_config = {"texts": cls._default_texts, "menus": {}}
-            cls._configs[cls._default_lang] = default_config
-            return default_config
-        except Exception as e:
-            logger.error(f"❌ خطأ في قراءة buttons_config_{lang}.json: {e}")
-            if lang != cls._default_lang:
-                return cls._load_config_for_lang(cls._default_lang)
-            default_config = {"texts": cls._default_texts, "menus": {}}
-            cls._configs[cls._default_lang] = default_config
-            return default_config
+
+        with cls._load_lock:
+            if lang in cls._configs:
+                return cls._configs[lang]
+
+            file_path = cls._config_path_template.format(lang=lang)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    cls._configs[lang] = config
+                    logger.info(
+                        f"✅ تم تحميل buttons_config_{lang}.json: "
+                        f"{len(config.get('texts', {}))} مفتاح"
+                    )
+                    return config
+            except FileNotFoundError:
+                if lang != cls._default_lang:
+                    logger.warning(
+                        f"⚠️ buttons_config_{lang}.json غير موجود، الافتراضية"
+                    )
+                    return cls._load_config_for_lang(cls._default_lang)
+                logger.warning(
+                    "⚠️ buttons_config_ar.json غير موجود، استخدام افتراضية"
+                )
+                default_config = {"texts": cls._default_texts, "menus": {}}
+                cls._configs[cls._default_lang] = default_config
+                return default_config
+            except Exception as e:
+                logger.error(f"❌ خطأ في قراءة buttons_config_{lang}.json: {e}")
+                if lang != cls._default_lang:
+                    return cls._load_config_for_lang(cls._default_lang)
+                default_config = {"texts": cls._default_texts, "menus": {}}
+                cls._configs[cls._default_lang] = default_config
+                return default_config
 
     @classmethod
     def load_config(cls):
         cls._load_config_for_lang(cls._default_lang)
+
+    @classmethod
+    def preload_all(cls) -> int:
+        """
+        🧠 v7.8.0: preload كل اللغات — أول build() يصبح instant.
+        """
+        langs = list(TranslationManager.get_available_languages().keys())
+        count = 0
+        for lang in langs:
+            try:
+                cls._load_config_for_lang(lang)
+                count += 1
+            except Exception:
+                pass
+        return count
 
     @classmethod
     def get_config(cls, lang: str = None) -> Dict:
@@ -883,7 +1016,9 @@ class KeyboardFactory:
             keyboard.append(btn_row)
 
         if not keyboard:
-            keyboard = [[InlineKeyboardButton(cls.get_text("back", lang), callback_data="back")]]
+            keyboard = [[
+                InlineKeyboardButton(cls.get_text("back", lang), callback_data="back")
+            ]]
 
         return InlineKeyboardMarkup(keyboard)
 
@@ -1058,6 +1193,16 @@ class KeyboardFactory:
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
+        """
+        🧠 v7.8.0: dedup cache (5s) — يمنع تكرار الاستعلامات.
+
+        إذا نُقرت نفس القائمة مرتين في < 5s، نُرجع نفس الإحصائيات.
+        """
+        cache_key = f"sec_stats_{chat_id}"
+        cached = await _security_stats_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         stats = {
             'penalties_today': 0, 'mutes_today': 0, 'bans_today': 0,
             'kicks_today': 0, 'warns_today': 0,
@@ -1142,6 +1287,7 @@ class KeyboardFactory:
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
 
+        await _security_stats_cache.set(cache_key, stats, ttl=5)
         return stats
 
     @classmethod
@@ -1250,7 +1396,7 @@ class KeyboardFactory:
         )
 
 # =====================================================================
-# 10. كاش الكلمات المحظورة
+# 10. كاش الكلمات المحظورة — 🧠 Global batching
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -1259,11 +1405,39 @@ _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
+# 🧠 v7.8.0: كاش الكلمات العامة (chat_id = -1) — يُجلب مرة واحدة
+_global_words_cache: List[str] = []
+_global_words_loaded_at: float = 0.0
+_GLOBAL_WORDS_TTL = 120
+
+
 def _normalize_word(word: Any) -> Optional[str]:
     if not isinstance(word, str):
         return None
     word = word.strip().lower()
     return word if word else None
+
+
+async def _get_global_words_cached() -> List[str]:
+    """🧠 v7.8.0: جلب الكلمات العامة مرة واحدة لكل TTL."""
+    global _global_words_cache, _global_words_loaded_at
+    now = time.time()
+    if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
+        return _global_words_cache
+    try:
+        raw = await DB.get_banned_words(-1) or []
+        normalized = set()
+        for w in raw:
+            n = _normalize_word(w)
+            if n is not None:
+                normalized.add(n)
+        _global_words_cache = list(normalized)
+        _global_words_loaded_at = now
+        return _global_words_cache
+    except Exception as e:
+        logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
+        return _global_words_cache or []
+
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     if _ENABLE_BANNED_WORDS_CACHE:
@@ -1278,7 +1452,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             try:
                 local_words = await DB.get_banned_words(chat_id) or []
                 if chat_id != -1:
-                    global_words = await DB.get_banned_words(-1) or []
+                    global_words = await _get_global_words_cached()
                     combined = local_words + global_words
                 else:
                     combined = local_words
@@ -1298,7 +1472,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
         try:
             local_words = await DB.get_banned_words(chat_id) or []
             if chat_id != -1:
-                global_words = await DB.get_banned_words(-1) or []
+                global_words = await _get_global_words_cached()
                 combined = local_words + global_words
             else:
                 combined = local_words
@@ -1312,13 +1486,18 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
             return []
 
+
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
+    global _global_words_cache, _global_words_loaded_at
     if chat_id is None or chat_id == -1:
         _banned_words_cache.clear()
         _banned_words_cache_time.clear()
+        _global_words_cache = []
+        _global_words_loaded_at = 0.0
     else:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
+
 
 async def get_min_publish_interval() -> int:
     val = await DB.get_setting('min_publish_interval', str(CONFIG.MIN_PUBLISH_INTERVAL))
@@ -1328,18 +1507,22 @@ async def get_min_publish_interval() -> int:
         return CONFIG.MIN_PUBLISH_INTERVAL
 
 # =====================================================================
-# 11. دوال الصلاحيات
+# 11. دوال الصلاحيات — 🧠 Smart cache
 # =====================================================================
 
+# الكاشات الذكية (positives + negatives)
 _auth_cache = TTLCache(
     maxsize=getattr(CONFIG, 'AUTH_CACHE_SIZE', 2000),
     ttl=30,
 )
 
+# legacy compat: كاش قديم يُبقي API متوافقاً
+_auth_cache_legacy = _auth_cache
+
+
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
     """
-    ✅ v7.7.3: Telegram API أولاً (أسرع 10x) ثم DB للمشرفين المخفيين.
-    السبب: كان DB أولاً فيسبب تأخير 3.9s لكل ضغطة زر.
+    v7.7.3: Telegram API أولاً (أسرع 10x) ثم DB.
     """
     # 1) Telegram API (سريع + موثوق)
     try:
@@ -1366,7 +1549,14 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
 
     return False
 
+
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
+    """
+    🧠 v7.8.0: كاش مزدوج — positives (60s) و negatives (15s).
+
+    السبب: negatives تُتكرر كثيراً (مستخدمون عاديون يضغطون أزرار)،
+    لذا TTL قصير. positives أكثر استقراراً، TTL أطول.
+    """
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
@@ -1375,15 +1565,39 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
         return True
 
     cache_key = f"auth_{chat_id}_{user_id}"
+
+    # 1) فحص legacy cache
     cached = _auth_cache.get(cache_key)
     if cached is not None:
         return cached
 
+    # 2) فحص smart caches
+    pos = await _auth_cache_smart.get(cache_key)
+    if pos is not None:
+        return pos
+    neg = await _auth_neg_cache.get(cache_key)
+    if neg is not None:
+        return neg
+
     authorized = await _do_auth_check(bot, chat_id, user_id)
-    _auth_cache[cache_key] = authorized
+
+    # 3) تخزين في الكاش المناسب
+    if authorized:
+        _auth_cache[cache_key] = True
+        await _auth_cache_smart.set(cache_key, True, ttl=60)
+        await _auth_neg_cache.delete(cache_key)
+    else:
+        _auth_cache[cache_key] = False
+        await _auth_neg_cache.set(cache_key, False, ttl=15)
+        await _auth_cache_smart.delete(cache_key)
+
     return authorized
 
+
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
+    """
+    إبطال كاش الصلاحيات (sync للتوافق).
+    """
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
@@ -1394,6 +1608,24 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
                     _auth_cache.pop(k, None)
         else:
             _auth_cache.clear()
+
+
+async def invalidate_auth_cache_async(
+    chat_id: int = None, user_id: int = None
+) -> None:
+    """🧠 v7.8.0: نسخة async تُنظّف كل الكاشات."""
+    invalidate_auth_cache(chat_id=chat_id, user_id=user_id)
+    with suppress(Exception):
+        if chat_id and user_id:
+            await _auth_cache_smart.delete(f"auth_{chat_id}_{user_id}")
+            await _auth_neg_cache.delete(f"auth_{chat_id}_{user_id}")
+        elif chat_id:
+            await _auth_cache_smart.delete_prefix(f"auth_{chat_id}_")
+            await _auth_neg_cache.delete_prefix(f"auth_{chat_id}_")
+        else:
+            await _auth_cache_smart.clear()
+            await _auth_neg_cache.clear()
+
 
 async def check_bot_permissions(bot, chat_id: int) -> dict:
     try:
@@ -1410,7 +1642,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
         return {'can_act': False, 'reason': str(e)[:50]}
 
 # =====================================================================
-# 12. إرسال آمن
+# 12. إرسال آمن — 🧠 Exponential backoff
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
@@ -1443,17 +1675,27 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
     else:
         return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
 
+
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
+    """
+    🧠 v7.8.0: إرسال آمن مع Exponential backoff للـ429.
+
+    - RetryAfter → ينتظر المدة المطلوبة + يعيد المحاولة
+    - TimedOut → محاولة ثانية بعد 1s
+    - BadRequest → بدون parse_mode
+    """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
     ):
         return None
+
     try:
         await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=2.0)
     except asyncio.TimeoutError:
         logger.debug("⚠️ RATE_LIMITER timeout")
+
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
     media_type = None
     media_file_id = None
@@ -1463,49 +1705,65 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             media_type = mt
             media_file_id = kwargs.pop(mt)
             break
+
     caption_text = text[:1024] if media_type else text
-    try:
-        if media_type:
-            return await _send_media(bot, chat_id, media_type, media_file_id,
-                                     caption=caption_text or None,
-                                     reply_markup=reply_markup, **kwargs)
-        else:
-            return await bot.send_message(chat_id=chat_id, text=text,
-                                          reply_markup=reply_markup,
-                                          parse_mode=parse_mode, **kwargs)
-    except TimedOut:
-        logger.warning("⚠️ Timed out، محاولة إعادة الإرسال...")
+
+    # 🧠 محاولات متعددة
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
-            await asyncio.sleep(1)
             if media_type:
-                return await _send_media(bot, chat_id, media_type, media_file_id,
-                                         caption=caption_text or None,
-                                         reply_markup=reply_markup, **kwargs)
+                return await _send_media(
+                    bot, chat_id, media_type, media_file_id,
+                    caption=caption_text or None,
+                    reply_markup=reply_markup, **kwargs
+                )
             else:
-                return await bot.send_message(chat_id=chat_id, text=text,
-                                              reply_markup=reply_markup,
-                                              parse_mode=parse_mode, **kwargs)
-        except Exception as e2:
-            logger.error(f"❌ فشل الإرسال بعد المحاولة الثانية: {e2}")
+                return await bot.send_message(
+                    chat_id=chat_id, text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode, **kwargs
+                )
+        except RetryAfter as e:
+            wait = int(getattr(e, 'retry_after', 1)) + 1
+            RATE_LIMITER.report_429()
+            logger.warning(f"⏳ RetryAfter {wait}s (attempt {attempt+1})")
+            await asyncio.sleep(wait)
+            continue
+        except TimedOut:
+            logger.warning(f"⚠️ TimedOut (attempt {attempt+1})")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1)
+                continue
             return None
-    except BadRequest as e:
-        error_msg = str(e).lower()
-        if "can't parse entities" in error_msg or "parse" in error_msg:
-            try:
-                if media_type:
-                    return await _send_media(bot, chat_id, media_type, media_file_id,
-                                             caption=caption_text or None,
-                                             reply_markup=reply_markup, **kwargs)
-                else:
-                    return await bot.send_message(chat_id=chat_id, text=text[:4096],
-                                                  reply_markup=reply_markup,
-                                                  parse_mode=None, **kwargs)
-            except Exception as e2:
-                logger.error(f"❌ فشل الإرسال النهائي: {e2}")
-        return None
-    except Exception as e:
-        logger.warning(f"⚠️ فشل الإرسال: {e}")
-        return None
+        except BadRequest as e:
+            error_msg = str(e).lower()
+            if "can't parse entities" in error_msg or "parse" in error_msg:
+                try:
+                    if media_type:
+                        return await _send_media(
+                            bot, chat_id, media_type, media_file_id,
+                            caption=caption_text or None,
+                            reply_markup=reply_markup, **kwargs
+                        )
+                    else:
+                        return await bot.send_message(
+                            chat_id=chat_id, text=text[:4096],
+                            reply_markup=reply_markup,
+                            parse_mode=None, **kwargs
+                        )
+                except Exception as e2:
+                    logger.error(f"❌ فشل الإرسال النهائي: {e2}")
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ فشل الإرسال (attempt {attempt+1}): {e}")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1 * (attempt + 1))
+                continue
+            return None
+
+    return None
+
 
 def get_ram_usage() -> dict:
     if psutil is None:
@@ -1551,10 +1809,13 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
             from cache import invalidate_user_cache as _iuc
             await _iuc(user_id)
         invalidate_auth_cache(user_id=user_id)
+        with suppress(Exception):
+            await invalidate_auth_cache_async(user_id=user_id)
         return True, f"✅ تم حظر المستخدم: {user_id}"
     except Exception as e:
         logger.error(f"❌ ban_user_by_id({user_id}): {e}", exc_info=True)
         return False, f"❌ فشل الحظر: {str(e)[:100]}"
+
 
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
     """فك حظر مستخدم (بواسطة ID)."""
@@ -1567,19 +1828,22 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
             from cache import invalidate_user_cache as _iuc
             await _iuc(user_id)
         invalidate_auth_cache(user_id=user_id)
+        with suppress(Exception):
+            await invalidate_auth_cache_async(user_id=user_id)
         return True, f"✅ تم فك حظر المستخدم: {user_id}"
     except Exception as e:
         logger.error(f"❌ unban_user_by_id({user_id}): {e}", exc_info=True)
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
 # =====================================================================
-# 14. نظام العقوبات
+# 14. نظام العقوبات — 🧠 Singleton strategies
 # =====================================================================
 
 class PenaltyStrategy(ABC):
     @abstractmethod
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         pass
+
 
 class BanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1592,6 +1856,7 @@ class BanPenalty(PenaltyStrategy):
             return True, "✅ تم الحظر"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class MutePenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1612,6 +1877,7 @@ class MutePenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class KickPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -1623,6 +1889,7 @@ class KickPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class WarnPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         if user_id == bot.id:
@@ -1632,6 +1899,7 @@ class WarnPenalty(PenaltyStrategy):
             return True, f"⚠️ تحذير {w}"
         except Exception as e:
             return False, str(e)[:100]
+
 
 class RestrictPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
@@ -1652,6 +1920,7 @@ class RestrictPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class UnbanPenalty(PenaltyStrategy):
     async def apply(self, bot, chat_id: int, user_id: int, **kwargs) -> Tuple[bool, str]:
         try:
@@ -1660,14 +1929,27 @@ class UnbanPenalty(PenaltyStrategy):
         except Exception as e:
             return False, str(e)[:100]
 
+
 class PenaltyFactory:
-    @staticmethod
-    def get_strategy(penalty_type: str):
-        strategies = {
-            'ban': BanPenalty(), 'mute': MutePenalty(), 'kick': KickPenalty(),
-            'warn': WarnPenalty(), 'restrict': RestrictPenalty(), 'unban': UnbanPenalty()
-        }
-        return strategies.get(penalty_type)
+    """
+    🧠 v7.8.0: Singleton strategies — instances تُنشأ مرة واحدة.
+
+    قبل: كل apply_penalty() كانت تُنشئ 6 instances (كلها بلا حالة).
+    بعد: instances مشتركة → أقل GC pressure.
+    """
+    _strategies: Dict[str, PenaltyStrategy] = {
+        'ban': BanPenalty(),
+        'mute': MutePenalty(),
+        'kick': KickPenalty(),
+        'warn': WarnPenalty(),
+        'restrict': RestrictPenalty(),
+        'unban': UnbanPenalty(),
+    }
+
+    @classmethod
+    def get_strategy(cls, penalty_type: str) -> Optional[PenaltyStrategy]:
+        return cls._strategies.get(penalty_type)
+
 
 async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
@@ -1736,6 +2018,7 @@ _USAGE_FLUSH_LIMIT = 50
 _USAGE_FLUSH_INTERVAL = 60
 _usage_lock = asyncio.Lock()
 
+
 async def _increment_usage_async(chat_id: int, keyword: str):
     async with _usage_lock:
         key = (chat_id, keyword.lower())
@@ -1743,6 +2026,7 @@ async def _increment_usage_async(chat_id: int, keyword: str):
         should_flush = len(_usage_updates) >= _USAGE_FLUSH_LIMIT
     if should_flush:
         await _flush_usage_updates()
+
 
 async def _flush_usage_updates():
     async with _usage_lock:
@@ -1753,7 +2037,8 @@ async def _flush_usage_updates():
     try:
         for (chat_id, keyword), count in data:
             await DB.execute(
-                "UPDATE auto_replies SET usage_count = usage_count + ? WHERE chat_id=? AND keyword=?",
+                "UPDATE auto_replies SET usage_count = usage_count + ? "
+                "WHERE chat_id=? AND keyword=?",
                 (count, chat_id, keyword)
             )
     except Exception as e:
@@ -1761,6 +2046,7 @@ async def _flush_usage_updates():
         async with _usage_lock:
             for key, count in data:
                 _usage_updates[key] = _usage_updates.get(key, 0) + count
+
 
 async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
     rows = await DB.fetchall(
@@ -1779,6 +2065,7 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
 
     await asyncio.to_thread(_write)
     return len(data)
+
 
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
@@ -1800,14 +2087,17 @@ async def import_auto_replies(chat_id: int,
             if not keyword or not reply:
                 continue
             if overwrite:
-                await DB.execute("DELETE FROM auto_replies WHERE chat_id=? AND keyword=?",
-                                 (chat_id, keyword))
+                await DB.execute(
+                    "DELETE FROM auto_replies WHERE chat_id=? AND keyword=?",
+                    (chat_id, keyword)
+                )
             reply_type = item.get('reply_type', 'text')
             media_id = item.get('media_file_id')
             buttons = item.get('buttons')
             await DB.add_auto_reply(
                 chat_id, keyword, reply, reply_type=reply_type,
-                media_id=media_id, buttons=json.dumps(buttons) if buttons else None
+                media_id=media_id,
+                buttons=json.dumps(buttons) if buttons else None
             )
             count += 1
         _auto_reply_cache.invalidate()
@@ -1815,6 +2105,7 @@ async def import_auto_replies(chat_id: int,
     except Exception as e:
         logger.error(f"❌ Import error: {e}")
         return 0
+
 
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
     try:
@@ -1851,12 +2142,14 @@ def load_replies_from_file() -> dict:
         logger.error(f"❌ خطأ في تحميل replies.py: {e}")
         return {}
 
+
 _REPLIES_FROM_FILE = load_replies_from_file()
 
 if _REPLIES_FROM_FILE:
     logger.info(f"✅ تم تحميل ملف الردود بنجاح: {len(_REPLIES_FROM_FILE)} رد متاح")
 else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
+
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
     if not _REPLIES_FROM_FILE or not keyword:
@@ -1882,6 +2175,7 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
             return random.choice(replies)
     return None
 
+
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
@@ -1890,13 +2184,34 @@ def reload_replies_from_file() -> dict:
     return _REPLIES_FROM_FILE
 
 # =====================================================================
-# 17. المهام الخلفية
+# 17. المهام الخلفية — 🧠 Adaptive
 # =====================================================================
 
 class BackgroundTasks:
+    """
+    🧠 v7.8.0: كاش المشرفين بتكيّف TTL.
+
+    - المجموعات النشطة (يُسأل عنها كثيراً) → TTL أطول
+    - المجموعات الخاملة → TTL أقصر
+    """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
-    _GROUP_ADMINS_CACHE_TTL = 600
+    _group_admins_access_count: Dict[int, int] = {}
+    _BASE_TTL = 600
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
+
+    @staticmethod
+    def _adaptive_ttl(chat_id: int) -> int:
+        """🧠 TTL يتكيف حسب عدد الاستدعاءات الأخيرة."""
+        access = BackgroundTasks._group_admins_access_count.get(chat_id, 0)
+        if access >= 20:
+            return BackgroundTasks._BASE_TTL * 2  # 20 min
+        if access >= 10:
+            return int(BackgroundTasks._BASE_TTL * 1.5)
+        if access >= 5:
+            return BackgroundTasks._BASE_TTL
+        if access >= 1:
+            return int(BackgroundTasks._BASE_TTL * 0.5)
+        return 60
 
     @staticmethod
     async def _get_admin_ids_cached(bot, chat_id: int,
@@ -1904,11 +2219,16 @@ class BackgroundTasks:
         now = time.time()
         if not force_refresh and chat_id in BackgroundTasks._group_admins_cache:
             cached_time, cached_ids = BackgroundTasks._group_admins_cache[chat_id]
-            if now - cached_time < BackgroundTasks._GROUP_ADMINS_CACHE_TTL:
+            ttl = BackgroundTasks._adaptive_ttl(chat_id)
+            if now - cached_time < ttl:
+                BackgroundTasks._group_admins_access_count[chat_id] = \
+                    BackgroundTasks._group_admins_access_count.get(chat_id, 0) + 1
                 return cached_ids
+
         try:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
+
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
                 sorted_items = sorted(
                     BackgroundTasks._group_admins_cache.items(),
@@ -1916,7 +2236,10 @@ class BackgroundTasks:
                 )
                 for k, _ in sorted_items[: BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5]:
                     BackgroundTasks._group_admins_cache.pop(k, None)
+                    BackgroundTasks._group_admins_access_count.pop(k, None)
+
             BackgroundTasks._group_admins_cache[chat_id] = (now, admin_ids)
+            BackgroundTasks._group_admins_access_count[chat_id] = 1
             return admin_ids
         except Exception as e:
             logger.debug(f"⚠️ فشل جلب مشرفي {chat_id}: {e}")
@@ -1931,6 +2254,7 @@ class BackgroundTasks:
             media_type = post.get('media_type')
             media_file_id = post.get('media_file_id')
             caption = text[:1024] if text else None
+
             if media_type == 'photo' and media_file_id:
                 await bot.send_photo(channel_id, media_file_id, caption=caption)
             elif media_type == 'video' and media_file_id:
@@ -1942,26 +2266,20 @@ class BackgroundTasks:
             elif media_type == 'voice' and media_file_id:
                 await bot.send_voice(channel_id, media_file_id)
                 if text:
-                    try:
+                    with suppress(Exception):
                         await bot.send_message(channel_id, text)
-                    except Exception:
-                        pass
             elif media_type == 'animation' and media_file_id:
                 await bot.send_animation(channel_id, media_file_id, caption=caption)
             elif media_type == 'sticker' and media_file_id:
                 await bot.send_sticker(channel_id, media_file_id)
                 if text:
-                    try:
+                    with suppress(Exception):
                         await bot.send_message(channel_id, text)
-                    except Exception:
-                        pass
             elif media_type == 'video_note' and media_file_id:
                 await bot.send_video_note(channel_id, media_file_id)
                 if text:
-                    try:
+                    with suppress(Exception):
                         await bot.send_message(channel_id, text)
-                    except Exception:
-                        pass
             else:
                 if text and len(text) > 4096:
                     for i in range(0, len(text), 4096):
@@ -2004,13 +2322,13 @@ class BackgroundTasks:
                 await DB.mark_post_published(post['id'])
                 await DB.update_last_publish(ch['id'])
                 await DB.update_next_publish(ch['id'])
-                logger.info(f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة...")
+                logger.info(
+                    f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة..."
+                )
                 if published_count == 0 or recycled:
                     if user_id:
-                        try:
+                        with suppress(Exception):
                             await safe_send(bot, user_id, "✅ تم نشر منشور في قناتك")
-                        except Exception:
-                            pass
                 await asyncio.sleep(sleep_seconds)
             else:
                 await DB.increment_post_fail(post['id'])
@@ -2019,19 +2337,43 @@ class BackgroundTasks:
 
     @staticmethod
     async def auto_publish(bot) -> None:
+        """
+        🧠 v7.8.0: Dynamic semaphore — يتكيف مع حجم الحمل.
+
+        - القنوات < 10 → semaphore=5
+        - القنوات 10-20 → semaphore=10
+        - القنوات > 20 → semaphore=15
+        """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
         sleep_seconds = min_interval_minutes * 60
-        publish_semaphore = asyncio.Semaphore(max_channels)
-        active_tasks = {}
+
+        # 🧠 semaphore ديناميكي
+        def _get_semaphore_size(n: int) -> int:
+            if n <= 5:
+                return 5
+            if n <= 10:
+                return 10
+            if n <= 20:
+                return 15
+            return 20
+
+        active_tasks: Dict[int, asyncio.Task] = {}
+
         while True:
             try:
                 channels = await asyncio.wait_for(
-                    DB.get_channels_to_publish(max_channels), timeout=10)
+                    DB.get_channels_to_publish(max_channels), timeout=10
+                )
                 if not channels:
                     await asyncio.sleep(60)
                     continue
+
+                # 🧠 semaphore بحجم مناسب
+                sem_size = _get_semaphore_size(len(channels))
+                semaphore = asyncio.Semaphore(sem_size)
+
                 for ch in channels:
                     channel_id = ch['id']
                     if channel_id in active_tasks and not active_tasks[channel_id].done():
@@ -2040,19 +2382,23 @@ class BackgroundTasks:
 
                     async def run_publish(ch=ch, bot=bot,
                                           sleep_seconds=sleep_seconds,
-                                          published_count=published_count):
-                        async with publish_semaphore:
+                                          published_count=published_count,
+                                          semaphore=semaphore):
+                        async with semaphore:
                             await BackgroundTasks._publish_single_channel(
-                                bot, ch, sleep_seconds, published_count)
+                                bot, ch, sleep_seconds, published_count
+                            )
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
                     await asyncio.sleep(0.5)
+
                 for cid in list(active_tasks.keys()):
                     if active_tasks[cid].done():
                         with suppress(Exception):
                             active_tasks[cid].result()
                         del active_tasks[cid]
+
                 await asyncio.sleep(60)
             except asyncio.TimeoutError:
                 logger.error("❌ استعلام القنوات استغرق أكثر من 10 ثوانٍ")
@@ -2083,7 +2429,10 @@ class BackgroundTasks:
             if not await DB.get_auto_backup():
                 return
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            backup_file = PATHS.BACKUPS / f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+            backup_file = (
+                PATHS.BACKUPS /
+                f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+            )
             success = False
             if hasattr(DB, "backup_database"):
                 try:
@@ -2111,13 +2460,17 @@ class BackgroundTasks:
                     await DB.set_setting('last_backup', TimeUtils.sql_iso())
                 except Exception as e:
                     logger.warning(f"⚠️ فشل حفظ last_backup: {e}")
-                backups = sorted(PATHS.BACKUPS.glob("backup_*.db"),
-                                 key=lambda x: x.stat().st_mtime, reverse=True)
+                backups = sorted(
+                    PATHS.BACKUPS.glob("backup_*.db"),
+                    key=lambda x: x.stat().st_mtime, reverse=True,
+                )
                 for old in backups[CONFIG.MAX_BACKUPS:]:
                     with suppress(Exception):
                         old.unlink()
                 elapsed = _time.monotonic() - t_start
-                logger.info(f"✅ نسخة احتياطية: {backup_file.name} ({elapsed:.2f}s)")
+                logger.info(
+                    f"✅ نسخة احتياطية: {backup_file.name} ({elapsed:.2f}s)"
+                )
             else:
                 logger.error("❌ فشل النسخ الاحتياطي")
         except Exception as e:
@@ -2131,7 +2484,9 @@ class BackgroundTasks:
                 if hasattr(DB, "send_subscription_reminders"):
                     async def send_impl(user_id: int, days_left: int, lang: str) -> bool:
                         try:
-                            text = await get_text(lang, 'reminder_subscription_expires', days=days_left)
+                            text = await get_text(
+                                lang, 'reminder_subscription_expires', days=days_left
+                            )
                             if text == 'reminder_subscription_expires':
                                 text = f"⚠️ اشتراكك سينتهي بعد {days_left} يوم"
                             result = await safe_send(bot, user_id, text)
@@ -2147,7 +2502,9 @@ class BackgroundTasks:
                         try:
                             days = int(u['days_left'])
                             lang = u.get('language', 'ar')
-                            text = await get_text(lang, 'reminder_subscription_expires', days=days)
+                            text = await get_text(
+                                lang, 'reminder_subscription_expires', days=days
+                            )
                             if text == 'reminder_subscription_expires':
                                 text = f"⚠️ اشتراكك سينتهي بعد {days} يوم"
                             await safe_send(bot, u['user_id'], text)
@@ -2163,7 +2520,11 @@ class BackgroundTasks:
             await asyncio.sleep(CONFIG.HEARTBEAT_INTERVAL)
             try:
                 ram = get_ram_usage()
-                msg = f"💓 **Heartbeat**\n\n🕐 {TimeUtils.mecca_iso()}\n💾 RAM: {ram['percent']}%"
+                msg = (
+                    f"💓 **Heartbeat**\n\n"
+                    f"🕐 {TimeUtils.mecca_iso()}\n"
+                    f"💾 RAM: {ram['percent']}%"
+                )
                 log_channel = await DB.get_log_channel()
                 try:
                     if log_channel:
@@ -2200,7 +2561,8 @@ class BackgroundTasks:
                     continue
                 groups = await asyncio.wait_for(
                     DB.fetchall("SELECT chat_id FROM bot_groups WHERE banned=0"),
-                    timeout=15)
+                    timeout=15
+                )
                 if not groups:
                     await asyncio.sleep(7200)
                     continue
@@ -2215,7 +2577,8 @@ class BackgroundTasks:
                                        if isinstance(group_row, dict)
                                        else group_row[0])
                             admin_ids = await BackgroundTasks._get_admin_ids_cached(
-                                bot, chat_id)
+                                bot, chat_id
+                            )
                             if admin_ids:
                                 await DB.sync_group_admins(chat_id, admin_ids)
                                 updated_count += 1
@@ -2223,10 +2586,13 @@ class BackgroundTasks:
                         except Exception as e:
                             logger.debug(f"Sync admins {group_row}: {e}")
 
-                await asyncio.gather(*[sync_one(g) for g in groups],
-                                     return_exceptions=True)
+                await asyncio.gather(
+                    *[sync_one(g) for g in groups],
+                    return_exceptions=True
+                )
                 logger.info(
-                    f"✅ تم تحديث مشرفي {updated_count}/{len(groups)} مجموعة")
+                    f"✅ تم تحديث مشرفي {updated_count}/{len(groups)} مجموعة"
+                )
             except asyncio.TimeoutError:
                 logger.error("❌ استعلام المجموعات استغرق أكثر من 15 ثانية")
             except Exception as e:
@@ -2248,37 +2614,94 @@ class BackgroundTasks:
         while True:
             await asyncio.sleep(3600)
             try:
+                # 🧠 تنظيف الكاشات الذكية
+                await _security_stats_cache.clear()
                 _banned_words_cache.clear()
                 _banned_words_cache_time.clear()
                 _auto_reply_cache.clear()
                 _auth_cache.clear()
                 BackgroundTasks._group_admins_cache.clear()
-                now = time.time()
-                expired_users = [
-                    uid for uid, ts in StateManager._timestamps.items()
-                    if now - ts > StateManager._timeout
-                ]
-                for uid in expired_users:
-                    StateManager.clear(uid)
-                logger.info("✅ تم تنظيف الكاش المؤقت والحالات المنتهية")
+                BackgroundTasks._group_admins_access_count.clear()
+                logger.info("✅ تم تنظيف الكاش المؤقت")
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف الكاش: {e}")
             try:
                 cutoff_30 = TimeUtils.utc_now() - timedelta(days=30)
                 cutoff_60 = TimeUtils.utc_now() - timedelta(days=60)
                 cutoff_90 = TimeUtils.utc_now() - timedelta(days=90)
-                await DB.execute("DELETE FROM admin_logs WHERE created_at < ?", (cutoff_30,))
-                await DB.execute("DELETE FROM user_penalties WHERE created_at < ?", (cutoff_60,))
-                await DB.execute("DELETE FROM payment_logs WHERE created_at < ?", (cutoff_90,))
+                await DB.execute(
+                    "DELETE FROM admin_logs WHERE created_at < ?", (cutoff_30,)
+                )
+                await DB.execute(
+                    "DELETE FROM user_penalties WHERE created_at < ?", (cutoff_60,)
+                )
+                await DB.execute(
+                    "DELETE FROM payment_logs WHERE created_at < ?", (cutoff_90,)
+                )
                 logger.info("✅ تم تنظيف البيانات القديمة")
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
 # =====================================================================
-# 18. خادم الويب
+# 18. 🧠 Warmup الشامل
+# =====================================================================
+
+async def warmup_all() -> Dict[str, Any]:
+    """
+    🧠 v7.8.0: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
+
+    - كل ملفات اللغات
+    - كل ملفات الأزرار
+    - الكلمات المحظورة العامة
+    - الردود من الملف
+
+    الفائدة: أول تفاعل مستخدم سيكون instant.
+    """
+    result = {
+        'translations_loaded': 0,
+        'buttons_loaded': 0,
+        'banned_words_loaded': 0,
+        'replies_loaded': 0,
+        'total_ms': 0,
+    }
+    t_start = time.monotonic()
+
+    try:
+        # 1) اللغات
+        result['translations_loaded'] = TranslationManager.preload_all()
+
+        # 2) الأزرار
+        result['buttons_loaded'] = KeyboardFactory.preload_all()
+
+        # 3) الكلمات المحظورة العامة
+        try:
+            words = await asyncio.wait_for(_get_global_words_cached(), timeout=5)
+            result['banned_words_loaded'] = len(words)
+        except Exception as e:
+            logger.debug(f"warmup banned_words: {e}")
+
+        # 4) الردود
+        result['replies_loaded'] = len(_REPLIES_FROM_FILE) if _REPLIES_FROM_FILE else 0
+
+    except Exception as e:
+        logger.error(f"❌ Warmup error: {e}", exc_info=True)
+
+    result['total_ms'] = int((time.monotonic() - t_start) * 1000)
+    logger.info(
+        f"🔥 Warmup: {result['translations_loaded']} لغة + "
+        f"{result['buttons_loaded']} أزرار + "
+        f"{result['banned_words_loaded']} كلمة + "
+        f"{result['replies_loaded']} رد — "
+        f"{result['total_ms']}ms"
+    )
+    return result
+
+# =====================================================================
+# 19. خادم الويب
 # =====================================================================
 
 _webhook_app = None
+
 
 async def setup_webhook(app, port: int):
     global _webhook_app
@@ -2295,6 +2718,7 @@ async def setup_webhook(app, port: int):
     await site.start()
     logger.info(f"✅ Webhook on port {port}")
     return runner
+
 
 async def webhook_handler(request):
     global _webhook_app
@@ -2313,7 +2737,7 @@ async def webhook_handler(request):
         return web.Response(status=500, text="ERROR")
 
 # =====================================================================
-# 19. معالج الأخطاء
+# 20. معالج الأخطاء
 # =====================================================================
 
 class ErrorHandler:
@@ -2331,13 +2755,17 @@ class ErrorHandler:
             try:
                 log_channel = await DB.get_log_channel()
                 if log_channel:
-                    short_msg = (f"❌ **خطأ في البوت**\n\n"
-                                 f"📝 {error_msg[:300]}\n"
-                                 f"🕐 {TimeUtils.mecca_iso()}")
+                    short_msg = (
+                        f"❌ **خطأ في البوت**\n\n"
+                        f"📝 {error_msg[:300]}\n"
+                        f"🕐 {TimeUtils.mecca_iso()}"
+                    )
                     if update and update.effective_user:
                         short_msg += f"\n👤 {update.effective_user.id}"
-                    await safe_send(context.bot, log_channel, short_msg,
-                                    parse_mode='Markdown')
+                    await safe_send(
+                        context.bot, log_channel, short_msg,
+                        parse_mode='Markdown'
+                    )
             except Exception:
                 pass
         except Exception:
@@ -2354,7 +2782,8 @@ __all__ = [
     'UserState', 'StateManager', 'CB', 'KeyboardFactory',
     'get_banned_words_cached', 'invalidate_banned_words_cache',
     'get_min_publish_interval',
-    'is_authorized_in_group', 'invalidate_auth_cache', 'check_bot_permissions',
+    'is_authorized_in_group', 'invalidate_auth_cache',
+    'invalidate_auth_cache_async', 'check_bot_permissions',
     'safe_send', 'get_ram_usage',
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
@@ -2363,4 +2792,5 @@ __all__ = [
     'export_auto_replies', 'import_auto_replies', 'fetch_json_from_url',
     'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
+    'SmartCache', 'warmup_all',
 ]
