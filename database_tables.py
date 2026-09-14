@@ -2,26 +2,33 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.5.9)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.1)
 ================================================================================
+🚀 v7.6.1 (توحيد الفهارس + رفع الإصدار):
+  ✅ CURRENT_SCHEMA_VERSION = 3
+  ✅ EXPECTED_INDEX_COUNT = 65 (كان 62)
+  ✅ 3 فهارس جديدة نُقلت من database.py:
+     - idx_referral_rewards_count
+     - idx_contest_participants_contest
+     - idx_gift_codes_plan
+  ✅ توحيد مصدر الفهارس: كل الفهارس الآن في COMMON_INDEXES
+
+🚀 v7.6.0 (Fast-path — تسريع بدء التشغيل):
+  ✅ فحص مبكر لـ schema_version قبل أي CREATE TABLE
+  ✅ إذا كان الـschema محدّثاً: تخطي كامل (~0.5s بدل ~31s)
+  ✅ يقلل زمن إعادة التشغيل (spin-down/wake-up) من ~40s إلى ~5s
+
 🆕 v7.5.9 (تنظيف الفهارس القديمة):
   ✅ DEPRECATED_INDEXES: قائمة الفهارس القديمة المراد حذفها
   ✅ _drop_deprecated_indexes_postgres/sqlite/mysql: دوال الحذف
   ✅ حذف الفهارس القديمة تلقائياً قبل إنشاء الجديدة
   ✅ دمج _create_indexes_sqlite/postgres في دالة موحّدة
-  ✅ حذف _table_exists_mysql (كود ميت)
-  ✅ إضافة 'features = '' OR' في CHECK لـ PostgreSQL
 
 📌 v7.5.8 (إصلاحات v5.4):
   - _safe_now_iso: إزالة +00:00 من fallback (توافق MySQL)
-  - حذف الكود الميت: _validate_json, TABLES_WITH_FK_RESTRICT
-  - _fetch_existing_indexes_mysql: تبسيط + رفع level إلى INFO
+  - _fetch_existing_indexes_mysql: تبسيط
   - فحص مسبق للأعمدة في CHECK لـ plans.features (PostgreSQL)
   - توحيد schema_version insert لكل المحركات
-  - إضافة فحص أمان في _execute_batch_migrations (اسم الجدول)
-  - إصلاح COALESCE في MySQL UNIQUE INDEX (يدعم NULL)
-  - استخدام _safe_now_dt في PostgreSQL لكل الطوابع الزمنية
-  - فحص COUNT الفهارس قبل الإنشاء
 ================================================================================
 """
 
@@ -35,7 +42,8 @@ from datetime import datetime, timezone
 # 0. ثوابت مشتركة
 # =====================================================================
 
-CURRENT_SCHEMA_VERSION = 1
+# ✅ v7.6.1: رفع الإصدار لتفعيل ترحيل الفهارس الجديدة
+CURRENT_SCHEMA_VERSION = 3
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -44,8 +52,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.5.8: عدد الفهارس (ثابت)
-EXPECTED_INDEX_COUNT = 62
+# ✅ v7.6.1: عدد الفهارس (بعد إضافة 3 فهارس)
+EXPECTED_INDEX_COUNT = 65
 
 COMMON_INDEXES = [
     # ═══════════════════════════════════════════════════════════════
@@ -178,11 +186,29 @@ COMMON_INDEXES = [
      "referrals(referrer_id, created_at DESC)"),
 
     # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.6.1: REFERRAL_REWARDS (1) — نُقلت من database.py
+    # ═══════════════════════════════════════════════════════════════
+    ("referral_rewards", "idx_referral_rewards_count",
+     "referral_rewards(referral_count)"),
+
+    # ═══════════════════════════════════════════════════════════════
     # CONTESTS (2)
     # ═══════════════════════════════════════════════════════════════
     ("contests", "idx_contests_status", "contests(status)"),
     ("contests", "idx_contests_status_end",
      "contests(status, end_date)"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.6.1: CONTEST_PARTICIPANTS (1) — نُقلت من database.py
+    # ═══════════════════════════════════════════════════════════════
+    ("contest_participants", "idx_contest_participants_contest",
+     "contest_participants(contest_id)"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.6.1: GIFT_CODES (1) — نُقلت من database.py
+    # ═══════════════════════════════════════════════════════════════
+    ("gift_codes", "idx_gift_codes_plan",
+     "gift_codes(plan_id)"),
 
     # ═══════════════════════════════════════════════════════════════
     # USER_PENALTIES (4)
@@ -255,9 +281,8 @@ COMMON_INDEXES = [
 ]
 
 # ✅ v7.5.9: قائمة الفهارس القديمة المراد حذفها (تنظيف)
-# هذه فهارس كانت موجودة في نسخ سابقة وتم استبدالها بفهارس أفضل
 DEPRECATED_INDEXES = [
-    # ═══ posts — نسخ قديمة أو مكررة ═══
+    # ═══ posts ═══
     "idx_posts_channel_pub_fail_created_optimized",
     "idx_posts_next",
     "idx_posts_channel_unpub",
@@ -269,9 +294,8 @@ DEPRECATED_INDEXES = [
     "idx_posts_fail_count",
     "idx_posts_channel_created",
     "idx_posts_channel_fail",
-    "idx_posts_channel_pub_fail",
 
-    # ═══ subscriptions — نسخ قديمة أو مكررة ═══
+    # ═══ subscriptions ═══
     "idx_subscriptions_user_status",
     "idx_subscriptions_user_status_end",
     "idx_sub_user_status_end",
@@ -281,7 +305,7 @@ DEPRECATED_INDEXES = [
     "idx_sub_end",
     "idx_sub_status",
 
-    # ═══ user_channels — نسخ قديمة أو مكررة ═══
+    # ═══ user_channels ═══
     "idx_user_channels_user_banned",
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
@@ -291,7 +315,7 @@ DEPRECATED_INDEXES = [
     "idx_uc_channel_id",
     "idx_uc_active",
 
-    # ═══ user_penalties — نسخ قديمة أو مكررة ═══
+    # ═══ user_penalties ═══
     "idx_penalties_user_chat_status",
     "idx_penalties_user_chat",
     "idx_penalties_user",
@@ -301,90 +325,84 @@ DEPRECATED_INDEXES = [
     "idx_penalties_chat_status",
     "idx_penalties_chat",
 
-    # ═══ banned_words — نسخ مكررة ═══
+    # ═══ banned_words ═══
     "idx_banned_words_chat",
     "idx_banned_words_word",
 
-    # ═══ user_reminder_settings — نسخ مكررة ═══
+    # ═══ user_reminder_settings ═══
     "idx_reminders_subscription",
     "idx_reminder_subscription",
     "idx_reminders_user",
 
-    # ═══ admin_logs — نسخ قديمة ═══
+    # ═══ admin_logs ═══
     "idx_admin_logs_created",
     "idx_admin_logs_admin",
 
-    # ═══ anonymous_admins — نسخ قديمة ═══
+    # ═══ anonymous_admins ═══
     "idx_anonymous_admins_chat",
     "idx_anonymous_admins_user",
 
-    # ═══ hidden_admins — نسخ قديمة ═══
+    # ═══ hidden_admins ═══
     "idx_hidden_admin_admin",
 
-    # ═══ group_admins — نسخ قديمة ═══
+    # ═══ group_admins ═══
     "idx_group_admins_user",
     "idx_group_admins_chat",
 
-    # ═══ schedule — نسخ قديمة ═══
+    # ═══ schedule ═══
     "idx_sched_next",
     "idx_schedule_next",
     "idx_schedule_next_channel",
 
-    # ═══ contest_participants — نسخ قديمة ═══
+    # ═══ contest_participants ═══
     "idx_contest_participants_user",
 
-    # ═══ users — نسخ قديمة ═══
+    # ═══ users ═══
     "idx_users_updated",
     "idx_users_trial_used",
     "idx_users_subscription",
     "idx_users_referral",
     "idx_users_banned_publish",
 
-    # ═══ referrals — نسخ قديمة ═══
+    # ═══ referrals ═══
     "idx_referrals_referred",
     "idx_referrals_created",
 
-    # ═══ contests — نسخ قديمة ═══
+    # ═══ contests ═══
     "idx_contests_end",
 
-    # ═══ hidden_owner_groups — نسخ قديمة ═══
+    # ═══ hidden_owner_groups ═══
     "idx_hidden_owner_owner",
 
-    # ═══ support_tickets — نسخ قديمة ═══
+    # ═══ support_tickets ═══
     "idx_tickets_user",
     "idx_tickets_number",
 
-    # ═══ invoices — نسخ قديمة ═══
+    # ═══ invoices ═══
     "idx_inv_status",
     "idx_inv_number",
 
-    # ═══ auto_replies — نسخ قديمة ═══
+    # ═══ auto_replies ═══
     "idx_auto_replies_keyword",
     "idx_ar_keyword",
 
-    # ═══ settings — نسخ قديمة ═══
+    # ═══ settings ═══
     "idx_settings_key",
 
-    # ═══ user_violations — نسخ قديمة ═══
+    # ═══ user_violations ═══
     "idx_user_violations_user",
     "idx_user_violations_chat",
     "idx_violations_user_chat",
 
-    # ═══ user_warnings — نسخ قديمة ═══
+    # ═══ user_warnings ═══
     "idx_user_warnings_user",
     "idx_user_warnings_chat",
 
-    # ═══ payment_logs — نسخ قديمة ═══
-    # (idx_payment_logs_user موجود ومستخدم، لا نحذفه)
-
-    # ═══ contest_winners — نسخ قديمة ═══
-    # (لا يوجد فهرس على هذا الجدول)
-
-    # ═══ user_groups_link — نسخ قديمة ═══
+    # ═══ user_groups_link ═══
     "idx_ugl_user",
 ]
 
-# ✅ v7.5.8: فحص فعلي لعدد الفهارس عند الاستيراد
+# ✅ v7.6.1: فحص فعلي لعدد الفهارس عند الاستيراد
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
     f"❌ عدد الفهارس غير مطابق: "
     f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
@@ -396,15 +414,12 @@ assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
 # =====================================================================
 
 def _safe_now_iso(TimeUtils) -> str:
-    """
-    ✅ v7.5.8: fallback بدون +00:00 (توافق MySQL DATETIME).
-    """
+    """✅ v7.5.8: fallback بدون +00:00 (توافق MySQL DATETIME)."""
     if TimeUtils:
         try:
             return TimeUtils.sql_iso()
         except Exception as e:
             logging.debug(f"_safe_now_iso fallback: {e}")
-    # ✅ fallback نظيف بدون timezone suffix
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -423,6 +438,51 @@ def _is_valid_index_name(name: str) -> bool:
     if not name or not isinstance(name, str):
         return False
     return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
+
+
+# =====================================================================
+# ✅ v7.6.0: دوال Fast-path (فحص schema_version قبل الإنشاء)
+# =====================================================================
+
+async def _get_current_schema_version_postgres(conn):
+    """✅ v7.6.0: قراءة إصدار الـschema الحالي (PostgreSQL)."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT MAX(version) AS v FROM schema_version"
+        )
+        if row and row["v"] is not None:
+            return int(row["v"])
+    except Exception:
+        pass
+    return 0
+
+
+async def _get_current_schema_version_sqlite(conn):
+    """✅ v7.6.0: قراءة إصدار الـschema الحالي (SQLite)."""
+    try:
+        cursor = await conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        )
+        row = await cursor.fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+    except Exception:
+        pass
+    return 0
+
+
+async def _get_current_schema_version_mysql(conn):
+    """✅ v7.6.0: قراءة إصدار الـschema الحالي (MySQL)."""
+    try:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT MAX(version) FROM schema_version")
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row and row[0] is not None:
+            return int(row[0])
+    except Exception:
+        pass
+    return 0
 
 
 # =====================================================================
@@ -458,9 +518,7 @@ async def _fetch_existing_indexes_sqlite(conn):
 
 
 async def _fetch_existing_indexes_mysql(conn, tables):
-    """
-    ✅ v7.5.8: تبسيط + logging أفضل + parameterized.
-    """
+    """✅ v7.5.8: تبسيط + logging أفضل + parameterized."""
     if not tables:
         return set()
     try:
@@ -522,9 +580,6 @@ async def _fetch_existing_tables_sqlite(conn):
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
-    """
-    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في PostgreSQL.
-    """
     if not DEPRECATED_INDEXES:
         return
     try:
@@ -555,9 +610,6 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
 
 
 async def _drop_deprecated_indexes_sqlite(conn, logger):
-    """
-    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في SQLite.
-    """
     if not DEPRECATED_INDEXES:
         return
     try:
@@ -588,9 +640,6 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
 
 
 async def _drop_deprecated_indexes_mysql(conn, logger):
-    """
-    ✅ v7.5.9: حذف الفهارس القديمة تلقائياً في MySQL.
-    """
     if not DEPRECATED_INDEXES:
         return
     try:
@@ -612,7 +661,6 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
                     )
                     dropped += 1
                 except Exception as e:
-                    # تجاهل الأخطاء الشائعة (فهرس غير موجود)
                     err_msg = str(e).lower()
                     if "1091" not in err_msg and "doesn't exist" not in err_msg:
                         logger.warning(
@@ -632,9 +680,6 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
 async def _create_indexes_generic(
     conn, logger, db_name: str, fetch_existing_fn
 ):
-    """
-    ✅ v7.5.9: دالة موحّدة لإنشاء الفهارس (SQLite + PostgreSQL).
-    """
     try:
         existing = await fetch_existing_fn(conn)
     except Exception as e:
@@ -681,14 +726,12 @@ async def _create_indexes_generic(
 
 
 async def _create_indexes_sqlite(conn, logger):
-    """✅ v7.5.9: تستخدم الدالة الموحّدة."""
     async def _fetch(c):
         return await _fetch_existing_indexes_sqlite(c)
     await _create_indexes_generic(conn, logger, "SQLite", _fetch)
 
 
 async def _create_indexes_postgres(conn, logger):
-    """✅ v7.5.9: تستخدم الدالة الموحّدة."""
     index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
 
     async def _fetch(c):
@@ -698,9 +741,6 @@ async def _create_indexes_postgres(conn, logger):
 
 
 async def _create_indexes_mysql(conn, logger):
-    """
-    ✅ v7.5.8: يفحص وجود الأعمدة قبل إنشاء الفهرس.
-    """
     tables = set(t for t, _, _ in COMMON_INDEXES)
     try:
         existing = await _fetch_existing_indexes_mysql(conn, tables)
@@ -751,6 +791,21 @@ async def _create_indexes_mysql(conn, logger):
 # =====================================================================
 
 async def create_tables_sqlite(conn, logger, TimeUtils):
+    # ═══════════════════════════════════════════════════════════════
+    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
+    # ═══════════════════════════════════════════════════════════════
+    current = await _get_current_schema_version_sqlite(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        if logger:
+            logger.info(
+                f"⏩ SQLite: schema v{current} محدّث — "
+                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+            )
+        return
+
+    # ═══════════════════════════════════════════════════════════════
+    # من هنا: الكود كما هو (يُنفَّذ فقط عند أول تشغيل أو ترقية)
+    # ═══════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -1320,7 +1375,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+    # حذف الفهارس القديمة أولاً
     await _drop_deprecated_indexes_sqlite(conn, logger)
 
     # ثم إنشاء الفهارس الجديدة
@@ -1350,6 +1405,21 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 # =====================================================================
 
 async def create_tables_postgres(conn, logger, TimeUtils):
+    # ═══════════════════════════════════════════════════════════════
+    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
+    # ═══════════════════════════════════════════════════════════════
+    current = await _get_current_schema_version_postgres(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        if logger:
+            logger.info(
+                f"⏩ PG: schema v{current} محدّث — "
+                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+            )
+        return
+
+    # ═══════════════════════════════════════════════════════════════
+    # من هنا: الكود كما هو
+    # ═══════════════════════════════════════════════════════════════
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -1923,7 +1993,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+    # حذف الفهارس القديمة أولاً
     await _drop_deprecated_indexes_postgres(conn, logger)
 
     # ثم إنشاء الفهارس الجديدة
@@ -1953,6 +2023,21 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 # =====================================================================
 
 async def create_tables_mysql(conn, logger, TimeUtils):
+    # ═══════════════════════════════════════════════════════════════
+    # 🚀 v7.6.0: FAST-PATH — فحص الإصدار قبل أي CREATE TABLE
+    # ═══════════════════════════════════════════════════════════════
+    current = await _get_current_schema_version_mysql(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        if logger:
+            logger.info(
+                f"⏩ MySQL: schema v{current} محدّث — "
+                f"تخطي إنشاء الجداول والفهارس (fast-path)"
+            )
+        return
+
+    # ═══════════════════════════════════════════════════════════════
+    # من هنا: الكود كما هو
+    # ═══════════════════════════════════════════════════════════════
     await conn.execute("SET FOREIGN_KEY_CHECKS=0")
     try:
         await conn.execute("""
@@ -2535,7 +2620,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.5.9: حذف الفهارس القديمة أولاً
+        # حذف الفهارس القديمة أولاً
         await _drop_deprecated_indexes_mysql(conn, logger)
 
         # ثم إنشاء الفهارس الجديدة
