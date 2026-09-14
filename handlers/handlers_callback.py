@@ -2,11 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.0.4)
+handlers_callback.py - المعالج النهائي الكامل (v9.0.5)
 =====================================================================
+✅ v9.0.5 — إصلاحات إضافية:
+  - _handle_language_change: إبطال context.user_data['lang']
+    (كان يبقى اللغة القديمة حتى إعادة التشغيل)
+  - __all__: تصدير _invalidate_sec_auth_cache للاستخدام الخارجي
+    (استدعها من chat_member بعد تغيير المشرفين)
+
 ✅ v9.0.4 — تحسين أداء زر الردود:
-  - _handle_auto_reply.toggle: كاش في context.user_data (توفير استعلام DB)
-  - لا مزيد من "🐢 زر بطيء auto_reply_toggle — 3.93s"
+  - _handle_auto_reply.toggle: كاش في context.user_data
 
 ✅ v9.0.3 — إصلاح زر sec_auto_reply_menu:
   - _handle_security: عرض لوحة الردود مباشرة
@@ -1476,6 +1481,7 @@ class CallbackHandlers:
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, "🌐 اختر اللغة:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
+    # ✅ v9.0.5: إبطال كاش اللغة عند التغيير
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
         data = query.data or ""
@@ -1484,6 +1490,18 @@ class CallbackHandlers:
         if lang_set in valid_langs:
             await DB.set_user_language(user_id, lang_set)
             await invalidate_user_cache(user_id)
+            # ✅ v9.0.5: إبطال كاش اللغة في context.user_data
+            # (بدونه، الرسائل تبقى باللغة القديمة حتى إعادة التشغيل)
+            try:
+                context.user_data.pop('lang', None)
+            except Exception:
+                pass
+            # ✅ v9.0.5: محاولة استدعاء clear_lang_cache من handlers_message
+            try:
+                from handlers_message import clear_lang_cache
+                clear_lang_cache(context)
+            except Exception:
+                pass
             ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
             if not ok:
                 await CommandHandlers.start(update, context)
@@ -2129,7 +2147,6 @@ class CallbackHandlers:
             return
 
         try:
-            # ✅ v9.0.3: sec_auto_reply_menu — عرض لوحة الردود مباشرة
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
                 try:
@@ -2147,14 +2164,12 @@ class CallbackHandlers:
                 )
                 return
 
-            # ✅ v9.0.2: sec_maxlen
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 context.user_data['sec_chat'] = chat_id
                 await safe_edit(query, "📏 أرسل الحد الأقصى لطول الرسالة (0 = بلا حد):", bot=context.bot)
                 return
 
-            # ✅ v9.0.2: sec_act_log
             if action == "act_log":
                 await CallbackHandlers._show_admin_logs(update, context, query, chat_id, lang)
                 return
@@ -3287,7 +3302,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # الردود التلقائية — ✅ v9.0.4: كاش toggle
+    # الردود التلقائية
     # =================================================================
 
     @staticmethod
@@ -3297,7 +3312,6 @@ class CallbackHandlers:
         data = query.data
         parts = data.split(":")
 
-        # ✅ v9.0.3: استخراج action بطريقة صحيحة
         raw_action = parts[0]
         if raw_action.startswith("sec_"):
             raw_action = raw_action[4:]
@@ -3339,7 +3353,6 @@ class CallbackHandlers:
                 await safe_edit(query, "🤖 إعدادات الردود التلقائية:", reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ v9.0.4: كاش في context.user_data لتسريع toggle
             if action == "toggle":
                 cache_key = f"ars_{chat_id}"
                 settings = context.user_data.get(cache_key)
@@ -3349,7 +3362,6 @@ class CallbackHandlers:
                         settings = _row_to_dict(settings) or {}
                 new_status = not settings.get('enabled', False)
                 await DB.update_auto_reply_settings(chat_id, enabled=new_status)
-                # تحديث الكاش
                 settings['enabled'] = new_status
                 context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build("auto_reply", chat_id=chat_id, lang=lang)
@@ -3400,7 +3412,6 @@ class CallbackHandlers:
 
             if action == "reset_confirm":
                 await DB.reset_auto_replies(chat_id)
-                # إبطال الكاش
                 context.user_data.pop(f"ars_{chat_id}", None)
                 await safe_edit(query, "✅ تم حذف كل الردود", bot=context.bot)
                 return
@@ -3761,4 +3772,4 @@ class CallbackHandlers:
 # تصدير
 # =====================================================================
 
-__all__ = ["CallbackHandlers"]
+__all__ = ["CallbackHandlers", "_invalidate_sec_auth_cache"]
