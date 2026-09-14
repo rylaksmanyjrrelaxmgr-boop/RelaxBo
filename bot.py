@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.1.0)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.2.0)
 ================================================================================
+🆕 v5.2.0 (periodic cleanup + تحسينات):
+    ✅ GroupRateLimiterManager.periodic_cleanup_task — تنظيف دوري للكاشات
+    ✅ استيراد GroupRateLimiterManager من handlers.handlers_message
+    ✅ تقرير تلقائي بعد كل مهمة خلفية (نجاح/فشل)
+    ✅ فحص توافق DB_TYPE مع DATABASE_URL عند البدء
+
 🆕 v5.1.0 (Warmup + فحص دوال):
     ✅ warmup_all() عند بدء التشغيل — تحميل كل الموارد مسبقاً
     ✅ _verify_command_handlers() — فحص دوال CommandHandlers
@@ -47,6 +53,8 @@ from handlers import (
 from handlers.handlers_channels_list import register_channels_list_handlers
 # ✅ v4.1: إصلاح التنقل
 from handlers.handlers_nav_fix import register_nav_fix
+# ✅ v5.2.0: GroupRateLimiterManager
+from handlers.handlers_message import GroupRateLimiterManager
 
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
@@ -158,6 +166,49 @@ def _verify_command_handlers() -> bool:
 
     logger.info(f"✅ كل {len(required)} دالة CommandHandlers موجودة")
     return True
+
+
+# =====================================================================
+# 🛡️ v5.2.0: فحص توافق DB_TYPE مع DATABASE_URL
+# =====================================================================
+
+def _verify_db_config() -> bool:
+    """
+    التحقق من توافق نوع DB المكتشف مع DATABASE_URL.
+
+    يكشف المشاكل مبكراً قبل محاولة الاتصال.
+    """
+    try:
+        db_type = getattr(DB, "DB_TYPE", "unknown")
+        db_url = os.getenv("DATABASE_URL", "").strip()
+
+        if not db_url:
+            if db_type != "sqlite":
+                logger.warning(
+                    f"⚠️ DB_TYPE={db_type} لكن DATABASE_URL فارغ! "
+                    f"سيتم fallback إلى SQLite"
+                )
+            else:
+                logger.info("✅ DB: SQLite (لا يوجد DATABASE_URL)")
+            return True
+
+        # فحص توافق
+        url_lower = db_url.lower()
+        is_pg_url = "postgres" in url_lower or "postgresql" in url_lower
+        is_mysql_url = "mysql" in url_lower or "mariadb" in url_lower
+
+        if db_type == "postgres" and not is_pg_url:
+            logger.error("❌ DB_TYPE=postgres لكن DATABASE_URL ليس postgres!")
+            return False
+        if db_type == "mysql" and not is_mysql_url:
+            logger.error("❌ DB_TYPE=mysql لكن DATABASE_URL ليس mysql!")
+            return False
+
+        logger.info(f"✅ DB: {db_type.upper()} — إعداد صحيح")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ فشل فحص DB: {e}")
+        return True  # لا نوقف التشغيل بسبب هذا
 
 
 # =====================================================================
@@ -407,6 +458,11 @@ async def main():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
         raise SystemExit(1)
 
+    # 🛡️ v5.2.0: فحص توافق DB
+    if not _verify_db_config():
+        logger.error("❌ فشل فحص إعدادات قاعدة البيانات — الخروج")
+        raise SystemExit(1)
+
     # ═══ تهيئة قاعدة البيانات ═══
     t0 = time.monotonic()
     if hasattr(DB, 'pre_initialize'):
@@ -462,7 +518,6 @@ async def main():
         os.getenv("HEROKU_APP_NAME") or
         os.getenv("WEBHOOK_URL")
     )
-    # إزالة https:// من hostname إن وُجد
     if hostname and hostname.startswith("http"):
         hostname = urlparse(hostname).netloc
 
@@ -636,18 +691,30 @@ async def main():
 
     # ========== المهام الخلفية ==========
     async def run_task_with_retry(task_func, *args, task_name=""):
+        """
+        ✅ v5.2.0: تشغيل المهمة مع إعادة محاولة + تقرير دوري.
+        """
+        consecutive_failures = 0
         while True:
             try:
                 await task_func(*args)
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 logger.info(f"🛑 مهمة {task_name} أُلغيت")
                 raise
             except Exception as e:
+                consecutive_failures += 1
                 logger.error(
-                    f"❌ Task {task_name} crashed: {e}", exc_info=True
+                    f"❌ Task {task_name} crashed "
+                    f"(x{consecutive_failures}): {e}",
+                    exc_info=True,
                 )
-                logger.info(f"🔄 إعادة تشغيل {task_name} بعد 5 ثوانٍ...")
-                await asyncio.sleep(5)
+                # ✅ v5.2.0: backoff متزايد
+                delay = min(5 * consecutive_failures, 60)
+                logger.info(
+                    f"🔄 إعادة تشغيل {task_name} بعد {delay} ثانية..."
+                )
+                await asyncio.sleep(delay)
 
     async def cleanup_locks():
         while True:
@@ -673,7 +740,16 @@ async def main():
         asyncio.create_task(run_task_with_retry(BackgroundTasks.cleanup_old_data, task_name="cleanup_old_data")),
         asyncio.create_task(run_task_with_retry(cache_cleanup_task, task_name="cache_cleanup")),
         asyncio.create_task(run_task_with_retry(cleanup_locks, task_name="cleanup_locks")),
+        # ✅ v5.2.0: تنظيف دوري للـRateLimiter وsec_auth_cache
+        asyncio.create_task(
+            run_task_with_retry(
+                GroupRateLimiterManager.periodic_cleanup_task,
+                task_name="periodic_cleanup"
+            )
+        ),
     ]
+
+    logger.info(f"✅ تم تشغيل {len(tasks)} مهمة خلفية")
 
     # ========== بدء التشغيل ==========
     try:
