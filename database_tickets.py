@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_tickets.py - دوال التذاكر (v7.4.1)
+database_tickets.py - دوال التذاكر (v7.4.2)
 ================================================================================
-TicketsMixin:
-  - create_ticket       : إنشاء تذكرة جديدة (مع ترقيم تلقائي)
-  - get_tickets         : جلب كل التذاكر المعلّقة
-  - close_ticket        : إغلاق تذكرة
-  - delete_all_tickets  : حذف كل التذاكر
+🆕 v7.4.2 (إصلاح MySQL):
+    ✅ create_ticket: backticks حول `key` و `value` لـ MySQL
+       (كان يفشل على MySQL — كلمات محجوزة)
+    ✅ معالجة آمنة لـ next_num (int/None/غائب)
+    ✅ parameterized query بدل 'last_ticket_number' كـliteral
+
+📌 v7.4.1:
+    - create_ticket       : إنشاء تذكرة جديدة (مع ترقيم تلقائي)
+    - get_tickets         : جلب كل التذاكر المعلّقة
+    - close_ticket        : إغلاق تذكرة
+    - delete_all_tickets  : حذف كل التذاكر
 
 📌 مطابق تماماً للسلوك الأصلي في database.py
 ================================================================================
@@ -21,6 +27,21 @@ logger = logging.getLogger(__name__)
 
 class TicketsMixin:
     """Mixin يحتوي كل دوال التذاكر"""
+
+    # =====================================================================
+    # 0) ✅ v7.4.2: helper داخلي للتوافق مع MySQL
+    # =====================================================================
+
+    def _tq(self, col: str) -> str:
+        """
+        ✅ v7.4.2: يُرجع اسم العمود مع backticks لـ MySQL فقط.
+
+        السبب: `key` و `value` كلمات محجوزة في MySQL.
+        PostgreSQL/SQLite: لا يحتاجان backticks.
+        """
+        if getattr(self, "USE_MYSQL", False):
+            return f"`{col}`"
+        return col
 
     # =====================================================================
     # 1) إنشاء تذكرة جديدة
@@ -38,16 +59,30 @@ class TicketsMixin:
         try:
             async with self._lock:
                 async with self.transaction() as conn:
-                    next_num = await self._fetchval_with_conn(
+                    # ✅ v7.4.2: backticks لـ MySQL
+                    key_col = self._tq("key")
+                    value_col = self._tq("value")
+
+                    # ✅ v7.4.2: parameterized query بدل 'last_ticket_number' literal
+                    next_num_str = await self._fetchval_with_conn(
                         conn,
-                        "SELECT value FROM settings WHERE key = 'last_ticket_number'",
+                        f"SELECT {value_col} FROM settings WHERE {key_col} = ?",
+                        "last_ticket_number",
                         default="0",
                     )
-                    next_num = int(next_num) + 1
+
+                    # ✅ v7.4.2: معالجة آمنة (None / "" / نص غير رقمي)
+                    try:
+                        next_num = int(next_num_str) + 1
+                        if next_num <= 0:
+                            next_num = 1
+                    except (ValueError, TypeError):
+                        next_num = 1
+
                     await self._execute_with_conn(
                         conn,
-                        "UPDATE settings SET value = ? WHERE key = 'last_ticket_number'",
-                        str(next_num),
+                        f"UPDATE settings SET {value_col} = ? WHERE {key_col} = ?",
+                        str(next_num), "last_ticket_number",
                     )
                     await self._execute_with_conn(
                         conn,
