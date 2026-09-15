@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.11 — BANNED-WORDS-CACHE FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.12 — AUDIT-UTC-CLEAN)
 ================================================================================
+🔍 v7.7.12 (AUDIT-UTC-CLEAN — لا تغيير وظيفي):
+  ✅ مراجعة شاملة: كل استدعاءات التخزين تستخدم TimeUtils.utc_now()
+  ✅ لا يوجد أي استخدام لـ mecca_now() في سياق التخزين
+  ✅ mecca_iso() تُستعمل فقط عند الحاجة للعرض (وهي غير مستدعاة هنا)
+  ✅ متوافق مع utils.py v7.8.5 (Pool Monitor + UTC Consistency)
+  ⚠️ لا تعديلات وظيفية — هذا إصدار توثيقي فقط
+
 🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL):
-  ✅ __init__: إضافة المتغيرات الناقصة التي يستخدمها
-     Mixin.get_banned_words:
-       - self._banned_words_cache: Dict[int, List[str]]
-       - self._banned_words_cache_time: Dict[int, float]
-       - self._banned_words_cache_ttl: float
-       - self._banned_words_cache_lock: asyncio.Lock
+  ✅ __init__: إضافة المتغيرات الناقصة التي يستخدمها Mixin.get_banned_words
   ✅ حل نهائي لـ: AttributeError: 'Database' object has no
      attribute '_banned_words_cache_ttl'
 
 🚨 v7.7.10 (FIX-INT32):
   ✅ _ensure_bigint_ids: تحويل تلقائي للأعمدة INT32 → BIGINT
   ✅ log_channel_id: INTEGER → BIGINT (Telegram Channel IDs)
-  ✅ BOOTSTRAP_DATA_VERSION = 7 (يُجبر الـ migration)
+  ✅ BOOTSTRAP_DATA_VERSION = 7
   ✅ حل invalid input for query argument (value out of int32 range)
 
 🚀 v7.7.9 (PERF-1..6):
   PERF-1 tables_hash: تخطي create_tables عند عدم تغيّر schema
   PERF-2 _fetch_all_columns_map: استعلام واحد لأعمدة كل الجداول
   PERF-3 حذف _ensure_text_hash_column المكرّرة
-  PERF-4 SQLite PRAGMA مستقل لكل أمر (لا يُسقط الاتصال)
+  PERF-4 SQLite PRAGMA مستقل لكل أمر
   PERF-5 _upsert_setting موحّد
   PERF-6 _init_default_data: batch INSERT بدل loop
 
 🔥 v7.7.8 (FIX-PG-BOOTSTRAP):
   ✅ _bootstrap: لا transaction لـPG/MySQL — DDL في autocommit
   ✅ حل InFailedSQLTransactionError نهائياً
-  ✅ SQLite يبقى transaction آمن
 
 إصلاحات v7.7.7 (LOG-CHANNEL):
   LOG-1  _migrate_schema: عمود log_channel_id في bot_groups
@@ -1492,6 +1493,12 @@ async def _table_exists(conn, table: str) -> bool:
 # =====================================================================
 
 class TimeUtils:
+    """
+    🕐 القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
+
+    - utc_now():    للتخزين، الحسابات، المقارنات — مستخدمة في كل الكود ✅
+    - mecca_now():  للعرض فقط (غير مستدعاة في database.py)
+    """
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(UTC).replace(tzinfo=None)
@@ -1566,7 +1573,6 @@ class Database(
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
-    # ✅ v7.7.10: رُفع من 6 → 7 لإجبار migration الـBIGINT
     BOOTSTRAP_DATA_VERSION = 7
 
     VALID_PENALTY_TYPES = {"mute", "ban", "restrict", "kick", "warn"}
@@ -1596,7 +1602,6 @@ class Database(
     }
     MAX_PENALTY_DURATION = 365 * 86400
 
-    # ✅ v7.7.10: أعمدة يجب أن تكون BIGINT (تستقبل Telegram IDs)
     BIGINT_COLUMNS = [
         ("bot_groups", "log_channel_id"),
         ("anonymous_admins", "user_id"),
@@ -1838,21 +1843,12 @@ class Database(
             self.PATHS = PATHS
             self.DATABASE_URL = DATABASE_URL
 
-            # =============================================================
-            # ✅ v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL):
-            #   متغيرات كان يستخدمها Mixin.get_banned_words لكنها
-            #   لم تكن معرّفة هنا — مما تسبب في:
-            #     AttributeError: 'Database' object has no
-            #     attribute '_banned_words_cache_ttl'
-            #   ملاحظة: هذه كاش محلي داخل الـ Database، منفصل عن
-            #   الكاش الذي يديره utils.get_banned_words_cached.
-            # =============================================================
+            # v7.7.11: متغيرات كاش الكلمات المحظورة
             self._banned_words_local_cache = {}
             self._global_banned_words_cache: List[str] = []
             self._global_banned_words_loaded = False
             self._global_words_lock = asyncio.Lock()
 
-            # ✅ v7.7.11: المتغيرات الناقصة (سبب الخطأ)
             self._banned_words_cache: Dict[int, List[str]] = {}
             self._banned_words_cache_time: Dict[int, float] = {}
             self._banned_words_cache_ttl: float = float(
@@ -1866,6 +1862,40 @@ class Database(
         except Exception:
             self._singleton_init_done = False
             raise
+
+    # =================================================================
+    # 🔍 v7.7.12: Pool stats (اختياري — utils.py يقرأ _pool مباشرة)
+    # =================================================================
+
+    async def get_pool_stats(self) -> Dict[str, Any]:
+        """
+        🔍 v7.7.12: يُرجِع حالة Pool PostgreSQL/MySQL.
+        ملاحظة: utils.BackgroundTasks._read_pool_stats يقرأ _pool مباشرة،
+        لكن هذه الدالة تُوفّر واجهة نظيفة لمن يفضّلها.
+        """
+        if not (USE_POSTGRES or USE_MYSQL):
+            return {"type": "sqlite_or_other"}
+        pool = self._pool
+        if pool is None:
+            return {"type": "none", "error": "pool_is_none"}
+        try:
+            max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
+            current_size = pool.get_size() if hasattr(pool, 'get_size') else None
+            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else 0
+            if max_size is None or current_size is None:
+                return {"type": "unknown"}
+            in_use = max(0, current_size - idle_size)
+            util = round((in_use / max_size) * 100, 1) if max_size > 0 else 0.0
+            return {
+                "type": "postgres" if USE_POSTGRES else "mysql",
+                "max_size": max_size,
+                "current_size": current_size,
+                "idle_size": idle_size,
+                "in_use": in_use,
+                "utilization_pct": util,
+            }
+        except Exception as e:
+            return {"type": "error", "message": str(e)}
 
     # =================================================================
     # مساعد لتتبّع مهام الخلفية
@@ -2097,9 +2127,6 @@ class Database(
             raise
 
     async def _create_sqlite_connection(self):
-        """
-        ✅ v7.7.9 (PERF-4): كل PRAGMA في try مستقل
-        """
         conn = None
         try:
             conn = await aiosqlite.connect(
@@ -3606,22 +3633,7 @@ class Database(
             logger.error(f"❌ _ensure_text_hash_column: {e}")
             return False
 
-    # =================================================================
-    # ✅ v7.7.10 (FIX-INT32): تحويل الأعمدة إلى BIGINT
-    # =================================================================
-
     async def _ensure_bigint_ids(self, conn) -> int:
-        """
-        ✅ v7.7.10 (FIX-INT32):
-        Telegram Channel/User IDs تتجاوز int32. نحوّل الأعمدة
-        INTEGER → BIGINT تلقائياً.
-
-        - PG: ALTER COLUMN ... TYPE BIGINT
-        - MySQL: MODIFY COLUMN ... BIGINT
-        - SQLite: لا يحتاج (ديناميكي)
-
-        Returns: عدد الأعمدة المُحوّلة
-        """
         if DB_TYPE == "sqlite":
             return 0
 
@@ -3638,10 +3650,10 @@ class Database(
                         table, col,
                     )
                     if row is None:
-                        continue  # العمود/الجدول غير موجود
+                        continue
                     row_l = row.lower()
                     if row_l == "bigint":
-                        continue  # ✅ صحيح
+                        continue
                     if row_l in ("integer", "int", "smallint", "smallserial"):
                         await conn.execute(
                             f'ALTER TABLE "{table}" '
@@ -3697,10 +3709,6 @@ class Database(
         return converted
 
     async def _migrate_schema(self, conn):
-        """
-        ✅ v7.7.9 (PERF-2): استعلام واحد لكل الأعمدة بدل N+1
-        ✅ v7.7.10 (FIX-INT32): استدعاء _ensure_bigint_ids
-        """
         if USE_MYSQL:
             try:
                 await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=0")
@@ -3780,14 +3788,12 @@ class Database(
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL")
                 ],
-                # ✅ v7.7.10: BIGINT (كان INTEGER — كسر Telegram)
                 "bot_groups": [
                     ("log_channel_id", "BIGINT DEFAULT NULL"),
                 ],
                 "auto_replies": [
                     ("usage_count", "INTEGER DEFAULT 0")
                 ],
-                # ✅ v7.7.10: BIGINT (كان INTEGER)
                 "anonymous_admins": [("user_id", "BIGINT")],
                 "posts": [
                     ("text_hash", "TEXT DEFAULT ''"),
@@ -3845,10 +3851,7 @@ class Database(
                     f"(fetch={fetch_elapsed:.2f}s)"
                 )
 
-            # ✅ PERF-3: text_hash مرة واحدة
             await self._ensure_text_hash_column(conn)
-
-            # ✅ v7.7.10 (FIX-INT32): تحويل الأعمدة إلى BIGINT
             await self._ensure_bigint_ids(conn)
 
             self._group_security_columns_cache = None
@@ -4062,14 +4065,10 @@ class Database(
             return False
 
     # =================================================================
-    # البيانات الافتراضية — ✅ v7.7.9 (PERF-6)
+    # البيانات الافتراضية
     # =================================================================
 
     async def _init_default_data(self, conn):
-        """
-        ✅ v7.7.9 (PERF-6): استعلام واحد لجلب الباقات الموجودة
-        + batch INSERT بدل loop.
-        """
         default_plans = [
             {"name": "تجربة",
              "description": "تجربة مجانية 30 يوم",
@@ -4118,7 +4117,6 @@ class Database(
         ]
         now_dt = TimeUtils.utc_now()
 
-        # ✅ PERF-6: استعلام واحد لجلب الأسماء الموجودة
         names = [p["name"] for p in default_plans]
         existing_names: Set[str] = set()
         try:
@@ -4171,7 +4169,6 @@ class Database(
             if p["name"] in existing_names
         ]
 
-        # إدخال دفعة واحدة
         if to_insert:
             try:
                 params_list = [
@@ -4197,7 +4194,6 @@ class Database(
             except Exception as e:
                 logger.warning(f"⚠️ insert plans batch: {e}")
 
-        # تحديث الباقات الموجودة (max_channels/max_posts)
         if to_update:
             for p in to_update:
                 try:
@@ -4537,11 +4533,10 @@ class Database(
                 pass
 
     # =================================================================
-    # Bootstrap — ✅ v7.7.8 FIX-PG + v7.7.9 PERF + v7.7.10 BIGINT
+    # Bootstrap
     # =================================================================
 
     async def _do_bootstrap_inner(self, conn) -> bool:
-        # ✅ PERF-1: فحص tables_hash قبل create_tables
         tables_hash = self._compute_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
             conn,
@@ -4562,7 +4557,6 @@ class Database(
         else:
             logger.info("⏩ الجداول موجودة — تخطي create_tables")
 
-        # ✅ PERF-2: bootstrap_hash يتحكم بالـ migration فقط
         current_hash = self._compute_bootstrap_hash()
         stored_hash = await self._fetchval_with_conn(
             conn,
@@ -4593,7 +4587,6 @@ class Database(
             try:
                 await self.initialize()
 
-                # ✅ FIX v7.7.8: PG/MySQL بدون transaction للـDDL
                 if USE_POSTGRES or USE_MYSQL:
                     async with self.connection() as conn:
                         await self._do_bootstrap_inner(conn)
