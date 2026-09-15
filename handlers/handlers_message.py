@@ -2,9 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.8)
+handlers_message.py - معالجات الرسائل (v7.7.9)
 =====================================================================
-🆕 v7.7.8 (إصلاحات حرجة):
+🆕 v7.7.9 (إصلاح تعارض WAIT_LOG_CH):
+    ✅ handle_private: ترك WAIT_LOG_CH لـ group_log handler
+       عند وجود log_group_id في context.user_data
+    ✅ يمنع تعارض ميزة "قناة سجل المجموعة" مع "قناة سجل البوت"
+       (كلا الميزتين كانتا تستخدمان UserState.WAIT_LOG_CH)
+
+📌 v7.7.8 (إصلاحات حرجة):
     ✅ _do_db_restore: try/finally يضمن reconnect دائماً
     ✅ _do_db_restore: إبطال كل الكاشات بعد الاستعادة
     ✅ _do_db_restore: تحديث backoff لملفات النسخ الاحتياطي الكبيرة
@@ -14,7 +20,6 @@ handlers_message.py - معالجات الرسائل (v7.7.8)
     ✅ _ensure_lang: إزالة tuple استثناءات redundant
     ✅ _get_penalty_duration: حذف معامل غير مُستخدَم
     ✅ logging في _handle_adding_posts: إخفاء نص المستخدم
-       (الخصوصية)
 
 📌 v7.7.7:
     ✅ _do_db_restore: DB.close() + reconnect
@@ -489,6 +494,17 @@ class MessageHandlers:
         try:
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
+
+            # ✅ v7.7.9: فحص WAIT_LOG_CH لقناة المجموعة
+            # إذا كان هناك log_group_id في user_data → هذه العملية
+            # خاصة بميزة "قناة سجل المجموعة" (handlers_group_log)
+            # → نتركها له بدل معالجتها هنا كـ "قناة سجل البوت" العامة
+            if state == UserState.WAIT_LOG_CH and context.user_data.get('log_group_id'):
+                logger.debug(
+                    f"⏭️ handle_private: ترك WAIT_LOG_CH لـ group_log handler "
+                    f"(user={user_id}, group={context.user_data.get('log_group_id')})"
+                )
+                return
 
             # ✅ v7.7.8: تسجيل محجوب (لا نُخزّن نص المستخدم)
             try:
@@ -1403,6 +1419,13 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_log_ch_input(update, context):
+        """
+        معالج قناة سجل البوت العامة (admin-level).
+
+        ⚠️ v7.7.9: هذا المعالج لقناة سجل البوت فقط.
+        ميزة "قناة سجل المجموعة" تُعالَج بواسطة handlers_group_log.py
+        وتُستبعد من هنا عبر الفحص في handle_private.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
