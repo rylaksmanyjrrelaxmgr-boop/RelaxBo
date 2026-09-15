@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.10 — BIGINT fix)
+database.py - قاعدة البيانات المتكاملة (v7.7.11 — BANNED-WORDS-CACHE FIX)
 ================================================================================
+🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL):
+  ✅ __init__: إضافة المتغيرات الناقصة التي يستخدمها
+     Mixin.get_banned_words:
+       - self._banned_words_cache: Dict[int, List[str]]
+       - self._banned_words_cache_time: Dict[int, float]
+       - self._banned_words_cache_ttl: float
+       - self._banned_words_cache_lock: asyncio.Lock
+  ✅ حل نهائي لـ: AttributeError: 'Database' object has no
+     attribute '_banned_words_cache_ttl'
+
 🚨 v7.7.10 (FIX-INT32):
   ✅ _ensure_bigint_ids: تحويل تلقائي للأعمدة INT32 → BIGINT
   ✅ log_channel_id: INTEGER → BIGINT (Telegram Channel IDs)
@@ -1827,10 +1837,29 @@ class Database(
             self.CONFIG = CONFIG
             self.PATHS = PATHS
             self.DATABASE_URL = DATABASE_URL
+
+            # =============================================================
+            # ✅ v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL):
+            #   متغيرات كان يستخدمها Mixin.get_banned_words لكنها
+            #   لم تكن معرّفة هنا — مما تسبب في:
+            #     AttributeError: 'Database' object has no
+            #     attribute '_banned_words_cache_ttl'
+            #   ملاحظة: هذه كاش محلي داخل الـ Database، منفصل عن
+            #   الكاش الذي يديره utils.get_banned_words_cached.
+            # =============================================================
             self._banned_words_local_cache = {}
             self._global_banned_words_cache: List[str] = []
             self._global_banned_words_loaded = False
             self._global_words_lock = asyncio.Lock()
+
+            # ✅ v7.7.11: المتغيرات الناقصة (سبب الخطأ)
+            self._banned_words_cache: Dict[int, List[str]] = {}
+            self._banned_words_cache_time: Dict[int, float] = {}
+            self._banned_words_cache_ttl: float = float(
+                os.getenv("BANNED_WORDS_CACHE_TTL", "60")
+            )
+            self._banned_words_cache_lock = asyncio.Lock()
+
             self._group_security_columns_cache: Optional[set] = None
 
             self._singleton_init_done = True
