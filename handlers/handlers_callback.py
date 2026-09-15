@@ -1,28 +1,37 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.2)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.0)
 =====================================================================
-✅ v9.4.2 — prefetch شامل (بدون بطء):
-  - LOG_CHANNEL_MENU_CACHE_TTL: 180s → 600s
-  - _show_groups_list: prefetch log_channel لكل المجموعات
-  - prefetch أمان + قناة سجل عند فتح groups
-
-✅ v9.4.1 — تحسين أداء إضافي:
-  - كاش اللغة في context.user_data (تفادي DB call)
-  - Prefetch لبيانات قناة السجل عند فتح grp_set
-  - إبطال كاش اللغة عند تغييرها
-
 ✅ v9.4.0 — تحسين أداء قناة السجل:
-  - _get_log_channel_menu_data: cache + parallel fetch
+  - _get_log_channel_menu_data: cache 30s + parallel fetch
   - _invalidate_log_channel_menu_cache: إبطال ذكي
   - _show_log_channel_menu: من 3 queries → 0 (cached)
   - إبطال الكاش عند set/remove/test
 
-✅ v9.3.0 — ذكاء المشاركة في قناة السجل
-✅ v9.2.0 — تكامل قناة سجل المجموعة
-✅ v9.1.0 — تحسينات أداء أزرار الأمان
+✅ v9.3.0 — ذكاء المشاركة في قناة السجل:
+  - _show_log_channel_menu: عرض "قناة مشتركة" + عدد المجموعات + الأسماء
+  - _handle_log_channel: قسم remove يُنبّه إذا كانت القناة مشتركة
+  - قسم test يعرض الوجهة الحالية
+
+✅ v9.2.0 — تكامل قناة سجل المجموعة:
+  - استيراد group_log بشكل آمن
+  - معالجات log_channel_btn / set / remove / test
+  - إدارة كاملة من لوحة الأمان
+
+✅ v9.1.0 — تحسينات أداء أزرار الأمان:
+  - _get_security_settings_cached (5s TTL)
+  - two-phase rendering
+  - _load_stats_and_edit helper موحد
+  - _preload_first_group
+
+✅ v9.0.5: إبطال context.user_data['lang'] عند تغيير اللغة
+✅ v9.0.4: كاش في context.user_data
+✅ v9.0.3: إصلاح sec_auto_reply_menu
+✅ v9.0.2: sec_maxlen, act_pin, HTML escape
+✅ v9.0.0: كل الإصلاحات الـ 90+
 =====================================================================
 """
 
@@ -108,7 +117,7 @@ try:
 except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
-# ✅ استيراد group_log بشكل آمن
+# ✅ v9.2.0: استيراد group_log بشكل آمن
 try:
     import group_log as _group_log_module
     _GROUP_LOG_MODULE_AVAILABLE = True
@@ -138,11 +147,8 @@ PUBLISH_ACQUIRE_TIMEOUT = 30
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 
-# ✅ v9.4.2: cache لقناة السجل — 600 ثانية
-LOG_CHANNEL_MENU_CACHE_TTL = 600
-
-# ✅ v9.4.2: حد أقصى للمجموعات المسبقة التحميل
-PREFETCH_MAX_GROUPS = 15
+# ✅ v9.4.0: cache لقائمة قناة السجل
+LOG_CHANNEL_MENU_CACHE_TTL = 30
 
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
@@ -209,14 +215,14 @@ def _safe_str(value, default='?') -> str:
 
 
 def _get_group_log():
-    """وصول ديناميكي لـgroup_log instance."""
+    """✅ v9.2.0: وصول ديناميكي لـgroup_log instance."""
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
     return getattr(_group_log_module, "group_log", None)
 
 
 # =====================================================================
-# cache + parallel fetch لقناة السجل
+# ✅ v9.4.0: cache + parallel fetch لقناة السجل
 # =====================================================================
 
 def _log_channel_cache_key(chat_id: int) -> str:
@@ -224,7 +230,7 @@ def _log_channel_cache_key(chat_id: int) -> str:
 
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
-    """إبطال كاش قائمة قناة السجل."""
+    """✅ v9.4.0: إبطال كاش قائمة قناة السجل."""
     try:
         await internal_cache.invalidate(_log_channel_cache_key(chat_id))
     except Exception:
@@ -233,9 +239,18 @@ async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
 
 async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     """
-    جلب بيانات قناة السجل مع:
-    - cache 600s
-    - parallel fetch
+    ✅ v9.4.0: جلب بيانات قناة السجل مع:
+    - cache 30s (يتفادى 3 queries متكررة)
+    - parallel fetch لـ current + effective
+    - try/except لـ get_groups_using_channel (توافق إصدارات)
+
+    Returns:
+        {
+            'current': int | None,
+            'effective': int | None,
+            'share_count': int,
+            'share_names': list[str],
+        }
     """
     cache_key = _log_channel_cache_key(chat_id)
     cached = await internal_cache.get(cache_key)
@@ -251,6 +266,7 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     if gl is None:
         return empty_result
 
+    # ✅ parallel fetch: current + effective في نفس الوقت
     async def _get_current():
         try:
             return await gl.get_private(chat_id)
@@ -274,16 +290,19 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
         logger.debug(f"gather log_channel info: {e}")
         current, effective = None, None
 
+    # ✅ جلب المجموعات المشتركة (اختياري)
     share_count = 0
     share_names: list = []
     if current:
         try:
             others = None
             try:
+                # حاول مع kwarg (إصدار حديث)
                 others = await gl.get_groups_using_channel(
                     current, exclude_group_id=chat_id
                 )
             except TypeError:
+                # إصدار قديم — بدون kwarg
                 others = await gl.get_groups_using_channel(current)
                 if others:
                     others = [
@@ -520,72 +539,6 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
 
 
 # =====================================================================
-# كاش اللغة في context.user_data
-# =====================================================================
-
-async def _get_cached_lang(context, user_id: int) -> str:
-    """كاش اللغة — يتفادى DB call في كل ضغطة."""
-    key = f"_lang_{user_id}"
-    lang = context.user_data.get(key)
-    if lang:
-        return lang
-    try:
-        lang = await DB.get_user_language(user_id) or 'ar'
-    except Exception as e:
-        logger.warning(f"get_user_language failed: {e}")
-        lang = 'ar'
-    context.user_data[key] = lang
-    return lang
-
-
-def _invalidate_lang_cache(context, user_id: int) -> None:
-    """إبطال كاش اللغة لمستخدم."""
-    try:
-        context.user_data.pop(f"_lang_{user_id}", None)
-        context.user_data.pop('lang', None)
-    except Exception:
-        pass
-
-
-# =====================================================================
-# ✅ v9.4.2: Prefetch helper — تحميل بيانات قناة السجل + الأمان
-# =====================================================================
-
-async def _prefetch_group_assets(chat_id: int) -> None:
-    """
-    v9.4.2: تحميل كل بيانات المجموعة بشكل متوازٍ:
-    - بيانات قناة السجل
-    - إعدادات الأمان
-    - إحصائيات الأمان
-    """
-    try:
-        # 1) log_channel menu data
-        await _get_log_channel_menu_data(chat_id)
-
-        # 2) security settings (batch)
-        key = f"sec_set_{chat_id}"
-        cached = await _security_settings_cache.get(key)
-        if cached is None:
-            settings = await DB.get_security_settings(chat_id) or {}
-            if not isinstance(settings, dict):
-                settings = _row_to_dict(settings) or {}
-            await _security_settings_cache.set(
-                key, settings, ttl=SEC_SETTINGS_CACHE_TTL
-            )
-
-        # 3) security stats
-        stats_key = f"sec_stats_{chat_id}"
-        cached_stats = await _security_stats_cache_local.get(stats_key)
-        if cached_stats is None:
-            stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-            await _security_stats_cache_local.set(
-                stats_key, stats, ttl=SEC_STATS_CACHE_TTL
-            )
-    except Exception as e:
-        logger.debug(f"_prefetch_group_assets({chat_id}): {e}")
-
-
-# =====================================================================
 # CallbackHandlers
 # =====================================================================
 
@@ -647,7 +600,11 @@ class CallbackHandlers:
         start_time = time.monotonic()
         _ensure_bot_start_time(context)
 
-        lang = await _get_cached_lang(context, user_id)
+        try:
+            lang = await DB.get_user_language(user_id) or 'ar'
+        except Exception as e:
+            logger.warning(f"get_user_language failed: {e}")
+            lang = 'ar'
 
         try:
             handled = await CallbackHandlers._handle_parameterized(
@@ -850,7 +807,6 @@ class CallbackHandlers:
 
             if base_data == CB.TRANS_OFF:
                 await DB.set_user_language(user_id, 'off')
-                _invalidate_lang_cache(context, user_id)
                 await safe_edit(query, "✅ تم إيقاف الترجمة", bot=context.bot)
                 await invalidate_user_cache(user_id)
                 return
@@ -968,6 +924,7 @@ class CallbackHandlers:
                 await safe_edit(query, "👑 لوحة الأدمن", reply_markup=kb, bot=context.bot)
                 return
 
+            # ✅ v9.2.0: معالجات قناة السجل
             if data.startswith("log_channel_"):
                 await CallbackHandlers._handle_log_channel(
                     update, context, query, user_id, lang
@@ -1068,7 +1025,7 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # دوال مساعدة للأمان
+    # 🧠 v9.1.0: دوال مساعدة للأمان
     # =================================================================
 
     @staticmethod
@@ -1765,7 +1722,10 @@ class CallbackHandlers:
         if lang_set in valid_langs:
             await DB.set_user_language(user_id, lang_set)
             await invalidate_user_cache(user_id)
-            _invalidate_lang_cache(context, user_id)
+            try:
+                context.user_data.pop('lang', None)
+            except Exception:
+                pass
             try:
                 from handlers_message import clear_lang_cache
                 clear_lang_cache(context)
@@ -1873,6 +1833,7 @@ class CallbackHandlers:
         if not await _is_group_owner(user_id, chat_id):
             await safe_edit(query, "❌ لا تملك هذه المجموعة", bot=context.bot)
             return
+        # ✅ v9.4.0: إبطال كاش قناة السجل
         try:
             await _invalidate_log_channel_menu_cache(chat_id)
         except Exception:
@@ -1895,14 +1856,6 @@ class CallbackHandlers:
             return
 
         context.user_data['security_chat_id'] = chat_id
-
-        # ✅ v9.4.2: prefetch كامل في الخلفية
-        try:
-            task = asyncio.create_task(_prefetch_group_assets(chat_id))
-            ACTIVE_TASKS.add(task)
-            task.add_done_callback(ACTIVE_TASKS.discard)
-        except Exception as e:
-            logger.debug(f"prefetch group assets for {chat_id}: {e}")
 
         await CallbackHandlers._render_security_two_phase(
             query, context, chat_id, lang, force_refresh_settings=False
@@ -2081,14 +2034,15 @@ class CallbackHandlers:
         text = "👥 مجموعاتي\n\n"
         kb = []
         display_idx = 0
-        group_ids: list = []
+        first_chat_id = None
         for g in groups:
             gd = _row_to_dict(g) or {}
             gid = gd.get('chat_id')
             if gid is None:
                 continue
             display_idx += 1
-            group_ids.append(gid)
+            if display_idx == 1:
+                first_chat_id = gid
             name = gd.get('chat_name') or f"Group {gid}"
             status = "⛔" if gd.get('banned') else "✅"
             number = _group_number(display_idx)
@@ -2100,29 +2054,30 @@ class CallbackHandlers:
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
-        # ✅ v9.4.2: prefetch شامل لكل المجموعات في الخلفية
-        if group_ids:
-            targets = group_ids[:PREFETCH_MAX_GROUPS]
-
-            async def _prefetch_all():
-                tasks = [
-                    asyncio.create_task(_prefetch_group_assets(gid))
-                    for gid in targets
-                ]
-                if tasks:
-                    try:
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                    except Exception:
-                        pass
-
-            bg_task = asyncio.create_task(_prefetch_all())
-            ACTIVE_TASKS.add(bg_task)
-            bg_task.add_done_callback(ACTIVE_TASKS.discard)
+        if first_chat_id:
+            task = asyncio.create_task(
+                CallbackHandlers._preload_group_security(first_chat_id)
+            )
+            ACTIVE_TASKS.add(task)
+            task.add_done_callback(ACTIVE_TASKS.discard)
 
     @staticmethod
     async def _preload_group_security(chat_id: int) -> None:
-        # للتوافق الخلفي — الآن يفوّض إلى _prefetch_group_assets
-        await _prefetch_group_assets(chat_id)
+        try:
+            key = f"sec_set_{chat_id}"
+            cached = await _security_settings_cache.get(key)
+            if cached is None:
+                settings = await DB.get_security_settings(chat_id) or {}
+                if not isinstance(settings, dict):
+                    settings = _row_to_dict(settings) or {}
+                await _security_settings_cache.set(key, settings, ttl=SEC_SETTINGS_CACHE_TTL)
+            stats_key = f"sec_stats_{chat_id}"
+            cached_stats = await _security_stats_cache_local.get(stats_key)
+            if cached_stats is None:
+                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
+                await _security_stats_cache_local.set(stats_key, stats, ttl=SEC_STATS_CACHE_TTL)
+        except Exception as e:
+            logger.debug(f"_preload_group_security({chat_id}): {e}")
 
     @staticmethod
     def _unwrap_get_next_post(result) -> Tuple[Optional[Dict], bool]:
@@ -2309,7 +2264,7 @@ class CallbackHandlers:
     @staticmethod
     async def _show_channel_list(update, context, query, user_id, lang=None):
         if not lang:
-            lang = await _get_cached_lang(context, user_id)
+            lang = await DB.get_user_language(user_id) or 'ar'
         channels = await DB.get_user_channels(user_id)
         if not channels:
             kb = InlineKeyboardMarkup([
@@ -2375,7 +2330,7 @@ class CallbackHandlers:
     @staticmethod
     async def _show_post_list(update, context, query, user_id, lang=None):
         if not lang:
-            lang = await _get_cached_lang(context, user_id)
+            lang = await DB.get_user_language(user_id) or 'ar'
         active = await DB.get_active_channel(user_id)
         if not active:
             await safe_edit(query, "❌ لا توجد قناة نشطة", bot=context.bot)
@@ -2422,7 +2377,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
         if not lang:
-            lang = await _get_cached_lang(context, user_id)
+            lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
         parts = data.split(":")
 
@@ -2728,11 +2683,19 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # قناة سجل المجموعة
+    # ✅ v9.4.0: قناة سجل المجموعة (cached + parallel)
     # =================================================================
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
+        """
+        عرض قائمة إدارة قناة السجل — v9.4.0.
+
+        ✅ من 3 queries متتالية → 0 (cached 30s)
+        ✅ parallel fetch عند first call
+        ✅ إبطال تلقائي عند set/remove/test
+        """
+        # ✅ v9.4.0: fetch عبر cache
         data = await _get_log_channel_menu_data(chat_id)
 
         current = data.get('current')
@@ -2740,6 +2703,7 @@ class CallbackHandlers:
         share_count = data.get('share_count', 0)
         share_names = data.get('share_names', [])
 
+        # ─── بناء نص الحالة ───
         if current:
             if share_count == 0:
                 status_block = (
@@ -2785,6 +2749,7 @@ class CallbackHandlers:
             f"🆔 مجموعتك: <code>{chat_id}</code>"
         )
 
+        # ─── الأزرار ───
         set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗 تعيين قناة السجل"
         test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 اختبار"
         remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️ إزالة"
@@ -2823,9 +2788,11 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_log_channel(update, context, query, user_id, lang):
+        """معالج أزرار قناة السجل."""
         data = query.data or ""
         parts = data.split(":")
 
+        # ─── استخراج chat_id ───
         chat_id = None
         if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
             chat_id = int(parts[1])
@@ -2848,6 +2815,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
 
+        # ─── تحديد الإجراء ───
         if parts[0] == "log_channel_btn":
             action = "menu"
         elif parts[0].startswith("log_channel_"):
@@ -2856,12 +2824,14 @@ class CallbackHandlers:
             action = parts[0]
 
         try:
+            # ─── القائمة ───
             if action in ("menu", "btn", "show"):
                 await CallbackHandlers._show_log_channel_menu(
                     query, context, chat_id, user_id, lang
                 )
                 return
 
+            # ─── تعيين ───
             if action == "set":
                 gl = _get_group_log()
                 if gl is None:
@@ -2890,6 +2860,7 @@ class CallbackHandlers:
                 )
                 return
 
+            # ─── إزالة (ذكية) ───
             if action == "remove":
                 gl = _get_group_log()
                 if gl is None:
@@ -2900,6 +2871,7 @@ class CallbackHandlers:
                     )
                     return
 
+                # ✅ v9.3.0: فحص المشاركة قبل الحذف
                 current = await gl.get_private(chat_id)
                 share_info = ""
                 if current:
@@ -2928,6 +2900,7 @@ class CallbackHandlers:
                     )
                     return
 
+                # ✅ v9.4.0: إبطال الكاش
                 await _invalidate_log_channel_menu_cache(chat_id)
 
                 back_text = KeyboardFactory.get_text(
@@ -2949,6 +2922,7 @@ class CallbackHandlers:
                 )
                 return
 
+            # ─── اختبار ───
             if action == "test":
                 gl = _get_group_log()
                 if gl is None:
@@ -2983,6 +2957,7 @@ class CallbackHandlers:
                         event="general",
                         silent=False,
                     )
+                    # ✅ v9.4.0: إبطال الكاش (قد يتغير الوقت/الحالة)
                     await _invalidate_log_channel_menu_cache(chat_id)
                     await safe_edit(
                         query,
@@ -3204,7 +3179,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ غير مصرح", bot=context.bot)
             return
         if not lang:
-            lang = await _get_cached_lang(context, user_id)
+            lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
 
         try:
@@ -3899,7 +3874,7 @@ class CallbackHandlers:
     @staticmethod
     async def _handle_auto_reply(update, context, query, user_id, lang=None):
         if not lang:
-            lang = await _get_cached_lang(context, user_id)
+            lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
         parts = data.split(":")
 
@@ -4091,7 +4066,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_schedule_menu(update, context, query, ch_id, user_id):
-        lang = await _get_cached_lang(context, user_id)
+        lang = await DB.get_user_language(user_id) or 'ar'
         kb = KeyboardFactory.build("channel_settings", chat_id=ch_id, lang=lang)
         await safe_edit(query, "📅 جدولة القناة", reply_markup=kb, bot=context.bot)
 
