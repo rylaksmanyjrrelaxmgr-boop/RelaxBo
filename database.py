@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.12 — AUDIT-UTC-CLEAN)
+database.py - قاعدة البيانات المتكاملة (v7.7.13 — FIX-RESTORE-COMPUTE-TEXT-HASH)
 ================================================================================
+🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
+  ✅ استعادة _compute_text_hash المحذوفة سهواً في v7.7.9 PERF-3
+  ✅ حل نهائي لـ: AttributeError: 'Database' object has no
+     attribute '_compute_text_hash'
+  ✅ متوافقة مع database_channels_posts.py (Mixin Contract)
+
 🔍 v7.7.12 (AUDIT-UTC-CLEAN — لا تغيير وظيفي):
   ✅ مراجعة شاملة: كل استدعاءات التخزين تستخدم TimeUtils.utc_now()
   ✅ لا يوجد أي استخدام لـ mecca_now() في سياق التخزين
@@ -76,7 +82,6 @@ from typing import (
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
-
 # =====================================================================
 # 0) كشف نوع قاعدة البيانات
 # =====================================================================
@@ -112,7 +117,6 @@ USE_MYSQL = (DB_TYPE == "mysql")
 logger = logging.getLogger(__name__)
 logger.info(f"📌 قاعدة البيانات: {DB_TYPE.upper()}")
 
-
 # =====================================================================
 # 0.1) التكوينات
 # =====================================================================
@@ -130,7 +134,6 @@ except ImportError:
         PRIMARY_OWNER_ID = 0
         MAX_DAILY_REFERRALS = 10
         MAX_GLOBAL_BANNED_WORDS = 500
-
 
 # =====================================================================
 # 0.2) database_tables
@@ -153,7 +156,6 @@ except ImportError as e:
     CURRENT_SCHEMA_VERSION = 1
     TABLES_MODULE_AVAILABLE = False
 
-
 # =====================================================================
 # 0.3) Mixins
 # =====================================================================
@@ -167,7 +169,6 @@ def _load_mixin(module_name: str, class_name: str):
     except ImportError as e:
         logger.warning(f"⚠️ {module_name}.py غير موجود: {e}")
         return object, False
-
 
 ChannelsPostsMixin, CHANNELS_POSTS_MIXIN_AVAILABLE = _load_mixin(
     "database_channels_posts", "ChannelsPostsMixin"
@@ -199,7 +200,6 @@ BackupMixin, BACKUP_MIXIN_AVAILABLE = _load_mixin(
 RemindersMixin, REMINDERS_MIXIN_AVAILABLE = _load_mixin(
     "database_reminders", "RemindersMixin"
 )
-
 
 # =====================================================================
 # 0.4) InternalQueryCache
@@ -245,9 +245,7 @@ class InternalQueryCache:
     async def get_size(self) -> int:
         return len(self._cache)
 
-
 internal_cache = InternalQueryCache(ttl=30, max_size=10000)
-
 
 # =====================================================================
 # 0.5) SimpleCache
@@ -352,10 +350,8 @@ class SimpleCache:
                 'ttl': self._ttl,
             }
 
-
 class SettingsCache(SimpleCache):
     pass
-
 
 # =====================================================================
 # 0.6) cache.py
@@ -446,7 +442,6 @@ except ImportError:
     CACHE_AVAILABLE = True
     logger.warning("⚠️ cache.py غير موجود — كاش داخلي")
 
-
 # =====================================================================
 # 0.7) ثوابت
 # =====================================================================
@@ -461,7 +456,6 @@ SQLITE_POOL_SIZE = int(os.getenv("SQLITE_POOL_SIZE", "10"))
 EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "true"
 MAX_ACTIVE_PENALTIES_FETCH = 1000
 UTC = timezone.utc
-
 
 # =====================================================================
 # 1) ثوابت مساعدة
@@ -532,7 +526,6 @@ _ALLOWED_COL_KEYWORDS = frozenset({
     "REFERENCES", "CHECK", "CONSTRAINT",
 })
 
-
 def _validate_column_def(col_name: str, col_def: str) -> bool:
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
         logger.error(f"❌ اسم عمود غير صالح: {col_name}")
@@ -564,7 +557,6 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
         return False
     return True
 
-
 def _clone_start_data(data: Dict) -> Dict:
     if not isinstance(data, dict):
         return data
@@ -577,12 +569,10 @@ def _clone_start_data(data: Dict) -> Dict:
             cloned[key] = list(value)
     return cloned
 
-
 class _FactoryFailed(Exception):
     def __init__(self, msg: str, pool: Any):
         super().__init__(msg)
         self.pool = pool
-
 
 async def _create_pool_with_retry(
     pool_factory: Callable[[], Awaitable[Any]],
@@ -627,16 +617,13 @@ async def _create_pool_with_retry(
         raise last_exc
     raise RuntimeError(f"فشل الاتصال بـ {name}")
 
-
 def _sql_get_setting_value() -> str:
     if USE_MYSQL:
         return "SELECT `value` FROM settings WHERE `key` = ?"
     return "SELECT value FROM settings WHERE key = ?"
 
-
 def _mysql_random() -> str:
     return "RAND()" if USE_MYSQL else "RANDOM()"
-
 
 # =====================================================================
 # Parser للأقواس — FIX-A
@@ -734,7 +721,6 @@ def _find_values_end(query: str) -> int:
 
     return last_close if last_close > 0 else -1
 
-
 def _insert_before_returning(query: str, clause: str) -> str:
     upper = query.upper()
     n = len(upper)
@@ -799,7 +785,6 @@ def _insert_before_returning(query: str, clause: str) -> str:
     if idx > 0:
         return query[:idx] + " " + clause + query[idx:]
     return query + " " + clause
-
 
 def _replace_excluded_with_values(set_clause: str) -> str:
     result: List[str] = []
@@ -884,7 +869,6 @@ def _replace_excluded_with_values(set_clause: str) -> str:
         result.append(ch)
         i += 1
     return "".join(result)
-
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
     if table in _UNIQUE_CACHE:
@@ -1033,7 +1017,6 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
     _UNIQUE_CACHE[table] = columns
     return columns
 
-
 async def _find_best_conflict_target(
     table: str, conn, insert_columns: List[str]
 ) -> Optional[str]:
@@ -1111,7 +1094,6 @@ async def _find_best_conflict_target(
             return None
         except Exception:
             return None
-
 
 def _convert_placeholders(query: str) -> str:
     if DB_TYPE == "sqlite":
@@ -1209,7 +1191,6 @@ def _convert_placeholders(query: str) -> str:
         return "".join(result)
     return query
 
-
 async def _convert_insert_or_ignore(query: str, conn=None) -> str:
     if DB_TYPE == "sqlite":
         return query
@@ -1252,7 +1233,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
     elif USE_MYSQL:
         return query.replace("INSERT OR IGNORE", "INSERT IGNORE", 1)
     return query
-
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
     if DB_TYPE == "sqlite":
@@ -1399,7 +1379,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         )
     return query
 
-
 def _convert_upsert(query: str) -> str:
     if DB_TYPE == "sqlite" or USE_POSTGRES:
         return query
@@ -1425,7 +1404,6 @@ def _convert_upsert(query: str) -> str:
         raise ValueError("MySQL: RETURNING غير مدعوم")
     return new_query + f" ON DUPLICATE KEY UPDATE {new_update_set}" + tail
 
-
 def _adapt_params(params: tuple, query: str = "") -> tuple:
     if params is None:
         return ()
@@ -1447,7 +1425,6 @@ def _adapt_params(params: tuple, query: str = "") -> tuple:
         else:
             new_params.append(p)
     return tuple(new_params)
-
 
 async def _table_exists(conn, table: str) -> bool:
     try:
@@ -1486,7 +1463,6 @@ async def _table_exists(conn, table: str) -> bool:
                     pass
     except Exception:
         return False
-
 
 # =====================================================================
 # 2) TimeUtils
@@ -1559,7 +1535,6 @@ class TimeUtils:
             return dt
         except (ValueError, TypeError):
             return None
-
 
 # =====================================================================
 # 3) فئة Database
@@ -4399,6 +4374,24 @@ class Database(
             json.dumps(data, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
+    # ✅ v7.7.13: استعادة الدالة المحذوفة سهواً — عقد Mixin Contract
+    def _compute_text_hash(self, text: str) -> str:
+        """
+        🔐 يحسب SHA-256 hash للنص — يُستخدم لمنع تكرار المنشورات.
+
+        يُستدعى من ChannelsPostsMixin.add_posts (database_channels_posts.py).
+        يُخزَّن الناتج في posts.text_hash (CHAR(64) في MySQL).
+
+        ⚠️ ملاحظة مهمة: لا تضف normalization (lower/strip) هنا —
+        لأن add_posts يستدعيها بالنص بعد القصّ فقط، وأي تغيير
+        سيسبب تكرارات وهمية للمنشورات القديمة المخزّنة مسبقاً.
+        """
+        if not text:
+            return ""
+        return hashlib.sha256(
+            str(text).encode("utf-8")
+        ).hexdigest()
+
     def _compute_tables_hash(self) -> str:
         return hashlib.sha256(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
@@ -6043,21 +6036,17 @@ class Database(
             f"LIMIT {MAX_ACTIVE_PENALTIES_FETCH}"
         )
 
-
 # =====================================================================
 # 4) كائن عالمي
 # =====================================================================
 
 DB = Database()
 
-
 async def get_db() -> Database:
     return DB
 
-
 async def initialize_db() -> bool:
     return await DB.initialize_db()
-
 
 # =====================================================================
 # 5) __all__
