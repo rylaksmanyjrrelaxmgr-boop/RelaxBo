@@ -1,14 +1,19 @@
 # group_log.py
 """
-group_log.py — نظام سجل قنوات المجموعات (v1.2.0)
+group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.0)
 =====================================================================
-- سجل خاص لكل مجموعة (bot_groups.log_channel_id)
-- سجل عام (settings.global_log_channel)
-- أولوية: خاص → عام (fallback)
-- Queue + Worker لتفادي حجب البوت
-- Cache 60s لتقليل ضغط DB
-- ✅ v1.2.0: get_running_loop + has_private + get_effective_target
-  + drain + shutdown + حماية Worker مزدوج
+v1.3.0 (ذكاء المشاركة):
+    ✅ get_groups_using_channel — قائمة المجموعات المشاركة
+    ✅ get_channel_share_count — عدد المجموعات
+    ✅ set_private يُعيد dict مع معلومات المشاركة
+    ✅ send مع رأس ذكي يحمل اسم المجموعة المصدر
+    ✅ _worker: تنظيف جماعي عند فشل القناة
+    ✅ unset_private_bulk للتنظيف الجماعي
+    ✅ كاش لأسماء المجموعات
+
+v1.2.0 (أساس):
+    ✅ get_running_loop + has_private + get_effective_target
+    ✅ drain + shutdown + حماية Worker مزدوج
 =====================================================================
 """
 
@@ -22,10 +27,11 @@ logger = logging.getLogger(__name__)
 
 class GroupLog:
     """
-    إدارة سجل قنوات المجموعات.
+    إدارة سجل قنوات المجموعات — نسخة ذكية.
 
     - كل مجموعة لها قناة سجل خاصة (اختياري)
     - قناة سجل عامة (اختياري) — fallback
+    - ✅ قناة واحدة يمكن أن تخدم عدة مجموعات بذكاء
     """
 
     QUEUE_MAX_SIZE = 1000
@@ -39,6 +45,9 @@ class GroupLog:
         self._cache: Dict[int, List[dict]] = {}
         self._cache_ts: Dict[int, float] = {}
         self._cache_ttl = self.CACHE_TTL
+
+        # ✅ v1.3.0: أسماء المجموعات (cache للأداء)
+        self._group_names: Dict[int, str] = {}
 
         # Global log channel cache
         self._global_chat_id: Optional[int] = None
@@ -60,9 +69,11 @@ class GroupLog:
             self._cache_ts.clear()
             self._global_ts = 0.0
             self._global_chat_id = None
+            self._group_names.clear()
         else:
             self._cache.pop(group_id, None)
             self._cache_ts.pop(group_id, None)
+            self._group_names.pop(group_id, None)
 
     # =================================================================
     # سجل خاص بالمجموعة
@@ -89,13 +100,123 @@ class GroupLog:
         """هل للمجموعة قناة سجل خاصة؟"""
         return (await self.get_private(group_id)) is not None
 
-    async def set_private(self, group_id: int, chat_id: int) -> bool:
-        """يعيّن قناة سجل خاصة لمجموعة."""
-        if not group_id or not chat_id:
-            return False
+    # =================================================================
+    # ✅ v1.3.0: ذكاء المشاركة
+    # =================================================================
 
+    async def get_groups_using_channel(
+        self, chat_id: int, exclude_group_id: int = None
+    ) -> List[Dict]:
+        """
+        ✅ v1.3.0: قائمة المجموعات التي تستخدم نفس القناة.
+
+        يُرجع: [{'chat_id': int, 'chat_name': str, 'banned': int}, ...]
+        """
+        if not chat_id:
+            return []
         try:
-            # 1) محاولة التحديث (المجموعة موجودة)
+            if exclude_group_id is not None:
+                rows = await self.db.fetchall(
+                    "SELECT chat_id, chat_name, banned FROM bot_groups "
+                    "WHERE log_channel_id = ? AND chat_id != ?",
+                    (chat_id, exclude_group_id),
+                )
+            else:
+                rows = await self.db.fetchall(
+                    "SELECT chat_id, chat_name, banned FROM bot_groups "
+                    "WHERE log_channel_id = ?",
+                    (chat_id,),
+                )
+            return [dict(r) for r in (rows or [])]
+        except Exception as e:
+            logger.error(f"get_groups_using_channel({chat_id}): {e}")
+            return []
+
+    async def get_channel_share_count(
+        self, chat_id: int, exclude_group_id: int = None
+    ) -> int:
+        """✅ v1.3.0: عدد المجموعات التي تستخدم نفس القناة."""
+        if not chat_id:
+            return 0
+        try:
+            if exclude_group_id is not None:
+                count = await self.db.fetchval(
+                    "SELECT COUNT(*) FROM bot_groups "
+                    "WHERE log_channel_id = ? AND chat_id != ?",
+                    (chat_id, exclude_group_id),
+                    default=0,
+                )
+            else:
+                count = await self.db.fetchval(
+                    "SELECT COUNT(*) FROM bot_groups "
+                    "WHERE log_channel_id = ?",
+                    (chat_id,),
+                    default=0,
+                )
+            return int(count or 0)
+        except Exception as e:
+            logger.error(f"get_channel_share_count({chat_id}): {e}")
+            return 0
+
+    async def _get_group_name(self, group_id: int) -> str:
+        """جلب اسم المجموعة (مع cache)."""
+        if group_id in self._group_names:
+            return self._group_names[group_id]
+        try:
+            name = await self.db.fetchval(
+                "SELECT chat_name FROM bot_groups WHERE chat_id = ?",
+                (group_id,),
+                default=None,
+            )
+            result = str(name) if name else f"مجموعة {group_id}"
+        except Exception:
+            result = f"مجموعة {group_id}"
+        self._group_names[group_id] = result
+        return result
+
+    # =================================================================
+    # ✅ v1.3.0: set_private مع تقرير ذكي
+    # =================================================================
+
+    async def set_private(self, group_id: int, chat_id: int) -> Dict:
+        """
+        ✅ v1.3.0: يعيّن قناة سجل خاصة.
+
+        يُرجع dict:
+        {
+            'ok': bool,
+            'shared': bool,          # هل القناة مشتركة؟
+            'share_count': int,      # عدد المجموعات الأخرى
+            'other_groups': list,    # أسماء المجموعات الأخرى
+        }
+        """
+        result = {
+            'ok': False,
+            'shared': False,
+            'share_count': 0,
+            'other_groups': [],
+        }
+
+        if not group_id or not chat_id:
+            return result
+
+        # ✅ فحص المشاركة أولاً
+        try:
+            others = await self.get_groups_using_channel(
+                chat_id, exclude_group_id=group_id
+            )
+            if others:
+                result['shared'] = True
+                result['share_count'] = len(others)
+                result['other_groups'] = [
+                    o.get('chat_name') or f"مجموعة {o.get('chat_id')}"
+                    for o in others[:5]
+                ]
+        except Exception as e:
+            logger.warning(f"share check failed: {e}")
+
+        # المحاولة الفعلية
+        try:
             n = await self.db.execute(
                 "UPDATE bot_groups SET log_channel_id = ? "
                 "WHERE chat_id = ?",
@@ -103,9 +224,10 @@ class GroupLog:
             )
             if n and n > 0:
                 self.invalidate(group_id)
-                return True
+                result['ok'] = True
+                return result
 
-            # 2) المجموعة غير موجودة — أدخلها
+            # لو المجموعة غير موجودة — أدرجها
             try:
                 await self.db.execute(
                     "INSERT OR IGNORE INTO bot_groups "
@@ -118,20 +240,20 @@ class GroupLog:
                         datetime.now(timezone.utc).replace(tzinfo=None),
                     ),
                 )
-                # تأكيد الحفظ بعد الإدراج
                 await self.db.execute(
                     "UPDATE bot_groups SET log_channel_id = ? "
                     "WHERE chat_id = ?",
                     (chat_id, group_id),
                 )
+                result['ok'] = True
             except Exception as ie:
                 logger.warning(f"set_private insert fallback: {ie}")
 
             self.invalidate(group_id)
-            return True
+            return result
         except Exception as e:
             logger.error(f"set_private({group_id}, {chat_id}): {e}")
-            return False
+            return result
 
     async def unset_private(self, group_id: int) -> bool:
         """يُزيل قناة السجل الخاصة بمجموعة."""
@@ -149,6 +271,24 @@ class GroupLog:
             logger.error(f"unset_private({group_id}): {e}")
             return False
 
+    async def unset_private_bulk(self, group_ids: List[int]) -> int:
+        """✅ v1.3.0: إزالة القناة من عدة مجموعات."""
+        if not group_ids:
+            return 0
+        try:
+            placeholders = ",".join(["?"] * len(group_ids))
+            n = await self.db.execute(
+                f"UPDATE bot_groups SET log_channel_id = NULL "
+                f"WHERE chat_id IN ({placeholders})",
+                tuple(group_ids),
+            )
+            for gid in group_ids:
+                self.invalidate(gid)
+            return n or 0
+        except Exception as e:
+            logger.error(f"unset_private_bulk: {e}")
+            return 0
+
     # =================================================================
     # سجل عام
     # =================================================================
@@ -158,7 +298,6 @@ class GroupLog:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # لا يوجد event loop — ارجع القيمة المخزّنة
             return self._global_chat_id
 
         now = loop.time()
@@ -180,7 +319,6 @@ class GroupLog:
         return self._global_chat_id
 
     async def set_global(self, chat_id: int) -> bool:
-        """يعيّن السجل العام."""
         if not chat_id:
             return False
         try:
@@ -196,7 +334,6 @@ class GroupLog:
             return False
 
     async def unset_global(self) -> bool:
-        """يحذف السجل العام."""
         try:
             await self.db.execute(
                 "DELETE FROM settings WHERE key = ?",
@@ -209,18 +346,14 @@ class GroupLog:
             return False
 
     async def get_global(self) -> Optional[int]:
-        """يرجع معرّف السجل العام."""
         return await self._get_global()
 
     # =================================================================
-    # Resolution — أولوية: خاص → عام
+    # Resolution
     # =================================================================
 
     async def get_effective_target(self, group_id: int) -> Optional[int]:
-        """
-        ✅ v1.2.0: القناة التي سيُرسل إليها فعلياً (خاص → عام).
-        مفيد لعرض "الحالية" في القائمة.
-        """
+        """القناة التي سيُرسل إليها فعلياً (خاص → عام)."""
         if not group_id:
             return None
         private = await self.get_private(group_id)
@@ -229,11 +362,7 @@ class GroupLog:
         return await self._get_global()
 
     async def _resolve_targets(self, group_id: int) -> List[dict]:
-        """
-        القنوات التي سيُرسل إليها الحدث:
-        - قناة خاصة إن وُجدت
-        - وإلا: القناة العامة (fallback)
-        """
+        """القنوات التي سيُرسل إليها الحدث."""
         try:
             loop = asyncio.get_running_loop()
             now = loop.time()
@@ -246,7 +375,6 @@ class GroupLog:
 
         targets: List[dict] = []
 
-        # 1) خاص
         private = await self.get_private(group_id)
         if private:
             targets.append({
@@ -255,7 +383,6 @@ class GroupLog:
                 "source": "private",
             })
         else:
-            # 2) عام (fallback)
             g = await self._get_global()
             if g:
                 targets.append({
@@ -269,17 +396,19 @@ class GroupLog:
         return targets
 
     # =================================================================
-    # الإرسال (Queue)
+    # ✅ v1.3.0: send مع رأس ذكي
     # =================================================================
 
     def send(self, group_id: int, text: str,
              event: str = "general",
              parse_mode: str = "HTML",
-             silent: bool = True) -> None:
+             silent: bool = True,
+             show_group_header: bool = True) -> None:
         """
-        يضع رسالة سجل في الطابور — لا يحجب التنفيذ.
+        يضع رسالة سجل في الطابور.
 
-        event: "general" | "users" | "broadcast" | "errors" | "buttons" | "all"
+        ✅ v1.3.0: show_group_header — إضافة رأس باسم المجموعة
+                    تلقائياً لتمييز المصدر عند المشاركة.
         """
         if not group_id or not text:
             return
@@ -290,12 +419,55 @@ class GroupLog:
                 "event": event,
                 "parse_mode": parse_mode,
                 "silent": silent,
+                "show_group_header": show_group_header,
             })
         except asyncio.QueueFull:
             logger.warning(
                 f"group_log queue full — dropping "
                 f"(grp={group_id}, event={event})"
             )
+
+    async def _build_message_text(self, item: dict) -> str:
+        """
+        ✅ v1.3.0: بناء النص النهائي مع رأس ذكي.
+        - قناة خاصة بمجموعة واحدة → بلا رأس
+        - قناة مشتركة أو عامة → رأس باسم المجموعة
+        """
+        base_text = item["text"]
+        group_id = item["group_id"]
+
+        if not item.get("show_group_header", True):
+            return base_text
+
+        # هل القناة مشتركة؟
+        try:
+            private = await self.get_private(group_id)
+            if not private:
+                # يستخدم السجل العام → أضف الرأس دائماً
+                shared = True
+            else:
+                count = await self.get_channel_share_count(
+                    private, exclude_group_id=group_id
+                )
+                shared = count > 0
+        except Exception:
+            shared = True
+
+        if not shared:
+            return base_text
+
+        # أضف رأس باسم المجموعة
+        group_name = await self._get_group_name(group_id)
+        header = (
+            f"<b>📌 من: {group_name}</b>\n"
+            f"<code>{group_id}</code>\n"
+            f"━━━━━━━━━━━━━━━\n"
+        )
+        return header + base_text
+
+    # =================================================================
+    # Worker
+    # =================================================================
 
     async def _worker(self) -> None:
         """عامل خلفي يعالج طابور الرسائل."""
@@ -308,17 +480,19 @@ class GroupLog:
                     if not targets:
                         continue
 
+                    # ✅ v1.3.0: بناء النص مع الرأس الذكي
+                    final_text = await self._build_message_text(item)
+
                     for t in targets:
                         try:
                             await self.bot.send_message(
                                 chat_id=t["chat_id"],
-                                text=item["text"],
+                                text=final_text,
                                 parse_mode=item["parse_mode"],
                                 disable_notification=item["silent"],
                             )
                         except Exception as e:
                             err_msg = str(e).lower()
-                            # لو القناة محذوفة أو البوت طُرد منها
                             if any(kw in err_msg for kw in (
                                 "chat not found",
                                 "bot was kicked",
@@ -326,22 +500,16 @@ class GroupLog:
                                 "chat_id is empty",
                                 "user is deactivated",
                                 "bot is not a member",
+                                "not enough rights",
                             )):
                                 logger.warning(
                                     f"⚠️ قناة السجل غير متاحة "
                                     f"(grp={item['group_id']}, "
-                                    f"src={t['source']}) — تنظيف"
+                                    f"src={t['source']}) — تنظيف ذكي"
                                 )
-                                # نظّف القناة الفاسدة
-                                try:
-                                    if t["source"] == "private":
-                                        await self.unset_private(
-                                            item["group_id"]
-                                        )
-                                    elif t["source"] == "global":
-                                        await self.unset_global()
-                                except Exception:
-                                    pass
+                                await self._cleanup_broken_target(
+                                    t, item["group_id"]
+                                )
                             else:
                                 logger.warning(
                                     f"group_log send failed "
@@ -359,8 +527,36 @@ class GroupLog:
                 logger.error(f"group_log worker: {e}")
                 await asyncio.sleep(1)
 
+    async def _cleanup_broken_target(
+        self, target: dict, source_group_id: int
+    ) -> None:
+        """
+        ✅ v1.3.0: تنظيف ذكي للقناة الفاسدة.
+        - قناة عامة → احذف الإعداد العام
+        - قناة خاصة → احذف من **كل** المجموعات المشاركة
+        """
+        try:
+            if target["source"] == "global":
+                await self.unset_global()
+                logger.info("🧹 تم تنظيف القناة العامة")
+                return
+
+            chat_id = target["chat_id"]
+            groups = await self.get_groups_using_channel(chat_id)
+            if groups:
+                group_ids = [g['chat_id'] for g in groups]
+                n = await self.unset_private_bulk(group_ids)
+                logger.info(
+                    f"🧹 تم تنظيف {n} مجموعة من القناة الفاسدة "
+                    f"{chat_id}"
+                )
+            else:
+                await self.unset_private(source_group_id)
+        except Exception as e:
+            logger.warning(f"_cleanup_broken_target: {e}")
+
     def start(self) -> None:
-        """يبدأ العامل الخلفي (idempotent — لا يبدأ مرتين)."""
+        """يبدأ العامل الخلفي (idempotent)."""
         if self._worker_task and not self._worker_task.done():
             return
         try:
@@ -375,16 +571,11 @@ class GroupLog:
             )
 
     def stop(self) -> None:
-        """يوقف العامل فوراً (بدون انتظار الطابور)."""
         if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
             self._started = False
 
     async def drain(self, timeout: float = 5.0) -> int:
-        """
-        ✅ v1.2.0: ينتظر انتهاء الطابور (بحد أقصى timeout ثانية).
-        يرجّع عدد الرسائل المتبقية (إن انتهت المهلة).
-        """
         try:
             await asyncio.wait_for(
                 self._queue.join(), timeout=timeout
@@ -398,9 +589,6 @@ class GroupLog:
             return remaining
 
     async def shutdown(self, drain_timeout: float = 5.0) -> None:
-        """
-        ✅ v1.2.0: إيقاف لطيف — ينتظر الطابور ثم يُلغي العامل.
-        """
         try:
             await self.drain(timeout=drain_timeout)
         finally:
@@ -408,12 +596,10 @@ class GroupLog:
 
     @property
     def queue_size(self) -> int:
-        """حجم الطابور الحالي."""
         return self._queue.qsize()
 
     @property
     def is_running(self) -> bool:
-        """هل العامل يعمل؟"""
         return (
             self._worker_task is not None
             and not self._worker_task.done()
@@ -425,7 +611,6 @@ class GroupLog:
 
     @staticmethod
     def fmt_user(user) -> str:
-        """تنسيق اسم مستخدم للعرض."""
         if user is None:
             return "—"
         name = (
@@ -444,7 +629,6 @@ class GroupLog:
 
     @staticmethod
     def fmt_time() -> str:
-        """الوقت الحالي بتوقيت UTC."""
         return datetime.now(timezone.utc).strftime(
             "%Y-%m-%d %H:%M:%S UTC"
         )
