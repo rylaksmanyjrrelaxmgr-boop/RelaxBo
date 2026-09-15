@@ -2,17 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.4)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.5)
 ================================================================================
+🚀 v7.6.5 (LOG-CHANNEL-ID):
+  ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
+  ✅ إضافة فهرس idx_bot_groups_log_channel
+  ✅ CURRENT_SCHEMA_VERSION = 6
+  ✅ EXPECTED_INDEX_COUNT = 66
+  ✅ دعم كامل لميزة "قناة سجل المجموعة" بدون الحاجة لـALTER
+
 🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
   ✅ _normalize_columns_mysql() — يُزيل ASC/DESC من الأعمدة
   ✅ _ensure_index_definitions_match_mysql: يستخدم الـhelper الجديد
   ✅ يمنع churn 6 فهارس (DESC) عند انتهاء الـfast-path
-  ✅ CURRENT_SCHEMA_VERSION يبقى 5
 
 🚀 v7.6.3 (الحل الذكي — فحص التعريفات):
   ✅ _ensure_index_definitions_match_postgres/sqlite/mysql
-  ✅ CURRENT_SCHEMA_VERSION = 5
 
 🚀 v7.6.2: حذف 11 فهرساً من DEPRECATED_INDEXES
 🚀 v7.6.1: توحيد الفهارس + 3 فهارس من database.py
@@ -30,7 +35,7 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6  # ✅ v7.6.5: 5 → 6 (log_channel_id)
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -39,7 +44,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 65
+EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.5: 65 → 66
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -68,9 +73,12 @@ COMMON_INDEXES = [
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
 
-    # ═══ BOT_GROUPS (2) ═══
+    # ═══ BOT_GROUPS (3) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
+    # ✅ v7.6.5: فهرس قناة السجل
+    ("bot_groups", "idx_bot_groups_log_channel",
+     "bot_groups(log_channel_id)"),
 
     # ═══ USER_GROUPS_LINK (1) ═══
     ("user_groups_link", "idx_user_groups_link_user_id",
@@ -363,24 +371,11 @@ def _normalize_columns(col_str: str) -> str:
 
 
 def _normalize_columns_mysql(col_str: str) -> str:
-    """
-    ✅ v7.6.4: تطبيع خاص بـ MySQL.
-
-    MySQL لا يعيد اتجاه ASC/DESC في SHOW INDEX (أو يعيده في عمود منفصل).
-    لذا يجب إزالة ASC/DESC من الطرفين لتفادي mismatch دائم مع الفهارس
-    التي تحتوي على DESC في COMMON_INDEXES (6 فهارس).
-
-    الطريقة:
-      1. lowercase
-      2. إزالة " asc" و " desc" من النهاية أو قبل الفاصلة
-      3. إزالة المسافات
-    """
+    """✅ v7.6.4: تطبيع خاص بـ MySQL — إزالة ASC/DESC."""
     if not col_str:
         return ""
     s = col_str.lower()
-    # إزالة " asc" أو " desc" (مع كلمة الفصل)
     s = re.sub(r"\s+(asc|desc)\b", "", s)
-    # إزالة أي مسافات متبقية
     s = s.replace(" ", "")
     return s
 
@@ -627,13 +622,7 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
 
 
 async def _ensure_index_definitions_match_mysql(conn, logger):
-    """
-    ✅ v7.6.4: MySQL version مع إزالة ASC/DESC من المقارنة.
-
-    السبب: MySQL < 8.0 لا يدعم DESC في INDEX أصلاً، و MySQL 8.0+
-    يعرضه في عمود Collation منفصل في SHOW INDEX.
-    المقارنة النصية المباشرة تفشل مع DESC → churn للـ6 فهارس.
-    """
+    """✅ v7.6.4: MySQL version مع إزالة ASC/DESC."""
     checked = 0
     dropped = 0
     missing = 0
@@ -652,9 +641,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
             except Exception:
                 continue
 
-            # SHOW INDEX columns:
-            # 0=Table, 1=Non_unique, 2=Key_name, 3=Seq_in_index, 4=Column_name
-            # (5=Collation, 6=Cardinality, ...)
             by_key = {}
             for r in rows:
                 key_name = r[2]
@@ -672,7 +658,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     continue
 
                 sorted_cols = sorted(by_key[idx_name], key=lambda x: x[0])
-                # ✅ v7.6.4: استخدام _normalize_columns_mysql
                 actual_cols = _normalize_columns_mysql(
                     ",".join(c for _, c in sorted_cols)
                 )
@@ -1012,6 +997,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.5: إضافة log_channel_id
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id INTEGER PRIMARY KEY,
@@ -1020,7 +1006,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             added_by INTEGER,
             added_at TEXT,
             updated_at TEXT,
-            banned INTEGER DEFAULT 0
+            banned INTEGER DEFAULT 0,
+            log_channel_id INTEGER DEFAULT NULL
         )
     """)
 
@@ -1615,6 +1602,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.5: إضافة log_channel_id
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -1623,7 +1611,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             added_by BIGINT,
             added_at TIMESTAMP,
             updated_at TIMESTAMP,
-            banned INTEGER DEFAULT 0
+            banned INTEGER DEFAULT 0,
+            log_channel_id BIGINT DEFAULT NULL
         )
     """)
 
@@ -2233,6 +2222,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.5: إضافة log_channel_id
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_groups (
                 chat_id BIGINT PRIMARY KEY,
@@ -2241,7 +2231,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 added_by BIGINT,
                 added_at DATETIME,
                 updated_at DATETIME,
-                banned TINYINT(1) DEFAULT 0
+                banned TINYINT(1) DEFAULT 0,
+                log_channel_id BIGINT DEFAULT NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
