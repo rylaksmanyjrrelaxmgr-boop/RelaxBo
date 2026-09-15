@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.7)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.8)
 ================================================================================
+🚀 v7.6.8 (CURSOR-CLEANUP):
+  ✅ إغلاق cursors في كل دوال SQLite (5 أماكن) — منع resource leak
+  ✅ _get_current_schema_version_mysql: try/finally لضمان الإغلاق
+  ✅ حذف import os و import json غير المستخدمين
+  ✅ تحسين assert إلى raise RuntimeError (يعمل مع -O)
+
 🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX):
   ✅ CURRENT_SCHEMA_VERSION: 7 → 8 (إجبار rebuild لمرة واحدة)
   ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat
@@ -14,30 +20,21 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
   ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
   ✅ إصلاح فقدان الفهارس الصامت (lost index silent failure)
-  ✅ CURRENT_SCHEMA_VERSION = 7 (إجبار rebuild لمرة واحدة)
   ✅ _verify_critical_indexes_* لكل DB
 
 🚀 v7.6.5 (LOG-CHANNEL-ID):
   ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
-  ✅ إضافة فهرس idx_bot_groups_log_channel
-  ✅ دعم كامل لميزة "قناة سجل المجموعة" بدون الحاجة لـALTER
 
 🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
   ✅ _normalize_columns_mysql() — يُزيل ASC/DESC من الأعمدة
-  ✅ _ensure_index_definitions_match_mysql: يستخدم الـhelper الجديد
-  ✅ يمنع churn 6 فهارس (DESC) عند انتهاء الـfast-path
 
-🚀 v7.6.3 (الحل الذكي — فحص التعريفات):
-  ✅ _ensure_index_definitions_match_postgres/sqlite/mysql
-
+🚀 v7.6.3: فحص تعريفات الفهارس (Smart Check)
 🚀 v7.6.2: حذف 11 فهرساً من DEPRECATED_INDEXES
 🚀 v7.6.1: توحيد الفهارس + 3 فهارس من database.py
 🚀 v7.6.0: Fast-path (~0.5s بدل ~31s)
 ================================================================================
 """
 
-import os
-import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -56,7 +53,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.7: 66 (لم يتغير — فقط رُفع schema)
+EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.7: 66 (لم يتغير)
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -88,7 +85,6 @@ COMMON_INDEXES = [
     # ═══ BOT_GROUPS (3) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
-    # ✅ v7.6.5: فهرس قناة السجل
     ("bot_groups", "idx_bot_groups_log_channel",
      "bot_groups(log_channel_id)"),
 
@@ -125,7 +121,6 @@ COMMON_INDEXES = [
      "anonymous_admins(anonymous_id, chat_id)"),
 
     # ═══ BANNED_WORDS (2) ═══
-    # ✅ v7.6.7: هذان الفهرسـان كانا مفقودين فعلياً — يسببان بطء 4.55s
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
@@ -229,119 +224,48 @@ COMMON_INDEXES = [
      "user_reminder_settings(subscription_reminder)"),
 ]
 
-# ✅ v7.6.2: الفهارس القديمة
 DEPRECATED_INDEXES = [
-    # ═══ posts ═══
     "idx_posts_channel_pub_fail_created_optimized",
-    "idx_posts_next",
-    "idx_posts_channel_unpub",
-    "idx_posts_channel_pub",
-    "idx_posts_channel_pub_fail",
+    "idx_posts_next", "idx_posts_channel_unpub",
+    "idx_posts_channel_pub", "idx_posts_channel_pub_fail",
     "idx_posts_channel_pub_fail_count",
-    "idx_posts_fail",
-    "idx_posts_created_at",
-    "idx_posts_fail_count",
-    "idx_posts_channel_created",
+    "idx_posts_fail", "idx_posts_created_at",
+    "idx_posts_fail_count", "idx_posts_channel_created",
     "idx_posts_channel_fail",
-
-    # ═══ subscriptions ═══
-    "idx_sub_user_status_end",
-    "idx_subscriptions_active",
+    "idx_sub_user_status_end", "idx_subscriptions_active",
     "idx_subscriptions_active_end",
-
-    # ═══ user_channels ═══
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
-    "idx_user_channels_id_user",
-    "idx_uc_user_banned",
-    "idx_uc_channel_id",
-    "idx_uc_active",
-
-    # ═══ user_penalties ═══
-    "idx_penalties_user_chat_status",
-    "idx_penalties_user_chat",
-    "idx_user_penalties_active_end",
-    "idx_user_penalties_expiry",
-    "idx_user_penalties_cleanup",
-    "idx_penalties_chat_status",
-
-    # ═══ banned_words ═══
+    "idx_user_channels_id_user", "idx_uc_user_banned",
+    "idx_uc_channel_id", "idx_uc_active",
+    "idx_penalties_user_chat_status", "idx_penalties_user_chat",
+    "idx_user_penalties_active_end", "idx_user_penalties_expiry",
+    "idx_user_penalties_cleanup", "idx_penalties_chat_status",
     "idx_banned_words_word",
-
-    # ═══ user_reminder_settings ═══
-    "idx_reminders_subscription",
-    "idx_reminders_user",
-
-    # ═══ admin_logs ═══
-    "idx_admin_logs_created",
-    "idx_admin_logs_admin",
-
-    # ═══ anonymous_admins ═══
-    "idx_anonymous_admins_chat",
-    "idx_anonymous_admins_user",
-
-    # ═══ hidden_admins ═══
+    "idx_reminders_subscription", "idx_reminders_user",
+    "idx_admin_logs_created", "idx_admin_logs_admin",
+    "idx_anonymous_admins_chat", "idx_anonymous_admins_user",
     "idx_hidden_admin_admin",
-
-    # ═══ group_admins ═══
-    "idx_group_admins_user",
-    "idx_group_admins_chat",
-
-    # ═══ schedule ═══
-    "idx_sched_next",
-    "idx_schedule_next",
-    "idx_schedule_next_channel",
-
-    # ═══ contest_participants ═══
+    "idx_group_admins_user", "idx_group_admins_chat",
+    "idx_sched_next", "idx_schedule_next", "idx_schedule_next_channel",
     "idx_contest_participants_user",
-
-    # ═══ users ═══
-    "idx_users_updated",
-    "idx_users_trial_used",
-    "idx_users_subscription",
-    "idx_users_referral",
+    "idx_users_updated", "idx_users_trial_used",
+    "idx_users_subscription", "idx_users_referral",
     "idx_users_banned_publish",
-
-    # ═══ referrals ═══
-    "idx_referrals_referred",
-    "idx_referrals_created",
-
-    # ═══ contests ═══
-    "idx_contests_end",
-
-    # ═══ hidden_owner_groups ═══
-    "idx_hidden_owner_owner",
-
-    # ═══ support_tickets ═══
-    "idx_tickets_user",
-    "idx_tickets_number",
-
-    # ═══ invoices ═══
-    "idx_inv_status",
-    "idx_inv_number",
-
-    # ═══ auto_replies ═══
-    "idx_auto_replies_keyword",
-    "idx_ar_keyword",
-
-    # ═══ settings ═══
+    "idx_referrals_referred", "idx_referrals_created",
+    "idx_contests_end", "idx_hidden_owner_owner",
+    "idx_tickets_user", "idx_tickets_number",
+    "idx_inv_status", "idx_inv_number",
+    "idx_auto_replies_keyword", "idx_ar_keyword",
     "idx_settings_key",
-
-    # ═══ user_violations ═══
-    "idx_user_violations_user",
-    "idx_user_violations_chat",
+    "idx_user_violations_user", "idx_user_violations_chat",
     "idx_violations_user_chat",
-
-    # ═══ user_warnings ═══
-    "idx_user_warnings_user",
-    "idx_user_warnings_chat",
-
-    # ═══ user_groups_link ═══
+    "idx_user_warnings_user", "idx_user_warnings_chat",
     "idx_ugl_user",
 ]
 
 # ✅ v7.6.6: فهارس حرجة يجب فحصها حتى مع fast-path
-# ✅ v7.6.7: إضافة فهارس banned_words (سبب بطء 4.55s)
+# ✅ v7.6.7: إضافة فهارس banned_words
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel",
@@ -351,15 +275,16 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_channels_user_banned",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
-    # 🆕 v7.6.7: فهارس الكلمات المحظورة الحرجة
     "idx_banned_words_chat",
     "idx_banned_words_chat_word",
 })
 
-assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
-    f"❌ عدد الفهارس غير مطابق: "
-    f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
-)
+# ✅ v7.6.8: raise بدل assert (يعمل مع -O)
+if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
+    raise RuntimeError(
+        f"❌ عدد الفهارس غير مطابق: "
+        f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
+    )
 
 
 # =====================================================================
@@ -391,7 +316,6 @@ def _is_valid_index_name(name: str) -> bool:
 
 
 def _normalize_columns(col_str: str) -> str:
-    """تطبيع قائمة الأعمدة للمقارنة (SQLite + PostgreSQL)."""
     if not col_str:
         return ""
     s = col_str.replace(" ", "").lower()
@@ -400,7 +324,6 @@ def _normalize_columns(col_str: str) -> str:
 
 
 def _normalize_columns_mysql(col_str: str) -> str:
-    """✅ v7.6.4: تطبيع خاص بـ MySQL — إزالة ASC/DESC."""
     if not col_str:
         return ""
     s = col_str.lower()
@@ -410,7 +333,6 @@ def _normalize_columns_mysql(col_str: str) -> str:
 
 
 def _parse_expected_columns(cols: str) -> str:
-    """استخراج الأعمدة من 'table(col1, col2)'."""
     m = re.match(r"^\w+\((.+)\)$", cols.strip())
     if not m:
         return ""
@@ -418,7 +340,6 @@ def _parse_expected_columns(cols: str) -> str:
 
 
 def _get_expected_cols_for_index(idx_name: str) -> str:
-    """✅ v7.6.6: يُعيد 'table(cols)' لفهرس معيّن."""
     for _table, name, cols in COMMON_INDEXES:
         if name == idx_name:
             return cols
@@ -442,11 +363,18 @@ async def _get_current_schema_version_postgres(conn):
 
 
 async def _get_current_schema_version_sqlite(conn):
+    """✅ v7.6.8: إغلاق cursor."""
     try:
         cursor = await conn.execute(
             "SELECT MAX(version) FROM schema_version"
         )
-        row = await cursor.fetchone()
+        try:
+            row = await cursor.fetchone()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
         if row and row[0] is not None:
             return int(row[0])
     except Exception:
@@ -455,26 +383,29 @@ async def _get_current_schema_version_sqlite(conn):
 
 
 async def _get_current_schema_version_mysql(conn):
+    """✅ v7.6.8: try/finally لضمان الإغلاق."""
     try:
         cursor = await conn.cursor()
-        await cursor.execute("SELECT MAX(version) FROM schema_version")
-        row = await cursor.fetchone()
-        await cursor.close()
-        if row and row[0] is not None:
-            return int(row[0])
+        try:
+            await cursor.execute("SELECT MAX(version) FROM schema_version")
+            row = await cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
     except Exception:
         pass
     return 0
 
 
 # =====================================================================
-# ✅ v7.6.6: فحص سريع للفهارس الحرجة (يعمل حتى مع fast-path)
+# فحص سريع للفهارس الحرجة (يعمل حتى مع fast-path)
 # =====================================================================
 
 async def _verify_critical_indexes_postgres(conn, logger):
-    """
-    فحص خفيف للفهارس الحرجة فقط — 1 SELECT + CREATE IF MISSING.
-    """
     try:
         rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
@@ -518,7 +449,7 @@ async def _verify_critical_indexes_postgres(conn, logger):
 
 
 async def _verify_critical_indexes_sqlite(conn, logger):
-    """✅ v7.6.6: SQLite version."""
+    """✅ v7.6.8: إغلاق cursor."""
     try:
         placeholders = ",".join(["?"] * len(CRITICAL_INDEX_NAMES))
         cursor = await conn.execute(
@@ -526,7 +457,14 @@ async def _verify_critical_indexes_sqlite(conn, logger):
             f"WHERE type='index' AND name IN ({placeholders})",
             tuple(CRITICAL_INDEX_NAMES),
         )
-        rows = await cursor.fetchall()
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+
         existing = {r[0] for r in rows}
         missing = CRITICAL_INDEX_NAMES - existing
 
@@ -564,9 +502,7 @@ async def _verify_critical_indexes_sqlite(conn, logger):
 
 
 async def _verify_critical_indexes_mysql(conn, logger):
-    """✅ v7.6.6: MySQL version."""
     try:
-        # جمع الفهارس الموجودة لكل جدول في مجموعة
         tables = set()
         for _t, idx_name, _c in COMMON_INDEXES:
             if idx_name in CRITICAL_INDEX_NAMES:
@@ -639,12 +575,19 @@ async def _fetch_existing_indexes_postgres(conn, index_names):
 
 
 async def _fetch_existing_indexes_sqlite(conn):
+    """✅ v7.6.8: إغلاق cursor."""
     try:
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='index' AND name IS NOT NULL"
         )
-        rows = await cursor.fetchall()
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
         return {row[0] for row in rows}
     except Exception as e:
         logging.debug(f"_fetch_existing_indexes_sqlite: {e}")
@@ -675,11 +618,13 @@ async def _fetch_existing_indexes_mysql(conn, tables):
         for table in tables:
             try:
                 cursor = await conn.cursor()
-                await cursor.execute(f"SHOW INDEX FROM `{table}`")
-                rows = await cursor.fetchall()
-                for r in rows:
-                    existing.add((table, r[2]))
-                await cursor.close()
+                try:
+                    await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                    rows = await cursor.fetchall()
+                    for r in rows:
+                        existing.add((table, r[2]))
+                finally:
+                    await cursor.close()
             except Exception:
                 continue
         return existing
@@ -690,7 +635,6 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 # =====================================================================
 
 async def _ensure_index_definitions_match_postgres(conn, logger):
-    """v7.6.3: يفحص تعريف كل فهرس في PostgreSQL."""
     checked = 0
     dropped = 0
     missing = 0
@@ -751,7 +695,7 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
 
 
 async def _ensure_index_definitions_match_sqlite(conn, logger):
-    """v7.6.3: SQLite version."""
+    """✅ v7.6.8: إغلاق cursor."""
     checked = 0
     dropped = 0
     missing = 0
@@ -767,7 +711,13 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
             f"WHERE type='index' AND name IN ({placeholders})",
             tuple(names),
         )
-        rows = await cursor.fetchall()
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
         existing = {r[0]: (r[1] or "") for r in rows}
 
         for _table, idx_name, cols in COMMON_INDEXES:
@@ -811,7 +761,6 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
 
 
 async def _ensure_index_definitions_match_mysql(conn, logger):
-    """✅ v7.6.4: MySQL version مع إزالة ASC/DESC."""
     checked = 0
     dropped = 0
     missing = 0
@@ -824,9 +773,11 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
             try:
                 cursor = await conn.cursor()
-                await cursor.execute(f"SHOW INDEX FROM `{table}`")
-                rows = await cursor.fetchall()
-                await cursor.close()
+                try:
+                    await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                    rows = await cursor.fetchall()
+                finally:
+                    await cursor.close()
             except Exception:
                 continue
 
@@ -879,7 +830,7 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
 
 # =====================================================================
-# حذف الفهارس القديمة (DEPRECATED)
+# حذف الفهارس القديمة
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
@@ -912,6 +863,7 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
 
 
 async def _drop_deprecated_indexes_sqlite(conn, logger):
+    """✅ v7.6.8: إغلاق cursor."""
     if not DEPRECATED_INDEXES:
         return
     try:
@@ -921,7 +873,13 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
             f"WHERE type='index' AND name IN ({placeholders})",
             tuple(DEPRECATED_INDEXES),
         )
-        rows = await cursor.fetchall()
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
         existing = {row[0] for row in rows}
 
         dropped = 0
@@ -1086,7 +1044,6 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
         await _verify_critical_indexes_sqlite(conn, logger)
         if logger:
             logger.info(
@@ -1188,7 +1145,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.5: إضافة log_channel_id
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id INTEGER PRIMARY KEY,
@@ -1693,7 +1649,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
         await _verify_critical_indexes_postgres(conn, logger)
         if logger:
             logger.info(
@@ -1795,7 +1750,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.5: إضافة log_channel_id
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_groups (
             chat_id BIGINT PRIMARY KEY,
@@ -2304,7 +2258,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
         await _verify_critical_indexes_mysql(conn, logger)
         if logger:
             logger.info(
@@ -2417,7 +2370,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.5: إضافة log_channel_id
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_groups (
                 chat_id BIGINT PRIMARY KEY,
