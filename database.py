@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.8 — PG bootstrap fix)
+database.py - قاعدة البيانات المتكاملة (v7.7.9 — PERF bootstrap)
 ================================================================================
+🚀 v7.7.9 (PERF-1..3):
+  PERF-1 tables_hash: تخطي create_tables عند عدم تغيّر schema
+  PERF-2 _fetch_all_columns_map: استعلام واحد لأعمدة كل الجداول
+  PERF-3 حذف _ensure_text_hash_column المكرّرة
+  PERF-4 SQLite PRAGMA مستقل لكل أمر (لا يُسقط الاتصال)
+  PERF-5 _upsert_setting موحّد
+
 🔥 v7.7.8 (FIX-PG-BOOTSTRAP):
   ✅ _bootstrap: لا transaction لـPG/MySQL — DDL في autocommit
   ✅ حل InFailedSQLTransactionError نهائياً
@@ -2034,6 +2041,10 @@ class Database(
             raise
 
     async def _create_sqlite_connection(self):
+        """
+        ✅ v7.7.9 (PERF-4): كل PRAGMA في try مستقل
+        — فشل واحد لا يُسقط الاتصال بأكمله.
+        """
         conn = None
         try:
             conn = await aiosqlite.connect(
@@ -2042,14 +2053,25 @@ class Database(
                 check_same_thread=False,
             )
             conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA busy_timeout=10000")
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
-            await conn.execute("PRAGMA foreign_keys=ON")
-            await conn.execute("PRAGMA cache_size=-20000")
-            await conn.execute("PRAGMA temp_store=MEMORY")
-            await conn.execute("PRAGMA wal_autocheckpoint=1000")
-            await conn.execute("PRAGMA mmap_size=268435456")
+
+            pragmas = [
+                ("busy_timeout", "10000"),
+                ("journal_mode", "WAL"),
+                ("synchronous", "NORMAL"),
+                ("foreign_keys", "ON"),
+                ("cache_size", "-20000"),
+                ("temp_store", "MEMORY"),
+                ("wal_autocheckpoint", "1000"),
+                ("mmap_size", "268435456"),
+            ]
+            for name, value in pragmas:
+                try:
+                    await conn.execute(f"PRAGMA {name}={value}")
+                except Exception as pe:
+                    logger.debug(
+                        f"⚠️ PRAGMA {name}={value}: {pe}"
+                    )
+
             self._track_sqlite_conn(conn)
             return conn
         except Exception as e:
@@ -3530,6 +3552,10 @@ class Database(
             return False
 
     async def _migrate_schema(self, conn):
+        """
+        ✅ v7.7.9 (PERF-2): استعلام واحد لكل الأعمدة بدل N+1
+        — على PG/MySQL: 1 round-trip فقط.
+        """
         if USE_MYSQL:
             try:
                 await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=0")
@@ -3641,12 +3667,18 @@ class Database(
                 ],
             }
 
+            # ✅ PERF-2: استعلام واحد لكل الجداول
+            t_fetch = time.monotonic()
+            all_columns = await self._fetch_all_columns_map(
+                conn, list(migrations.keys())
+            )
+            fetch_elapsed = time.monotonic() - t_fetch
+
             total_added = 0
+            tables_processed = 0
             for table, columns in migrations.items():
                 try:
-                    existing = await self._get_existing_columns(
-                        conn, table
-                    )
+                    existing = all_columns.get(table, set())
                     missing = [
                         (col, typ) for col, typ in columns
                         if col not in existing
@@ -3657,12 +3689,19 @@ class Database(
                         conn, table, missing
                     )
                     total_added += added
+                    tables_processed += 1
                 except Exception as e:
                     logger.warning(f"⚠️ {table}: {e}")
 
             if total_added > 0:
-                logger.info(f"⚡ الترحيل: +{total_added} عمود")
+                logger.info(
+                    f"⚡ الترحيل: +{total_added} عمود "
+                    f"في {tables_processed} جدول "
+                    f"(fetch={fetch_elapsed:.2f}s)"
+                )
+            # ✅ PERF-3: تُستدعى هنا مرة واحدة فقط
             await self._ensure_text_hash_column(conn)
+
             self._group_security_columns_cache = None
             _UNIQUE_CACHE.clear()
         finally:
@@ -4086,39 +4125,9 @@ class Database(
                 logger.info(
                     f"✅ استورد {len(words_to_insert)} كلمة"
                 )
-                try:
-                    if USE_POSTGRES:
-                        await conn.execute(
-                            "INSERT INTO settings (key, value) "
-                            "VALUES ($1, $2) "
-                            "ON CONFLICT (key) DO UPDATE SET "
-                            "value = EXCLUDED.value",
-                            "banned_words_hash", current_hash,
-                        )
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        try:
-                            await cursor.execute(
-                                "INSERT INTO settings "
-                                "(`key`, `value`) VALUES (%s, %s) "
-                                "ON DUPLICATE KEY UPDATE "
-                                "`value` = VALUES(`value`)",
-                                ("banned_words_hash", current_hash),
-                            )
-                        finally:
-                            await cursor.close()
-                    else:
-                        await conn.execute(
-                            "INSERT INTO settings (key, value) "
-                            "VALUES (?, ?) "
-                            "ON CONFLICT(key) DO UPDATE SET "
-                            "value = excluded.value",
-                            ("banned_words_hash", current_hash),
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"⚠️ banned_words_hash: {e}"
-                    )
+                await self._upsert_setting(
+                    conn, "banned_words_hash", current_hash
+                )
                 if CACHE_AVAILABLE:
                     await banned_words_cache.invalidate()
         except ImportError:
@@ -4231,39 +4240,9 @@ class Database(
                 logger.info(
                     f"✅ استورد {len(replies_to_insert)} رد"
                 )
-                try:
-                    if USE_POSTGRES:
-                        await conn.execute(
-                            "INSERT INTO settings (key, value) "
-                            "VALUES ($1, $2) "
-                            "ON CONFLICT (key) DO UPDATE SET "
-                            "value = EXCLUDED.value",
-                            "auto_replies_hash", current_hash,
-                        )
-                    elif USE_MYSQL:
-                        cursor = await conn.cursor()
-                        try:
-                            await cursor.execute(
-                                "INSERT INTO settings "
-                                "(`key`, `value`) VALUES (%s, %s) "
-                                "ON DUPLICATE KEY UPDATE "
-                                "`value` = VALUES(`value`)",
-                                ("auto_replies_hash", current_hash),
-                            )
-                        finally:
-                            await cursor.close()
-                    else:
-                        await conn.execute(
-                            "INSERT INTO settings (key, value) "
-                            "VALUES (?, ?) "
-                            "ON CONFLICT(key) DO UPDATE SET "
-                            "value = excluded.value",
-                            ("auto_replies_hash", current_hash),
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"⚠️ auto_replies_hash: {e}"
-                    )
+                await self._upsert_setting(
+                    conn, "auto_replies_hash", current_hash
+                )
         except ImportError:
             pass
         except Exception as e:
@@ -4280,6 +4259,118 @@ class Database(
         return hashlib.sha256(
             json.dumps(data, sort_keys=True).encode("utf-8")
         ).hexdigest()
+
+    # =================================================================
+    # 🆕 v7.7.9 (PERF-1..3): hashes & helpers
+    # =================================================================
+
+    def _compute_tables_hash(self) -> str:
+        """
+        hash منفصل عن bootstrap_hash — يتغيّر فقط عندما
+        تتغيّر نسخة schema في database_tables.py.
+        """
+        return hashlib.sha256(
+            f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
+        ).hexdigest()
+
+    async def _upsert_setting(
+        self, conn, key: str, value: str
+    ) -> None:
+        """
+        UPSERT موحّد لجدول settings — يوفّر تكرار الكود.
+        """
+        try:
+            if USE_POSTGRES:
+                await conn.execute(
+                    "INSERT INTO settings (key, value) "
+                    "VALUES ($1, $2) "
+                    "ON CONFLICT (key) DO UPDATE SET "
+                    "value = EXCLUDED.value",
+                    key, value,
+                )
+            elif USE_MYSQL:
+                cursor = await conn.cursor()
+                try:
+                    await cursor.execute(
+                        "INSERT INTO settings (`key`, `value`) "
+                        "VALUES (%s, %s) "
+                        "ON DUPLICATE KEY UPDATE "
+                        "`value` = VALUES(`value`)",
+                        (key, value),
+                    )
+                finally:
+                    await cursor.close()
+            else:
+                await conn.execute(
+                    "INSERT INTO settings (key, value) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET "
+                    "value = excluded.value",
+                    (key, value),
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ _upsert_setting({key}): {e}")
+
+    async def _fetch_all_columns_map(
+        self, conn, tables: List[str]
+    ) -> Dict[str, Set[str]]:
+        """
+        جلب أعمدة كل الجداول المطلوبة باستعلام واحد.
+        PG: 1 query. MySQL: 1 query. SQLite: N queries (لا بديل).
+        """
+        result: Dict[str, Set[str]] = {t: set() for t in tables}
+        if not tables:
+            return result
+
+        try:
+            if USE_POSTGRES:
+                rows = await conn.fetch(
+                    "SELECT table_name, column_name "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "  AND table_name = ANY($1::text[])",
+                    tables,
+                )
+                for r in rows:
+                    result.setdefault(r["table_name"], set()).add(
+                        r["column_name"]
+                    )
+            elif USE_MYSQL:
+                cursor = await conn.cursor()
+                try:
+                    placeholders = ",".join(["%s"] * len(tables))
+                    await cursor.execute(
+                        f"SELECT TABLE_NAME, COLUMN_NAME "
+                        f"FROM information_schema.COLUMNS "
+                        f"WHERE TABLE_SCHEMA = DATABASE() "
+                        f"  AND TABLE_NAME IN ({placeholders})",
+                        tables,
+                    )
+                    for r in await cursor.fetchall():
+                        result.setdefault(r[0], set()).add(r[1])
+                finally:
+                    await cursor.close()
+            else:
+                for table in tables:
+                    if not re.match(
+                        r"^[a-zA-Z_][a-zA-Z0-9_]*$", table
+                    ):
+                        continue
+                    cur = await conn.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                    try:
+                        rows = await cur.fetchall()
+                        result[table] = {r[1] for r in rows}
+                    finally:
+                        try:
+                            await cur.close()
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f"⚠️ _fetch_all_columns_map: {e}")
+
+        return result
 
     async def has_active_subscription(self, user_id: int) -> bool:
         cache_key = f"has_active_sub_{user_id}"
@@ -4318,56 +4409,55 @@ class Database(
                 pass
 
     # =================================================================
-    # Bootstrap — ✅ v7.7.8 FIX-PG-BOOTSTRAP
+    # Bootstrap — ✅ v7.7.8 FIX-PG-BOOTSTRAP + v7.7.9 PERF
     # =================================================================
 
     async def _do_bootstrap_inner(self, conn) -> bool:
-        await self._create_tables(conn=conn)
+        """
+        ✅ v7.7.9 (PERF-1): تخطي create_tables عند عدم تغيّر schema
+        ✅ v7.7.9 (PERF-3): حذف _ensure_text_hash_column المكرّرة
+        """
+        # ✅ PERF-1: فحص tables_hash قبل create_tables
+        tables_hash = self._compute_tables_hash()
+        stored_tables_hash = await self._fetchval_with_conn(
+            conn,
+            _sql_get_setting_value(),
+            "tables_hash",
+        )
+
+        if stored_tables_hash != tables_hash:
+            t_tables = time.monotonic()
+            await self._create_tables(conn=conn)
+            await self._upsert_setting(
+                conn, "tables_hash", tables_hash
+            )
+            logger.info(
+                f"✅ create_tables في "
+                f"{time.monotonic() - t_tables:.2f}s"
+            )
+        else:
+            logger.info("⏩ الجداول موجودة — تخطي create_tables")
+
+        # ✅ PERF-2: bootstrap_hash يتحكم بالـ migration فقط
         current_hash = self._compute_bootstrap_hash()
         stored_hash = await self._fetchval_with_conn(
             conn,
             _sql_get_setting_value(),
             "bootstrap_hash",
         )
+
         if stored_hash == current_hash:
-            logger.info("⏩ bootstrap محدّث — تخطي")
+            logger.info("⏩ bootstrap محدّث — تخطي migrate")
         else:
             t_mig = time.monotonic()
             await self._migrate_schema(conn)
-            await self._ensure_text_hash_column(conn)
+            # ✅ PERF-3: _ensure_text_hash_column تُستدعى
+            # داخلياً في _migrate_schema — لا تكرار هنا
             await self._init_default_data(conn)
             elapsed = time.monotonic() - t_mig
-            try:
-                if USE_POSTGRES:
-                    await conn.execute(
-                        "INSERT INTO settings (key, value) "
-                        "VALUES ($1, $2) "
-                        "ON CONFLICT (key) DO UPDATE SET "
-                        "value = EXCLUDED.value",
-                        "bootstrap_hash", current_hash,
-                    )
-                elif USE_MYSQL:
-                    cursor = await conn.cursor()
-                    try:
-                        await cursor.execute(
-                            "INSERT INTO settings "
-                            "(`key`, `value`) VALUES (%s, %s) "
-                            "ON DUPLICATE KEY UPDATE "
-                            "`value` = VALUES(`value`)",
-                            ("bootstrap_hash", current_hash),
-                        )
-                    finally:
-                        await cursor.close()
-                else:
-                    await conn.execute(
-                        "INSERT INTO settings (key, value) "
-                        "VALUES (?, ?) "
-                        "ON CONFLICT(key) DO UPDATE SET "
-                        "value = excluded.value",
-                        ("bootstrap_hash", current_hash),
-                    )
-            except Exception as e:
-                logger.warning(f"⚠️ bootstrap_hash: {e}")
+            await self._upsert_setting(
+                conn, "bootstrap_hash", current_hash
+            )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
         await self._import_banned_words(conn)
