@@ -1,7 +1,12 @@
 # group_log.py
 """
-group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.0)
+group_log.py — نظام سجل قنوات المجموعات الذكي (v1.3.1)
 =====================================================================
+v1.3.1 (PostgreSQL compatibility):
+    ✅ INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    ✅ INSERT OR REPLACE → INSERT ... ON CONFLICT (key) DO UPDATE
+    ✅ توافق كامل مع PostgreSQL + SQLite 3.24+
+
 v1.3.0 (ذكاء المشاركة):
     ✅ get_groups_using_channel — قائمة المجموعات المشاركة
     ✅ get_channel_share_count — عدد المجموعات
@@ -90,7 +95,14 @@ class GroupLog:
             )
             if not row:
                 return None
-            ch = row.get("log_channel_id")
+            # دعم dict و Row
+            if isinstance(row, dict):
+                ch = row.get("log_channel_id")
+            else:
+                try:
+                    ch = row["log_channel_id"]
+                except (KeyError, IndexError, TypeError):
+                    ch = None
             return int(ch) if ch else None
         except Exception as e:
             logger.error(f"get_private({group_id}): {e}")
@@ -127,7 +139,17 @@ class GroupLog:
                     "WHERE log_channel_id = ?",
                     (chat_id,),
                 )
-            return [dict(r) for r in (rows or [])]
+            # ✅ تحويل آمن إلى dict
+            result = []
+            for r in (rows or []):
+                if isinstance(r, dict):
+                    result.append(r)
+                else:
+                    try:
+                        result.append(dict(r))
+                    except (TypeError, ValueError):
+                        continue
+            return result
         except Exception as e:
             logger.error(f"get_groups_using_channel({chat_id}): {e}")
             return []
@@ -215,7 +237,7 @@ class GroupLog:
         except Exception as e:
             logger.warning(f"share check failed: {e}")
 
-        # المحاولة الفعلية
+        # المحاولة الفعلية — UPDATE
         try:
             n = await self.db.execute(
                 "UPDATE bot_groups SET log_channel_id = ? "
@@ -228,11 +250,13 @@ class GroupLog:
                 return result
 
             # لو المجموعة غير موجودة — أدرجها
+            # ✅ v1.3.1: ON CONFLICT DO NOTHING (متوافق PostgreSQL + SQLite 3.24+)
             try:
                 await self.db.execute(
-                    "INSERT OR IGNORE INTO bot_groups "
+                    "INSERT INTO bot_groups "
                     "(chat_id, chat_name, log_channel_id, added_at, banned) "
-                    "VALUES (?, ?, ?, ?, 0)",
+                    "VALUES (?, ?, ?, ?, 0) "
+                    "ON CONFLICT (chat_id) DO NOTHING",
                     (
                         group_id,
                         str(group_id),
@@ -322,9 +346,11 @@ class GroupLog:
         if not chat_id:
             return False
         try:
+            # ✅ v1.3.1: ON CONFLICT DO UPDATE (متوافق PostgreSQL + SQLite 3.24+)
             await self.db.execute(
-                "INSERT OR REPLACE INTO settings (key, value) "
-                "VALUES (?, ?)",
+                "INSERT INTO settings (key, value) "
+                "VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 ("global_log_channel", str(chat_id)),
             )
             self.invalidate()
@@ -656,7 +682,7 @@ def init_group_log(db, bot) -> GroupLog:
 
 
 def get_group_log() -> Optional[GroupLog]:
-    """يُرجع الـinstance الحالي (أو None)."""
+    """يُرجع الـinstance الحالي (or None)."""
     return group_log
 
 
