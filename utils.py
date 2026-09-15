@@ -2,13 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.4 - UTC-Consistent Timestamps)
+utils.py - الأدوات المساعدة للبوت (v7.8.5 - Pool Monitor + UTC Consistency)
 =================================================================================
+🔍 v7.8.5 (مراقبة Pool + تنبيه تلقائي):
+    ✅ BackgroundTasks.monitor_pool: يسجّل حالة Pool كل 60 ثانية
+       (🟢 < 50% | 🟡 50-80% | 🔴 > 80%)
+    ✅ BackgroundTasks.monitor_pool_alert: يُرسل تنبيه للمالك عند ≥ 85%
+       (مرة كل 10 دقائق كحد أقصى)
+    ✅ يقرأ DB._pool مباشرة — لا يحتاج تعديل database.py
+    ✅ يعمل فقط مع PostgreSQL/MySQL — يتجاهل SQLite
+
 🕐 v7.8.4 (توحيد التوقيت على UTC — القاعدة الذهبية):
     ✅ BackgroundTasks._do_backup: استخدام utc_now() بدل mecca_now()
-       لاسم ملف النسخة الاحتياطية.
-       السبب: قاعدة البيانات + سجلات Render = UTC، فيجب أن يكون اسم
-       الملف بنفس التوقيت لتفادي الالتباس (كان يُنتج فرق 3 ساعات).
     ✅ mecca_now() تبقى للعرض للمستخدم فقط (heartbeat، UI).
 
 🧠 v7.8.3 (حماية مزدوجة للكلمات المحظورة):
@@ -1438,10 +1443,6 @@ def _normalize_word(word: Any) -> Optional[str]:
 
 
 async def _get_global_words_cached() -> List[str]:
-    """
-    🧠 v7.8.3: جلب الكلمات العامة مرة واحدة لكل TTL.
-    ✅ عند فشل DB، أرجِع الكاش القديم (لا تُفرغه).
-    """
     global _global_words_cache, _global_words_loaded_at
     now = time.time()
     if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
@@ -1462,9 +1463,6 @@ async def _get_global_words_cached() -> List[str]:
 
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
-    """
-    🧠 v7.8.3: كاش الكلمات المحظورة مع حماية مزدوجة.
-    """
     if _ENABLE_BANNED_WORDS_CACHE:
         if chat_id not in _banned_words_locks:
             _banned_words_locks[chat_id] = asyncio.Lock()
@@ -1513,9 +1511,6 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
 
 
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
-    """
-    🧠 v7.8.3: إبطال كاش الكلمات المحظورة في utils و Database معاً.
-    """
     global _global_words_cache, _global_words_loaded_at
 
     if chat_id is None or chat_id == -1:
@@ -1565,7 +1560,6 @@ _auth_cache_legacy = _auth_cache
 
 
 async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
-    """v7.7.3: Telegram API أولاً (أسرع 10x) ثم DB."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status in ('administrator', 'creator'):
@@ -1591,7 +1585,6 @@ async def _do_auth_check(bot, chat_id: int, user_id: int) -> bool:
 
 
 async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
-    """🧠 v7.8.0: كاش مزدوج — positives (60s) و negatives (15s)."""
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
@@ -1627,7 +1620,6 @@ async def is_authorized_in_group(bot, chat_id: int, user_id: int) -> bool:
 
 
 def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
-    """إبطال كاش الصلاحيات (sync)."""
     with suppress(Exception):
         if chat_id and user_id:
             _auth_cache.pop(f"auth_{chat_id}_{user_id}", None)
@@ -1643,7 +1635,6 @@ def invalidate_auth_cache(chat_id: int = None, user_id: int = None) -> None:
 async def invalidate_auth_cache_async(
     chat_id: int = None, user_id: int = None
 ) -> None:
-    """🧠 v7.8.0: نسخة async تُنظّف كل الكاشات."""
     invalidate_auth_cache(chat_id=chat_id, user_id=user_id)
     with suppress(Exception):
         if chat_id and user_id:
@@ -1708,7 +1699,6 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
-    """🧠 v7.8.0: إرسال آمن مع Exponential backoff للـ429."""
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -1807,7 +1797,6 @@ def get_ram_usage() -> dict:
 # =====================================================================
 
 async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """حظر مستخدم من استخدام البوت (بواسطة ID)."""
     try:
         try:
             if CONFIG.is_developer(user_id):
@@ -1841,7 +1830,6 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
 
 
 async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
-    """فك حظر مستخدم (بواسطة ID)."""
     try:
         row = await DB.fetchone("SELECT user_id FROM users WHERE user_id=?", (user_id,))
         if not row:
@@ -1954,7 +1942,6 @@ class UnbanPenalty(PenaltyStrategy):
 
 
 class PenaltyFactory:
-    """🧠 v7.8.0: Singleton strategies."""
     _strategies: Dict[str, PenaltyStrategy] = {
         'ban': BanPenalty(),
         'mute': MutePenalty(),
@@ -2202,22 +2189,27 @@ def reload_replies_from_file() -> dict:
     return _REPLIES_FROM_FILE
 
 # =====================================================================
-# 17. المهام الخلفية — Adaptive + Batch
+# 17. المهام الخلفية — Adaptive + Batch + Pool Monitor
 # =====================================================================
 
 class BackgroundTasks:
     """
     🧠 v7.8.1: كاش المشرفين بتكيّف TTL + batch subscriptions.
     🕐 v7.8.4: _do_backup يستخدم utc_now() لأسماء الملفات (توحيد مع DB).
+    🔍 v7.8.5: monitor_pool + monitor_pool_alert لمراقبة PostgreSQL Pool.
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
     _BASE_TTL = 600
     _GROUP_ADMINS_CACHE_MAX_SIZE = 5000
 
+    # 🔍 v7.8.5: إعدادات مراقبة Pool
+    POOL_MONITOR_INTERVAL = 60          # كل 60 ثانية
+    POOL_ALERT_THRESHOLD = 85.0         # نسبة التنبيه %
+    POOL_ALERT_COOLDOWN = 600           # تنبيه كل 10 دقائق كحد أقصى
+
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
-        """🧠 TTL يتكيف حسب عدد الاستدعاءات."""
         access = BackgroundTasks._group_admins_access_count.get(chat_id, 0)
         if access >= 20:
             return BackgroundTasks._BASE_TTL * 2
@@ -2228,6 +2220,135 @@ class BackgroundTasks:
         if access >= 1:
             return int(BackgroundTasks._BASE_TTL * 0.5)
         return 60
+
+    # =================================================================
+    # 🔍 v7.8.5: مراقبة Pool
+    # =================================================================
+
+    @staticmethod
+    def _read_pool_stats() -> Optional[Dict[str, Any]]:
+        """
+        🔍 v7.8.5: يقرأ حالة Pool مباشرة من DB._pool.
+        يعمل فقط مع PostgreSQL/MySQL — يُرجِع None لـ SQLite.
+        """
+        try:
+            if not (getattr(DB, 'USE_POSTGRES', False) or getattr(DB, 'USE_MYSQL', False)):
+                return None
+            pool = getattr(DB, '_pool', None)
+            if pool is None:
+                return None
+
+            # asyncpg و asyncmy يدعمان هذه الواجهات
+            max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
+            current_size = pool.get_size() if hasattr(pool, 'get_size') else None
+            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
+
+            if max_size is None or current_size is None:
+                return None
+
+            # idle قد لا يدعمها asyncmy
+            if idle_size is None:
+                idle_size = 0
+
+            in_use = max(0, current_size - idle_size)
+            util = round((in_use / max_size) * 100, 1) if max_size > 0 else 0.0
+
+            return {
+                "max_size": max_size,
+                "current_size": current_size,
+                "idle_size": idle_size,
+                "in_use": in_use,
+                "utilization_pct": util,
+            }
+        except Exception as e:
+            logger.debug(f"_read_pool_stats: {e}")
+            return None
+
+    @staticmethod
+    def _format_pool_line(stats: Dict[str, Any]) -> str:
+        """يُنسّق سطر مراقبة Pool مع إيموجي حسب النسبة."""
+        util = stats["utilization_pct"]
+        if util < 50:
+            emoji = "🟢"
+        elif util < 80:
+            emoji = "🟡"
+        else:
+            emoji = "🔴"
+
+        return (
+            f"{emoji} Pool: {stats['in_use']}/{stats['max_size']} "
+            f"({util}%) — idle={stats['idle_size']} | current={stats['current_size']}"
+        )
+
+    @staticmethod
+    async def monitor_pool() -> None:
+        """
+        🔍 v7.8.5: يسجّل حالة Pool كل 60 ثانية.
+        - 🟢 < 50%  → صحة ممتازة
+        - 🟡 50-80% → ضغط طبيعي
+        - 🔴 > 80%  → تحذير (راجع الاستعلامات البطيئة)
+        """
+        # انتظار 30 ثانية قبل أول فحص (لتجنب الضغط عند البدء)
+        await asyncio.sleep(30)
+        while True:
+            try:
+                stats = BackgroundTasks._read_pool_stats()
+                if stats is not None:
+                    line = BackgroundTasks._format_pool_line(stats)
+                    logger.info(line)
+                    if stats["utilization_pct"] >= 85:
+                        logger.warning(
+                            f"⚠️ Pool شبه ممتلئ! "
+                            f"{stats['in_use']}/{stats['max_size']} "
+                            f"({stats['utilization_pct']}%) "
+                            f"— راجع الاستعلامات البطيئة (🐌)"
+                        )
+            except Exception as e:
+                logger.debug(f"monitor_pool: {e}")
+            await asyncio.sleep(BackgroundTasks.POOL_MONITOR_INTERVAL)
+
+    @staticmethod
+    async def monitor_pool_alert(bot) -> None:
+        """
+        🚨 v7.8.5: يُرسل تنبيه للمالك عند تجاوز 85%.
+        حد أقصى: تنبيه واحد كل 10 دقائق (cooldown).
+        """
+        last_alert_time = 0.0
+        await asyncio.sleep(60)
+        while True:
+            try:
+                stats = BackgroundTasks._read_pool_stats()
+                if stats is not None:
+                    util = stats["utilization_pct"]
+                    now = time.time()
+                    if (util >= BackgroundTasks.POOL_ALERT_THRESHOLD and
+                            now - last_alert_time > BackgroundTasks.POOL_ALERT_COOLDOWN):
+                        last_alert_time = now
+                        try:
+                            await safe_send(
+                                bot,
+                                CONFIG.PRIMARY_OWNER_ID,
+                                (
+                                    f"🚨 <b>تنبيه Pool</b>\n\n"
+                                    f"📊 الاستخدام: "
+                                    f"{stats['in_use']}/{stats['max_size']} "
+                                    f"({util}%)\n"
+                                    f"🆓 فاضي: {stats['idle_size']}\n"
+                                    f"🔗 مفتوح: {stats['current_size']}\n"
+                                    f"🕐 {TimeUtils.mecca_iso()}\n\n"
+                                    f"⚠️ راجع الاستعلامات البطيئة!"
+                                ),
+                                parse_mode='HTML'
+                            )
+                        except Exception as alert_err:
+                            logger.debug(f"pool alert send: {alert_err}")
+            except Exception as e:
+                logger.debug(f"monitor_pool_alert: {e}")
+            await asyncio.sleep(BackgroundTasks.POOL_MONITOR_INTERVAL)
+
+    # =================================================================
+    # كاش المشرفين
+    # =================================================================
 
     @staticmethod
     async def _get_admin_ids_cached(bot, chat_id: int,
@@ -2323,9 +2444,6 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, sleep_seconds, published_count,
                                        has_sub: bool = None):
-        """
-        🧠 v7.8.1: يقبل has_sub مسبقاً (batch check).
-        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -2361,16 +2479,12 @@ class BackgroundTasks:
 
     @staticmethod
     async def auto_publish(bot) -> None:
-        """
-        🧠 v7.8.1: batch subscription check + semaphore limit 8.
-        """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
         sleep_seconds = min_interval_minutes * 60
 
         def _get_semaphore_size(n: int) -> int:
-            """🧠 v7.8.1: حد أقصى أقل لضغط Pool."""
             if n <= 5:
                 return 3
             if n <= 10:
@@ -2570,7 +2684,6 @@ class BackgroundTasks:
     async def heartbeat(bot) -> None:
         """
         🕐 v7.8.4: يبقى mecca_iso() للعرض (توقيت المستخدم).
-        القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
         """
         while True:
             await asyncio.sleep(CONFIG.HEARTBEAT_INTERVAL)
@@ -2702,9 +2815,6 @@ class BackgroundTasks:
 # =====================================================================
 
 async def warmup_all() -> Dict[str, Any]:
-    """
-    🧠 v7.8.3: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
-    """
     result = {
         'translations_loaded': 0,
         'buttons_loaded': 0,
