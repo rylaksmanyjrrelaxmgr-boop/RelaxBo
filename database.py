@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.9 — PERF bootstrap)
+database.py - قاعدة البيانات المتكاملة (v7.7.10 — BIGINT fix)
 ================================================================================
-🚀 v7.7.9 (PERF-1..3):
+🚨 v7.7.10 (FIX-INT32):
+  ✅ _ensure_bigint_ids: تحويل تلقائي للأعمدة INT32 → BIGINT
+  ✅ log_channel_id: INTEGER → BIGINT (Telegram Channel IDs)
+  ✅ BOOTSTRAP_DATA_VERSION = 7 (يُجبر الـ migration)
+  ✅ حل invalid input for query argument (value out of int32 range)
+
+🚀 v7.7.9 (PERF-1..6):
   PERF-1 tables_hash: تخطي create_tables عند عدم تغيّر schema
   PERF-2 _fetch_all_columns_map: استعلام واحد لأعمدة كل الجداول
   PERF-3 حذف _ensure_text_hash_column المكرّرة
   PERF-4 SQLite PRAGMA مستقل لكل أمر (لا يُسقط الاتصال)
   PERF-5 _upsert_setting موحّد
+  PERF-6 _init_default_data: batch INSERT بدل loop
 
 🔥 v7.7.8 (FIX-PG-BOOTSTRAP):
   ✅ _bootstrap: لا transaction لـPG/MySQL — DDL في autocommit
@@ -1365,7 +1372,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         update_cols = [c for c in columns if c not in key_set]
         if not update_cols:
             return new_query.replace("INSERT", "INSERT IGNORE", 1)
-        # ⚠️ MySQL 8.0.20+ يُصدر تحذير deprecation لـ VALUES().
         set_clause = ", ".join(
             f"`{c}` = VALUES(`{c}`)" for c in update_cols
         )
@@ -1549,7 +1555,9 @@ class Database(
 ):
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
-    BOOTSTRAP_DATA_VERSION = 6
+
+    # ✅ v7.7.10: رُفع من 6 → 7 لإجبار migration الـBIGINT
+    BOOTSTRAP_DATA_VERSION = 7
 
     VALID_PENALTY_TYPES = {"mute", "ban", "restrict", "kick", "warn"}
     VALID_REPLY_TYPES = {
@@ -1577,6 +1585,27 @@ class Database(
         "max_message_length",
     }
     MAX_PENALTY_DURATION = 365 * 86400
+
+    # ✅ v7.7.10: أعمدة يجب أن تكون BIGINT (تستقبل Telegram IDs)
+    BIGINT_COLUMNS = [
+        ("bot_groups", "log_channel_id"),
+        ("anonymous_admins", "user_id"),
+        ("user_penalties", "user_id"),
+        ("user_penalties", "chat_id"),
+        ("user_warnings", "user_id"),
+        ("user_warnings", "chat_id"),
+        ("admin_logs", "admin_id"),
+        ("admin_logs", "target_id"),
+        ("admin_logs", "chat_id"),
+        ("group_admins", "user_id"),
+        ("group_admins", "chat_id"),
+        ("hidden_admins", "admin_id"),
+        ("hidden_admins", "chat_id"),
+        ("hidden_owner_groups", "owner_id"),
+        ("hidden_owner_groups", "chat_id"),
+        ("user_messages", "user_id"),
+        ("user_messages", "chat_id"),
+    ]
 
     COLUMN_ALIASES = {
         "delete_mentions": "mentions", "delete_mention": "mentions",
@@ -1717,7 +1746,6 @@ class Database(
             self._closing = False
             self._closed = False
 
-            # ✅ HOTFIX-1 (v7.7.6): قفل عام للتوافقية مع الـ mixins
             self._lock = asyncio.Lock()
 
             self._lifecycle_lock = asyncio.Lock()
@@ -1732,7 +1760,6 @@ class Database(
             self._secondary_index_task = None
             self._cache_cleanup_task = None
 
-            # ✅ ISSUE-3: مرجع قوي لمهام الخلفية لمنع GC
             self._bg_tasks: Set[asyncio.Task] = set()
 
             self._sqlite_creation_lock = asyncio.Lock()
@@ -2043,7 +2070,6 @@ class Database(
     async def _create_sqlite_connection(self):
         """
         ✅ v7.7.9 (PERF-4): كل PRAGMA في try مستقل
-        — فشل واحد لا يُسقط الاتصال بأكمله.
         """
         conn = None
         try:
@@ -3551,10 +3577,100 @@ class Database(
             logger.error(f"❌ _ensure_text_hash_column: {e}")
             return False
 
+    # =================================================================
+    # ✅ v7.7.10 (FIX-INT32): تحويل الأعمدة إلى BIGINT
+    # =================================================================
+
+    async def _ensure_bigint_ids(self, conn) -> int:
+        """
+        ✅ v7.7.10 (FIX-INT32):
+        Telegram Channel/User IDs تتجاوز int32. نحوّل الأعمدة
+        INTEGER → BIGINT تلقائياً.
+
+        - PG: ALTER COLUMN ... TYPE BIGINT
+        - MySQL: MODIFY COLUMN ... BIGINT
+        - SQLite: لا يحتاج (ديناميكي)
+
+        Returns: عدد الأعمدة المُحوّلة
+        """
+        if DB_TYPE == "sqlite":
+            return 0
+
+        converted = 0
+        for table, col in self.BIGINT_COLUMNS:
+            try:
+                if USE_POSTGRES:
+                    row = await conn.fetchval(
+                        "SELECT data_type "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = $1 "
+                        "  AND column_name = $2 "
+                        "  AND table_schema = current_schema()",
+                        table, col,
+                    )
+                    if row is None:
+                        continue  # العمود/الجدول غير موجود
+                    row_l = row.lower()
+                    if row_l == "bigint":
+                        continue  # ✅ صحيح
+                    if row_l in ("integer", "int", "smallint", "smallserial"):
+                        await conn.execute(
+                            f'ALTER TABLE "{table}" '
+                            f'ALTER COLUMN "{col}" TYPE BIGINT'
+                        )
+                        logger.info(
+                            f"🔧 تحويل {table}.{col}: "
+                            f"{row} → BIGINT"
+                        )
+                        converted += 1
+                elif USE_MYSQL:
+                    cursor = await conn.cursor()
+                    try:
+                        await cursor.execute(
+                            "SELECT DATA_TYPE "
+                            "FROM information_schema.COLUMNS "
+                            "WHERE TABLE_SCHEMA = DATABASE() "
+                            "  AND TABLE_NAME = %s "
+                            "  AND COLUMN_NAME = %s",
+                            (table, col),
+                        )
+                        r = await cursor.fetchone()
+                        if not r:
+                            continue
+                        current_type = r[0].lower()
+                        if current_type == "bigint":
+                            continue
+                        if current_type in (
+                            "int", "integer", "mediumint",
+                            "smallint", "tinyint",
+                        ):
+                            await cursor.execute(
+                                f"ALTER TABLE `{table}` "
+                                f"MODIFY COLUMN `{col}` "
+                                f"BIGINT DEFAULT NULL"
+                            )
+                            logger.info(
+                                f"🔧 تحويل {table}.{col}: "
+                                f"{current_type} → BIGINT"
+                            )
+                            converted += 1
+                    finally:
+                        await cursor.close()
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ _ensure_bigint_ids({table}.{col}): {e}"
+                )
+
+        if converted > 0:
+            logger.info(
+                f"✅ تحويل {converted} عمود إلى BIGINT"
+            )
+        return converted
+
     async def _migrate_schema(self, conn):
         """
         ✅ v7.7.9 (PERF-2): استعلام واحد لكل الأعمدة بدل N+1
-        — على PG/MySQL: 1 round-trip فقط.
+        ✅ v7.7.10 (FIX-INT32): استدعاء _ensure_bigint_ids
         """
         if USE_MYSQL:
             try:
@@ -3635,14 +3751,15 @@ class Database(
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL")
                 ],
-                # 🆕 v7.7.7: عمود قناة السجل
+                # ✅ v7.7.10: BIGINT (كان INTEGER — كسر Telegram)
                 "bot_groups": [
-                    ("log_channel_id", "INTEGER DEFAULT NULL"),
+                    ("log_channel_id", "BIGINT DEFAULT NULL"),
                 ],
                 "auto_replies": [
                     ("usage_count", "INTEGER DEFAULT 0")
                 ],
-                "anonymous_admins": [("user_id", "INTEGER")],
+                # ✅ v7.7.10: BIGINT (كان INTEGER)
+                "anonymous_admins": [("user_id", "BIGINT")],
                 "posts": [
                     ("text_hash", "TEXT DEFAULT ''"),
                     ("published_at", "TIMESTAMP"),
@@ -3667,7 +3784,6 @@ class Database(
                 ],
             }
 
-            # ✅ PERF-2: استعلام واحد لكل الجداول
             t_fetch = time.monotonic()
             all_columns = await self._fetch_all_columns_map(
                 conn, list(migrations.keys())
@@ -3699,8 +3815,12 @@ class Database(
                     f"في {tables_processed} جدول "
                     f"(fetch={fetch_elapsed:.2f}s)"
                 )
-            # ✅ PERF-3: تُستدعى هنا مرة واحدة فقط
+
+            # ✅ PERF-3: text_hash مرة واحدة
             await self._ensure_text_hash_column(conn)
+
+            # ✅ v7.7.10 (FIX-INT32): تحويل الأعمدة إلى BIGINT
+            await self._ensure_bigint_ids(conn)
 
             self._group_security_columns_cache = None
             _UNIQUE_CACHE.clear()
@@ -3913,10 +4033,14 @@ class Database(
             return False
 
     # =================================================================
-    # البيانات الافتراضية
+    # البيانات الافتراضية — ✅ v7.7.9 (PERF-6)
     # =================================================================
 
     async def _init_default_data(self, conn):
+        """
+        ✅ v7.7.9 (PERF-6): استعلام واحد لجلب الباقات الموجودة
+        + batch INSERT بدل loop.
+        """
         default_plans = [
             {"name": "تجربة",
              "description": "تجربة مجانية 30 يوم",
@@ -3965,108 +4089,98 @@ class Database(
         ]
         now_dt = TimeUtils.utc_now()
 
-        for plan in default_plans:
+        # ✅ PERF-6: استعلام واحد لجلب الأسماء الموجودة
+        names = [p["name"] for p in default_plans]
+        existing_names: Set[str] = set()
+        try:
             if USE_POSTGRES:
-                existing = await conn.fetchval(
-                    "SELECT id FROM plans WHERE name = $1",
-                    plan["name"],
+                rows = await conn.fetch(
+                    "SELECT name FROM plans "
+                    "WHERE name = ANY($1::text[])",
+                    names,
                 )
-                if not existing:
-                    await conn.execute(
-                        """INSERT INTO plans
-                           (name, description, price, currency,
-                            duration_days, max_channels, max_posts,
-                            features, is_active, is_gift, created_at)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                                   $9, $10, $11)""",
-                        plan["name"], plan["description"],
-                        plan["price"], "XTR",
-                        plan["duration_days"], plan["max_channels"],
-                        plan["max_posts"], plan["features"], 1,
-                        plan["is_gift"], now_dt,
-                    )
-                else:
-                    await conn.execute(
-                        "UPDATE plans SET max_channels = $1, "
-                        "max_posts = $2 WHERE name = $3",
-                        plan["max_channels"], plan["max_posts"],
-                        plan["name"],
-                    )
+                existing_names = {r["name"] for r in rows}
             elif USE_MYSQL:
                 cursor = await conn.cursor()
                 try:
+                    placeholders = ",".join(["%s"] * len(names))
                     await cursor.execute(
-                        "SELECT id FROM plans WHERE name = %s",
-                        (plan["name"],),
+                        f"SELECT name FROM plans "
+                        f"WHERE name IN ({placeholders})",
+                        names,
                     )
-                    existing = await cursor.fetchone()
+                    existing_names = {
+                        r[0] for r in await cursor.fetchall()
+                    }
                 finally:
                     await cursor.close()
-                if not existing:
-                    cursor2 = await conn.cursor()
-                    try:
-                        await cursor2.execute(
-                            """INSERT INTO plans
-                               (name, description, price, currency,
-                                duration_days, max_channels,
-                                max_posts, features, is_active,
-                                is_gift, created_at)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s,
-                                       %s, %s, %s, %s)""",
-                            (plan["name"], plan["description"],
-                             plan["price"], "XTR",
-                             plan["duration_days"],
-                             plan["max_channels"],
-                             plan["max_posts"], plan["features"], 1,
-                             plan["is_gift"], now_dt),
-                        )
-                    finally:
-                        await cursor2.close()
-                else:
-                    cursor3 = await conn.cursor()
-                    try:
-                        await cursor3.execute(
-                            "UPDATE plans SET max_channels = %s, "
-                            "max_posts = %s WHERE name = %s",
-                            (plan["max_channels"],
-                             plan["max_posts"],
-                             plan["name"]),
-                        )
-                    finally:
-                        await cursor3.close()
             else:
+                placeholders = ",".join(["?"] * len(names))
                 cursor = await conn.execute(
-                    "SELECT id FROM plans WHERE name = ?",
-                    (plan["name"],),
+                    f"SELECT name FROM plans "
+                    f"WHERE name IN ({placeholders})",
+                    names,
                 )
                 try:
-                    existing = await cursor.fetchone()
+                    existing_names = {
+                        r[0] for r in await cursor.fetchall()
+                    }
                 finally:
                     try:
                         await cursor.close()
                     except Exception:
                         pass
-                if not existing:
+        except Exception as e:
+            logger.warning(f"⚠️ fetch existing plans: {e}")
+
+        to_insert = [
+            p for p in default_plans
+            if p["name"] not in existing_names
+        ]
+        to_update = [
+            p for p in default_plans
+            if p["name"] in existing_names
+        ]
+
+        # إدخال دفعة واحدة
+        if to_insert:
+            try:
+                params_list = [
+                    (
+                        p["name"], p["description"],
+                        p["price"], "XTR",
+                        p["duration_days"], p["max_channels"],
+                        p["max_posts"], p["features"], 1,
+                        p["is_gift"], now_dt,
+                    )
+                    for p in to_insert
+                ]
+                await self._executemany_with_conn(
+                    conn,
+                    """INSERT OR IGNORE INTO plans
+                       (name, description, price, currency,
+                        duration_days, max_channels, max_posts,
+                        features, is_active, is_gift, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    params_list,
+                )
+                logger.info(f"✅ أُدرج {len(to_insert)} باقة")
+            except Exception as e:
+                logger.warning(f"⚠️ insert plans batch: {e}")
+
+        # تحديث الباقات الموجودة (max_channels/max_posts)
+        if to_update:
+            for p in to_update:
+                try:
                     await self._execute_with_conn(
                         conn,
-                        """INSERT INTO plans
-                           (name, description, price, currency,
-                            duration_days, max_channels, max_posts,
-                            features, is_active, is_gift, created_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                        plan["name"], plan["description"],
-                        plan["price"], "XTR",
-                        plan["duration_days"], plan["max_channels"],
-                        plan["max_posts"], plan["features"], 1,
-                        plan["is_gift"], now_dt,
-                    )
-                else:
-                    await conn.execute(
                         "UPDATE plans SET max_channels = ?, "
                         "max_posts = ? WHERE name = ?",
-                        (plan["max_channels"], plan["max_posts"],
-                         plan["name"]),
+                        p["max_channels"], p["max_posts"],
+                        p["name"],
                     )
+                except Exception:
+                    pass
 
     async def _import_banned_words(self, conn):
         try:
@@ -4260,15 +4374,7 @@ class Database(
             json.dumps(data, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
-    # =================================================================
-    # 🆕 v7.7.9 (PERF-1..3): hashes & helpers
-    # =================================================================
-
     def _compute_tables_hash(self) -> str:
-        """
-        hash منفصل عن bootstrap_hash — يتغيّر فقط عندما
-        تتغيّر نسخة schema في database_tables.py.
-        """
         return hashlib.sha256(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
         ).hexdigest()
@@ -4276,9 +4382,6 @@ class Database(
     async def _upsert_setting(
         self, conn, key: str, value: str
     ) -> None:
-        """
-        UPSERT موحّد لجدول settings — يوفّر تكرار الكود.
-        """
         try:
             if USE_POSTGRES:
                 await conn.execute(
@@ -4314,10 +4417,6 @@ class Database(
     async def _fetch_all_columns_map(
         self, conn, tables: List[str]
     ) -> Dict[str, Set[str]]:
-        """
-        جلب أعمدة كل الجداول المطلوبة باستعلام واحد.
-        PG: 1 query. MySQL: 1 query. SQLite: N queries (لا بديل).
-        """
         result: Dict[str, Set[str]] = {t: set() for t in tables}
         if not tables:
             return result
@@ -4409,14 +4508,10 @@ class Database(
                 pass
 
     # =================================================================
-    # Bootstrap — ✅ v7.7.8 FIX-PG-BOOTSTRAP + v7.7.9 PERF
+    # Bootstrap — ✅ v7.7.8 FIX-PG + v7.7.9 PERF + v7.7.10 BIGINT
     # =================================================================
 
     async def _do_bootstrap_inner(self, conn) -> bool:
-        """
-        ✅ v7.7.9 (PERF-1): تخطي create_tables عند عدم تغيّر schema
-        ✅ v7.7.9 (PERF-3): حذف _ensure_text_hash_column المكرّرة
-        """
         # ✅ PERF-1: فحص tables_hash قبل create_tables
         tables_hash = self._compute_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
@@ -4451,8 +4546,6 @@ class Database(
         else:
             t_mig = time.monotonic()
             await self._migrate_schema(conn)
-            # ✅ PERF-3: _ensure_text_hash_column تُستدعى
-            # داخلياً في _migrate_schema — لا تكرار هنا
             await self._init_default_data(conn)
             elapsed = time.monotonic() - t_mig
             await self._upsert_setting(
@@ -4467,16 +4560,6 @@ class Database(
     async def _bootstrap(
         self, *, with_background: bool = True
     ) -> bool:
-        """
-        ✅ v7.7.8 (FIX-PG-BOOTSTRAP):
-
-        PostgreSQL/MySQL: أي DDL فاشل داخل transaction يُلغيه
-        كاملاً ويرفض كل الجمل التالية بـ
-        InFailedSQLTransactionError. الحل: DDL يعمل في
-        autocommit mode (خارج transaction).
-
-        SQLite: transaction آمن (rollback جزئي).
-        """
         async with self._bootstrap_lock:
             try:
                 await self.initialize()
