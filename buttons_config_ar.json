@@ -189,6 +189,8 @@
     "sec_violation_penalties": "🚨 عقوبات المخالفات",
     "sec_activate_all": "✅ تفعيل الكل",
     "sec_deactivate_all": "❌ تعطيل الكل",
+    "sec_enable_all": "✅ تفعيل الكل",
+    "sec_disable_all": "❌ تعطيل الكل",
     "sec_close": "❌ إغلاق",
     "status_only": "📊 الحالة",
     "reminder_subscription_expires": "⚠️ اشتراكك سينتهي بعد {days} يوم",
@@ -283,6 +285,19 @@
         ["admin_refresh_cache"],
         ["admin_invoices", "admin_payment_logs"],
         ["admin_grant_free"],
+        ["back"]
+      ]
+    },
+    "admin": {
+      "rows": [
+        ["admin_users", "admin_banned"],
+        ["admin_unban_all"],
+        ["admin_channels", "admin_groups"],
+        ["admin_ban_user", "admin_unban_user"],
+        ["admin_grant_free", "admin_add_admin"],
+        ["admin_broadcast", "admin_invoices"],
+        ["admin_backup", "admin_restore"],
+        ["admin_ram", "admin_metrics"],
         ["back"]
       ]
     },
