@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.1)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.0)
 ================================================================================
+🔍 v5.4.0 (Pool Monitor integration):
+    ✅ استيراد BackgroundTasks.monitor_pool + monitor_pool_alert
+    ✅ تشغيل monitor_pool (يسجّل حالة Pool كل 60s)
+    ✅ تشغيل monitor_pool_alert (تنبيه Telegram عند ≥85%)
+    ✅ زيادة عدد المهام الخلفية من 13 → 15
+
 🆕 v5.3.1 (group_log integration كامل):
     ✅ استيراد init_group_log من group_log
     ✅ استدعاء init_group_log(DB, app.bot) + gl.start() بعد initialize
@@ -915,6 +921,20 @@ async def main():
             run_task_with_retry(
                 GroupRateLimiterManager.periodic_cleanup_task,
                 task_name="periodic_cleanup"
+            )
+        ),
+        # 🔍 v5.4.0: مراقبة PostgreSQL Pool
+        asyncio.create_task(
+            run_task_with_retry(
+                BackgroundTasks.monitor_pool,
+                task_name="monitor_pool"
+            )
+        ),
+        asyncio.create_task(
+            run_task_with_retry(
+                BackgroundTasks.monitor_pool_alert,
+                app.bot,
+                task_name="monitor_pool_alert"
             )
         ),
     ]
