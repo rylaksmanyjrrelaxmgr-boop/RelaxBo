@@ -2,16 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.2.0)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.1)
 ================================================================================
+🆕 v5.3.1 (group_log integration كامل):
+    ✅ استيراد init_group_log من group_log
+    ✅ استدعاء init_group_log(DB, app.bot) + gl.start() بعد initialize
+    ✅ إغلاق لطيف لـgroup_log عبر shutdown() في finally
+    ✅ حماية شاملة — البوت يعمل حتى لو غاب group_log
+
+🆕 v5.3.0 (group_log integration أساسي):
+    ✅ استيراد register_group_log_handlers من handlers.handlers_group_log
+    ✅ تسجيل معالجات سجل قناة المجموعات
+    ✅ فحص توفر دوال group_log عند البدء (غير معطِّل)
+
 🆕 v5.2.0 (periodic cleanup + تحسينات):
-    ✅ GroupRateLimiterManager.periodic_cleanup_task — تنظيف دوري للكاشات
+    ✅ GroupRateLimiterManager.periodic_cleanup_task
     ✅ استيراد GroupRateLimiterManager من handlers.handlers_message
-    ✅ تقرير تلقائي بعد كل مهمة خلفية (نجاح/فشل)
+    ✅ تقرير تلقائي بعد كل مهمة خلفية
     ✅ فحص توافق DB_TYPE مع DATABASE_URL عند البدء
 
 🆕 v5.1.0 (Warmup + فحص دوال):
-    ✅ warmup_all() عند بدء التشغيل — تحميل كل الموارد مسبقاً
+    ✅ warmup_all() عند بدء التشغيل
     ✅ _verify_command_handlers() — فحص دوال CommandHandlers
     ✅ قياس زمن warmup في السجلّات
 
@@ -56,6 +67,24 @@ from handlers.handlers_nav_fix import register_nav_fix
 # ✅ v5.2.0: GroupRateLimiterManager
 from handlers.handlers_message import GroupRateLimiterManager
 
+# ✅ v5.3.0: group_log — استيراد بحماية
+try:
+    from handlers.handlers_group_log import register_group_log_handlers
+    _GROUP_LOG_AVAILABLE = True
+except ImportError as _e:
+    register_group_log_handlers = None
+    _GROUP_LOG_AVAILABLE = False
+    _GROUP_LOG_IMPORT_ERROR = str(_e)
+
+# ✅ v5.3.1: init_group_log
+try:
+    from group_log import init_group_log as _init_group_log
+    _GROUP_LOG_INIT_AVAILABLE = True
+except ImportError as _e:
+    _init_group_log = None
+    _GROUP_LOG_INIT_AVAILABLE = False
+    _GROUP_LOG_INIT_IMPORT_ERROR = str(_e)
+
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send,
@@ -93,6 +122,9 @@ ALLOWED_UPDATES = [
     "chat_member",
     "my_chat_member",
 ]
+
+# ✅ v5.3.1: مرجع عالمي لـgroup_log للإغلاق اللطيف
+_GROUP_LOG_INSTANCE = None
 
 
 # =====================================================================
@@ -209,6 +241,111 @@ def _verify_db_config() -> bool:
     except Exception as e:
         logger.warning(f"⚠️ فشل فحص DB: {e}")
         return True  # لا نوقف التشغيل بسبب هذا
+
+
+# =====================================================================
+# 🛡️ v5.3.0: فحص توفر معالجات group_log
+# =====================================================================
+
+def _verify_group_log_handlers() -> bool:
+    """
+    التحقق من توفر معالجات group_log (غير معطِّل).
+
+    يرجع True إذا كانت متوفرة، False إذا لا — لكن لا يوقف التشغيل.
+    """
+    if not _GROUP_LOG_AVAILABLE:
+        logger.warning(
+            f"⚠️ handlers_group_log غير متاح: "
+            f"{globals().get('_GROUP_LOG_IMPORT_ERROR', 'unknown')}"
+        )
+        logger.warning("⚠️ زر قناة السجل لن يعمل — سيتم تجاهله")
+        return False
+
+    try:
+        if not callable(register_group_log_handlers):
+            logger.warning(
+                "⚠️ register_group_log_handlers غير قابل للاستدعاء"
+            )
+            return False
+        logger.info("✅ handlers_group_log متاح")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ فحص group_log فشل: {e}")
+        return False
+
+
+# =====================================================================
+# 🛡️ v5.3.1: تهيئة group_log instance
+# =====================================================================
+
+def _init_group_log_instance(app) -> bool:
+    """
+    إنشاء وتشغيل GroupLog instance.
+
+    ✅ v5.3.1:
+        - يستدعي init_group_log(DB, app.bot)
+        - يبدأ الـWorker
+        - يخزّن المرجع في _GROUP_LOG_INSTANCE للإغلاق لاحقاً
+    """
+    global _GROUP_LOG_INSTANCE
+
+    if not _GROUP_LOG_INIT_AVAILABLE:
+        logger.warning(
+            f"⚠️ group_log.init غير متاح: "
+            f"{globals().get('_GROUP_LOG_INIT_IMPORT_ERROR', 'unknown')}"
+        )
+        return False
+
+    if not callable(_init_group_log):
+        logger.warning("⚠️ init_group_log غير قابل للاستدعاء")
+        return False
+
+    try:
+        _GROUP_LOG_INSTANCE = _init_group_log(DB, app.bot)
+        if _GROUP_LOG_INSTANCE is None:
+            logger.error("❌ init_group_log أعاد None")
+            return False
+
+        _GROUP_LOG_INSTANCE.start()
+        logger.info(
+            "✅ GroupLog: instance مُنشأ + worker started"
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"❌ فشل تهيئة GroupLog: {e}", exc_info=True
+        )
+        return False
+
+
+async def _shutdown_group_log() -> None:
+    """
+    إغلاق لطيف لـGroupLog عند إيقاف البوت.
+
+    ✅ v5.3.1:
+        - انتظار الطابور (5s كحد أقصى)
+        - إلغاء Worker
+        - تسجيل النتيجة
+    """
+    global _GROUP_LOG_INSTANCE
+
+    if _GROUP_LOG_INSTANCE is None:
+        return
+
+    try:
+        if hasattr(_GROUP_LOG_INSTANCE, "shutdown"):
+            await _GROUP_LOG_INSTANCE.shutdown(drain_timeout=5.0)
+            logger.info("✅ GroupLog: تم الإغلاق بنجاح")
+        elif hasattr(_GROUP_LOG_INSTANCE, "stop"):
+            _GROUP_LOG_INSTANCE.stop()
+            logger.info("✅ GroupLog: worker stopped")
+    except asyncio.CancelledError:
+        logger.info("🛑 GroupLog: shutdown أُلغي")
+        raise
+    except Exception as e:
+        logger.warning(f"⚠️ GroupLog shutdown: {e}")
+    finally:
+        _GROUP_LOG_INSTANCE = None
 
 
 # =====================================================================
@@ -463,6 +600,9 @@ async def main():
         logger.error("❌ فشل فحص إعدادات قاعدة البيانات — الخروج")
         raise SystemExit(1)
 
+    # 🛡️ v5.3.0: فحص group_log handlers (غير معطِّل)
+    _verify_group_log_handlers()
+
     # ═══ تهيئة قاعدة البيانات ═══
     t0 = time.monotonic()
     if hasattr(DB, 'pre_initialize'):
@@ -529,6 +669,21 @@ async def main():
     logger.info(
         f"⏱️ تم تهيئة التطبيق في {time.monotonic()-t_app:.2f} ثانية"
     )
+
+    # ========== ✅ v5.3.1: تهيئة group_log ==========
+    if _GROUP_LOG_INIT_AVAILABLE and _GROUP_LOG_AVAILABLE:
+        _init_group_log_instance(app)
+    else:
+        if not _GROUP_LOG_INIT_AVAILABLE:
+            logger.warning(
+                "⚠️ group_log.init غير متاح — لن يعمل "
+                "نظام سجل المجموعات"
+            )
+        elif not _GROUP_LOG_AVAILABLE:
+            logger.warning(
+                "⚠️ handlers_group_log غير متاح — لن يعمل "
+                "نظام سجل المجموعات"
+            )
 
     # ========== قائمة الأوامر الخاصة ==========
     private_commands = [
@@ -656,6 +811,21 @@ async def main():
         logger.info("✅ handlers قائمة القنوات مُسجَّل")
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers القنوات: {e}", exc_info=True)
+
+    # ═══ ✅ v5.3.0: معالجات سجل قناة المجموعات ═══
+    if _GROUP_LOG_AVAILABLE:
+        try:
+            register_group_log_handlers(app)
+            logger.info("✅ group_log: معالجات سجل قناة المجموعات مُسجّلة")
+        except Exception as e:
+            logger.error(
+                f"❌ فشل تسجيل group_log: {e}",
+                exc_info=True
+            )
+    else:
+        logger.warning(
+            "⚠️ group_log غير متاح — زر قناة السجل لن يعمل"
+        )
 
     # معالج الأزرار العام
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
@@ -788,9 +958,15 @@ async def main():
             finally:
                 await runner.cleanup()
     finally:
+        # ✅ v5.3.1: إغلاق GroupLog بلطف أولاً
+        await _shutdown_group_log()
+
+        # إلغاء المهام الخلفية
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        # إغلاق التطبيق
         await app.shutdown()
 
     logger.info(f"✅ اكتمل الإقلاع في {time.monotonic()-t_start:.2f} ثانية")
