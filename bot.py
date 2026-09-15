@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.1)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.2)
 ================================================================================
+🆕 v5.3.2 (Keep-Warm Cache):
+    ✅ مهمة خلفية كل 90s تُحدِّث كاش المجموعات النشطة
+    ✅ القضاء على بطء Cold start في أزرار قناة السجل
+    ✅ prefetch متوازٍ + معالجة أخطاء كاملة
+
 🆕 v5.3.1 (group_log integration كامل):
     ✅ استيراد init_group_log من group_log
     ✅ استدعاء init_group_log(DB, app.bot) + gl.start() بعد initialize
@@ -125,6 +130,14 @@ ALLOWED_UPDATES = [
 
 # ✅ v5.3.1: مرجع عالمي لـgroup_log للإغلاق اللطيف
 _GROUP_LOG_INSTANCE = None
+
+# =====================================================================
+# ✅ v5.3.2: Keep-Warm Cache — ثوابت
+# =====================================================================
+
+KEEP_WARM_INTERVAL = 90   # ثانية — كل 90s يُحدَّث الكاش
+KEEP_WARM_LIMIT = 20      # حد أقصى للمجموعات المُحدَّثة
+KEEP_WARM_FIRST_RUN = 30  # أول تشغيل بعد 30 ثانية من الإقلاع
 
 
 # =====================================================================
@@ -349,6 +362,108 @@ async def _shutdown_group_log() -> None:
 
 
 # =====================================================================
+# ✅ v5.3.2: Keep-Warm Cache — تحديث دوري لكاش المجموعات
+# =====================================================================
+
+async def _keep_warm_cache_once() -> None:
+    """
+    تحديث كاش المجموعات النشطة مرة واحدة.
+
+    يشمل:
+    - بيانات قناة السجل (_get_log_channel_menu_data)
+    - إعدادات الأمان (_security_settings_cache)
+    - إحصائيات الأمان (_security_stats_cache_local)
+    """
+    try:
+        # استيراد ديناميكي — يتفادى circular imports
+        from handlers.handlers_callback import _prefetch_group_assets
+
+        # جلب المجموعات النشطة (غير المحظورة)
+        try:
+            rows = await DB.fetchall(
+                "SELECT chat_id FROM bot_groups "
+                "WHERE banned=0 OR banned IS NULL "
+                "ORDER BY rowid DESC LIMIT ?",
+                (KEEP_WARM_LIMIT,),
+            )
+        except Exception as e:
+            logger.debug(f"keep_warm fetch: {e}")
+            return
+
+        if not rows:
+            return
+
+        # استخراج chat_ids
+        chat_ids = []
+        for r in rows:
+            try:
+                # دعم dict و sqlite3.Row
+                if isinstance(r, dict):
+                    cid = r.get("chat_id")
+                else:
+                    cid = r["chat_id"]
+                if cid is not None:
+                    chat_ids.append(int(cid))
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+
+        if not chat_ids:
+            return
+
+        # Prefetch متوازٍ
+        tasks = [
+            asyncio.create_task(_prefetch_group_assets(cid))
+            for cid in chat_ids
+        ]
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception:
+            pass
+
+        logger.debug(
+            f"🔥 keep-warm: تم تحديث {len(chat_ids)} مجموعة"
+        )
+    except Exception as e:
+        logger.debug(f"keep_warm_once error: {e}")
+
+
+async def _keep_warm_cache_loop() -> None:
+    """
+    حلقة مستمرة: تُشغِّل _keep_warm_cache_once كل KEEP_WARM_INTERVAL.
+
+    - أول تشغيل بعد KEEP_WARM_FIRST_RUN
+    - مُغلَّف بـ try/except — لا يُوقف المهمة أبداً
+    - يستجيب لـ CancelledError بلطف
+    """
+    # انتظار أولي
+    try:
+        await asyncio.sleep(KEEP_WARM_FIRST_RUN)
+    except asyncio.CancelledError:
+        logger.info("🛑 keep_warm_loop أُلغي قبل البدء")
+        raise
+
+    logger.info(
+        f"🔥 Keep-Warm Cache مُفعّل — كل {KEEP_WARM_INTERVAL}s"
+    )
+
+    while True:
+        try:
+            await _keep_warm_cache_once()
+        except asyncio.CancelledError:
+            logger.info("🛑 keep_warm_loop أُلغي")
+            raise
+        except Exception as e:
+            # لا نوقف الحلقة بسبب خطأ
+            logger.debug(f"keep_warm_loop iteration: {e}")
+
+        try:
+            await asyncio.sleep(KEEP_WARM_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("🛑 keep_warm_loop أُلغي أثناء النوم")
+            raise
+
+
+# =====================================================================
 # دوال مساعدة للدفع
 # =====================================================================
 
@@ -515,7 +630,7 @@ async def successful_payment(update, context):
                 logger.info(f"✅ Gift code created: user={user_id}")
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في توليد كود الهدية.")
-                logger.error(f"❌ Failed to create gift code: user={user_id}")
+                logger.error(f"❌ Failed to create gift code: {user_id}")
         except Exception as e:
             logger.exception(f"❌ Exception in gift payment: {e}")
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
@@ -915,6 +1030,13 @@ async def main():
             run_task_with_retry(
                 GroupRateLimiterManager.periodic_cleanup_task,
                 task_name="periodic_cleanup"
+            )
+        ),
+        # ✅ v5.3.2: Keep-Warm Cache — تحديث دوري لكاش المجموعات
+        asyncio.create_task(
+            run_task_with_retry(
+                _keep_warm_cache_loop,
+                task_name="keep_warm_cache"
             )
         ),
     ]
