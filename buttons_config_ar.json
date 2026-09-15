@@ -319,6 +319,7 @@
         ["sec_penalty_durations"],
         ["sec_adv_act", "sec_act_log"],
         ["sec_auto_reply_menu"],
+        ["log_channel_btn"],
         ["sec_antiflood_settings", "sec_night_settings"],
         ["sec_enable_all", "sec_disable_all"],
         ["sec_close"]
