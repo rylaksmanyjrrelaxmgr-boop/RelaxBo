@@ -1,7 +1,13 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.3.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.4.0)
 =====================================================================
+v1.4.0 (PTB v20+ fix):
+    ✅ إصلاح AttributeError: forward_from_chat محذوف في PTB v20+
+    ✅ دالة _extract_forward_channel متوافقة مع كل الإصدارات
+    ✅ استخدام forward_origin (MessageOriginChannel)
+    ✅ fallback لـ forward_from_chat (PTB v13.x)
+
 v1.3.0 (تقرير المشاركة الذكي):
     ✅ set_private يُعيد dict — نعرض معلومات المشاركة للمستخدم
     ✅ عرض عدد المجموعات + الأسماء عند التعيين
@@ -23,7 +29,7 @@ v1.1.0:
 
 import logging
 from html import escape as _html_escape
-from typing import Optional
+from typing import Optional, Tuple
 
 from telegram import Update
 from telegram.ext import (
@@ -46,6 +52,28 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
+# كشف إصدار PTB للتوافقية
+# =====================================================================
+
+try:
+    # PTB v20+
+    from telegram import (
+        MessageOriginChannel,
+        MessageOriginChat,
+        MessageOriginUser,
+        MessageOriginHiddenUser,
+    )
+    _PTB_V20_PLUS = True
+except ImportError:
+    # PTB v13.x
+    MessageOriginChannel = None
+    MessageOriginChat = None
+    MessageOriginUser = None
+    MessageOriginHiddenUser = None
+    _PTB_V20_PLUS = False
+
+
+# =====================================================================
 # مساعد للوصول الديناميكي
 # =====================================================================
 
@@ -59,6 +87,57 @@ def _get_group_log():
 def _safe_html(text) -> str:
     """استبدال HTML entities لتفادي كسر الرسالة."""
     return _html_escape(str(text or ""))
+
+
+# =====================================================================
+# ✅ v1.4.0: استخراج معلومات القناة المُعاد توجيهها
+# =====================================================================
+
+def _extract_forward_channel(msg) -> Tuple[Optional[int], str]:
+    """
+    يستخرج (chat_id, title) للقناة المُعاد توجيه رسالة منها.
+    متوافق مع PTB v20+ (forward_origin) و v13.x (forward_from_chat).
+
+    Returns:
+        (chat_id, title) — chat_id=None إذا لم تكن الرسالة من قناة.
+    """
+    # ─── PTB v20+ ───
+    origin = getattr(msg, "forward_origin", None)
+    if origin is not None:
+        # قناة
+        if _PTB_V20_PLUS and isinstance(origin, MessageOriginChannel):
+            chat = getattr(origin, "chat", None)
+            if chat is not None:
+                cid = getattr(chat, "id", None)
+                title = getattr(chat, "title", "") or ""
+                return cid, title
+        # محادثة (قد تكون قناة أو مجموعة)
+        if _PTB_V20_PLUS and isinstance(origin, MessageOriginChat):
+            chat = getattr(origin, "sender_chat", None)
+            if chat is not None:
+                ctype = getattr(chat, "type", None)
+                if ctype == "channel":
+                    cid = getattr(chat, "id", None)
+                    title = getattr(chat, "title", "") or ""
+                    return cid, title
+        # مستخدم / مخفي — ليست قناة
+        if _PTB_V20_PLUS and isinstance(
+            origin, (MessageOriginUser, MessageOriginHiddenUser)
+        ):
+            return None, ""
+        # أي كائن origin آخر — لا نعرف نوعه، نتجاهل
+        return None, ""
+
+    # ─── PTB v13.x fallback ───
+    fwd_chat = getattr(msg, "forward_from_chat", None)
+    if fwd_chat is not None:
+        ctype = getattr(fwd_chat, "type", None)
+        if ctype == "channel":
+            cid = getattr(fwd_chat, "id", None)
+            title = getattr(fwd_chat, "title", "") or ""
+            return cid, title
+
+    return None, ""
 
 
 # =====================================================================
@@ -134,12 +213,14 @@ async def receive_log_channel(
         return
 
     # ─── استخراج chat_id ───
+    # ✅ v1.4.0: استخدام الدالة المساعدة المتوافقة
     chat_id: Optional[int] = None
     title: str = ""
 
-    if msg.forward_from_chat and msg.forward_from_chat.type == "channel":
-        chat_id = msg.forward_from_chat.id
-        title = msg.forward_from_chat.title or ""
+    forwarded_id, forwarded_title = _extract_forward_channel(msg)
+    if forwarded_id is not None:
+        chat_id = forwarded_id
+        title = forwarded_title
     elif text and text.lstrip("-").isdigit():
         try:
             chat_id = int(text)
