@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.3.0)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.0)
 =====================================================================
+✅ v9.4.0 — تحسين أداء قناة السجل:
+  - _get_log_channel_menu_data: cache 30s + parallel fetch
+  - _invalidate_log_channel_menu_cache: إبطال ذكي
+  - _show_log_channel_menu: من 3 queries → 0 (cached)
+  - إبطال الكاش عند set/remove/test
+
 ✅ v9.3.0 — ذكاء المشاركة في قناة السجل:
   - _show_log_channel_menu: عرض "قناة مشتركة" + عدد المجموعات + الأسماء
   - _handle_log_channel: قسم remove يُنبّه إذا كانت القناة مشتركة
@@ -48,7 +54,7 @@ from telegram.ext import ContextTypes
 from telegram.error import BadRequest, RetryAfter, Forbidden
 
 from config import CONFIG, PATHS
-from database import DB, TimeUtils
+from database import DB, TimeUtils, internal_cache
 
 # ─── utils ────────────────────────────────────────────────────────────
 try:
@@ -140,6 +146,9 @@ PUBLISH_ACQUIRE_TIMEOUT = 30
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 
+# ✅ v9.4.0: cache لقائمة قناة السجل
+LOG_CHANNEL_MENU_CACHE_TTL = 30
+
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
@@ -209,6 +218,118 @@ def _get_group_log():
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
     return getattr(_group_log_module, "group_log", None)
+
+
+# =====================================================================
+# ✅ v9.4.0: cache + parallel fetch لقناة السجل
+# =====================================================================
+
+def _log_channel_cache_key(chat_id: int) -> str:
+    return f"log_ch_menu_{chat_id}"
+
+
+async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
+    """✅ v9.4.0: إبطال كاش قائمة قناة السجل."""
+    try:
+        await internal_cache.invalidate(_log_channel_cache_key(chat_id))
+    except Exception:
+        pass
+
+
+async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
+    """
+    ✅ v9.4.0: جلب بيانات قناة السجل مع:
+    - cache 30s (يتفادى 3 queries متكررة)
+    - parallel fetch لـ current + effective
+    - try/except لـ get_groups_using_channel (توافق إصدارات)
+
+    Returns:
+        {
+            'current': int | None,
+            'effective': int | None,
+            'share_count': int,
+            'share_names': list[str],
+        }
+    """
+    cache_key = _log_channel_cache_key(chat_id)
+    cached = await internal_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    empty_result = {
+        'current': None, 'effective': None,
+        'share_count': 0, 'share_names': [],
+    }
+
+    gl = _get_group_log()
+    if gl is None:
+        return empty_result
+
+    # ✅ parallel fetch: current + effective في نفس الوقت
+    async def _get_current():
+        try:
+            return await gl.get_private(chat_id)
+        except Exception as e:
+            logger.debug(f"get_private({chat_id}): {e}")
+            return None
+
+    async def _get_effective():
+        try:
+            return await gl.get_effective_target(chat_id)
+        except Exception as e:
+            logger.debug(f"get_effective_target({chat_id}): {e}")
+            return None
+
+    try:
+        current, effective = await asyncio.gather(
+            _get_current(), _get_effective(),
+            return_exceptions=False,
+        )
+    except Exception as e:
+        logger.debug(f"gather log_channel info: {e}")
+        current, effective = None, None
+
+    # ✅ جلب المجموعات المشتركة (اختياري)
+    share_count = 0
+    share_names: list = []
+    if current:
+        try:
+            others = None
+            try:
+                # حاول مع kwarg (إصدار حديث)
+                others = await gl.get_groups_using_channel(
+                    current, exclude_group_id=chat_id
+                )
+            except TypeError:
+                # إصدار قديم — بدون kwarg
+                others = await gl.get_groups_using_channel(current)
+                if others:
+                    others = [
+                        o for o in others
+                        if _coerce_int(
+                            (o or {}).get('chat_id'), 0
+                        ) != chat_id
+                    ]
+            if others:
+                share_count = len(others)
+                share_names = [
+                    (o.get('chat_name') or f"مجموعة {o.get('chat_id')}")
+                    for o in others[:3]
+                    if isinstance(o, dict)
+                ]
+        except Exception as e:
+            logger.debug(f"get_groups_using_channel({current}): {e}")
+
+    data = {
+        'current': current,
+        'effective': effective,
+        'share_count': share_count,
+        'share_names': share_names,
+    }
+    await internal_cache.set(
+        cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL
+    )
+    return data
 
 
 # =====================================================================
@@ -1711,6 +1832,11 @@ class CallbackHandlers:
         if not await _is_group_owner(user_id, chat_id):
             await safe_edit(query, "❌ لا تملك هذه المجموعة", bot=context.bot)
             return
+        # ✅ v9.4.0: إبطال كاش قناة السجل
+        try:
+            await _invalidate_log_channel_menu_cache(chat_id)
+        except Exception:
+            pass
         if await DB.delete_group(chat_id):
             await safe_edit(query, "✅ تم حذف المجموعة", bot=context.bot)
         else:
@@ -2277,7 +2403,6 @@ class CallbackHandlers:
             return
 
         try:
-            # ✅ v9.2.0: زر قناة السجل
             if action == "log_channel_btn":
                 await CallbackHandlers._show_log_channel_menu(
                     query, context, chat_id, user_id, lang
@@ -2557,38 +2682,25 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # ✅ v9.3.0: قناة سجل المجموعة (مع ذكاء المشاركة)
+    # ✅ v9.4.0: قناة سجل المجموعة (cached + parallel)
     # =================================================================
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
         """
-        عرض قائمة إدارة قناة السجل — v9.3.0 مع ذكاء المشاركة.
+        عرض قائمة إدارة قناة السجل — v9.4.0.
+
+        ✅ من 3 queries متتالية → 0 (cached 30s)
+        ✅ parallel fetch عند first call
+        ✅ إبطال تلقائي عند set/remove/test
         """
-        gl = _get_group_log()
+        # ✅ v9.4.0: fetch عبر cache
+        data = await _get_log_channel_menu_data(chat_id)
 
-        current = None
-        effective = None
-        share_count = 0
-        share_names: list = []
-
-        if gl is not None:
-            try:
-                current = await gl.get_private(chat_id)
-                effective = await gl.get_effective_target(chat_id)
-
-                # ✅ v9.3.0: فحص المشاركة
-                if current:
-                    others = await gl.get_groups_using_channel(
-                        current, exclude_group_id=chat_id
-                    )
-                    share_count = len(others)
-                    share_names = [
-                        o.get('chat_name') or f"مجموعة {o.get('chat_id')}"
-                        for o in others[:3]
-                    ]
-            except Exception as e:
-                logger.debug(f"get log_channel info: {e}")
+        current = data.get('current')
+        effective = data.get('effective')
+        share_count = data.get('share_count', 0)
+        share_names = data.get('share_names', [])
 
         # ─── بناء نص الحالة ───
         if current:
@@ -2787,6 +2899,9 @@ class CallbackHandlers:
                     )
                     return
 
+                # ✅ v9.4.0: إبطال الكاش
+                await _invalidate_log_channel_menu_cache(chat_id)
+
                 back_text = KeyboardFactory.get_text(
                     "back", lang
                 ) or "🔙 رجوع"
@@ -2841,6 +2956,8 @@ class CallbackHandlers:
                         event="general",
                         silent=False,
                     )
+                    # ✅ v9.4.0: إبطال الكاش (قد يتغير الوقت/الحالة)
+                    await _invalidate_log_channel_menu_cache(chat_id)
                     await safe_edit(
                         query,
                         "✅ <b>تم إرسال رسالة اختبار</b>\n\n"
