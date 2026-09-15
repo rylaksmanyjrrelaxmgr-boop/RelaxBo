@@ -1,28 +1,28 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.2.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.3.0)
 =====================================================================
-✅ v1.2.0 (المُدمَجة النهائية):
-    🔧 إصلاح import binding — استخدام get_group_log() ديناميكياً
-    🔧 استخدام send() المتزامن (Queue-based) في group_log v1.2.0
-    ✅ دعم StateManager + UserState.WAIT_LOG_CH
-    ✅ دعم الإلغاء بكلمة "إلغاء"/"cancel"
-    ✅ أمر /cancel_group_log لإلغاء الانتظار
-    ✅ فحص أن البوت مشرف + can_post_messages
-    ✅ فحص أن القناة ليست المجموعة نفسها
-    ✅ عرض عنوان القناة في رسالة التأكيد
-    ✅ تنظيف الحالة دائماً (نجاح/فشل/إلغاء)
-    ✅ حماية شاملة من edge cases
+v1.3.0 (تقرير المشاركة الذكي):
+    ✅ set_private يُعيد dict — نعرض معلومات المشاركة للمستخدم
+    ✅ عرض عدد المجموعات + الأسماء عند التعيين
+    ✅ توضيح "كل رسالة ستحمل رأساً باسم مجموعتك"
 
-📌 v1.0.0 (الأساس):
-    - يستقبل معرّف القناة كنص أو رسالة موجّهة
-    - يتحقق أن البوت مشرف في القناة
-    - يحفظ log_channel_id في bot_groups عبر group_log.set_private
-    - يرسل رسالة اختبار للتأكد
+v1.2.0:
+    ✅ إصلاح import binding — get_group_log() ديناميكياً
+    ✅ دعم send() المتزامن (Queue-based)
+    ✅ دعم get_effective_target() للقناة النشطة
+    ✅ حماية من حالات edge case
+    ✅ دعم كامل للـStateManager (WAIT_LOG_CH)
+
+v1.1.0:
+    ✅ يستخدم StateManager + UserState.WAIT_LOG_CH
+    ✅ يتوافق مع handlers_callback.py
+    ✅ تنظيف الحالة بعد النجاح/الفشل
 =====================================================================
 """
 
 import logging
+from html import escape as _html_escape
 from typing import Optional
 
 from telegram import Update
@@ -31,7 +31,7 @@ from telegram.ext import (
     filters, ContextTypes,
 )
 
-# ✅ v1.2.0: استيراد الوحدة (لا المتغير) — لإصلاح import binding
+# ✅ استيراد الوحدة (لا المتغير) — لتجنب import binding
 try:
     import group_log as _group_log_module
     _GROUP_LOG_MODULE_AVAILABLE = True
@@ -46,17 +46,19 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# ✅ v1.2.0: مساعد للوصول الديناميكي إلى الـinstance
+# مساعد للوصول الديناميكي
 # =====================================================================
 
 def _get_group_log():
-    """
-    يقرأ الـinstance الحالي من الوحدة (بعد init_group_log).
-    لا ينسخ القيمة — يتعامل مع النموذج المحدّث في كل استدعاء.
-    """
+    """يقرأ الـinstance الحالي من الوحدة (بعد init_group_log)."""
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
     return getattr(_group_log_module, "group_log", None)
+
+
+def _safe_html(text) -> str:
+    """استبدال HTML entities لتفادي كسر الرسالة."""
+    return _html_escape(str(text or ""))
 
 
 # =====================================================================
@@ -67,24 +69,16 @@ async def receive_log_channel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    يستقبل معرّف القناة أو رسالة موجّهة من قناة، ويحفظها كقناة سجل
-    للمجموعة المخزّنة في context.user_data['log_group_id'].
-
-    ✅ v1.2.0:
-        - يقرأ الحالة من StateManager (متوافق مع handlers_callback)
-        - يستخدم get_group_log() ديناميكياً
-        - ينظّف الحالة بعد النجاح/الفشل
-        - يدعم الإلغاء بكلمة "إلغاء" / "cancel"
-        - يستخدم send() المتزامن (Queue-based)
+    يستقبل معرّف القناة أو رسالة موجّهة، ويحفظها كقناة سجل.
     """
     user = update.effective_user
     if not user:
         return
 
-    # ✅ الفحص الأساسي: هل المستخدم في حالة انتظار معرّف قناة؟
+    # الفحص الأساسي: هل المستخدم في حالة انتظار؟
     state = StateManager.get(user.id)
     if state != UserState.WAIT_LOG_CH:
-        return  # ليس دوره — تجاهل بهدوء
+        return
 
     msg = update.message
     if not msg:
@@ -102,7 +96,7 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── استرجاع group_id (دعم كلا المفتاحين) ───
+    # ─── استرجاع group_id ───
     group_id = (
         context.user_data.get("log_group_id")
         or context.user_data.get("awaiting_log_channel_for")
@@ -143,12 +137,9 @@ async def receive_log_channel(
     chat_id: Optional[int] = None
     title: str = ""
 
-    # (أ) رسالة موجّهة من قناة
     if msg.forward_from_chat and msg.forward_from_chat.type == "channel":
         chat_id = msg.forward_from_chat.id
         title = msg.forward_from_chat.title or ""
-
-    # (ب) نص = معرّف رقمي (مثل -1001234567890)
     elif text and text.lstrip("-").isdigit():
         try:
             chat_id = int(text)
@@ -168,7 +159,6 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── فحص أن القناة ليست المجموعة نفسها ───
     if chat_id == group_id:
         try:
             await msg.reply_text(
@@ -202,7 +192,7 @@ async def receive_log_channel(
         try:
             await msg.reply_text(
                 f"❌ تعذّر الوصول للقناة:\n"
-                f"<code>{str(e)[:150]}</code>\n\n"
+                f"<code>{_safe_html(str(e)[:150])}</code>\n\n"
                 f"تأكد أن:\n"
                 f"• البوت عضو في القناة\n"
                 f"• البوت مشرف فيها",
@@ -212,7 +202,7 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── فحص صلاحية النشر (can_post_messages) ───
+    # ─── فحص صلاحية النشر ───
     try:
         can_post = getattr(member, "can_post_messages", True)
         if member.status == "administrator" and can_post is False:
@@ -241,36 +231,54 @@ async def receive_log_channel(
 
     # ─── الحفظ في قاعدة البيانات ───
     try:
-        ok = await gl.set_private(group_id, chat_id)
+        result = await gl.set_private(group_id, chat_id)
     except Exception as e:
         logger.error(
             f"❌ gl.set_private فشل: {e}", exc_info=True
         )
-        ok = False
+        result = {'ok': False}
 
-    # ✅ تنظيف الحالة بعد المحاولة (نجحت أو فشلت)
+    # ✅ تنظيف الحالة
     StateManager.clear(user.id)
     context.user_data.pop("log_group_id", None)
     context.user_data.pop("awaiting_log_channel_for", None)
 
     # ─── النتيجة ───
+    ok = result.get('ok', False) if isinstance(result, dict) else bool(result)
+
     if ok:
+        # ✅ v1.3.0: عرض حالة المشاركة
+        share_notice = ""
+        if isinstance(result, dict) and result.get('shared'):
+            count = result.get('share_count', 0)
+            others = result.get('other_groups', [])
+            others_str = "، ".join(
+                _safe_html(o) for o in others
+            ) if others else "—"
+
+            share_notice = (
+                f"\n\n🤝 <b>قناة مشتركة</b>\n"
+                f"👥 <b>{count + 1} مجموعات</b> تستخدم هذه القناة\n"
+                f"📋 <i>المجموعات الأخرى:</i> "
+                f"<code>{others_str}</code>\n\n"
+                f"💡 <b>كل رسالة ستحمل رأساً يحمل اسم مجموعتك</b>"
+                f" لتمييز المصدر في القناة."
+            )
+
         try:
             await msg.reply_text(
                 f"✅ <b>تم تعيين قناة السجل بنجاح</b>\n\n"
                 f"📌 المجموعة: <code>{group_id}</code>\n"
                 f"📢 القناة: <code>{chat_id}</code>"
-                + (f"\n🏷️ العنوان: {title}" if title else ""),
+                + (f"\n🏷️ العنوان: {_safe_html(title)}" if title else "")
+                + share_notice,
                 parse_mode="HTML",
             )
         except Exception as e:
             logger.warning(f"فشل إرسال تأكيد التعيين: {e}")
 
-        # =============================================================
-        # إرسال رسالة اختبار للقناة
-        # =============================================================
+        # إرسال رسالة اختبار
         try:
-            # ✅ v1.2.0: send() متزامن (يضع في Queue)
             gl.send(
                 group_id,
                 "🧪 <b>رسالة اختبار</b>\n"
@@ -292,16 +300,13 @@ async def receive_log_channel(
 
 
 # =====================================================================
-# إلغاء الانتظار — معالج مستقل
+# إلغاء الانتظار — أمر مستقل
 # =====================================================================
 
 async def cancel_log_channel_wait(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """
-    ✅ v1.2.0: معالج مستقل لإلغاء الانتظار بأمر /cancel_group_log.
-    مفيد لو المستخدم عالق.
-    """
+    """معالج مستقل لإلغاء الانتظار بأمر /cancel_group_log."""
     user = update.effective_user
     if not user:
         return
@@ -325,20 +330,12 @@ async def cancel_log_channel_wait(
 # =====================================================================
 
 def register_group_log_handlers(app: Application) -> None:
-    """
-    يُسجّل MessageHandler في Application.
-    يُنادَى من bot.py بعد init_group_log.
-
-    ✅ v1.2.0:
-        - group=1 (يعمل بالتوازي مع handle_private)
-        - يجب أن يتجاهل handle_private الحالة WAIT_LOG_CH أولاً
-        - CommandHandler منفصل لإلغاء الانتظار
-    """
+    """يُسجّل MessageHandler في Application."""
     if app is None:
         logger.error("❌ register_group_log_handlers: app=None")
         return
 
-    # 1) معالج الرسائل الرئيسي (نص + موجّه)
+    # 1) معالج الرسائل الرئيسي
     app.add_handler(
         MessageHandler(
             (filters.FORWARDED | filters.TEXT) & ~filters.COMMAND,
