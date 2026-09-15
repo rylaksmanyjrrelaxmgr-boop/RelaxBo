@@ -2,17 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.1.0)
+handlers_callback.py - المعالج النهائي الكامل (v9.2.0)
 =====================================================================
+✅ v9.2.0 — تكامل قناة سجل المجموعة:
+  - استيراد group_log بشكل آمن (importlib ديناميكي)
+  - معالجات log_channel_btn / set / remove / test
+  - عرض القناة الحالية + نص المساعدة
+  - إدارة كاملة من لوحة الأمان
+
 ✅ v9.1.0 — تحسينات أداء أزرار الأمان:
-  - _get_security_settings_cached (5s TTL) — يوفّر استعلام DB
+  - _get_security_settings_cached (5s TTL)
   - _handle_group_settings: two-phase rendering
-    * المرحلة 1: عرض فوري بدون إحصائيات (< 500ms)
-    * المرحلة 2: تحميل الإحصائيات في الخلفية + edit
-  - _refresh_security_view: نفس النمط (فوري ثم إحصائيات)
+  - _refresh_security_view: نفس النمط
   - _load_stats_and_edit: helper موحد
-  - _preload_first_group: تسخين cache أول مجموعة عند عرض القائمة
-  - _security_settings_cache + _security_stats_cache محلية
+  - _preload_first_group: تسخين cache
 
 ✅ v9.0.5:
   - _handle_language_change: إبطال context.user_data['lang']
@@ -107,6 +110,14 @@ try:
 except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
+# ✅ v9.2.0: استيراد group_log بشكل آمن (لا نكسر الملف لو غاب)
+try:
+    import group_log as _group_log_module
+    _GROUP_LOG_MODULE_AVAILABLE = True
+except ImportError:
+    _group_log_module = None
+    _GROUP_LOG_MODULE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # =====================================================================
@@ -193,6 +204,15 @@ def _safe_str(value, default='?') -> str:
         return default
     s = str(value)
     return s if s.strip() else default
+
+
+def _get_group_log():
+    """
+    ✅ v9.2.0: وصول ديناميكي لـgroup_log instance (بعد init_group_log).
+    """
+    if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
+        return None
+    return getattr(_group_log_module, "group_log", None)
 
 
 # =====================================================================
@@ -786,6 +806,13 @@ class CallbackHandlers:
                 await safe_edit(query, "👑 لوحة الأدمن", reply_markup=kb, bot=context.bot)
                 return
 
+            # ✅ v9.2.0: معالجات قناة السجل (قبل sec_ لأنها تبدأ بـlog_)
+            if data.startswith("log_channel_"):
+                await CallbackHandlers._handle_log_channel(
+                    update, context, query, user_id, lang
+                )
+                return
+
             if data.startswith("sec_"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return
@@ -909,7 +936,6 @@ class CallbackHandlers:
             await _security_settings_cache.delete(f"sec_set_{chat_id}")
         except Exception:
             pass
-        # ✅ إبطال كاش الإحصائيات أيضاً (لأن الإعدادات تغيرت)
         try:
             await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
         except Exception:
@@ -921,7 +947,6 @@ class CallbackHandlers:
         🧠 v9.1.0: تحميل الإحصائيات في الخلفية ثم تعديل الرسالة.
         """
         try:
-            # فحص cache أولاً
             cache_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(cache_key)
 
@@ -1488,10 +1513,7 @@ class CallbackHandlers:
         🧠 v9.1.0: عرض فوري بدون إحصائيات + تحميلها في الخلفية.
         """
         try:
-            # ✅ إبطال الكاش (الإعدادات تغيرت)
             await CallbackHandlers._invalidate_security_settings_cache(chat_id)
-
-            # ✅ Two-phase rendering
             await CallbackHandlers._render_security_two_phase(
                 query, context, chat_id, lang, force_refresh_settings=False
             )
@@ -1732,7 +1754,6 @@ class CallbackHandlers:
 
         context.user_data['security_chat_id'] = chat_id
 
-        # ✅ Two-phase rendering (فوري < 500ms + إحصائيات في الخلفية)
         await CallbackHandlers._render_security_two_phase(
             query, context, chat_id, lang, force_refresh_settings=False
         )
@@ -1933,7 +1954,6 @@ class CallbackHandlers:
         kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
-        # ✅ v9.1.0: تسخين cache لأول مجموعة في الخلفية
         if first_chat_id:
             task = asyncio.create_task(
                 CallbackHandlers._preload_group_security(first_chat_id)
@@ -1947,7 +1967,6 @@ class CallbackHandlers:
         🧠 v9.1.0: تسخين cache الإعدادات + الإحصائيات لمجموعة.
         """
         try:
-            # settings
             key = f"sec_set_{chat_id}"
             cached = await _security_settings_cache.get(key)
             if cached is None:
@@ -1955,7 +1974,6 @@ class CallbackHandlers:
                 if not isinstance(settings, dict):
                     settings = _row_to_dict(settings) or {}
                 await _security_settings_cache.set(key, settings, ttl=SEC_SETTINGS_CACHE_TTL)
-            # stats
             stats_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(stats_key)
             if cached_stats is None:
@@ -2289,6 +2307,13 @@ class CallbackHandlers:
             return
 
         try:
+            # ✅ v9.2.0: زر قناة السجل
+            if action == "log_channel_btn":
+                await CallbackHandlers._show_log_channel_menu(
+                    query, context, chat_id, user_id, lang
+                )
+                return
+
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
                 try:
@@ -2559,6 +2584,276 @@ class CallbackHandlers:
 
         except Exception as e:
             logger.error(f"خطأ في إعدادات الأمان: {e}", exc_info=True)
+            await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
+
+    # =================================================================
+    # ✅ v9.2.0: قناة سجل المجموعة
+    # =================================================================
+
+    @staticmethod
+    async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
+        """عرض قائمة إدارة قناة السجل."""
+        gl = _get_group_log()
+
+        current = None
+        effective = None
+        source = None
+
+        if gl is not None:
+            try:
+                current = await gl.get_private(chat_id)
+                effective = await gl.get_effective_target(chat_id)
+                if effective is not None:
+                    source = "خاص" if current else "عام"
+            except Exception as e:
+                logger.debug(f"get log_channel info: {e}")
+
+        # ─── نص القائمة ───
+        if current:
+            current_line = (
+                f"📌 <b>القناة الحالية (خاصة):</b>\n"
+                f"<code>{current}</code>"
+            )
+        elif effective:
+            current_line = (
+                f"ℹ️ <b>لا توجد قناة خاصة</b>\n"
+                f"🌐 سيُستخدم السجل العام:\n<code>{effective}</code>"
+            )
+        else:
+            current_line = (
+                "❌ <b>لا توجد قناة سجل معيّنة</b>\n"
+                "<i>ستُفقد السجلات الخاصة بهذه المجموعة</i>"
+            )
+
+        help_text = KeyboardFactory.get_text("log_channel_help", lang) or (
+            "أضف البوت كمشرف في القناة ثم أرسل معرّفها "
+            "أو أعد توجيه رسالة منها"
+        )
+
+        text = (
+            f"📢 <b>قناة السجل</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{current_line}\n\n"
+            f"<i>{_html.escape(help_text)}</i>\n\n"
+            f"🆔 المجموعة: <code>{chat_id}</code>"
+        )
+
+        # ─── الأزرار ───
+        set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗 تعيين قناة السجل"
+        test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 اختبار"
+        remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️ إزالة"
+        back_text = KeyboardFactory.get_text("back", lang) or "🔙 رجوع"
+
+        rows = [
+            [InlineKeyboardButton(
+                set_text, callback_data=f"log_channel_set:{chat_id}"
+            )],
+        ]
+
+        if current:
+            rows.append([
+                InlineKeyboardButton(
+                    test_text, callback_data=f"log_channel_test:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    remove_text,
+                    callback_data=f"log_channel_remove:{chat_id}"
+                ),
+            ])
+
+        rows.append([
+            InlineKeyboardButton(
+                back_text, callback_data=f"{CB.GRP_SET}:{chat_id}"
+            )
+        ])
+
+        await safe_edit(
+            query,
+            text,
+            reply_markup=InlineKeyboardMarkup(rows),
+            parse_mode='HTML',
+            bot=context.bot,
+        )
+
+    @staticmethod
+    async def _handle_log_channel(update, context, query, user_id, lang):
+        """معالج أزرار قناة السجل."""
+        data = query.data or ""
+        parts = data.split(":")
+
+        # ─── استخراج chat_id ───
+        chat_id = None
+        if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
+            chat_id = int(parts[1])
+        if chat_id is None:
+            stored = (
+                context.user_data.get('security_chat_id')
+                or context.user_data.get('sec_chat')
+            )
+            if stored:
+                try:
+                    chat_id = int(stored)
+                except (TypeError, ValueError):
+                    chat_id = None
+
+        if chat_id is None:
+            await safe_edit(query, "❌ لم يتم تحديد المجموعة", bot=context.bot)
+            return
+
+        if not await _check_sec_auth(context, user_id, chat_id):
+            await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
+            return
+
+        # ─── تحديد الإجراء ───
+        if parts[0] == "log_channel_btn":
+            action = "menu"
+        elif parts[0].startswith("log_channel_"):
+            action = parts[0][len("log_channel_"):]
+        else:
+            action = parts[0]
+
+        try:
+            # ─── القائمة ───
+            if action in ("menu", "btn", "show"):
+                await CallbackHandlers._show_log_channel_menu(
+                    query, context, chat_id, user_id, lang
+                )
+                return
+
+            # ─── تعيين ───
+            if action == "set":
+                gl = _get_group_log()
+                if gl is None:
+                    await safe_edit(
+                        query,
+                        "❌ خدمة قناة السجل غير متوفرة حالياً",
+                        bot=context.bot,
+                    )
+                    return
+
+                StateManager.set(user_id, UserState.WAIT_LOG_CH)
+                context.user_data['log_group_id'] = chat_id
+                await safe_edit(
+                    query,
+                    "📢 <b>تعيين قناة السجل</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "أرسل الآن:\n"
+                    "• معرّف القناة الرقمي\n"
+                    "  <i>مثال:</i> <code>-1001234567890</code>\n\n"
+                    "• أو <b>أعد توجيه رسالة</b> من القناة إلى هنا\n\n"
+                    "⚠️ <i>تأكد أن البوت مشرف في القناة "
+                    "بصلاحية نشر الرسائل</i>\n\n"
+                    "💡 للإلغاء: أرسل <b>إلغاء</b>.",
+                    parse_mode='HTML',
+                    bot=context.bot,
+                )
+                return
+
+            # ─── إزالة ───
+            if action == "remove":
+                gl = _get_group_log()
+                if gl is None:
+                    await safe_edit(
+                        query,
+                        "❌ خدمة قناة السجل غير متوفرة",
+                        bot=context.bot,
+                    )
+                    return
+
+                try:
+                    await gl.unset_private(chat_id)
+                except Exception as e:
+                    logger.error(
+                        f"unset_private({chat_id}): {e}",
+                        exc_info=True,
+                    )
+                    await safe_edit(
+                        query,
+                        f"❌ فشل الحذف: {str(e)[:80]}",
+                        bot=context.bot,
+                    )
+                    return
+
+                back_text = KeyboardFactory.get_text(
+                    "back", lang
+                ) or "🔙 رجوع"
+                await safe_edit(
+                    query,
+                    "🗑️ <b>تمت إزالة قناة السجل</b>\n\n"
+                    f"🆔 المجموعة: <code>{chat_id}</code>",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            back_text,
+                            callback_data=f"{CB.GRP_SET}:{chat_id}"
+                        )]
+                    ]),
+                    parse_mode='HTML',
+                    bot=context.bot,
+                )
+                return
+
+            # ─── اختبار ───
+            if action == "test":
+                gl = _get_group_log()
+                if gl is None:
+                    await safe_edit(
+                        query,
+                        "❌ خدمة قناة السجل غير متوفرة",
+                        bot=context.bot,
+                    )
+                    return
+
+                # فحص أن هناك قناة معينة قبل الاختبار
+                try:
+                    current = await gl.get_private(chat_id)
+                except Exception:
+                    current = None
+
+                if not current:
+                    await safe_edit(
+                        query,
+                        "❌ لا توجد قناة سجل معيّنة لهذه المجموعة.\n"
+                        "اضغط '🔗 تعيين قناة السجل' أولاً.",
+                        bot=context.bot,
+                    )
+                    return
+
+                try:
+                    # ✅ v1.2.0: send() متزامن (Queue)
+                    gl.send(
+                        chat_id,
+                        "🧪 <b>رسالة اختبار</b>\n"
+                        "قناة السجل تعمل بنجاح! ✅\n"
+                        f"<i>المجموعة:</i> <code>{chat_id}</code>\n"
+                        f"<i>الوقت:</i> {gl.fmt_time()}",
+                        event="general",
+                        silent=False,
+                    )
+                    await safe_edit(
+                        query,
+                        "✅ <b>تم إرسال رسالة اختبار</b>\n\n"
+                        f"📢 إلى: <code>{current}</code>\n\n"
+                        "تحقق من قناة السجل.",
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"test log channel: {e}", exc_info=True
+                    )
+                    await safe_edit(
+                        query,
+                        f"❌ فشل الإرسال: {str(e)[:100]}",
+                        bot=context.bot,
+                    )
+                return
+
+            await safe_edit(
+                query, "⚠️ إجراء غير معروف", bot=context.bot
+            )
+
+        except Exception as e:
+            logger.error(f"_handle_log_channel: {e}", exc_info=True)
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
