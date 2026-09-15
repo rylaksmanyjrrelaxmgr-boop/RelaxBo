@@ -2,25 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.2.0)
+handlers_callback.py - المعالج النهائي الكامل (v9.3.0)
 =====================================================================
+✅ v9.3.0 — ذكاء المشاركة في قناة السجل:
+  - _show_log_channel_menu: عرض "قناة مشتركة" + عدد المجموعات + الأسماء
+  - _handle_log_channel: قسم remove يُنبّه إذا كانت القناة مشتركة
+  - قسم test يعرض الوجهة الحالية
+
 ✅ v9.2.0 — تكامل قناة سجل المجموعة:
-  - استيراد group_log بشكل آمن (importlib ديناميكي)
+  - استيراد group_log بشكل آمن
   - معالجات log_channel_btn / set / remove / test
-  - عرض القناة الحالية + نص المساعدة
   - إدارة كاملة من لوحة الأمان
 
 ✅ v9.1.0 — تحسينات أداء أزرار الأمان:
   - _get_security_settings_cached (5s TTL)
-  - _handle_group_settings: two-phase rendering
-  - _refresh_security_view: نفس النمط
-  - _load_stats_and_edit: helper موحد
-  - _preload_first_group: تسخين cache
+  - two-phase rendering
+  - _load_stats_and_edit helper موحد
+  - _preload_first_group
 
-✅ v9.0.5:
-  - _handle_language_change: إبطال context.user_data['lang']
-  - __all__: تصدير _invalidate_sec_auth_cache
-
+✅ v9.0.5: إبطال context.user_data['lang'] عند تغيير اللغة
 ✅ v9.0.4: كاش في context.user_data
 ✅ v9.0.3: إصلاح sec_auto_reply_menu
 ✅ v9.0.2: sec_maxlen, act_pin, HTML escape
@@ -110,7 +110,7 @@ try:
 except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
-# ✅ v9.2.0: استيراد group_log بشكل آمن (لا نكسر الملف لو غاب)
+# ✅ v9.2.0: استيراد group_log بشكل آمن
 try:
     import group_log as _group_log_module
     _GROUP_LOG_MODULE_AVAILABLE = True
@@ -137,7 +137,6 @@ ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
 
-# 🧠 v9.1.0: كاشات ذكية للأمان
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 
@@ -151,7 +150,6 @@ _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 
-# 🧠 v9.1.0: كاشات آمنة للأمان
 _security_settings_cache: SmartCache = SmartCache(
     ttl=SEC_SETTINGS_CACHE_TTL, max_size=500
 )
@@ -207,9 +205,7 @@ def _safe_str(value, default='?') -> str:
 
 
 def _get_group_log():
-    """
-    ✅ v9.2.0: وصول ديناميكي لـgroup_log instance (بعد init_group_log).
-    """
+    """✅ v9.2.0: وصول ديناميكي لـgroup_log instance."""
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
     return getattr(_group_log_module, "group_log", None)
@@ -806,7 +802,7 @@ class CallbackHandlers:
                 await safe_edit(query, "👑 لوحة الأدمن", reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ v9.2.0: معالجات قناة السجل (قبل sec_ لأنها تبدأ بـlog_)
+            # ✅ v9.2.0: معالجات قناة السجل
             if data.startswith("log_channel_"):
                 await CallbackHandlers._handle_log_channel(
                     update, context, query, user_id, lang
@@ -907,14 +903,11 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # 🧠 v9.1.0: دوال مساعدة للأمان (Two-Phase + Cache)
+    # 🧠 v9.1.0: دوال مساعدة للأمان
     # =================================================================
 
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
-        """
-        🧠 v9.1.0: جلب إعدادات الأمان مع cache (5s TTL).
-        """
         key = f"sec_set_{chat_id}"
         cached = await _security_settings_cache.get(key)
         if cached is not None:
@@ -931,7 +924,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id: int) -> None:
-        """إبطال كاش الإعدادات بعد أي تعديل."""
         try:
             await _security_settings_cache.delete(f"sec_set_{chat_id}")
         except Exception:
@@ -943,9 +935,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings):
-        """
-        🧠 v9.1.0: تحميل الإحصائيات في الخلفية ثم تعديل الرسالة.
-        """
         try:
             cache_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(cache_key)
@@ -967,23 +956,16 @@ class CallbackHandlers:
     @staticmethod
     async def _render_security_two_phase(query, context, chat_id, lang,
                                           force_refresh_settings=False):
-        """
-        🧠 v9.1.0: عرض لوحة الأمان على مرحلتين:
-        - المرحلة 1: إعدادات فقط (فوري < 500ms)
-        - المرحلة 2: إحصائيات في الخلفية + edit
-        """
         try:
             if force_refresh_settings:
                 await CallbackHandlers._invalidate_security_settings_cache(chat_id)
 
             settings = await CallbackHandlers._get_security_settings_cached(chat_id)
 
-            # ═══ المرحلة 1: عرض فوري (بدون إحصائيات) ═══
             text_no_stats = KeyboardFactory._format_security_text(settings, {})
             kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text_no_stats, reply_markup=kb, bot=context.bot)
 
-            # ═══ المرحلة 2: الإحصائيات في الخلفية ═══
             task = asyncio.create_task(
                 CallbackHandlers._load_stats_and_edit(
                     query, context, chat_id, lang, settings
@@ -1504,14 +1486,11 @@ class CallbackHandlers:
             return True
 
     # =================================================================
-    # 🧠 v9.1.0: Refresh موحد (Two-Phase)
+    # Refresh موحد
     # =================================================================
 
     @staticmethod
     async def _refresh_security_view(query, context, chat_id, lang):
-        """
-        🧠 v9.1.0: عرض فوري بدون إحصائيات + تحميلها في الخلفية.
-        """
         try:
             await CallbackHandlers._invalidate_security_settings_cache(chat_id)
             await CallbackHandlers._render_security_two_phase(
@@ -1739,9 +1718,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_group_settings(update, context, query, user_id, lang, data):
-        """
-        🧠 v9.1.0: نسخة محسّنة بـ Two-Phase rendering.
-        """
         try:
             chat_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
@@ -1919,9 +1895,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
-        """
-        🧠 v9.1.0: مع preload لأول مجموعة (تسخين cache مسبقاً).
-        """
         groups = await DB.get_user_groups(user_id)
         if not groups:
             kb = InlineKeyboardMarkup([
@@ -1963,9 +1936,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _preload_group_security(chat_id: int) -> None:
-        """
-        🧠 v9.1.0: تسخين cache الإعدادات + الإحصائيات لمجموعة.
-        """
         try:
             key = f"sec_set_{chat_id}"
             cached = await _security_settings_cache.get(key)
@@ -2587,40 +2557,68 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # ✅ v9.2.0: قناة سجل المجموعة
+    # ✅ v9.3.0: قناة سجل المجموعة (مع ذكاء المشاركة)
     # =================================================================
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
-        """عرض قائمة إدارة قناة السجل."""
+        """
+        عرض قائمة إدارة قناة السجل — v9.3.0 مع ذكاء المشاركة.
+        """
         gl = _get_group_log()
 
         current = None
         effective = None
-        source = None
+        share_count = 0
+        share_names: list = []
 
         if gl is not None:
             try:
                 current = await gl.get_private(chat_id)
                 effective = await gl.get_effective_target(chat_id)
-                if effective is not None:
-                    source = "خاص" if current else "عام"
+
+                # ✅ v9.3.0: فحص المشاركة
+                if current:
+                    others = await gl.get_groups_using_channel(
+                        current, exclude_group_id=chat_id
+                    )
+                    share_count = len(others)
+                    share_names = [
+                        o.get('chat_name') or f"مجموعة {o.get('chat_id')}"
+                        for o in others[:3]
+                    ]
             except Exception as e:
                 logger.debug(f"get log_channel info: {e}")
 
-        # ─── نص القائمة ───
+        # ─── بناء نص الحالة ───
         if current:
-            current_line = (
-                f"📌 <b>القناة الحالية (خاصة):</b>\n"
-                f"<code>{current}</code>"
-            )
+            if share_count == 0:
+                status_block = (
+                    f"✅ <b>قناة خاصة</b>\n"
+                    f"🆔 <code>{current}</code>\n"
+                    f"<i>هذه القناة تخدم مجموعتك فقط</i>"
+                )
+            else:
+                others_text = "، ".join(
+                    _html.escape(str(n)) for n in share_names
+                )
+                if share_count > 3:
+                    others_text += f" و{share_count - 3} أخرى"
+                status_block = (
+                    f"🤝 <b>قناة مشتركة</b>\n"
+                    f"🆔 <code>{current}</code>\n"
+                    f"👥 <b>{share_count + 1} مجموعات</b> تستخدمها\n"
+                    f"📋 <i>المجموعات الأخرى: {others_text}</i>\n\n"
+                    f"💡 كل رسالة ستُرسل مع رأس يحمل اسم مجموعتك"
+                )
         elif effective:
-            current_line = (
-                f"ℹ️ <b>لا توجد قناة خاصة</b>\n"
-                f"🌐 سيُستخدم السجل العام:\n<code>{effective}</code>"
+            status_block = (
+                f"🌐 <b>السجل العام مفعّل</b>\n"
+                f"🆔 <code>{effective}</code>\n"
+                f"<i>لا توجد قناة خاصة — تُستخدم القناة العامة</i>"
             )
         else:
-            current_line = (
+            status_block = (
                 "❌ <b>لا توجد قناة سجل معيّنة</b>\n"
                 "<i>ستُفقد السجلات الخاصة بهذه المجموعة</i>"
             )
@@ -2633,9 +2631,9 @@ class CallbackHandlers:
         text = (
             f"📢 <b>قناة السجل</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{current_line}\n\n"
+            f"{status_block}\n\n"
             f"<i>{_html.escape(help_text)}</i>\n\n"
-            f"🆔 المجموعة: <code>{chat_id}</code>"
+            f"🆔 مجموعتك: <code>{chat_id}</code>"
         )
 
         # ─── الأزرار ───
@@ -2749,7 +2747,7 @@ class CallbackHandlers:
                 )
                 return
 
-            # ─── إزالة ───
+            # ─── إزالة (ذكية) ───
             if action == "remove":
                 gl = _get_group_log()
                 if gl is None:
@@ -2759,6 +2757,21 @@ class CallbackHandlers:
                         bot=context.bot,
                     )
                     return
+
+                # ✅ v9.3.0: فحص المشاركة قبل الحذف
+                current = await gl.get_private(chat_id)
+                share_info = ""
+                if current:
+                    share_count = await gl.get_channel_share_count(
+                        current, exclude_group_id=chat_id
+                    )
+                    if share_count > 0:
+                        share_info = (
+                            f"\n\n⚠️ <b>تنبيه:</b> هذه القناة "
+                            f"مشتركة مع <b>{share_count}</b> "
+                            f"مجموعة أخرى.\n"
+                            f"<i>إزالتها من مجموعتك لن تؤثر عليهم.</i>"
+                        )
 
                 try:
                     await gl.unset_private(chat_id)
@@ -2780,7 +2793,8 @@ class CallbackHandlers:
                 await safe_edit(
                     query,
                     "🗑️ <b>تمت إزالة قناة السجل</b>\n\n"
-                    f"🆔 المجموعة: <code>{chat_id}</code>",
+                    f"🆔 المجموعة: <code>{chat_id}</code>"
+                    + share_info,
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton(
                             back_text,
@@ -2803,7 +2817,6 @@ class CallbackHandlers:
                     )
                     return
 
-                # فحص أن هناك قناة معينة قبل الاختبار
                 try:
                     current = await gl.get_private(chat_id)
                 except Exception:
@@ -2819,7 +2832,6 @@ class CallbackHandlers:
                     return
 
                 try:
-                    # ✅ v1.2.0: send() متزامن (Queue)
                     gl.send(
                         chat_id,
                         "🧪 <b>رسالة اختبار</b>\n"
