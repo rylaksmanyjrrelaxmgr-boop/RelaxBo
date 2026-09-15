@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.6 — كود نهائي مصحح ومكتمل)
+database.py - قاعدة البيانات المتكاملة (v7.7.7 — كود نهائي مصحح ومكتمل)
 ================================================================================
 إصلاحات v7.7.4 (B-1..B-5, M-1..M-6, N-2, N-4):
   B-1  get_user: كاش صحيح — لا تُخزَّن إحصائيات صفرية
@@ -36,6 +36,10 @@ database.py - قاعدة البيانات المتكاملة (v7.7.6 — كود 
              (مثل increment_violation_count في database_groups.py)
              كان يظهر خطأ:
              "'Database' object has no attribute '_lock'"
+
+إصلاحات v7.7.7 (LOG-CHANNEL):
+  LOG-1      _migrate_schema: عمود log_channel_id في bot_groups
+             — لدعم قناة سجل مخصّصة لكل مجموعة.
 ================================================================================
 """
 
@@ -3659,6 +3663,10 @@ class Database(
                 ],
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL")
+                ],
+                # 🆕 v7.7.7: عمود قناة السجل لكل مجموعة
+                "bot_groups": [
+                    ("log_channel_id", "INTEGER DEFAULT NULL"),
                 ],
                 "auto_replies": [
                     ("usage_count", "INTEGER DEFAULT 0")
