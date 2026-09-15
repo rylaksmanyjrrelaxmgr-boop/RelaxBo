@@ -1,7 +1,12 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.4.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.5.0)
 =====================================================================
+v1.5.0 (cache invalidation):
+    ✅ إبطال كاش قائمة قناة السجل بعد set_private ناجح
+    ✅ توافق كامل مع handlers_callback.py v9.4.0
+    ✅ استيراد internal_cache من database
+
 v1.4.0 (PTB v20+ fix):
     ✅ إصلاح AttributeError: forward_from_chat محذوف في PTB v20+
     ✅ دالة _extract_forward_channel متوافقة مع كل الإصدارات
@@ -48,6 +53,14 @@ except ImportError as _e:
 
 from utils import StateManager, UserState
 
+# ✅ v1.5.0: استيراد internal_cache لإبطال كاش قائمة قناة السجل
+try:
+    from database import internal_cache as _internal_cache
+    _INTERNAL_CACHE_AVAILABLE = True
+except ImportError:
+    _internal_cache = None
+    _INTERNAL_CACHE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +100,23 @@ def _get_group_log():
 def _safe_html(text) -> str:
     """استبدال HTML entities لتفادي كسر الرسالة."""
     return _html_escape(str(text or ""))
+
+
+# =====================================================================
+# ✅ v1.5.0: إبطال كاش قائمة قناة السجل (متوافق مع handlers_callback.py v9.4.0)
+# =====================================================================
+
+async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
+    """
+    إبطال كاش قائمة قناة السجل بعد تغيير حالة القناة.
+    نفس المفتاح المستخدم في handlers_callback.py (v9.4.0).
+    """
+    if not _INTERNAL_CACHE_AVAILABLE or _internal_cache is None:
+        return
+    try:
+        await _internal_cache.invalidate(f"log_ch_menu_{chat_id}")
+    except Exception as e:
+        logger.debug(f"_invalidate_log_channel_menu_cache({chat_id}): {e}")
 
 
 # =====================================================================
@@ -328,6 +358,14 @@ async def receive_log_channel(
     ok = result.get('ok', False) if isinstance(result, dict) else bool(result)
 
     if ok:
+        # ✅ v1.5.0: إبطال كاش قائمة قناة السجل
+        try:
+            await _invalidate_log_channel_menu_cache(group_id)
+        except Exception as e:
+            logger.debug(
+                f"invalidate log_channel_menu cache failed: {e}"
+            )
+
         # ✅ v1.3.0: عرض حالة المشاركة
         share_notice = ""
         if isinstance(result, dict) and result.get('shared'):
