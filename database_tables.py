@@ -2,13 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.5)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.6)
 ================================================================================
+🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
+  ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
+  ✅ إصلاح فقدان الفهارس الصامت (lost index silent failure)
+  ✅ CURRENT_SCHEMA_VERSION = 7 (إجبار rebuild لمرة واحدة)
+  ✅ _verify_critical_indexes_* لكل DB
+
 🚀 v7.6.5 (LOG-CHANNEL-ID):
   ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
   ✅ إضافة فهرس idx_bot_groups_log_channel
-  ✅ CURRENT_SCHEMA_VERSION = 6
-  ✅ EXPECTED_INDEX_COUNT = 66
   ✅ دعم كامل لميزة "قناة سجل المجموعة" بدون الحاجة لـALTER
 
 🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
@@ -35,7 +39,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-CURRENT_SCHEMA_VERSION = 6  # ✅ v7.6.5: 5 → 6 (log_channel_id)
+# ✅ v7.6.6: 6 → 7 (إجبار rebuild لمرة واحدة)
+CURRENT_SCHEMA_VERSION = 7
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -327,6 +332,18 @@ DEPRECATED_INDEXES = [
     "idx_ugl_user",
 ]
 
+# ✅ v7.6.6: فهارس حرجة يجب فحصها حتى مع fast-path
+CRITICAL_INDEX_NAMES = frozenset({
+    "idx_bot_groups_log_channel",
+    "idx_posts_channel",
+    "idx_posts_channel_published",
+    "idx_posts_channel_pub_fail_created",
+    "idx_penalties_user_chat_status_end",
+    "idx_user_channels_user_banned",
+    "idx_subscriptions_user_status_end",
+    "idx_schedule_channel_next",
+})
+
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
     f"❌ عدد الفهارس غير مطابق: "
     f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
@@ -388,6 +405,14 @@ def _parse_expected_columns(cols: str) -> str:
     return m.group(1)
 
 
+def _get_expected_cols_for_index(idx_name: str) -> str:
+    """✅ v7.6.6: يُعيد 'table(cols)' لفهرس معيّن."""
+    for _table, name, cols in COMMON_INDEXES:
+        if name == idx_name:
+            return cols
+    return ""
+
+
 # =====================================================================
 # Fast-path: قراءة schema_version
 # =====================================================================
@@ -428,6 +453,158 @@ async def _get_current_schema_version_mysql(conn):
     except Exception:
         pass
     return 0
+
+
+# =====================================================================
+# ✅ v7.6.6: فحص سريع للفهارس الحرجة (يعمل حتى مع fast-path)
+# =====================================================================
+
+async def _verify_critical_indexes_postgres(conn, logger):
+    """
+    فحص خفيف للفهارس الحرجة فقط — 1 SELECT + CREATE IF MISSING.
+    """
+    try:
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[])",
+            list(CRITICAL_INDEX_NAMES),
+        )
+        existing = {r["indexname"] for r in rows}
+        missing = CRITICAL_INDEX_NAMES - existing
+
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ PG: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name)
+            if not cols:
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+                if logger:
+                    logger.info(f"✅ PG: أُنشئ {idx_name}")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ PG فشل إنشاء {idx_name}: {e}")
+
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_postgres: {e}")
+        return 0
+
+
+async def _verify_critical_indexes_sqlite(conn, logger):
+    """✅ v7.6.6: SQLite version."""
+    try:
+        placeholders = ",".join(["?"] * len(CRITICAL_INDEX_NAMES))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(CRITICAL_INDEX_NAMES),
+        )
+        rows = await cursor.fetchall()
+        existing = {r[0] for r in rows}
+        missing = CRITICAL_INDEX_NAMES - existing
+
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ SQLite: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name)
+            if not cols:
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+                if logger:
+                    logger.info(f"✅ SQLite: أُنشئ {idx_name}")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ SQLite فشل {idx_name}: {e}")
+
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_sqlite: {e}")
+        return 0
+
+
+async def _verify_critical_indexes_mysql(conn, logger):
+    """✅ v7.6.6: MySQL version."""
+    try:
+        # جمع الفهارس الموجودة لكل جدول في مجموعة
+        tables = set()
+        for _t, idx_name, _c in COMMON_INDEXES:
+            if idx_name in CRITICAL_INDEX_NAMES:
+                tables.add(_t)
+
+        if not tables:
+            return 0
+
+        existing_pairs = await _fetch_existing_indexes_mysql(
+            conn, list(tables)
+        )
+        existing_names = {idx for _, idx in existing_pairs}
+        missing = CRITICAL_INDEX_NAMES - existing_names
+
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ MySQL: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name)
+            if not cols:
+                continue
+            try:
+                await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
+                created += 1
+                if logger:
+                    logger.info(f"✅ MySQL: أُنشئ {idx_name}")
+            except Exception as e:
+                err_msg = str(e).lower()
+                if (
+                    "duplicate" in err_msg
+                    or "already exists" in err_msg
+                    or "1061" in err_msg
+                ):
+                    continue
+                if logger:
+                    logger.warning(f"⚠️ MySQL فشل {idx_name}: {e}")
+
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_mysql: {e}")
+        return 0
 
 
 # =====================================================================
@@ -897,6 +1074,8 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
+        await _verify_critical_indexes_sqlite(conn, logger)
         if logger:
             logger.info(
                 f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
@@ -1502,6 +1681,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
+        await _verify_critical_indexes_postgres(conn, logger)
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -2111,6 +2292,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.6: فحص سريع للفهارس الحرجة حتى مع fast-path
+        await _verify_critical_indexes_mysql(conn, logger)
         if logger:
             logger.info(
                 f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
@@ -2742,6 +2925,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "COMMON_INDEXES",
     "EXPECTED_INDEX_COUNT",
+    "CRITICAL_INDEX_NAMES",
     "DEPRECATED_INDEXES",
     "DEFAULT_SETTINGS",
 ]
