@@ -2,40 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.9)
+handlers_message.py - معالجات الرسائل (v7.7.10)
 =====================================================================
-🆕 v7.7.9 (إصلاح تعارض WAIT_LOG_CH):
+🆕 v7.7.10 (إصلاح تحذير حذف الرسائل):
+    ✅ _delete_and_warn: تجاهل BadRequest "Message to delete not found"
+       و "message can't be deleted" بصمت (logger.debug)
+       بدل إظهار WARNING مزعج
+
+📌 v7.7.9 (إصلاح تعارض WAIT_LOG_CH):
     ✅ handle_private: ترك WAIT_LOG_CH لـ group_log handler
        عند وجود log_group_id في context.user_data
-    ✅ يمنع تعارض ميزة "قناة سجل المجموعة" مع "قناة سجل البوت"
-       (كلا الميزتين كانتا تستخدمان UserState.WAIT_LOG_CH)
 
 📌 v7.7.8 (إصلاحات حرجة):
     ✅ _do_db_restore: try/finally يضمن reconnect دائماً
     ✅ _do_db_restore: إبطال كل الكاشات بعد الاستعادة
-    ✅ _do_db_restore: تحديث backoff لملفات النسخ الاحتياطي الكبيرة
     ✅ _process_auto_reply: فحص media_id قبل الإرسال
     ✅ _sec_auth_cache: LRU size limit (لا memory leak)
     ✅ GroupRateLimiterManager: تنظيف تلقائي كل ساعة
-    ✅ _ensure_lang: إزالة tuple استثناءات redundant
-    ✅ _get_penalty_duration: حذف معامل غير مُستخدَم
-    ✅ logging في _handle_adding_posts: إخفاء نص المستخدم
-
-📌 v7.7.7:
-    ✅ _do_db_restore: DB.close() + reconnect
-    ✅ _handle_channel_input: get_chat مرة واحدة
-    ✅ _handle_redeem_gift_input: حماية من return غير-tuple
-    ✅ clear_lang_cache() helper جديد
-
-📌 v7.7.6:
-    ✅ _ensure_lang محسّنة (كاش سريع + timeout قصير)
-    ✅ Logging تشخيصي في handle_private و _handle_adding_posts
-
-✅ 60 حالة مستخدم — جميعها مُعالَجة 100%
-✅ التقاط المنشورات كاملة
-✅ حظر/فك حظر المستخدمين
-✅ جميع المدد الافتراضية
-✅ تحديد الفائز في المسابقات
 =====================================================================
 """
 
@@ -92,15 +75,20 @@ MAX_ADMIN_BROADCAST_TARGETS = 100_000
 BROADCAST_DELAY_SECONDS = 0.1
 MAX_GROUP_LIMITERS_CACHE = 1000
 
-# ✅ v7.7.8: حد أقصى لكاش الصلاحيات
 MAX_SEC_AUTH_CACHE_SIZE = 5000
 SEC_AUTH_CACHE_TTL = 300
+CACHE_CLEANUP_INTERVAL = 3600
 
-# ✅ v7.7.8: تنظيف دوري للكاشات
-CACHE_CLEANUP_INTERVAL = 3600  # ساعة
+# ✅ v7.7.10: أنماط رسائل الحذف الطبيعية (تُتجاهل بصمت)
+_DELETE_IGNORED_PATTERNS = (
+    "message to delete not found",
+    "message can't be deleted",
+    "message identifier is not specified",
+    "message is not found",
+)
 
 # =====================================================================
-# ✅ v7.7.8: كاش الصلاحيات مع حد أقصى
+# كاش الصلاحيات مع حد أقصى
 # =====================================================================
 
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
@@ -108,7 +96,6 @@ _sec_auth_cache_lock = asyncio.Lock()
 
 
 async def _sec_auth_cache_get(user_id: int, chat_id: int) -> Optional[bool]:
-    """✅ v7.7.8: جلب من الكاش مع فحص TTL."""
     key = (user_id, chat_id)
     entry = _sec_auth_cache.get(key)
     if entry is None:
@@ -121,11 +108,9 @@ async def _sec_auth_cache_get(user_id: int, chat_id: int) -> Optional[bool]:
 
 
 async def _sec_auth_cache_set(user_id: int, chat_id: int, result: bool) -> None:
-    """✅ v7.7.8: تخزين مع LRU eviction."""
     key = (user_id, chat_id)
     async with _sec_auth_cache_lock:
         if len(_sec_auth_cache) >= MAX_SEC_AUTH_CACHE_SIZE and key not in _sec_auth_cache:
-            # حذف الأقدم (25%)
             sorted_items = sorted(
                 _sec_auth_cache.items(), key=lambda x: x[1][1]
             )
@@ -136,7 +121,6 @@ async def _sec_auth_cache_set(user_id: int, chat_id: int, result: bool) -> None:
 
 
 async def _sec_auth_cache_cleanup() -> int:
-    """✅ v7.7.8: حذف العناصر المنتهية."""
     async with _sec_auth_cache_lock:
         now = time.monotonic()
         expired = [
@@ -146,6 +130,41 @@ async def _sec_auth_cache_cleanup() -> int:
         for k in expired:
             del _sec_auth_cache[k]
         return len(expired)
+
+
+# =====================================================================
+# ✅ v7.7.10: دالة موحدة لحذف الرسائل
+# =====================================================================
+
+def _is_delete_ignore_error(exc: Exception) -> bool:
+    """✅ v7.7.10: فحص إن كان الخطأ من النوع الطبيعي الذي يُتجاهل."""
+    try:
+        err = str(exc).lower()
+        return any(p in err for p in _DELETE_IGNORED_PATTERNS)
+    except Exception:
+        return False
+
+
+async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
+    """
+    ✅ v7.7.10: حذف رسالة مع تجاهل الأخطاء الطبيعية.
+    يعيد True إذا نجح الحذف أو كان الخطأ متوقعاً.
+    """
+    try:
+        await bot.delete_message(chat_id, message_id)
+        return True
+    except BadRequest as e:
+        if _is_delete_ignore_error(e):
+            logger.debug(f"تخطي حذف رسالة غير موجودة (chat={chat_id}, msg={message_id})")
+            return True
+        logger.warning(f"تعذر حذف الرسالة (BadRequest): {e}")
+        return False
+    except Exception as e:
+        if _is_delete_ignore_error(e):
+            logger.debug(f"تخطي حذف رسالة غير موجودة (chat={chat_id}, msg={message_id})")
+            return True
+        logger.warning(f"تعذر حذف الرسالة: {e}")
+        return False
 
 
 # =====================================================================
@@ -175,7 +194,6 @@ class GroupRateLimiterManager:
 
     @classmethod
     def cleanup(cls) -> int:
-        """✅ v7.7.8: إرجاع عدد المحذوف."""
         n = len(cls._limiters)
         cls._limiters.clear()
         cls._last_access.clear()
@@ -183,13 +201,11 @@ class GroupRateLimiterManager:
 
     @classmethod
     async def periodic_cleanup_task(cls):
-        """✅ v7.7.8: مهمة تنظيف دورية."""
         while True:
             try:
                 await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
                 now = time.time()
                 async with cls._lock:
-                    # حذف limiters غير مستخدمة لساعة
                     to_remove = [
                         cid for cid, ts in cls._last_access.items()
                         if now - ts > 7200
@@ -197,7 +213,6 @@ class GroupRateLimiterManager:
                     for cid in to_remove:
                         cls._limiters.pop(cid, None)
                         cls._last_access.pop(cid, None)
-                # تنظيف كاش الصلاحيات
                 cleaned = await _sec_auth_cache_cleanup()
                 if cleaned > 0:
                     logger.debug(f"🧹 تنظيف sec_auth_cache: {cleaned} عنصر")
@@ -222,10 +237,7 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
         return default
 
 
-# ✅ v7.7.8: _ensure_lang مع إزالة redundant exception
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """✅ v7.7.8: كاش سريع + timeout قصير لتفادي البطء."""
-    # 1) من الذاكرة أولاً (أسرع)
     lang = context.user_data.get('lang')
     if lang:
         return lang
@@ -237,7 +249,6 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
         pass
 
     if user_id:
-        # 2) من الكاش السريع
         try:
             from cache import user_cache
             cached = await user_cache.get(user_id)
@@ -248,7 +259,6 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
         except Exception:
             pass
 
-        # 3) من DB مع timeout قصير
         try:
             lang = await asyncio.wait_for(
                 DB.get_user_language(user_id),
@@ -257,18 +267,12 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
             context.user_data['lang'] = lang
             return lang
         except Exception as e:
-            # ✅ v7.7.8: Exception يغطي TimeoutError — لا حاجة لـ tuple
             logger.debug(f"⚠️ _ensure_lang for user {user_id}: {e}")
 
     return 'ar'
 
 
-# ✅ helper جديد لإبطال كاش اللغة
 def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    إبطال كاش اللغة في context.user_data.
-    استدعها من handlers_callback بعد تغيير اللغة.
-    """
     try:
         context.user_data.pop('lang', None)
     except Exception:
@@ -302,13 +306,11 @@ async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
 
 
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
+    """
+    ✅ v7.7.10: يستخدم _safe_delete_message لتوحيد السلوك.
+    """
     await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except BadRequest:
-        pass
-    except Exception as e:
-        logger.debug(f"تعذر حذف الرسالة المؤجلة: {e}")
+    await _safe_delete_message(bot, chat_id, message_id)
 
 
 async def apply_violation_penalty(update, context, chat_id: int, user_id: int,
@@ -495,10 +497,7 @@ class MessageHandlers:
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
 
-            # ✅ v7.7.9: فحص WAIT_LOG_CH لقناة المجموعة
-            # إذا كان هناك log_group_id في user_data → هذه العملية
-            # خاصة بميزة "قناة سجل المجموعة" (handlers_group_log)
-            # → نتركها له بدل معالجتها هنا كـ "قناة سجل البوت" العامة
+            # v7.7.9: ترك WAIT_LOG_CH لـ group_log handler
             if state == UserState.WAIT_LOG_CH and context.user_data.get('log_group_id'):
                 logger.debug(
                     f"⏭️ handle_private: ترك WAIT_LOG_CH لـ group_log handler "
@@ -506,7 +505,6 @@ class MessageHandlers:
                 )
                 return
 
-            # ✅ v7.7.8: تسجيل محجوب (لا نُخزّن نص المستخدم)
             try:
                 msg = update.effective_message
                 has_text = bool(msg and (msg.text or msg.caption))
@@ -844,10 +842,7 @@ class MessageHandlers:
 
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+                await _safe_delete_message(context.bot, chat_id, message.message_id)
                 return
 
         if settings.get('delete_links'):
@@ -902,9 +897,6 @@ class MessageHandlers:
 
     @staticmethod
     def _get_penalty_duration(settings: dict, violation_type: str) -> int:
-        """
-        ✅ v7.7.8: حذف المعامل غير المُستخدَم penalty_type.
-        """
         if violation_type in ('flood', 'antiflood'):
             return settings.get('antiflood_penalty_duration', 3600)
         elif violation_type in ('night', 'night_mode'):
@@ -938,10 +930,16 @@ class MessageHandlers:
     async def _delete_and_warn(update, context, chat_id, user_id, violation_type, settings: dict):
         lang = await _ensure_lang(update, context)
 
+        # ✅ v7.7.10: استخدام _safe_delete_message لتجاهل الأخطاء الطبيعية
         try:
-            await update.effective_message.delete()
+            msg_obj = update.effective_message
+            if msg_obj and msg_obj.message_id:
+                await _safe_delete_message(
+                    context.bot, chat_id, msg_obj.message_id
+                )
         except Exception as e:
-            logger.warning(f"تعذر حذف الرسالة: {e}")
+            if not _is_delete_ignore_error(e):
+                logger.warning(f"تعذر حذف الرسالة: {e}")
 
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
@@ -1009,7 +1007,7 @@ class MessageHandlers:
                         pass
 
     # =================================================================
-    # الردود التلقائية — ✅ v7.7.8: فحص media_id
+    # الردود التلقائية
     # =================================================================
 
     @staticmethod
@@ -1030,13 +1028,11 @@ class MessageHandlers:
                 reply_type = reply.get('reply_type', 'text') or 'text'
                 media_id = reply.get('reply_media_id')
 
-                # ✅ v7.7.8: فحص media_id قبل الإرسال
                 media_types = {'photo', 'video', 'document', 'audio',
                                'animation', 'voice', 'sticker', 'video_note'}
 
                 if reply_type in media_types:
                     if not media_id:
-                        # media_id مفقود → fallback إلى نص
                         logger.warning(
                             f"⚠️ auto_reply type={reply_type} without media_id "
                             f"for chat={chat_id}"
@@ -1061,7 +1057,6 @@ class MessageHandlers:
                             if reply_text:
                                 await safe_send(context.bot, chat_id, reply_text)
                 else:
-                    # نص عادي
                     if reply_text:
                         await safe_send(context.bot, chat_id, reply_text)
 
@@ -1097,7 +1092,6 @@ class MessageHandlers:
                 return
 
         try:
-            # ✅ استدعاء get_chat مرة واحدة فقط
             chat_obj = None
             channel_id = None
 
@@ -1122,7 +1116,6 @@ class MessageHandlers:
             else:
                 channel_name = f"قناة {channel_id}"
 
-            # فحص صلاحيات البوت
             try:
                 bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
                 if bot_member.status not in ['administrator', 'creator']:
@@ -1143,7 +1136,6 @@ class MessageHandlers:
                 StateManager.clear(user_id)
                 return
 
-            # فحص صلاحيات المستخدم
             if user_id != CONFIG.PRIMARY_OWNER_ID:
                 try:
                     user_member = await context.bot.get_chat_member(channel_id, user_id)
@@ -1174,12 +1166,11 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # إضافة المنشورات — ✅ v7.7.8: logging محجوب
+    # إضافة المنشورات
     # =================================================================
 
     @staticmethod
     async def _handle_adding_posts(update, context):
-        # ✅ v7.7.8: لا نسجّل نص المستخدم
         try:
             msg = update.effective_message
             has_photo = bool(msg.photo) if msg else False
@@ -1419,13 +1410,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_log_ch_input(update, context):
-        """
-        معالج قناة سجل البوت العامة (admin-level).
-
-        ⚠️ v7.7.9: هذا المعالج لقناة سجل البوت فقط.
-        ميزة "قناة سجل المجموعة" تُعالَج بواسطة handlers_group_log.py
-        وتُستبعد من هنا عبر الفحص في handle_private.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -2509,7 +2493,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # استعادة قاعدة البيانات — ✅ v7.7.8: try/finally + cache invalidation
+    # استعادة قاعدة البيانات
     # =================================================================
 
     @staticmethod
@@ -2559,7 +2543,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning(f"تعذر إنشاء نسخة pre_restore: {e}")
 
-            # ✅ إغلاق DB قبل الكتابة
             try:
                 close_fn = getattr(DB, 'close', None)
                 if callable(close_fn):
@@ -2569,7 +2552,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning(f"⚠️ فشل إغلاق DB قبل الاستعادة: {e}")
 
-            # ✅ نسخ ذرّي
             try:
                 temp_target = str(PATHS.DB) + ".restoring"
                 shutil.copy2(tmp_path, temp_target)
@@ -2584,7 +2566,6 @@ class MessageHandlers:
                     logger.error(f"❌ نسخ DB فشل: {e2}")
                     restore_error = e2
 
-            # ✅ v7.7.8: إبطال الكاشات بعد الاستعادة
             if success_restore:
                 try:
                     from cache import clear_all_caches
@@ -2598,7 +2579,6 @@ class MessageHandlers:
             restore_error = e
 
         finally:
-            # ✅ v7.7.8: reconnect دائماً في finally
             if db_closed:
                 try:
                     reconnect_fn = getattr(DB, 'reconnect', None)
@@ -2616,14 +2596,12 @@ class MessageHandlers:
                 except Exception as e:
                     logger.error(f"❌ فشل reconnect بعد الاستعادة: {e}", exc_info=True)
 
-            # حذف الملف المؤقت
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except OSError:
                     pass
 
-        # ✅ إرسال النتيجة بعد كل شيء
         if success_restore:
             msg = await _trans('restore_success', lang,
                                "✅ تمت الاستعادة بنجاح!\nأعد تشغيل البوت لتفعيل التغييرات.")
@@ -2691,10 +2669,7 @@ class MessageHandlers:
         try:
             settings = await get_security_settings_cached(chat_id)
             if settings.get('delete_service'):
-                try:
-                    await message.delete()
-                except Exception as e:
-                    logger.debug(f"تعذر حذف رسالة الخدمة: {e}")
+                await _safe_delete_message(context.bot, chat_id, message.message_id)
         except Exception as e:
             logger.debug(f"handle_service error: {e}")
 
@@ -2732,4 +2707,10 @@ class MessageHandlers:
 # تصدير
 # =====================================================================
 
-__all__ = ["MessageHandlers", "GroupRateLimiterManager", "clear_lang_cache"]
+__all__ = [
+    "MessageHandlers",
+    "GroupRateLimiterManager",
+    "clear_lang_cache",
+    "_safe_delete_message",
+    "_is_delete_ignore_error",
+]
