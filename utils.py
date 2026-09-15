@@ -2,13 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.2 - Smart Edition)
+utils.py - الأدوات المساعدة للبوت (v7.8.3 - Resilient Banned-Words Cache)
 =================================================================================
+🧠 v7.8.3 (حماية مزدوجة للكلمات المحظورة):
+    ✅ get_banned_words_cached: عند فشل DB، أرجِع الكاش القديم بدل []
+       (يمنع تعطّل فلتر الكلمات المحظورة عند أي خطأ عابر)
+    ✅ _get_global_words_cached: نفس الحماية للكلمات العامة
+    ✅ invalidate_banned_words_cache: يُبطل كاش Database أيضاً
+       (_banned_words_cache + _banned_words_cache_time)
+    ✅ warmup_all: يشمل warmed up للكاش المحلي في Database
+    ✅ التعامل مع AttributeError من DB بأمان (getattr fallback)
+
 🧠 v7.8.2 (دمج سجل قناة المجموعات):
     ✅ KeyboardFactory._default_texts: إضافة 9 مفاتيح log_channel_*
-       (log_channel_btn, log_channel_set, log_channel_remove,
-        log_channel_current, log_channel_none, log_channel_help,
-        log_channel_saved, log_channel_removed, log_channel_test)
     ✅ التوافق مع group_log.py + handlers_callback.py v9.2.0
 
 🧠 v7.8.1 (حماية من thundering herd + batch subscriptions):
@@ -1435,7 +1441,7 @@ class KeyboardFactory:
         )
 
 # =====================================================================
-# 10. كاش الكلمات المحظورة — Global batching
+# 10. كاش الكلمات المحظورة — Global batching + Resilient Fallback
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -1457,7 +1463,10 @@ def _normalize_word(word: Any) -> Optional[str]:
 
 
 async def _get_global_words_cached() -> List[str]:
-    """🧠 v7.8.0: جلب الكلمات العامة مرة واحدة لكل TTL."""
+    """
+    🧠 v7.8.3: جلب الكلمات العامة مرة واحدة لكل TTL.
+    ✅ عند فشل DB، أرجِع الكاش القديم (لا تُفرغه).
+    """
     global _global_words_cache, _global_words_loaded_at
     now = time.time()
     if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
@@ -1474,10 +1483,17 @@ async def _get_global_words_cached() -> List[str]:
         return _global_words_cache
     except Exception as e:
         logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
+        # ✅ v7.8.3: أرجِع الكاش القديم بدل []
         return _global_words_cache or []
 
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
+    """
+    🧠 v7.8.3: كاش الكلمات المحظورة مع حماية مزدوجة.
+
+    - عند فشل DB: أرجِع الكاش القديم بدل [] (يمنع تعطّل الفلتر)
+    - dedup بـ lock per-chat لمنع thundering herd
+    """
     if _ENABLE_BANNED_WORDS_CACHE:
         if chat_id not in _banned_words_locks:
             _banned_words_locks[chat_id] = asyncio.Lock()
@@ -1505,7 +1521,8 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
                 return words
             except Exception as e:
                 logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
-                return []
+                # ✅ v7.8.3: أرجِع الكاش القديم بدل [] — يمنع تعطّل الفلتر
+                return _banned_words_cache.get(chat_id, [])
     else:
         try:
             local_words = await DB.get_banned_words(chat_id) or []
@@ -1522,11 +1539,19 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             return list(normalized_set)
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
-            return []
+            # ✅ v7.8.3: fallback للكاش
+            return _banned_words_cache.get(chat_id, [])
 
 
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
+    """
+    🧠 v7.8.3: إبطال كاش الكلمات المحظورة في utils و Database معاً.
+
+    هذا يمنع عدم التزامن بين الطبقتين.
+    """
     global _global_words_cache, _global_words_loaded_at
+
+    # 1) كاش utils
     if chat_id is None or chat_id == -1:
         _banned_words_cache.clear()
         _banned_words_cache_time.clear()
@@ -1535,6 +1560,24 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
     else:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
+
+    # 2) ✅ v7.8.3: كاش Database الداخلي (إن وُجد)
+    try:
+        if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
+            if chat_id is None or chat_id == -1:
+                DB._banned_words_cache.clear()
+                if hasattr(DB, '_banned_words_cache_time'):
+                    DB._banned_words_cache_time.clear()
+                if hasattr(DB, '_global_banned_words_cache'):
+                    DB._global_banned_words_cache = []
+                if hasattr(DB, '_global_banned_words_loaded'):
+                    DB._global_banned_words_loaded = False
+            else:
+                DB._banned_words_cache.pop(chat_id, None)
+                if hasattr(DB, '_banned_words_cache_time'):
+                    DB._banned_words_cache_time.pop(chat_id, None)
+    except Exception as e:
+        logger.debug(f"invalidate DB banned_words cache: {e}")
 
 
 async def get_min_publish_interval() -> int:
@@ -2681,12 +2724,14 @@ class BackgroundTasks:
 
 async def warmup_all() -> Dict[str, Any]:
     """
-    🧠 v7.8.0: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
+    🧠 v7.8.3: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
+    يشمل: اللغات، الأزرار، الكلمات المحظورة (utils + Database)، الردود.
     """
     result = {
         'translations_loaded': 0,
         'buttons_loaded': 0,
         'banned_words_loaded': 0,
+        'db_banned_words_loaded': 0,
         'replies_loaded': 0,
         'total_ms': 0,
     }
@@ -2699,14 +2744,24 @@ async def warmup_all() -> Dict[str, Any]:
         # 2) الأزرار
         result['buttons_loaded'] = KeyboardFactory.preload_all()
 
-        # 3) الكلمات المحظورة العامة
+        # 3) الكلمات المحظورة العامة (utils cache)
         try:
             words = await asyncio.wait_for(_get_global_words_cached(), timeout=5)
             result['banned_words_loaded'] = len(words)
         except Exception as e:
-            logger.debug(f"warmup banned_words: {e}")
+            logger.debug(f"warmup banned_words (utils): {e}")
 
-        # 4) الردود
+        # 4) ✅ v7.8.3: الكلمات المحظورة في Database cache أيضاً
+        try:
+            if hasattr(DB, 'get_banned_words'):
+                db_words = await asyncio.wait_for(
+                    DB.get_banned_words(-1), timeout=5
+                )
+                result['db_banned_words_loaded'] = len(db_words or [])
+        except Exception as e:
+            logger.debug(f"warmup banned_words (DB): {e}")
+
+        # 5) الردود
         result['replies_loaded'] = len(_REPLIES_FROM_FILE) if _REPLIES_FROM_FILE else 0
 
     except Exception as e:
@@ -2716,7 +2771,8 @@ async def warmup_all() -> Dict[str, Any]:
     logger.info(
         f"🔥 Warmup: {result['translations_loaded']} لغة + "
         f"{result['buttons_loaded']} أزرار + "
-        f"{result['banned_words_loaded']} كلمة + "
+        f"{result['banned_words_loaded']} كلمة (utils) + "
+        f"{result['db_banned_words_loaded']} كلمة (DB) + "
         f"{result['replies_loaded']} رد — "
         f"{result['total_ms']}ms"
     )
