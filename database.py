@@ -1,45 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.7 — كود نهائي مصحح ومكتمل)
+database.py - قاعدة البيانات المتكاملة (v7.7.8 — PG bootstrap fix)
 ================================================================================
-إصلاحات v7.7.4 (B-1..B-5, M-1..M-6, N-2, N-4):
-  B-1  get_user: كاش صحيح — لا تُخزَّن إحصائيات صفرية
-  B-2  Boolean setters: SELECT قبل UPDATE (تصحيح MySQL ROW_COUNT)
-  B-3  connection(): فشل COMMIT على SQLite يرفع استثناءً
-  B-4  __init__: _singleton_init_done يُرفع في النهاية فقط
-  B-5  _get_unique_columns: لا تُخزِّن ["id"] لجداول غير موجودة
-  M-1  MySQL: VALUES() مع تعليق التحذير + plan للترقية
-  M-2  _convert_upsert: scanner كامل (السلاسل/التعليقات محمية)
-  M-3  transaction(): timeout على commit يدمّر conn ولا يُعيده
-  M-4  _FactoryFailed يحمل pool فعلياً — cleanup يعمل
-  M-5  _get_connection: تحرير العداد قبل I/O
-  M-6  expire_penalties: التحكم بالحلقة عبر len(ids)
-  N-2  _validate_column_def: كلمات مسموحة إضافية
-  N-4  _get_user_lock: تحذير صريح عند التجاوز
-
-إصلاحات v7.7.5 (ISSUE-1..3, FIX-A..D, NOTE-1..2, FIX-MISSING):
-  ISSUE-1    _destroy_connection(MySQL): close ثم release — لا تسرّب slot
-  ISSUE-2    transaction(): except BaseException — يلتقط CancelledError
-  ISSUE-3    _recover_pool: تتبّع المهمة في _bg_tasks (منع GC)
-  FIX-A      _find_values_end: يعيد موضع آخر `)` في قائمة VALUES
-  FIX-B      _insert_before_returning: يكتشف RETURNING بعد \n/\t/\r
-  FIX-C      DATABASE_URL: استخدام urlparse (كلمة سر فيها @ + query params)
-  FIX-D      close(): _initialized=False في finally (منع حالة نصف-مغلقة)
-  NOTE-1     تنظيف تعليق N-5 القديم
-  NOTE-2     تبسيط except (TimeoutError, Exception) → BaseException
-  FIX-MISSING استعادة _get_secondary_indexes (كانت في v7.7.2)
-
-إصلاحات v7.7.6 (HOTFIX-1):
-  HOTFIX-1   __init__: إضافة self._lock = asyncio.Lock()
-             — توافقية مع الـ mixins التي تستخدم self._lock
-             (مثل increment_violation_count في database_groups.py)
-             كان يظهر خطأ:
-             "'Database' object has no attribute '_lock'"
+🔥 v7.7.8 (FIX-PG-BOOTSTRAP):
+  ✅ _bootstrap: لا transaction لـPG/MySQL — DDL في autocommit
+  ✅ حل InFailedSQLTransactionError نهائياً
+  ✅ SQLite يبقى transaction آمن
 
 إصلاحات v7.7.7 (LOG-CHANNEL):
-  LOG-1      _migrate_schema: عمود log_channel_id في bot_groups
-             — لدعم قناة سجل مخصّصة لكل مجموعة.
+  LOG-1  _migrate_schema: عمود log_channel_id في bot_groups
+
+إصلاحات v7.7.6 (HOTFIX-1):
+  HOTFIX-1 __init__: self._lock = asyncio.Lock()
+
+إصلاحات v7.7.5 (ISSUE-1..3, FIX-A..D, NOTE-1..2, FIX-MISSING):
+  ISSUE-1 _destroy_connection(MySQL): close ثم release
+  ISSUE-2 transaction(): except BaseException
+  ISSUE-3 _recover_pool: تتبّع في _bg_tasks
+  FIX-A   _find_values_end: parser متوازن
+  FIX-B   _insert_before_returning: يكتشف RETURNING بعد \n/\t/\r
+  FIX-C   DATABASE_URL: urlparse
+  FIX-D   close(): _initialized=False في finally
+  FIX-MISSING استعادة _get_secondary_indexes
+
+إصلاحات v7.7.4 (B-1..B-5, M-1..M-6, N-2, N-4):
+  B-1..B-5, M-1..M-6, N-2, N-4
 ================================================================================
 """
 
@@ -567,12 +553,7 @@ def _clone_start_data(data: Dict) -> Dict:
     return cloned
 
 
-# =====================================================================
-# _FactoryFailed + _create_pool_with_retry
-# =====================================================================
-
 class _FactoryFailed(Exception):
-    """استثناء يحمل pool جزئي لتنظيفه."""
     def __init__(self, msg: str, pool: Any):
         super().__init__(msg)
         self.pool = pool
@@ -633,15 +614,10 @@ def _mysql_random() -> str:
 
 
 # =====================================================================
-# Parser للأقواس — ✅ FIX-A (v7.7.5)
+# Parser للأقواس — FIX-A
 # =====================================================================
 
 def _find_values_end(query: str) -> int:
-    """
-    ✅ FIX-A (v7.7.5): Parser متوازن يعيد الموضع بعد **آخر** قوس مُغلق
-    في قائمة VALUES، وليس بعد أول قوس. يدعم multi-row VALUES:
-        VALUES (1),(2),(3)  →  يعيد موضع ')' الأخير
-    """
     m = re.search(r"\bVALUES\b\s*", query, re.IGNORECASE)
     if not m:
         return -1
@@ -659,7 +635,6 @@ def _find_values_end(query: str) -> int:
 
     while j < n:
         ch = query[j]
-
         if escape_next:
             escape_next = False
             j += 1
@@ -668,7 +643,6 @@ def _find_values_end(query: str) -> int:
             escape_next = True
             j += 1
             continue
-
         if in_line_c:
             if ch == "\n":
                 in_line_c = False
@@ -681,7 +655,6 @@ def _find_values_end(query: str) -> int:
                 continue
             j += 1
             continue
-
         if not in_single and not in_double:
             if ch == "-" and j + 1 < n and query[j + 1] == "-":
                 in_line_c = True
@@ -695,7 +668,6 @@ def _find_values_end(query: str) -> int:
                 in_line_c = True
                 j += 1
                 continue
-
         if ch == "'" and not in_double:
             in_single = not in_single
             j += 1
@@ -707,7 +679,6 @@ def _find_values_end(query: str) -> int:
         if in_single or in_double:
             j += 1
             continue
-
         if ch == "(":
             depth += 1
             j += 1
@@ -718,7 +689,6 @@ def _find_values_end(query: str) -> int:
                 last_close = j + 1
             j += 1
             continue
-
         if depth == 0 and last_close > 0:
             if ch in " \t\n\r":
                 k = j
@@ -735,14 +705,12 @@ def _find_values_end(query: str) -> int:
                 return last_close
             else:
                 return last_close
-
         j += 1
 
     return last_close if last_close > 0 else -1
 
 
 def _insert_before_returning(query: str, clause: str) -> str:
-    """✅ FIX-B (v7.7.5): يكتشف RETURNING بعد أي فراغ (\n/\t/\r)."""
     upper = query.upper()
     n = len(upper)
     in_single = in_double = False
@@ -809,7 +777,6 @@ def _insert_before_returning(query: str, clause: str) -> str:
 
 
 def _replace_excluded_with_values(set_clause: str) -> str:
-    """✅ M-2: يستبدل `excluded.<ident>` بـ `VALUES(<ident>)` محمي بالكامل."""
     result: List[str] = []
     i = 0
     n = len(set_clause)
@@ -1410,7 +1377,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
 
 
 def _convert_upsert(query: str) -> str:
-    """تحويل ON CONFLICT (PG) → ON DUPLICATE KEY (MySQL)."""
     if DB_TYPE == "sqlite" or USE_POSTGRES:
         return query
     if not USE_MYSQL:
@@ -1745,8 +1711,6 @@ class Database(
             self._closed = False
 
             # ✅ HOTFIX-1 (v7.7.6): قفل عام للتوافقية مع الـ mixins
-            # التي تستخدم self._lock (مثل increment_violation_count).
-            # كان يظهر: 'Database' object has no attribute '_lock'
             self._lock = asyncio.Lock()
 
             self._lifecycle_lock = asyncio.Lock()
@@ -1761,7 +1725,7 @@ class Database(
             self._secondary_index_task = None
             self._cache_cleanup_task = None
 
-            # ✅ ISSUE-3 (v7.7.5): مرجع قوي لمهام الخلفية لمنع GC
+            # ✅ ISSUE-3: مرجع قوي لمهام الخلفية لمنع GC
             self._bg_tasks: Set[asyncio.Task] = set()
 
             self._sqlite_creation_lock = asyncio.Lock()
@@ -1841,11 +1805,10 @@ class Database(
             raise
 
     # =================================================================
-    # ✅ ISSUE-3 (v7.7.5): مساعد لتتبّع مهام الخلفية
+    # مساعد لتتبّع مهام الخلفية
     # =================================================================
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
-        """يُنشئ مهمة ويسجّلها في _bg_tasks لمنع GC."""
         try:
             task = asyncio.create_task(coro)
         except Exception as e:
@@ -1951,7 +1914,6 @@ class Database(
                     f"max={self._max_connections})"
                 )
             elif USE_MYSQL:
-                # ✅ FIX-C (v7.7.5): urlparse بدل regex هشّ
                 try:
                     parsed = urlparse(DATABASE_URL)
                     if not parsed.hostname:
@@ -2177,7 +2139,6 @@ class Database(
                 if getattr(self, "_cache_cleanup_task", None):
                     self._cache_cleanup_task.cancel()
                     tasks.append(self._cache_cleanup_task)
-                # ✅ ISSUE-3: إلغاء مهام الخلفية المتتبعة
                 for bg in list(self._bg_tasks):
                     if not bg.done():
                         bg.cancel()
@@ -2274,7 +2235,6 @@ class Database(
             except BaseException as be:
                 cleanup_error = be
             finally:
-                # ✅ FIX-D: ضمان إنهاء الحالة حتى عند استثناء
                 self._initialized = False
                 self._closing = False
             if cleanup_error is not None:
@@ -2327,7 +2287,7 @@ class Database(
             self._recovering_pool = False
 
     # =================================================================
-    # _get_connection — M-5
+    # _get_connection
     # =================================================================
 
     async def _get_connection(self):
@@ -2454,12 +2414,7 @@ class Database(
                         0, self._sqlite_open_count - 1
                     )
 
-    # =================================================================
-    # ISSUE-1: MySQL — close ثم release
-    # =================================================================
-
     async def _destroy_connection(self, conn):
-        """تدمير conn غير قابل لإعادة الاستخدام — لا يُعاد إلى pool."""
         if USE_POSTGRES:
             try:
                 if hasattr(conn, "terminate"):
@@ -2488,10 +2443,6 @@ class Database(
                 self._sqlite_open_count = max(
                     0, self._sqlite_open_count - 1
                 )
-
-    # =================================================================
-    # connection() — B-3
-    # =================================================================
 
     @asynccontextmanager
     async def connection(self):
@@ -2526,10 +2477,6 @@ class Database(
             raise
         finally:
             await self._return_connection(conn)
-
-    # =================================================================
-    # transaction() — M-3 + ISSUE-2 + NOTE-2
-    # =================================================================
 
     @asynccontextmanager
     async def transaction(self):
@@ -3599,10 +3546,8 @@ class Database(
                      "INTEGER DEFAULT 3600"),
                     ("mute_default_duration",
                      "INTEGER DEFAULT 3600"),
-                    ("ban_default_duration",
-                     "INTEGER DEFAULT 0"),
-                    ("warn_default_duration",
-                     "INTEGER DEFAULT 0"),
+                    ("ban_default_duration", "INTEGER DEFAULT 0"),
+                    ("warn_default_duration", "INTEGER DEFAULT 0"),
                     ("restrict_default_duration",
                      "INTEGER DEFAULT 1800"),
                     ("enable_timed_penalties",
@@ -3664,7 +3609,7 @@ class Database(
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL")
                 ],
-                # 🆕 v7.7.7: عمود قناة السجل لكل مجموعة
+                # 🆕 v7.7.7: عمود قناة السجل
                 "bot_groups": [
                     ("log_channel_id", "INTEGER DEFAULT NULL"),
                 ],
@@ -4324,15 +4269,7 @@ class Database(
         except Exception as e:
             logger.error(f"❌ auto_replies: {e}")
 
-    # =================================================================
-    # ✅ FIX-MISSING (v7.7.5): استعادة _get_secondary_indexes
-    # =================================================================
-
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """
-        Hook للتوسيع — يُعيد قائمة (table, idx_name, create_sql).
-        الافتراضي فارغ. يمكن لـ subclass أو monkey-patch تزويده.
-        """
         return []
 
     def _compute_bootstrap_hash(self) -> str:
@@ -4381,7 +4318,7 @@ class Database(
                 pass
 
     # =================================================================
-    # Bootstrap
+    # Bootstrap — ✅ v7.7.8 FIX-PG-BOOTSTRAP
     # =================================================================
 
     async def _do_bootstrap_inner(self, conn) -> bool:
@@ -4440,14 +4377,26 @@ class Database(
     async def _bootstrap(
         self, *, with_background: bool = True
     ) -> bool:
+        """
+        ✅ v7.7.8 (FIX-PG-BOOTSTRAP):
+
+        PostgreSQL/MySQL: أي DDL فاشل داخل transaction يُلغيه
+        كاملاً ويرفض كل الجمل التالية بـ
+        InFailedSQLTransactionError. الحل: DDL يعمل في
+        autocommit mode (خارج transaction).
+
+        SQLite: transaction آمن (rollback جزئي).
+        """
         async with self._bootstrap_lock:
             try:
                 await self.initialize()
-                if USE_POSTGRES:
-                    async with self.transaction() as conn:
+
+                # ✅ FIX v7.7.8: PG/MySQL بدون transaction للـDDL
+                if USE_POSTGRES or USE_MYSQL:
+                    async with self.connection() as conn:
                         await self._do_bootstrap_inner(conn)
                 else:
-                    async with self.connection() as conn:
+                    async with self.transaction() as conn:
                         await self._do_bootstrap_inner(conn)
 
                 if with_background:
@@ -5058,10 +5007,6 @@ class Database(
         if result:
             await self._invalidate_user_cache_keys(user_id)
         return result
-
-    # =================================================================
-    # B-2: Boolean setters
-    # =================================================================
 
     async def get_auto_publish_status(self, user_id: int) -> bool:
         cache_key = f"auto_publish_{user_id}"
