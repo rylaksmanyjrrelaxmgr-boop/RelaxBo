@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.2)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.3.3)
 ================================================================================
+🆕 v5.3.3 (Postgres fix):
+    ✅ إصلاح ORDER BY rowid → chat_id (توافق PostgreSQL)
+    ✅ Keep-Warm Cache يعمل الآن مع Postgres + SQLite
+
 🆕 v5.3.2 (Keep-Warm Cache):
     ✅ مهمة خلفية كل 90s تُحدِّث كاش المجموعات النشطة
     ✅ القضاء على بطء Cold start في أزرار قناة السجل
@@ -369,6 +373,9 @@ async def _keep_warm_cache_once() -> None:
     """
     تحديث كاش المجموعات النشطة مرة واحدة.
 
+    ✅ v5.3.3: يستخدم ORDER BY chat_id بدل rowid
+        (توافق PostgreSQL + SQLite)
+
     يشمل:
     - بيانات قناة السجل (_get_log_channel_menu_data)
     - إعدادات الأمان (_security_settings_cache)
@@ -378,12 +385,12 @@ async def _keep_warm_cache_once() -> None:
         # استيراد ديناميكي — يتفادى circular imports
         from handlers.handlers_callback import _prefetch_group_assets
 
-        # جلب المجموعات النشطة (غير المحظورة)
+        # ✅ v5.3.3: ORDER BY chat_id (متوافق Postgres + SQLite)
         try:
             rows = await DB.fetchall(
                 "SELECT chat_id FROM bot_groups "
                 "WHERE banned=0 OR banned IS NULL "
-                "ORDER BY rowid DESC LIMIT ?",
+                "ORDER BY chat_id DESC LIMIT ?",
                 (KEEP_WARM_LIMIT,),
             )
         except Exception as e:
@@ -630,7 +637,7 @@ async def successful_payment(update, context):
                 logger.info(f"✅ Gift code created: user={user_id}")
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في توليد كود الهدية.")
-                logger.error(f"❌ Failed to create gift code: {user_id}")
+                logger.error(f"❌ Failed to create gift code: user={user_id}")
         except Exception as e:
             logger.exception(f"❌ Exception in gift payment: {e}")
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
