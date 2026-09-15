@@ -2,14 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.1 - Smart Edition)
+utils.py - الأدوات المساعدة للبوت (v7.8.2 - Smart Edition)
 =================================================================================
+🧠 v7.8.2 (دمج سجل قناة المجموعات):
+    ✅ KeyboardFactory._default_texts: إضافة 9 مفاتيح log_channel_*
+       (log_channel_btn, log_channel_set, log_channel_remove,
+        log_channel_current, log_channel_none, log_channel_help,
+        log_channel_saved, log_channel_removed, log_channel_test)
+    ✅ التوافق مع group_log.py + handlers_callback.py v9.2.0
+
 🧠 v7.8.1 (حماية من thundering herd + batch subscriptions):
     ✅ SmartCache.get_or_set(): dedup للمفاتيح المتزامنة
-       (50 كوروتين تطلب نفس المفتاح → استدعاء DB واحد فقط)
     ✅ BackgroundTasks._publish_single_channel: يقبل has_sub مسبقاً
     ✅ BackgroundTasks.auto_publish: batch subscription check
-       (من 20 استعلام → 1 استعلام IN)
     ✅ Semaphore limit 8 (بدل 20) — ضغط أقل على Pool
     ✅ تأخير بين المهام 0.3s (بدل 0.5s) — لكن أسرع عملياً
 
@@ -741,7 +746,7 @@ class CB:
 # =====================================================================
 
 class KeyboardFactory:
-    """🧠 v7.8.0: مصنع لوحات المفاتيح مع preload."""
+    """🧠 v7.8.2: مصنع لوحات المفاتيح مع preload + log_channel_* keys."""
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
@@ -791,6 +796,18 @@ class KeyboardFactory:
         "ch_sel": "📌 اختيار",
         "sched_btn": "📅 الجدولة",
         "groups": "👥 مجموعاتي",
+
+        # 🆕 v7.8.2: سجل قناة المجموعات
+        "log_channel_btn": "📢 قناة السجل",
+        "log_channel_set": "🔗 تعيين قناة السجل",
+        "log_channel_remove": "🗑️ إزالة قناة السجل",
+        "log_channel_current": "الحالية",
+        "log_channel_none": "❌ لا توجد قناة سجل",
+        "log_channel_help": "أضف البوت كمشرف في القناة ثم أرسل معرّفها أو أعد توجيه رسالة منها",
+        "log_channel_saved": "✅ تم تعيين قناة السجل",
+        "log_channel_removed": "🗑️ تمت إزالة قناة السجل",
+        "log_channel_test": "🧪 رسالة اختبار — قناة السجل تعمل بنجاح!",
+
         "post_add": "📥 إضافة منشورات",
         "post_pub": "📤 نشر منشور",
         "post_list": "📋 منشوراتي",
