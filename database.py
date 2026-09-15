@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.2)
+database.py - قاعدة البيانات المتكاملة (v7.7.6 — كود نهائي مصحح ومكتمل)
 ================================================================================
-🆕 v7.7.2 — إصلاح BUG-1..4 + M-1..2 + N-1..5:
-    🔴 BUG-1  close() يُصفّر _closing في finally (CRITICAL)
-    🟡 BUG-2  _do_initialize: _initialized=True بعد create_task
-    🟡 BUG-3  _convert_insert_or_ignore: ON CONFLICT قبل RETURNING
-    🟢 BUG-4  _find_values_end: يتجاهل -- و /* */ comments
-    🟡 M-1    _recover_pool مفعّل لـ MySQL أيضاً
-    🟡 M-2    _create_pool_with_retry: cleanup فعّال
-    🟢 N-1    MySQL ROW_COUNT بـ cursor منفصل
-    🟢 N-2    timestamp واحد في _import_banned_words
-    🟢 N-3    log once لـ WeakKeyDict failure
-    🟢 N-4    توثيق ترتيب الأقفال
-    🟢 N-5    توثيق MySQL DDL في bootstrap
+إصلاحات v7.7.4 (B-1..B-5, M-1..M-6, N-2, N-4):
+  B-1  get_user: كاش صحيح — لا تُخزَّن إحصائيات صفرية
+  B-2  Boolean setters: SELECT قبل UPDATE (تصحيح MySQL ROW_COUNT)
+  B-3  connection(): فشل COMMIT على SQLite يرفع استثناءً
+  B-4  __init__: _singleton_init_done يُرفع في النهاية فقط
+  B-5  _get_unique_columns: لا تُخزِّن ["id"] لجداول غير موجودة
+  M-1  MySQL: VALUES() مع تعليق التحذير + plan للترقية
+  M-2  _convert_upsert: scanner كامل (السلاسل/التعليقات محمية)
+  M-3  transaction(): timeout على commit يدمّر conn ولا يُعيده
+  M-4  _FactoryFailed يحمل pool فعلياً — cleanup يعمل
+  M-5  _get_connection: تحرير العداد قبل I/O
+  M-6  expire_penalties: التحكم بالحلقة عبر len(ids)
+  N-2  _validate_column_def: كلمات مسموحة إضافية
+  N-4  _get_user_lock: تحذير صريح عند التجاوز
 
-📌 v7.7.1: 15 إصلاحاً
-📌 v7.7.0: NEW-6 + M1-M6 + MINOR
-📌 v7.6.2: COLUMN_ALIASES + VALID_VIOLATION_TYPES + locks
-📌 v7.6.1: WeakSet + inspect + cursors
-📌 v7.6.0: MySQL commit + race + pool
-📌 v7.5.28: MySQL helpers
-================================================================================
+إصلاحات v7.7.5 (ISSUE-1..3, FIX-A..D, NOTE-1..2, FIX-MISSING):
+  ISSUE-1    _destroy_connection(MySQL): close ثم release — لا تسرّب slot
+  ISSUE-2    transaction(): except BaseException — يلتقط CancelledError
+  ISSUE-3    _recover_pool: تتبّع المهمة في _bg_tasks (منع GC)
+  FIX-A      _find_values_end: يعيد موضع آخر `)` في قائمة VALUES
+  FIX-B      _insert_before_returning: يكتشف RETURNING بعد \n/\t/\r
+  FIX-C      DATABASE_URL: استخدام urlparse (كلمة سر فيها @ + query params)
+  FIX-D      close(): _initialized=False في finally (منع حالة نصف-مغلقة)
+  NOTE-1     تنظيف تعليق N-5 القديم
+  NOTE-2     تبسيط except (TimeoutError, Exception) → BaseException
+  FIX-MISSING استعادة _get_secondary_indexes (كانت في v7.7.2)
 
-🔒 ترتيب الأقفال (N-4):
-   _bootstrap_lock → _lifecycle_lock → _sqlite_count_lock/_user_locks_lock
-   لا يوجد مسار معاكس. أي تعديل يجب أن يحترم هذا الترتيب.
+إصلاحات v7.7.6 (HOTFIX-1):
+  HOTFIX-1   __init__: إضافة self._lock = asyncio.Lock()
+             — توافقية مع الـ mixins التي تستخدم self._lock
+             (مثل increment_violation_count في database_groups.py)
+             كان يظهر خطأ:
+             "'Database' object has no attribute '_lock'"
 ================================================================================
 """
 
@@ -44,9 +53,10 @@ import inspect
 import weakref
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 from typing import (
     Dict, List, Optional, Tuple, Any, Union, AsyncGenerator,
-    Callable, Awaitable,
+    Callable, Awaitable, Set,
 )
 from contextlib import asynccontextmanager
 from collections import defaultdict
@@ -501,6 +511,10 @@ _ALLOWED_COL_KEYWORDS = frozenset({
     "DEFAULT", "NULL", "NOT", "PRIMARY", "KEY", "UNIQUE",
     "CURRENT_TIMESTAMP", "UTC_TIMESTAMP", "NOW",
     "AUTOINCREMENT", "AUTO_INCREMENT",
+    "CURRENT_DATE", "CURRENT_TIME", "SYSDATE", "LOCALTIME",
+    "LOCALTIMESTAMP", "TRUE", "FALSE",
+    "COLLATE", "ON", "UPDATE", "DELETE", "CASCADE",
+    "REFERENCES", "CHECK", "CONSTRAINT",
 })
 
 
@@ -549,17 +563,23 @@ def _clone_start_data(data: Dict) -> Dict:
     return cloned
 
 
+# =====================================================================
+# _FactoryFailed + _create_pool_with_retry
+# =====================================================================
+
+class _FactoryFailed(Exception):
+    """استثناء يحمل pool جزئي لتنظيفه."""
+    def __init__(self, msg: str, pool: Any):
+        super().__init__(msg)
+        self.pool = pool
+
+
 async def _create_pool_with_retry(
     pool_factory: Callable[[], Awaitable[Any]],
     name: str,
     max_attempts: int = 5,
     cleanup: Optional[Callable[[Any], Awaitable[None]]] = None,
 ) -> Any:
-    """
-    ✅ M-2: cleanup فعّال الآن.
-    pool_factory يجب أن تُعيد pool صالح أو ترفع استثناء.
-    إذا رفعت بعد إنشاء pool جزئي، cleanup يُستدعى.
-    """
     last_exc: Optional[Exception] = None
     for attempt in range(max_attempts):
         try:
@@ -567,18 +587,26 @@ async def _create_pool_with_retry(
             if attempt > 0:
                 logger.info(f"✅ نجح الاتصال بـ {name}")
             return pool
-        except Exception as e:
+        except _FactoryFailed as e:
             last_exc = e
-            # ✅ M-2: cleanup قد يكون فعّالاً لو factory رفعت مع pool مرفق
-            partial = getattr(e, "_partial_pool", None)
-            if partial is not None and cleanup is not None:
+            if e.pool is not None and cleanup is not None:
                 try:
-                    await cleanup(partial)
+                    await cleanup(e.pool)
                     logger.info(f"🧹 cleanup pool جزئي لـ {name}")
                 except Exception as ce:
                     logger.warning(f"⚠️ cleanup pool جزئي: {ce}")
             if attempt == max_attempts - 1:
-                raise last_exc
+                raise
+            delay = min(2 ** attempt, 30)
+            logger.warning(
+                f"⚠️ {name} ({attempt + 1}/{max_attempts}): "
+                f"{e} — إعادة {delay}s"
+            )
+            await asyncio.sleep(delay)
+        except Exception as e:
+            last_exc = e
+            if attempt == max_attempts - 1:
+                raise
             delay = min(2 ** attempt, 30)
             logger.warning(
                 f"⚠️ {name} ({attempt + 1}/{max_attempts}): "
@@ -601,17 +629,14 @@ def _mysql_random() -> str:
 
 
 # =====================================================================
-# ✅ BUG-4: _find_values_end يتجاهل SQL comments
+# Parser للأقواس — ✅ FIX-A (v7.7.5)
 # =====================================================================
 
 def _find_values_end(query: str) -> int:
     """
-    ✅ v7.7.2 (BUG-4): إيجاد نهاية VALUES (...) مع توازن الأقواس.
-    يتعامل مع:
-      - الأقواس المتداخلة
-      - السلاسل النصية ('...', "...")
-      - التعليقات (-- ... و /* ... */)
-    يُرجع موضع ما بعد القوس الأخير، أو -1 إن فشل.
+    ✅ FIX-A (v7.7.5): Parser متوازن يعيد الموضع بعد **آخر** قوس مُغلق
+    في قائمة VALUES، وليس بعد أول قوس. يدعم multi-row VALUES:
+        VALUES (1),(2),(3)  →  يعيد موضع ')' الأخير
     """
     m = re.search(r"\bVALUES\b\s*", query, re.IGNORECASE)
     if not m:
@@ -619,27 +644,18 @@ def _find_values_end(query: str) -> int:
     i = m.end()
     if i >= len(query) or query[i] != "(":
         return -1
-    depth = 0
+
+    n = len(query)
     in_single = in_double = False
-    in_line_comment = in_block_comment = False
+    in_line_c = in_block_c = False
     escape_next = False
+    depth = 0
     j = i
-    while j < len(query):
+    last_close = -1
+
+    while j < n:
         ch = query[j]
-        # التعليقات
-        if in_line_comment:
-            if ch == "\n":
-                in_line_comment = False
-            j += 1
-            continue
-        if in_block_comment:
-            if ch == "*" and j + 1 < len(query) and query[j + 1] == "/":
-                in_block_comment = False
-                j += 2
-                continue
-            j += 1
-            continue
-        # escape
+
         if escape_next:
             escape_next = False
             j += 1
@@ -648,17 +664,34 @@ def _find_values_end(query: str) -> int:
             escape_next = True
             j += 1
             continue
-        # بداية تعليق
+
+        if in_line_c:
+            if ch == "\n":
+                in_line_c = False
+            j += 1
+            continue
+        if in_block_c:
+            if ch == "*" and j + 1 < n and query[j + 1] == "/":
+                in_block_c = False
+                j += 2
+                continue
+            j += 1
+            continue
+
         if not in_single and not in_double:
-            if ch == "-" and j + 1 < len(query) and query[j + 1] == "-":
-                in_line_comment = True
+            if ch == "-" and j + 1 < n and query[j + 1] == "-":
+                in_line_c = True
                 j += 2
                 continue
-            if ch == "/" and j + 1 < len(query) and query[j + 1] == "*":
-                in_block_comment = True
+            if ch == "/" and j + 1 < n and query[j + 1] == "*":
+                in_block_c = True
                 j += 2
                 continue
-        # strings
+            if ch == "#":
+                in_line_c = True
+                j += 1
+                continue
+
         if ch == "'" and not in_double:
             in_single = not in_single
             j += 1
@@ -670,39 +703,191 @@ def _find_values_end(query: str) -> int:
         if in_single or in_double:
             j += 1
             continue
-        # parens
+
         if ch == "(":
             depth += 1
-        elif ch == ")":
+            j += 1
+            continue
+        if ch == ")":
             depth -= 1
             if depth == 0:
-                return j + 1
+                last_close = j + 1
+            j += 1
+            continue
+
+        if depth == 0 and last_close > 0:
+            if ch in " \t\n\r":
+                k = j
+                while k < n and query[k] in " \t\n\r":
+                    k += 1
+                if k < n and query[k] in ",(":
+                    j += 1
+                    continue
+                return last_close
+            elif ch == ",":
+                j += 1
+                continue
+            elif ch == ";":
+                return last_close
+            else:
+                return last_close
+
         j += 1
-    return -1
 
+    return last_close if last_close > 0 else -1
 
-# =====================================================================
-# ✅ BUG-3: helper لإدراج ON CONFLICT قبل RETURNING
-# =====================================================================
 
 def _insert_before_returning(query: str, clause: str) -> str:
-    """
-    ✅ v7.7.2 (BUG-3): يُدرج clause قبل RETURNING إن وُجد، وإلا في النهاية.
-    """
+    """✅ FIX-B (v7.7.5): يكتشف RETURNING بعد أي فراغ (\n/\t/\r)."""
     upper = query.upper()
-    # ابحث عن " RETURNING " مع حدود الكلمة
+    n = len(upper)
+    in_single = in_double = False
+    in_line_c = in_block_c = False
+    escape_next = False
     idx = -1
-    search_from = 0
-    while True:
-        pos = upper.find(" RETURNING ", search_from)
-        if pos < 0:
+    i = 0
+    while i < n:
+        ch = upper[i]
+        if escape_next:
+            escape_next = False
+            i += 1
+            continue
+        if ch == "\\" and (in_single or in_double):
+            escape_next = True
+            i += 1
+            continue
+        if in_line_c:
+            if ch == "\n":
+                in_line_c = False
+            i += 1
+            continue
+        if in_block_c:
+            if ch == "*" and i + 1 < n and upper[i + 1] == "/":
+                in_block_c = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if ch == "-" and i + 1 < n and upper[i + 1] == "-":
+                in_line_c = True
+                i += 2
+                continue
+            if ch == "/" and i + 1 < n and upper[i + 1] == "*":
+                in_block_c = True
+                i += 2
+                continue
+            if ch == "#":
+                in_line_c = True
+                i += 1
+                continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if in_single or in_double:
+            i += 1
+            continue
+        if (ch in " \t\n\r"
+                and i + 10 <= n
+                and upper[i + 1:i + 10] == "RETURNING"
+                and (i + 10 == n or upper[i + 10] in " \t\n\r;(")):
+            idx = i
             break
-        # تحقق أن "RETURNING" ليست داخل string (تبسيط: نتجاهل)
-        idx = pos
-        search_from = pos + 1
+        i += 1
     if idx > 0:
         return query[:idx] + " " + clause + query[idx:]
     return query + " " + clause
+
+
+def _replace_excluded_with_values(set_clause: str) -> str:
+    """✅ M-2: يستبدل `excluded.<ident>` بـ `VALUES(<ident>)` محمي بالكامل."""
+    result: List[str] = []
+    i = 0
+    n = len(set_clause)
+    in_single = in_double = False
+    in_line_c = in_block_c = False
+    escape_next = False
+    while i < n:
+        ch = set_clause[i]
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            i += 1
+            continue
+        if ch == "\\" and (in_single or in_double):
+            escape_next = True
+            result.append(ch)
+            i += 1
+            continue
+        if in_line_c:
+            result.append(ch)
+            if ch == "\n":
+                in_line_c = False
+            i += 1
+            continue
+        if in_block_c:
+            result.append(ch)
+            if ch == "*" and i + 1 < n and set_clause[i + 1] == "/":
+                result.append("/")
+                i += 2
+                in_block_c = False
+                continue
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if ch == "-" and i + 1 < n and set_clause[i + 1] == "-":
+                in_line_c = True
+                result.append(ch)
+                i += 1
+                continue
+            if ch == "/" and i + 1 < n and set_clause[i + 1] == "*":
+                in_block_c = True
+                result.append(ch)
+                i += 1
+                continue
+            if ch == "#":
+                in_line_c = True
+                result.append(ch)
+                i += 1
+                continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+            i += 1
+            continue
+        if in_single or in_double:
+            result.append(ch)
+            i += 1
+            continue
+        if (ch in ("e", "E")
+                and i + 9 <= n
+                and set_clause[i:i + 9].lower() == "excluded."):
+            prev_ok = (i == 0
+                       or not (set_clause[i - 1].isalnum()
+                               or set_clause[i - 1] == "_"))
+            if prev_ok:
+                j = i + 9
+                k = j
+                while k < n and (set_clause[k].isalnum() or set_clause[k] == "_"):
+                    k += 1
+                if k > j:
+                    ident = set_clause[j:k]
+                    result.append(f"VALUES({ident})")
+                    i = k
+                    continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
 
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
@@ -710,6 +895,7 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
         return _UNIQUE_CACHE[table]
     columns = []
     existing_columns = set()
+    table_existed = True
     try:
         if USE_POSTGRES:
             rows = await conn.fetch(
@@ -718,28 +904,49 @@ async def _get_unique_columns(table: str, conn) -> List[str]:
                 table,
             )
             existing_columns = {row["column_name"] for row in rows}
+            if not existing_columns:
+                table_existed = False
         elif USE_MYSQL:
             if not await _table_exists(conn, table):
-                return KNOWN_UNIQUE_FALLBACK.get(table, ["id"])
-            cursor = await conn.cursor()
-            try:
-                await cursor.execute(f"SHOW COLUMNS FROM `{table}`")
-                rows = await cursor.fetchall()
-                existing_columns = {row[0] for row in rows}
-            finally:
-                await cursor.close()
+                table_existed = False
+            else:
+                cursor = await conn.cursor()
+                try:
+                    await cursor.execute(f"SHOW COLUMNS FROM `{table}`")
+                    rows = await cursor.fetchall()
+                    existing_columns = {row[0] for row in rows}
+                finally:
+                    await cursor.close()
         else:
-            cursor = await conn.execute(f"PRAGMA table_info({table})")
+            cursor = await conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name=?",
+                (table,),
+            )
             try:
-                rows = await cursor.fetchall()
-                existing_columns = {row[1] for row in rows}
+                row = await cursor.fetchone()
             finally:
                 try:
                     await cursor.close()
                 except Exception:
                     pass
+            if row is None:
+                table_existed = False
+            else:
+                cursor = await conn.execute(f"PRAGMA table_info({table})")
+                try:
+                    rows = await cursor.fetchall()
+                    existing_columns = {row[1] for row in rows}
+                finally:
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
     except Exception as e:
         logger.warning(f"⚠️ فشل أعمدة {table}: {e}")
+        return KNOWN_UNIQUE_FALLBACK.get(table, ["id"])
+
+    if not table_existed:
         return KNOWN_UNIQUE_FALLBACK.get(table, ["id"])
 
     try:
@@ -940,8 +1147,7 @@ def _convert_placeholders(query: str) -> str:
             if in_block:
                 if ch == "*" and i + 1 < len(query) and query[i + 1] == "/":
                     in_block = False
-                    result.append(ch)
-                    result.append(query[i + 1])
+                    result.append(ch); result.append(query[i + 1])
                     i += 2; continue
                 result.append(ch); i += 1; continue
             if ch == "'" and not in_double and not in_comment and not in_block:
@@ -993,8 +1199,7 @@ def _convert_placeholders(query: str) -> str:
             if in_block:
                 if ch == "*" and i + 1 < len(query) and query[i + 1] == "/":
                     in_block = False
-                    result.append(ch)
-                    result.append(query[i + 1])
+                    result.append(ch); result.append(query[i + 1])
                     i += 2; continue
                 result.append(ch); i += 1; continue
             if ch == "'" and not in_double:
@@ -1010,7 +1215,6 @@ def _convert_placeholders(query: str) -> str:
 
 
 async def _convert_insert_or_ignore(query: str, conn=None) -> str:
-    """✅ BUG-3: ON CONFLICT قبل RETURNING إن وُجد."""
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -1023,7 +1227,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
             new_query, re.IGNORECASE,
         )
         if not match:
-            # ✅ BUG-3: لا VALUES(...) — أدخل ON CONFLICT قبل RETURNING
             return _insert_before_returning(
                 new_query, "ON CONFLICT DO NOTHING"
             )
@@ -1046,7 +1249,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
                 + new_query[end_pos:]
             )
         else:
-            # ✅ BUG-3: INSERT INTO t(...) بلا VALUES — أدرج قبل RETURNING
             new_query = _insert_before_returning(
                 new_query, f"ON CONFLICT{target} DO NOTHING"
             )
@@ -1071,7 +1273,9 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         )
         if not match:
             logger.error("❌ INSERT OR REPLACE بلا أعمدة")
-            return new_query
+            raise ValueError(
+                "INSERT OR REPLACE requires explicit column list"
+            )
         table = match.group(1)
         columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
 
@@ -1091,7 +1295,10 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                 best_cols = ", ".join(usable)
             else:
                 logger.error(f"❌ REPLACE على {table} بلا unique")
-                return new_query
+                raise ValueError(
+                    f"INSERT OR REPLACE on {table} requires a unique "
+                    f"constraint discoverable from columns {columns}"
+                )
 
         pk_set = set(c.strip() for c in best_cols.split(","))
         set_columns = [col for col in columns if col not in pk_set]
@@ -1180,6 +1387,7 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         update_cols = [c for c in columns if c not in key_set]
         if not update_cols:
             return new_query.replace("INSERT", "INSERT IGNORE", 1)
+        # ⚠️ MySQL 8.0.20+ يُصدر تحذير deprecation لـ VALUES().
         set_clause = ", ".join(
             f"`{c}` = VALUES(`{c}`)" for c in update_cols
         )
@@ -1198,6 +1406,7 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
 
 
 def _convert_upsert(query: str) -> str:
+    """تحويل ON CONFLICT (PG) → ON DUPLICATE KEY (MySQL)."""
     if DB_TYPE == "sqlite" or USE_POSTGRES:
         return query
     if not USE_MYSQL:
@@ -1212,11 +1421,7 @@ def _convert_upsert(query: str) -> str:
     if not match:
         return query
     update_set = match.group(2).strip()
-    new_update_set = re.sub(
-        r"excluded\.([a-zA-Z_][a-zA-Z0-9_]*)",
-        lambda m: f"VALUES({m.group(1)})",
-        update_set,
-    )
+    new_update_set = _replace_excluded_with_values(update_set)
     new_query = query[: match.start()].rstrip()
     tail = query[match.end():]
     tail_upper = tail.lstrip().upper()
@@ -1367,8 +1572,7 @@ class Database(
 ):
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
-
-    BOOTSTRAP_DATA_VERSION = 5
+    BOOTSTRAP_DATA_VERSION = 6
 
     VALID_PENALTY_TYPES = {"mute", "ban", "restrict", "kick", "warn"}
     VALID_REPLY_TYPES = {
@@ -1528,98 +1732,124 @@ class Database(
     def __init__(self):
         if getattr(self, "_singleton_init_done", False):
             return
-        self._singleton_init_done = True
-
-        self._pool = None
-        self._sqlite_queue = None
-        self._sqlite_pool_size = SQLITE_POOL_SIZE
-        self._initialized = False
-        self._closing = False
-        self._closed = False
-
-        self._lifecycle_lock = asyncio.Lock()
-        self._bootstrap_lock = asyncio.Lock()
-
-        self._db_type = DB_TYPE
-        self._max_connections = int(os.getenv("DB_POOL_SIZE", "20"))
-        self._min_connections = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
-        self._connection_timeout = int(os.getenv("DB_TIMEOUT", "30"))
-
-        self._cleanup_task = None
-        self._secondary_index_task = None
-        self._cache_cleanup_task = None
-
-        self._sqlite_creation_lock = asyncio.Lock()
-        self._sqlite_open_count = 0
-        self._sqlite_count_lock = asyncio.Lock()
-        self._sqlite_alive_check_interval = 30.0
-
         try:
-            self._active_sqlite_conns = weakref.WeakSet()
-            self._use_weakset = True
-        except Exception:
-            self._active_sqlite_conns = set()
-            self._use_weakset = False
+            self._pool = None
+            self._sqlite_queue = None
+            self._sqlite_pool_size = SQLITE_POOL_SIZE
+            self._initialized = False
+            self._closing = False
+            self._closed = False
 
+            # ✅ HOTFIX-1 (v7.7.6): قفل عام للتوافقية مع الـ mixins
+            # التي تستخدم self._lock (مثل increment_violation_count).
+            # كان يظهر: 'Database' object has no attribute '_lock'
+            self._lock = asyncio.Lock()
+
+            self._lifecycle_lock = asyncio.Lock()
+            self._bootstrap_lock = asyncio.Lock()
+
+            self._db_type = DB_TYPE
+            self._max_connections = int(os.getenv("DB_POOL_SIZE", "20"))
+            self._min_connections = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
+            self._connection_timeout = int(os.getenv("DB_TIMEOUT", "30"))
+
+            self._cleanup_task = None
+            self._secondary_index_task = None
+            self._cache_cleanup_task = None
+
+            # ✅ ISSUE-3 (v7.7.5): مرجع قوي لمهام الخلفية لمنع GC
+            self._bg_tasks: Set[asyncio.Task] = set()
+
+            self._sqlite_creation_lock = asyncio.Lock()
+            self._sqlite_open_count = 0
+            self._sqlite_count_lock = asyncio.Lock()
+            self._sqlite_alive_check_interval = 30.0
+
+            try:
+                self._active_sqlite_conns = weakref.WeakSet()
+                self._use_weakset = True
+            except Exception:
+                self._active_sqlite_conns = set()
+                self._use_weakset = False
+
+            try:
+                self._sqlite_alive_ts = weakref.WeakKeyDictionary()
+                self._use_alive_cache = True
+            except Exception:
+                self._sqlite_alive_ts = None
+                self._use_alive_cache = False
+
+            self._alive_cache_warned = False
+            self._pool_none_warned = False
+            self._recovering_pool = False
+
+            self._user_locks: Dict[int, asyncio.Lock] = {}
+            self._channel_locks: Dict[int, asyncio.Lock] = {}
+            self._user_locks_last_access: Dict[int, float] = {}
+            self._user_locks_lock = asyncio.Lock()
+            self._channel_locks_lock = asyncio.Lock()
+            self._channel_locks_last_access = {}
+            self._MAX_CHANNEL_LOCKS = MAX_CHANNEL_LOCKS_CONFIG
+            self._group_locks = defaultdict(lambda: asyncio.Lock())
+            self._group_locks_last_access = {}
+            self._group_locks_lock = asyncio.Lock()
+            self._MAX_GROUP_LOCKS = MAX_GROUP_LOCKS_CONFIG
+            self._penalty_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+            self._penalty_locks_last_access: Dict[Tuple[int, int], float] = {}
+            self._penalty_locks_lock = asyncio.Lock()
+            self._MAX_PENALTY_LOCKS = MAX_PENALTY_LOCKS_CONFIG
+            self._overflow_penalty_lock = asyncio.Lock()
+            self._overflow_lock_warned = False
+            self._overflow_user_lock_warned = False
+
+            self._backup_lock = asyncio.Lock()
+            self._slow_query_log_threshold = float(
+                os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0")
+            )
+            self._max_post_text_length = MAX_POST_TEXT_LENGTH
+            self._posts_batch_size = POSTS_BATCH_SIZE
+            self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
+            self._query_timeout = self._connection_timeout * 2
+            self._commit_timeout = 30
+            self.DB_TYPE = DB_TYPE
+            self.USE_POSTGRES = USE_POSTGRES
+            self.USE_MYSQL = USE_MYSQL
+            self.TimeUtils = TimeUtils
+            self.internal_cache = internal_cache
+            self.CACHE_AVAILABLE = CACHE_AVAILABLE
+            self.banned_words_cache = banned_words_cache
+            self.settings_cache = settings_cache
+            self.groups_cache = groups_cache
+            self.auth_cache = auth_cache
+            self.posts_cache = posts_cache
+            self.CONFIG = CONFIG
+            self.PATHS = PATHS
+            self.DATABASE_URL = DATABASE_URL
+            self._banned_words_local_cache = {}
+            self._global_banned_words_cache: List[str] = []
+            self._global_banned_words_loaded = False
+            self._global_words_lock = asyncio.Lock()
+            self._group_security_columns_cache: Optional[set] = None
+
+            self._singleton_init_done = True
+        except Exception:
+            self._singleton_init_done = False
+            raise
+
+    # =================================================================
+    # ✅ ISSUE-3 (v7.7.5): مساعد لتتبّع مهام الخلفية
+    # =================================================================
+
+    def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
+        """يُنشئ مهمة ويسجّلها في _bg_tasks لمنع GC."""
         try:
-            self._sqlite_alive_ts = weakref.WeakKeyDictionary()
-            self._use_alive_cache = True
-        except Exception:
-            self._sqlite_alive_ts = None
-            self._use_alive_cache = False
-
-        # ✅ N-3: log once
-        self._alive_cache_warned = False
-
-        self._pool_none_warned = False
-        self._recovering_pool = False
-
-        self._user_locks: Dict[int, asyncio.Lock] = {}
-        self._channel_locks: Dict[int, asyncio.Lock] = {}
-        self._user_locks_last_access: Dict[int, float] = {}
-        self._user_locks_lock = asyncio.Lock()
-        self._channel_locks_lock = asyncio.Lock()
-        self._channel_locks_last_access = {}
-        self._MAX_CHANNEL_LOCKS = MAX_CHANNEL_LOCKS_CONFIG
-        self._group_locks = defaultdict(lambda: asyncio.Lock())
-        self._group_locks_last_access = {}
-        self._group_locks_lock = asyncio.Lock()
-        self._MAX_GROUP_LOCKS = MAX_GROUP_LOCKS_CONFIG
-        self._penalty_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
-        self._penalty_locks_last_access: Dict[Tuple[int, int], float] = {}
-        self._penalty_locks_lock = asyncio.Lock()
-        self._MAX_PENALTY_LOCKS = MAX_PENALTY_LOCKS_CONFIG
-        self._overflow_penalty_lock = asyncio.Lock()
-        self._overflow_lock_warned = False
-
-        self._backup_lock = asyncio.Lock()
-        self._slow_query_log_threshold = float(
-            os.getenv("SLOW_QUERY_LOG_THRESHOLD", "1.0")
-        )
-        self._max_post_text_length = MAX_POST_TEXT_LENGTH
-        self._posts_batch_size = POSTS_BATCH_SIZE
-        self._explain_slow_queries = EXPLAIN_SLOW_QUERIES
-        self._query_timeout = self._connection_timeout * 2
-        self._commit_timeout = 30
-        self.DB_TYPE = DB_TYPE
-        self.USE_POSTGRES = USE_POSTGRES
-        self.USE_MYSQL = USE_MYSQL
-        self.TimeUtils = TimeUtils
-        self.internal_cache = internal_cache
-        self.CACHE_AVAILABLE = CACHE_AVAILABLE
-        self.banned_words_cache = banned_words_cache
-        self.settings_cache = settings_cache
-        self.groups_cache = groups_cache
-        self.auth_cache = auth_cache
-        self.posts_cache = posts_cache
-        self.CONFIG = CONFIG
-        self.PATHS = PATHS
-        self.DATABASE_URL = DATABASE_URL
-        self._banned_words_local_cache = {}
-        self._global_banned_words_cache: List[str] = []
-        self._global_banned_words_loaded = False
-        self._global_words_lock = asyncio.Lock()
-        self._group_security_columns_cache: Optional[set] = None
+            task = asyncio.create_task(coro)
+        except Exception as e:
+            logger.warning(f"⚠️ فشل create_task: {e}")
+            return None
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     # =================================================================
     # تتبع SQLite conns
@@ -1661,7 +1891,7 @@ class Database(
                 pass
 
     # =================================================================
-    # التهيئة — BUG-1 (v7.7.2): close() يُصفّر _closing في finally
+    # التهيئة
     # =================================================================
 
     async def initialize(self):
@@ -1672,19 +1902,14 @@ class Database(
                 return
             if self._closing:
                 raise RuntimeError("Database is closing")
-            try:
-                await self._do_initialize()
-                self._closed = False
-            finally:
-                # _closing يُصفَّر في initialize فقط عند فشل _do_initialize
-                # (في المسار الناجح، close() لم يُضبطه أصلاً)
-                pass
+            await self._do_initialize()
+            self._closed = False
 
     async def _do_initialize(self):
         try:
             if USE_POSTGRES:
                 async def _pg_factory():
-                    return await asyncpg.create_pool(
+                    pool = await asyncpg.create_pool(
                         dsn=DATABASE_URL,
                         min_size=self._min_connections,
                         max_size=self._max_connections,
@@ -1697,6 +1922,14 @@ class Database(
                             "timezone": "UTC",
                         },
                     )
+                    try:
+                        async with pool.acquire() as _c:
+                            await _c.fetchval("SELECT 1")
+                    except Exception as _test_e:
+                        raise _FactoryFailed(
+                            f"PG pool اختبار فشل: {_test_e}", pool
+                        )
+                    return pool
 
                 async def _pg_cleanup(pool):
                     try:
@@ -1714,25 +1947,55 @@ class Database(
                     f"max={self._max_connections})"
                 )
             elif USE_MYSQL:
-                pattern = (
-                    r"mysql(?:\+asyncmy)?://([^:]+):([^@]+)@"
-                    r"([^:]+):(\d+)/(.+)"
-                )
-                match = re.match(pattern, DATABASE_URL)
-                if not match:
-                    raise ValueError("Invalid MySQL DATABASE_URL")
-                user, password, host, port, database = match.groups()
+                # ✅ FIX-C (v7.7.5): urlparse بدل regex هشّ
+                try:
+                    parsed = urlparse(DATABASE_URL)
+                    if not parsed.hostname:
+                        raise ValueError("no host in DATABASE_URL")
+                    _mysql_cfg = {
+                        "host": parsed.hostname,
+                        "port": int(parsed.port or 3306),
+                        "user": parsed.username or "",
+                        "password": parsed.password or "",
+                        "db": (parsed.path or "/").lstrip("/"),
+                    }
+                    if not _mysql_cfg["db"]:
+                        raise ValueError("no database in DATABASE_URL")
+                except Exception as _pe:
+                    logger.error(f"❌ فشل تفكيك MySQL URL: {_pe}")
+                    raise ValueError(
+                        f"Invalid MySQL DATABASE_URL: {_pe}"
+                    ) from _pe
 
                 async def _mysql_factory():
-                    return await asyncmy.create_pool(
-                        host=host, port=int(port), user=user,
-                        password=password, db=database,
+                    pool = await asyncmy.create_pool(
+                        host=_mysql_cfg["host"],
+                        port=_mysql_cfg["port"],
+                        user=_mysql_cfg["user"],
+                        password=_mysql_cfg["password"],
+                        db=_mysql_cfg["db"],
                         minsize=self._min_connections,
                         maxsize=self._max_connections,
                         pool_recycle=3600, autocommit=False,
                         charset="utf8mb4",
                         init_command="SET time_zone = '+00:00'",
                     )
+                    try:
+                        async with pool.acquire() as _c:
+                            cur = await _c.cursor()
+                            try:
+                                await cur.execute("SELECT 1")
+                                await cur.fetchone()
+                            finally:
+                                try:
+                                    await cur.close()
+                                except Exception:
+                                    pass
+                    except Exception as _test_e:
+                        raise _FactoryFailed(
+                            f"MySQL pool اختبار فشل: {_test_e}", pool
+                        )
+                    return pool
 
                 async def _mysql_cleanup(pool):
                     try:
@@ -1765,7 +2028,6 @@ class Database(
                 )
                 await self._sqlite_queue.put(conn)
                 self._sqlite_open_count = 1
-                self._track_sqlite_conn(conn)
                 logger.info(
                     f"✅ Pool SQLite جاهز "
                     f"(size={self._sqlite_pool_size}, initial=1)"
@@ -1773,7 +2035,6 @@ class Database(
 
             self._pool_none_warned = False
 
-            # ✅ BUG-2: create_task قبل _initialized=True
             if self._cleanup_task is None or self._cleanup_task.done():
                 self._cleanup_task = asyncio.create_task(
                     self._auto_cleanup_locks()
@@ -1835,7 +2096,6 @@ class Database(
             return None
 
     async def _sqlite_is_alive(self, conn) -> bool:
-        # ✅ N-3: log once على failure الـ cache
         if not self._use_alive_cache or self._sqlite_alive_ts is None:
             try:
                 cursor = await conn.execute("SELECT 1")
@@ -1897,14 +2157,11 @@ class Database(
             return False
 
     async def close(self):
-        """
-        ✅ BUG-1 (v7.7.2): _closing يُصفَّر في finally.
-        الآن initialize() بعد close() يعمل.
-        """
         async with self._lifecycle_lock:
             if self._closed:
                 return
             self._closing = True
+            cleanup_error: Optional[BaseException] = None
             try:
                 tasks = []
                 if self._cleanup_task:
@@ -1916,6 +2173,11 @@ class Database(
                 if getattr(self, "_cache_cleanup_task", None):
                     self._cache_cleanup_task.cancel()
                     tasks.append(self._cache_cleanup_task)
+                # ✅ ISSUE-3: إلغاء مهام الخلفية المتتبعة
+                for bg in list(self._bg_tasks):
+                    if not bg.done():
+                        bg.cancel()
+                        tasks.append(bg)
                 if tasks:
                     results = await asyncio.gather(
                         *tasks, return_exceptions=True
@@ -1927,6 +2189,7 @@ class Database(
                             logger.warning(
                                 f"⚠️ فشل task أثناء close: {r}"
                             )
+                self._bg_tasks.clear()
 
                 if USE_POSTGRES and self._pool:
                     try:
@@ -2000,14 +2263,18 @@ class Database(
                 except Exception:
                     pass
 
-                self._initialized = False
                 self._cleanup_task = None
                 self._secondary_index_task = None
                 self._cache_cleanup_task = None
                 self._closed = True
+            except BaseException as be:
+                cleanup_error = be
             finally:
-                # ✅ BUG-1: الإغلاق انتهى — _closing يُصفَّر دائماً
+                # ✅ FIX-D: ضمان إنهاء الحالة حتى عند استثناء
+                self._initialized = False
                 self._closing = False
+            if cleanup_error is not None:
+                raise cleanup_error
 
     async def reconnect(self):
         try:
@@ -2055,6 +2322,10 @@ class Database(
         finally:
             self._recovering_pool = False
 
+    # =================================================================
+    # _get_connection — M-5
+    # =================================================================
+
     async def _get_connection(self):
         if self._closing:
             raise RuntimeError("Database is closing")
@@ -2095,20 +2366,37 @@ class Database(
                         self._sqlite_open_count = max(
                             0, self._sqlite_open_count - 1
                         )
-                        if self._sqlite_open_count < self._sqlite_pool_size:
-                            new_conn = await self._create_sqlite_connection()
-                            if new_conn is not None:
+                    reserved = False
+                    async with self._sqlite_creation_lock:
+                        async with self._sqlite_count_lock:
+                            if self._sqlite_open_count < self._sqlite_pool_size:
                                 self._sqlite_open_count += 1
-                                return new_conn
+                                reserved = True
+                    if reserved:
+                        new_conn = await self._create_sqlite_connection()
+                        if new_conn is not None:
+                            return new_conn
+                        async with self._sqlite_count_lock:
+                            self._sqlite_open_count = max(
+                                0, self._sqlite_open_count - 1
+                            )
                     raise RuntimeError("فشل استبدال SQLite conn")
                 return conn
             except asyncio.TimeoutError:
-                async with self._sqlite_count_lock:
-                    if self._sqlite_open_count < self._sqlite_pool_size:
-                        conn = await self._create_sqlite_connection()
-                        if conn is not None:
+                reserved = False
+                async with self._sqlite_creation_lock:
+                    async with self._sqlite_count_lock:
+                        if self._sqlite_open_count < self._sqlite_pool_size:
                             self._sqlite_open_count += 1
-                            return conn
+                            reserved = True
+                if reserved:
+                    conn = await self._create_sqlite_connection()
+                    if conn is not None:
+                        return conn
+                    async with self._sqlite_count_lock:
+                        self._sqlite_open_count = max(
+                            0, self._sqlite_open_count - 1
+                        )
                 return await asyncio.wait_for(
                     self._sqlite_queue.get(),
                     timeout=self._connection_timeout,
@@ -2162,6 +2450,45 @@ class Database(
                         0, self._sqlite_open_count - 1
                     )
 
+    # =================================================================
+    # ISSUE-1: MySQL — close ثم release
+    # =================================================================
+
+    async def _destroy_connection(self, conn):
+        """تدمير conn غير قابل لإعادة الاستخدام — لا يُعاد إلى pool."""
+        if USE_POSTGRES:
+            try:
+                if hasattr(conn, "terminate"):
+                    conn.terminate()
+                else:
+                    await conn.close()
+            except Exception as e:
+                logger.debug(f"PG destroy: {e}")
+        elif USE_MYSQL:
+            try:
+                conn.close()
+            except Exception as e:
+                logger.debug(f"MySQL close: {e}")
+            if self._pool is not None:
+                try:
+                    await self._pool.release(conn)
+                except Exception as e:
+                    logger.debug(f"MySQL release-after-destroy: {e}")
+        else:
+            self._untrack_sqlite_conn(conn)
+            try:
+                await conn.close()
+            except Exception:
+                pass
+            async with self._sqlite_count_lock:
+                self._sqlite_open_count = max(
+                    0, self._sqlite_open_count - 1
+                )
+
+    # =================================================================
+    # connection() — B-3
+    # =================================================================
+
     @asynccontextmanager
     async def connection(self):
         conn = await self._get_connection()
@@ -2172,7 +2499,8 @@ class Database(
                     if conn.in_transaction:
                         await conn.commit()
                 except Exception as e:
-                    logger.debug(f"SQLite commit: {e}")
+                    logger.error(f"❌ SQLite COMMIT فشل: {e}")
+                    raise
             elif USE_MYSQL:
                 try:
                     await conn.commit()
@@ -2195,10 +2523,15 @@ class Database(
         finally:
             await self._return_connection(conn)
 
+    # =================================================================
+    # transaction() — M-3 + ISSUE-2 + NOTE-2
+    # =================================================================
+
     @asynccontextmanager
     async def transaction(self):
         conn = await self._get_connection()
         tx = None
+        destroy = False
         try:
             if USE_POSTGRES:
                 tx = conn.transaction()
@@ -2208,15 +2541,20 @@ class Database(
             else:
                 await conn.execute("BEGIN TRANSACTION")
             yield conn
-            if USE_POSTGRES:
-                await asyncio.wait_for(
-                    tx.commit(), timeout=self._commit_timeout
-                )
-            else:
-                await asyncio.wait_for(
-                    conn.execute("COMMIT"), timeout=self._commit_timeout
-                )
-        except Exception as e:
+            try:
+                if USE_POSTGRES:
+                    await asyncio.wait_for(
+                        tx.commit(), timeout=self._commit_timeout
+                    )
+                else:
+                    await asyncio.wait_for(
+                        conn.execute("COMMIT"),
+                        timeout=self._commit_timeout,
+                    )
+            except BaseException:
+                destroy = True
+                raise
+        except BaseException as e:
             try:
                 if USE_POSTGRES and tx is not None:
                     await asyncio.wait_for(
@@ -2227,12 +2565,31 @@ class Database(
                         conn.execute("ROLLBACK"),
                         timeout=self._commit_timeout,
                     )
-            except Exception as re_exc:
-                logger.warning(f"⚠️ rollback: {re_exc}")
-            logger.error(f"❌ فشلت المعاملة: {e}", exc_info=True)
+            except BaseException as re_exc:
+                if not isinstance(re_exc, asyncio.CancelledError):
+                    logger.warning(f"⚠️ rollback: {re_exc}")
+                destroy = True
+            if not isinstance(e, asyncio.CancelledError):
+                logger.error(f"❌ فشلت المعاملة: {e}", exc_info=True)
             raise
         finally:
-            await self._return_connection(conn)
+            if destroy:
+                try:
+                    await self._destroy_connection(conn)
+                except asyncio.CancelledError:
+                    try:
+                        if USE_POSTGRES and hasattr(conn, "terminate"):
+                            conn.terminate()
+                        elif USE_MYSQL:
+                            conn.close()
+                    except Exception:
+                        pass
+                    raise
+                except Exception as de:
+                    logger.warning(f"⚠️ destroy_connection: {de}")
+                    await self._return_connection(conn)
+            else:
+                await self._return_connection(conn)
 
     # =================================================================
     # Query layer
@@ -2349,10 +2706,7 @@ class Database(
                     e, asyncpg.exceptions.PostgresConnectionError
                 ):
                     retryable = True
-                    try:
-                        asyncio.create_task(self._recover_pool())
-                    except Exception:
-                        pass
+                    self._spawn_bg_task(self._recover_pool())
                 elif USE_MYSQL and AsyncMySQLError is not None:
                     try:
                         if isinstance(e, AsyncMySQLError):
@@ -2362,14 +2716,10 @@ class Database(
                                 "connection", "timeout",
                             ]):
                                 retryable = True
-                            # ✅ M-1: recovery لـ MySQL أيضاً
                             if "connection" in error_msg:
-                                try:
-                                    asyncio.create_task(
-                                        self._recover_pool()
-                                    )
-                                except Exception:
-                                    pass
+                                self._spawn_bg_task(
+                                    self._recover_pool()
+                                )
                     except Exception:
                         pass
                 if retryable and attempt < max_retries - 1:
@@ -2412,7 +2762,6 @@ class Database(
                 return int(m.group(1))
             return 0
         elif USE_MYSQL:
-            # ✅ N-1: cursor منفصل لـ ROW_COUNT
             cursor = await conn.cursor()
             try:
                 await self._execute_with_logging(
@@ -2727,8 +3076,9 @@ class Database(
                     key=lambda x: x[1],
                 )
                 to_remove = []
+                target = max(1, len(sorted_items) // 4)
                 for uid, _ in sorted_items:
-                    if len(to_remove) >= len(sorted_items) // 2:
+                    if len(to_remove) >= target:
                         break
                     lock = self._user_locks.get(uid)
                     if lock and not lock.locked():
@@ -2736,6 +3086,14 @@ class Database(
                 for uid in to_remove:
                     self._user_locks.pop(uid, None)
                     self._user_locks_last_access.pop(uid, None)
+                if len(self._user_locks) >= self._MAX_USER_LOCKS:
+                    if not self._overflow_user_lock_warned:
+                        logger.warning(
+                            f"⚠️ user_locks تجاوز الحد "
+                            f"({len(self._user_locks)}/{self._MAX_USER_LOCKS}) "
+                            f"— يسمح بالنمو"
+                        )
+                        self._overflow_user_lock_warned = True
             if user_id not in self._user_locks:
                 self._user_locks[user_id] = asyncio.Lock()
             self._user_locks_last_access[user_id] = time.monotonic()
@@ -2849,6 +3207,8 @@ class Database(
                 for uid in to_remove:
                     self._user_locks.pop(uid, None)
                     self._user_locks_last_access.pop(uid, None)
+                if len(self._user_locks) < self._MAX_USER_LOCKS:
+                    self._overflow_user_lock_warned = False
                 return len(to_remove)
         except Exception as e:
             logger.error(f"❌ cleanup_user_locks: {e}")
@@ -3651,27 +4011,37 @@ class Database(
                 finally:
                     await cursor.close()
                 if not existing:
-                    await conn.execute(
-                        """INSERT INTO plans
-                           (name, description, price, currency,
-                            duration_days, max_channels, max_posts,
-                            features, is_active, is_gift, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                                   %s, %s, %s)""",
-                        (plan["name"], plan["description"],
-                         plan["price"], "XTR",
-                         plan["duration_days"],
-                         plan["max_channels"],
-                         plan["max_posts"], plan["features"], 1,
-                         plan["is_gift"], now_dt),
-                    )
+                    cursor2 = await conn.cursor()
+                    try:
+                        await cursor2.execute(
+                            """INSERT INTO plans
+                               (name, description, price, currency,
+                                duration_days, max_channels,
+                                max_posts, features, is_active,
+                                is_gift, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s,
+                                       %s, %s, %s, %s)""",
+                            (plan["name"], plan["description"],
+                             plan["price"], "XTR",
+                             plan["duration_days"],
+                             plan["max_channels"],
+                             plan["max_posts"], plan["features"], 1,
+                             plan["is_gift"], now_dt),
+                        )
+                    finally:
+                        await cursor2.close()
                 else:
-                    await conn.execute(
-                        "UPDATE plans SET max_channels = %s, "
-                        "max_posts = %s WHERE name = %s",
-                        (plan["max_channels"], plan["max_posts"],
-                         plan["name"]),
-                    )
+                    cursor3 = await conn.cursor()
+                    try:
+                        await cursor3.execute(
+                            "UPDATE plans SET max_channels = %s, "
+                            "max_posts = %s WHERE name = %s",
+                            (plan["max_channels"],
+                             plan["max_posts"],
+                             plan["name"]),
+                        )
+                    finally:
+                        await cursor3.close()
             else:
                 cursor = await conn.execute(
                     "SELECT id FROM plans WHERE name = ?",
@@ -3737,7 +4107,6 @@ class Database(
                     logger.warning("⚠️ owner_id=1 غير موجود")
                     return
                 owner_id = 1
-            # ✅ N-2: timestamp واحد
             ts = TimeUtils.utc_now()
             words_to_insert = []
             for word in BANNED_WORDS:
@@ -3774,13 +4143,17 @@ class Database(
                             "banned_words_hash", current_hash,
                         )
                     elif USE_MYSQL:
-                        await conn.execute(
-                            "INSERT INTO settings "
-                            "(`key`, `value`) VALUES (%s, %s) "
-                            "ON DUPLICATE KEY UPDATE "
-                            "`value` = VALUES(`value`)",
-                            ("banned_words_hash", current_hash),
-                        )
+                        cursor = await conn.cursor()
+                        try:
+                            await cursor.execute(
+                                "INSERT INTO settings "
+                                "(`key`, `value`) VALUES (%s, %s) "
+                                "ON DUPLICATE KEY UPDATE "
+                                "`value` = VALUES(`value`)",
+                                ("banned_words_hash", current_hash),
+                            )
+                        finally:
+                            await cursor.close()
                     else:
                         await conn.execute(
                             "INSERT INTO settings (key, value) "
@@ -3915,13 +4288,17 @@ class Database(
                             "auto_replies_hash", current_hash,
                         )
                     elif USE_MYSQL:
-                        await conn.execute(
-                            "INSERT INTO settings "
-                            "(`key`, `value`) VALUES (%s, %s) "
-                            "ON DUPLICATE KEY UPDATE "
-                            "`value` = VALUES(`value`)",
-                            ("auto_replies_hash", current_hash),
-                        )
+                        cursor = await conn.cursor()
+                        try:
+                            await cursor.execute(
+                                "INSERT INTO settings "
+                                "(`key`, `value`) VALUES (%s, %s) "
+                                "ON DUPLICATE KEY UPDATE "
+                                "`value` = VALUES(`value`)",
+                                ("auto_replies_hash", current_hash),
+                            )
+                        finally:
+                            await cursor.close()
                     else:
                         await conn.execute(
                             "INSERT INTO settings (key, value) "
@@ -3939,7 +4316,15 @@ class Database(
         except Exception as e:
             logger.error(f"❌ auto_replies: {e}")
 
+    # =================================================================
+    # ✅ FIX-MISSING (v7.7.5): استعادة _get_secondary_indexes
+    # =================================================================
+
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
+        """
+        Hook للتوسيع — يُعيد قائمة (table, idx_name, create_sql).
+        الافتراضي فارغ. يمكن لـ subclass أو monkey-patch تزويده.
+        """
         return []
 
     def _compute_bootstrap_hash(self) -> str:
@@ -3988,7 +4373,7 @@ class Database(
                 pass
 
     # =================================================================
-    # Bootstrap — N-5: MySQL DDL ملاحظة
+    # Bootstrap
     # =================================================================
 
     async def _do_bootstrap_inner(self, conn) -> bool:
@@ -4017,13 +4402,17 @@ class Database(
                         "bootstrap_hash", current_hash,
                     )
                 elif USE_MYSQL:
-                    await conn.execute(
-                        "INSERT INTO settings "
-                        "(`key`, `value`) VALUES (%s, %s) "
-                        "ON DUPLICATE KEY UPDATE "
-                        "`value` = VALUES(`value`)",
-                        ("bootstrap_hash", current_hash),
-                    )
+                    cursor = await conn.cursor()
+                    try:
+                        await cursor.execute(
+                            "INSERT INTO settings "
+                            "(`key`, `value`) VALUES (%s, %s) "
+                            "ON DUPLICATE KEY UPDATE "
+                            "`value` = VALUES(`value`)",
+                            ("bootstrap_hash", current_hash),
+                        )
+                    finally:
+                        await cursor.close()
                 else:
                     await conn.execute(
                         "INSERT INTO settings (key, value) "
@@ -4046,10 +4435,6 @@ class Database(
         async with self._bootstrap_lock:
             try:
                 await self.initialize()
-                # ✅ N-5: MySQL DDL غير transactional.
-                # استخدام self.transaction() مع MySQL مضلِّل،
-                # لذا نستخدم connection() مباشرة.
-                # ملاحظة: ترتيب الأقفال: _bootstrap_lock → _lifecycle_lock
                 if USE_POSTGRES:
                     async with self.transaction() as conn:
                         await self._do_bootstrap_inner(conn)
@@ -4402,7 +4787,7 @@ class Database(
                 _clone_start_data(data),
                 ttl=60,
             )
-            if CACHE_AVAILABLE and not include_stats:
+            if CACHE_AVAILABLE and include_stats:
                 full_data = {
                     "user_data": _clone_start_data(data),
                     "language": data.get("language", "ar"),
@@ -4666,6 +5051,10 @@ class Database(
             await self._invalidate_user_cache_keys(user_id)
         return result
 
+    # =================================================================
+    # B-2: Boolean setters
+    # =================================================================
+
     async def get_auto_publish_status(self, user_id: int) -> bool:
         cache_key = f"auto_publish_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -4682,13 +5071,21 @@ class Database(
     async def set_auto_publish(
         self, user_id: int, status: bool
     ) -> bool:
-        result = await self.execute(
-            "UPDATE users SET auto_publish = ? WHERE user_id = ?",
-            (1 if status else 0, user_id),
-        ) > 0
-        if result:
-            await self._invalidate_user_cache_keys(user_id)
-        return result
+        async with self.transaction() as conn:
+            exists = await self._fetchval_with_conn(
+                conn,
+                "SELECT 1 FROM users WHERE user_id = ?",
+                user_id,
+            )
+            if not exists:
+                return False
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET auto_publish = ? WHERE user_id = ?",
+                1 if status else 0, user_id,
+            )
+        await self._invalidate_user_cache_keys(user_id)
+        return True
 
     async def get_auto_recycle_status(self, user_id: int) -> bool:
         cache_key = f"auto_recycle_{user_id}"
@@ -4706,13 +5103,21 @@ class Database(
     async def set_auto_recycle(
         self, user_id: int, status: bool
     ) -> bool:
-        result = await self.execute(
-            "UPDATE users SET auto_recycle = ? WHERE user_id = ?",
-            (1 if status else 0, user_id),
-        ) > 0
-        if result:
-            await self._invalidate_user_cache_keys(user_id)
-        return result
+        async with self.transaction() as conn:
+            exists = await self._fetchval_with_conn(
+                conn,
+                "SELECT 1 FROM users WHERE user_id = ?",
+                user_id,
+            )
+            if not exists:
+                return False
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET auto_recycle = ? WHERE user_id = ?",
+                1 if status else 0, user_id,
+            )
+        await self._invalidate_user_cache_keys(user_id)
+        return True
 
     async def get_user_settings_batch(
         self, user_id: int
@@ -4748,22 +5153,38 @@ class Database(
         return result == 1
 
     async def ban_user(self, user_id: int) -> bool:
-        result = await self.execute(
-            "UPDATE users SET banned = 1 WHERE user_id = ?",
-            (user_id,),
-        ) > 0
-        if result:
-            await self._invalidate_user_cache_keys(user_id)
-        return result
+        async with self.transaction() as conn:
+            exists = await self._fetchval_with_conn(
+                conn,
+                "SELECT 1 FROM users WHERE user_id = ?",
+                user_id,
+            )
+            if not exists:
+                return False
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET banned = 1 WHERE user_id = ?",
+                user_id,
+            )
+        await self._invalidate_user_cache_keys(user_id)
+        return True
 
     async def unban_user(self, user_id: int) -> bool:
-        result = await self.execute(
-            "UPDATE users SET banned = 0 WHERE user_id = ?",
-            (user_id,),
-        ) > 0
-        if result:
-            await self._invalidate_user_cache_keys(user_id)
-        return result
+        async with self.transaction() as conn:
+            exists = await self._fetchval_with_conn(
+                conn,
+                "SELECT 1 FROM users WHERE user_id = ?",
+                user_id,
+            )
+            if not exists:
+                return False
+            await self._execute_with_conn(
+                conn,
+                "UPDATE users SET banned = 0 WHERE user_id = ?",
+                user_id,
+            )
+        await self._invalidate_user_cache_keys(user_id)
+        return True
 
     async def get_all_users(
         self, limit: int = 10000, offset: int = 0
@@ -4796,9 +5217,9 @@ class Database(
         if not user_ids:
             return 0
         try:
+            total_updated = 0
             async with self.transaction() as conn:
                 BATCH = 400 if DB_TYPE == "sqlite" else 500
-                total_updated = 0
                 for i in range(0, len(user_ids), BATCH):
                     batch = user_ids[i: i + BATCH]
                     placeholders = ",".join(["?"] * len(batch))
@@ -4809,19 +5230,13 @@ class Database(
                         *batch,
                     )
                     total_updated += updated
-                    for uid in batch:
-                        await internal_cache.invalidate(
-                            f"user_{uid}"
-                        )
-                        await internal_cache.invalidate(
-                            f"user_{uid}_True"
-                        )
-                        await internal_cache.invalidate(
-                            f"user_{uid}_False"
-                        )
-                if CACHE_AVAILABLE:
-                    for uid in user_ids:
-                        await invalidate_user_cache(uid)
+            for uid in user_ids:
+                await internal_cache.invalidate(f"user_{uid}")
+                await internal_cache.invalidate(f"user_{uid}_True")
+                await internal_cache.invalidate(f"user_{uid}_False")
+            if CACHE_AVAILABLE:
+                for uid in user_ids:
+                    await invalidate_user_cache(uid)
             return total_updated
         except Exception as e:
             logger.error(
@@ -4960,6 +5375,7 @@ class Database(
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
         if USE_MYSQL:
+            now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             query = """
                 SELECT uc.id, uc.channel_id, uc.user_id,
                        u.auto_publish, u.auto_recycle,
@@ -5023,12 +5439,7 @@ class Database(
             """
             return await self.fetchall(
                 query,
-                (
-                    now.strftime("%Y-%m-%d %H:%M:%S"),
-                    owner_id,
-                    now.strftime("%Y-%m-%d %H:%M:%S"),
-                    limit,
-                ),
+                (now_str, owner_id, now_str, limit),
             )
         else:
             query = """
@@ -5234,11 +5645,21 @@ class Database(
                 return None
 
     async def remove_penalty(self, penalty_id: int) -> bool:
-        return await self.execute(
-            "UPDATE user_penalties SET status = 'removed' "
-            "WHERE id = ?",
-            (penalty_id,),
-        ) > 0
+        async with self.transaction() as conn:
+            exists = await self._fetchval_with_conn(
+                conn,
+                "SELECT 1 FROM user_penalties WHERE id = ?",
+                penalty_id,
+            )
+            if not exists:
+                return False
+            await self._execute_with_conn(
+                conn,
+                "UPDATE user_penalties SET status = 'removed' "
+                "WHERE id = ?",
+                penalty_id,
+            )
+        return True
 
     async def remove_penalties_for_user(
         self, user_id: int, chat_id: int,
@@ -5284,34 +5705,8 @@ class Database(
         BATCH = 5000
         try:
             while True:
-                if USE_POSTGRES:
-                    pending = await self.fetchval(
-                        "SELECT 1 FROM user_penalties "
-                        "WHERE status = 'active' "
-                        "AND end_time IS NOT NULL "
-                        "AND end_time <= NOW() LIMIT 1",
-                        default=None,
-                    )
-                elif USE_MYSQL:
-                    pending = await self.fetchval(
-                        "SELECT 1 FROM user_penalties "
-                        "WHERE status = 'active' "
-                        "AND end_time IS NOT NULL "
-                        "AND end_time <= UTC_TIMESTAMP() LIMIT 1",
-                        default=None,
-                    )
-                else:
-                    pending = await self.fetchval(
-                        "SELECT 1 FROM user_penalties "
-                        "WHERE status = 'active' "
-                        "AND end_time IS NOT NULL "
-                        "AND end_time <= datetime('now') LIMIT 1",
-                        default=None,
-                    )
-                if not pending:
-                    break
-
                 batch_expired = 0
+                got_rows = 0
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
                         ids = await self._fetchall_with_conn(
@@ -5324,6 +5719,7 @@ class Database(
                             "LIMIT $1",
                             BATCH,
                         )
+                        got_rows = len(ids)
                         if not ids:
                             break
                         id_list = [r["id"] for r in ids]
@@ -5363,6 +5759,7 @@ class Database(
                             "LIMIT %s",
                             BATCH,
                         )
+                        got_rows = len(ids)
                         if not ids:
                             break
                         id_list = [r["id"] for r in ids]
@@ -5400,6 +5797,7 @@ class Database(
                             "LIMIT ?",
                             BATCH,
                         )
+                        got_rows = len(ids)
                         if not ids:
                             break
                         id_list = [r["id"] for r in ids]
@@ -5433,7 +5831,7 @@ class Database(
                         )
 
                 total_expired += batch_expired
-                if batch_expired < BATCH:
+                if got_rows < BATCH:
                     break
                 await asyncio.sleep(0)
 
@@ -5447,12 +5845,16 @@ class Database(
                             "NOW() - INTERVAL '90 days'"
                         )
                     elif USE_MYSQL:
-                        await conn.execute(
-                            "DELETE FROM penalty_archive "
-                            "WHERE archived_at IS NOT NULL "
-                            "AND archived_at < "
-                            "UTC_TIMESTAMP() - INTERVAL 90 DAY"
-                        )
+                        cursor = await conn.cursor()
+                        try:
+                            await cursor.execute(
+                                "DELETE FROM penalty_archive "
+                                "WHERE archived_at IS NOT NULL "
+                                "AND archived_at < "
+                                "UTC_TIMESTAMP() - INTERVAL 90 DAY"
+                            )
+                        finally:
+                            await cursor.close()
                     else:
                         await conn.execute(
                             "DELETE FROM penalty_archive "
@@ -5524,8 +5926,10 @@ __all__ = [
     "get_cache_stats", "cache_cleanup_task", "CACHE_AVAILABLE",
     "KNOWN_UNIQUE_FALLBACK", "_validate_column_def",
     "_clone_start_data", "_create_pool_with_retry",
+    "_FactoryFailed",
     "_sql_get_setting_value", "_mysql_random",
     "_find_values_end", "_insert_before_returning",
+    "_replace_excluded_with_values",
     "_get_unique_columns", "_find_best_conflict_target",
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
