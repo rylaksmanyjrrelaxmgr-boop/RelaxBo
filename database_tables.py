@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.6)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.7)
 ================================================================================
+🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX):
+  ✅ CURRENT_SCHEMA_VERSION: 7 → 8 (إجبار rebuild لمرة واحدة)
+  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat
+  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat_word
+  ✅ حل بطء 4.55s على SELECT DISTINCT word FROM banned_words
+  ✅ حل بطء 1.67s على SELECT word FROM banned_words
+
 🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
   ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
   ✅ إصلاح فقدان الفهارس الصامت (lost index silent failure)
@@ -39,8 +46,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.6: 6 → 7 (إجبار rebuild لمرة واحدة)
-CURRENT_SCHEMA_VERSION = 7
+# ✅ v7.6.7: 7 → 8 (إجبار rebuild لإنشاء فهارس banned_words المفقودة)
+CURRENT_SCHEMA_VERSION = 8
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -49,7 +56,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.5: 65 → 66
+EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.7: 66 (لم يتغير — فقط رُفع schema)
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -118,6 +125,7 @@ COMMON_INDEXES = [
      "anonymous_admins(anonymous_id, chat_id)"),
 
     # ═══ BANNED_WORDS (2) ═══
+    # ✅ v7.6.7: هذان الفهرسـان كانا مفقودين فعلياً — يسببان بطء 4.55s
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
@@ -333,6 +341,7 @@ DEPRECATED_INDEXES = [
 ]
 
 # ✅ v7.6.6: فهارس حرجة يجب فحصها حتى مع fast-path
+# ✅ v7.6.7: إضافة فهارس banned_words (سبب بطء 4.55s)
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel",
@@ -342,6 +351,9 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_channels_user_banned",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
+    # 🆕 v7.6.7: فهارس الكلمات المحظورة الحرجة
+    "idx_banned_words_chat",
+    "idx_banned_words_chat_word",
 })
 
 assert len(COMMON_INDEXES) == EXPECTED_INDEX_COUNT, (
