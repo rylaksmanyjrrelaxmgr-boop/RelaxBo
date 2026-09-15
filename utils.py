@@ -2,33 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.3 - Resilient Banned-Words Cache)
+utils.py - الأدوات المساعدة للبوت (v7.8.4 - UTC-Consistent Timestamps)
 =================================================================================
+🕐 v7.8.4 (توحيد التوقيت على UTC — القاعدة الذهبية):
+    ✅ BackgroundTasks._do_backup: استخدام utc_now() بدل mecca_now()
+       لاسم ملف النسخة الاحتياطية.
+       السبب: قاعدة البيانات + سجلات Render = UTC، فيجب أن يكون اسم
+       الملف بنفس التوقيت لتفادي الالتباس (كان يُنتج فرق 3 ساعات).
+    ✅ mecca_now() تبقى للعرض للمستخدم فقط (heartbeat، UI).
+
 🧠 v7.8.3 (حماية مزدوجة للكلمات المحظورة):
     ✅ get_banned_words_cached: عند فشل DB، أرجِع الكاش القديم بدل []
-       (يمنع تعطّل فلتر الكلمات المحظورة عند أي خطأ عابر)
     ✅ _get_global_words_cached: نفس الحماية للكلمات العامة
     ✅ invalidate_banned_words_cache: يُبطل كاش Database أيضاً
-       (_banned_words_cache + _banned_words_cache_time)
     ✅ warmup_all: يشمل warmed up للكاش المحلي في Database
-    ✅ التعامل مع AttributeError من DB بأمان (getattr fallback)
 
 🧠 v7.8.2 (دمج سجل قناة المجموعات):
     ✅ KeyboardFactory._default_texts: إضافة 9 مفاتيح log_channel_*
-    ✅ التوافق مع group_log.py + handlers_callback.py v9.2.0
 
 🧠 v7.8.1 (حماية من thundering herd + batch subscriptions):
     ✅ SmartCache.get_or_set(): dedup للمفاتيح المتزامنة
     ✅ BackgroundTasks._publish_single_channel: يقبل has_sub مسبقاً
     ✅ BackgroundTasks.auto_publish: batch subscription check
-    ✅ Semaphore limit 8 (بدل 20) — ضغط أقل على Pool
-    ✅ تأخير بين المهام 0.3s (بدل 0.5s) — لكن أسرع عملياً
+    ✅ Semaphore limit 8 (بدل 20)
+    ✅ تأخير بين المهام 0.3s
 
 🧠 v7.8.0 (تحسينات ذكية شاملة):
     ✅ PenaltyFactory: Singleton strategies
     ✅ KeyboardFactory: Preload كل اللغات + Warmup
     ✅ TranslationManager: Preload + Async warmup
-    ✅ StateManager: TTLCache (تنظيف تلقائي)
+    ✅ StateManager: TTLCache
     ✅ RateLimiter: Adaptive (429-aware)
     ✅ _group_admins_cache: TTL متكيّف
     ✅ _get_security_stats: dedup cache (5s)
@@ -36,7 +39,7 @@ utils.py - الأدوات المساعدة للبوت (v7.8.3 - Resilient Banned
     ✅ safe_send: Exponential backoff للـ429
     ✅ _banned_words_cache: Global batching
     ✅ warmup_all(): Preload at startup
-    ✅ _query_cache: كاش موحّد للاستعلامات المتكررة
+    ✅ _query_cache: كاش موحّد
 
 📌 v7.7.3: _do_auth_check: Telegram API أولاً
 📌 v7.7.2: تصحيحات أمنية + تنظيف
@@ -86,10 +89,6 @@ logger = logging.getLogger(__name__)
 class SmartCache:
     """
     🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
-
-    - get_or_set: يضمن استدعاء واحد فقط لكل مفتاح حتى مع 50 كوروتين متزامنة
-    - LRU eviction عند الوصول للحد
-    - TTL قابل للتخصيص لكل مفتاح
     """
     __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
@@ -117,17 +116,10 @@ class SmartCache:
         loader: Callable[[], Awaitable[Any]],
         ttl: int = None,
     ) -> Any:
-        """
-        🧠 v7.8.1: حماية من thundering herd.
-
-        لو N كوروتين طلبت نفس المفتاح في نفس اللحظة → استدعاء DB واحد فقط.
-        """
-        # محاولة أولى سريعة
         value = await self.get(key)
         if value is not None:
             return value
 
-        # حماية: قفل per-key
         async with self._lock:
             lock = self._stampede_locks.get(key)
             if lock is None:
@@ -135,7 +127,6 @@ class SmartCache:
                 self._stampede_locks[key] = lock
 
         async with lock:
-            # إعادة فحص — ربما امتلأ المفتاح أثناء انتظار القفل
             value = await self.get(key)
             if value is not None:
                 return value
@@ -152,7 +143,6 @@ class SmartCache:
         effective_ttl = ttl if ttl is not None else self._ttl_default
         async with self._lock:
             if len(self._cache) >= self._max_size and key not in self._cache:
-                # LRU eviction — الأقدم أولاً
                 for k in list(self._cache.keys())[: self._max_size // 4]:
                     self._cache.pop(k, None)
             self._cache[key] = (value, time.time() + effective_ttl)
@@ -177,17 +167,21 @@ class SmartCache:
             return len(self._cache)
 
 
-# الكاشات العامة
-_auth_cache_smart = SmartCache(ttl=60, max_size=2000)   # positives
-_auth_neg_cache = SmartCache(ttl=15, max_size=1000)     # negatives
-_security_stats_cache = SmartCache(ttl=5, max_size=500) # dedup 5s
+_auth_cache_smart = SmartCache(ttl=60, max_size=2000)
+_auth_neg_cache = SmartCache(ttl=15, max_size=1000)
+_security_stats_cache = SmartCache(ttl=5, max_size=500)
 
 # =====================================================================
 # 1. أدوات الوقت
 # =====================================================================
 
 class TimeUtils:
-    """أدوات الوقت والتاريخ."""
+    """
+    🕐 القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
+
+    - utc_now():    للتخزين، أسماء الملفات، الحسابات، المقارنات
+    - mecca_now():  للعرض للمستخدم فقط (heartbeat, UI messages)
+    """
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -242,7 +236,6 @@ class TimeUtils:
 # =====================================================================
 
 class TextUtils:
-    """أدوات معالجة النصوص."""
     @staticmethod
     def contains_link(text: Optional[str]) -> bool:
         if not text:
@@ -281,9 +274,6 @@ class TextUtils:
 # =====================================================================
 
 class RateLimiter:
-    """
-    🧠 v7.8.0: محدد معدل ذكي — يبطئ تلقائياً عند ضغط Telegram (429).
-    """
     def __init__(self, max_concurrent: int = 10, max_per_second: int = 30):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._last_calls = deque(maxlen=max_per_second * 2)
@@ -295,7 +285,6 @@ class RateLimiter:
         self._429_count = 0
 
     def report_429(self):
-        """يُستدعى عند استقبال 429 من Telegram."""
         self._429_count += 1
         self._last_429 = time.time()
         self._throttle_factor = min(self._throttle_factor * 1.5, 5.0)
@@ -335,7 +324,6 @@ PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 # =====================================================================
 
 class MetricsCollector:
-    """جمع إحصائيات الأداء."""
     def __init__(self):
         self.api_calls = deque(maxlen=1000)
         self.errors = deque(maxlen=1000)
@@ -369,7 +357,6 @@ METRICS = MetricsCollector()
 # =====================================================================
 
 class AutoReplyCache:
-    """🧠 v7.8.0: كاش للردود التلقائية — يستخدم cachetools.TTLCache."""
     def __init__(self, maxsize: int = 300, ttl: int = 300):
         self._cache: TTLCache = TTLCache(maxsize=maxsize, ttl=ttl)
 
@@ -396,9 +383,6 @@ _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 # =====================================================================
 
 class TranslationManager:
-    """
-    🧠 v7.8.0: إدارة الترجمات مع preload + warmup.
-    """
     _translations: Dict[str, Dict] = {}
     _locales_dir: str = str(Path(__file__).resolve().parent / "locales")
     _default_lang: str = "ar"
@@ -438,7 +422,6 @@ class TranslationManager:
 
     @classmethod
     def preload_all(cls) -> int:
-        """🧠 v7.8.0: preload كل اللغات المتاحة."""
         langs = list(cls.get_available_languages().keys())
         count = 0
         for lang in langs:
@@ -484,7 +467,6 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
 # =====================================================================
 
 class UserState(Enum):
-    """حالات المستخدم."""
     NONE = auto()
     ADDING_POSTS = auto()
     WAIT_CHANNEL = auto()
@@ -551,7 +533,6 @@ class UserState(Enum):
 
 
 class StateManager:
-    """🧠 v7.8.0: إدارة الحالات بـ TTLCache (تنظيف تلقائي)."""
     _cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
     _lock = threading.Lock()
 
@@ -572,7 +553,6 @@ class StateManager:
 
     @classmethod
     def is_expired(cls, user_id: int, timeout: int = None) -> bool:
-        """يرجع True إن لم يكن موجوداً."""
         with cls._lock:
             return user_id not in cls._cache
 
@@ -581,7 +561,6 @@ class StateManager:
 # =====================================================================
 
 class CB:
-    """ثوابت بيانات الأزرار."""
     MAIN = "main"
     BACK = "back"
     CANCEL = "cancel"
@@ -752,7 +731,6 @@ class CB:
 # =====================================================================
 
 class KeyboardFactory:
-    """🧠 v7.8.2: مصنع لوحات المفاتيح مع preload + log_channel_* keys."""
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
@@ -803,7 +781,6 @@ class KeyboardFactory:
         "sched_btn": "📅 الجدولة",
         "groups": "👥 مجموعاتي",
 
-        # 🆕 v7.8.2: سجل قناة المجموعات
         "log_channel_btn": "📢 قناة السجل",
         "log_channel_set": "🔗 تعيين قناة السجل",
         "log_channel_remove": "🗑️ إزالة قناة السجل",
@@ -1004,7 +981,6 @@ class KeyboardFactory:
 
     @classmethod
     def preload_all(cls) -> int:
-        """🧠 v7.8.0: preload كل اللغات."""
         langs = list(TranslationManager.get_available_languages().keys())
         count = 0
         for lang in langs:
@@ -1242,7 +1218,6 @@ class KeyboardFactory:
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
-        """🧠 v7.8.0: dedup cache (5s)."""
         cache_key = f"sec_stats_{chat_id}"
         cached = await _security_stats_cache.get(cache_key)
         if cached is not None:
@@ -1483,16 +1458,12 @@ async def _get_global_words_cached() -> List[str]:
         return _global_words_cache
     except Exception as e:
         logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
-        # ✅ v7.8.3: أرجِع الكاش القديم بدل []
         return _global_words_cache or []
 
 
 async def get_banned_words_cached(chat_id: int) -> List[str]:
     """
     🧠 v7.8.3: كاش الكلمات المحظورة مع حماية مزدوجة.
-
-    - عند فشل DB: أرجِع الكاش القديم بدل [] (يمنع تعطّل الفلتر)
-    - dedup بـ lock per-chat لمنع thundering herd
     """
     if _ENABLE_BANNED_WORDS_CACHE:
         if chat_id not in _banned_words_locks:
@@ -1521,7 +1492,6 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
                 return words
             except Exception as e:
                 logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
-                # ✅ v7.8.3: أرجِع الكاش القديم بدل [] — يمنع تعطّل الفلتر
                 return _banned_words_cache.get(chat_id, [])
     else:
         try:
@@ -1539,19 +1509,15 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             return list(normalized_set)
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات المحظورة: {e}")
-            # ✅ v7.8.3: fallback للكاش
             return _banned_words_cache.get(chat_id, [])
 
 
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
     """
     🧠 v7.8.3: إبطال كاش الكلمات المحظورة في utils و Database معاً.
-
-    هذا يمنع عدم التزامن بين الطبقتين.
     """
     global _global_words_cache, _global_words_loaded_at
 
-    # 1) كاش utils
     if chat_id is None or chat_id == -1:
         _banned_words_cache.clear()
         _banned_words_cache_time.clear()
@@ -1561,7 +1527,6 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
         _banned_words_cache.pop(chat_id, None)
         _banned_words_cache_time.pop(chat_id, None)
 
-    # 2) ✅ v7.8.3: كاش Database الداخلي (إن وُجد)
     try:
         if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
             if chat_id is None or chat_id == -1:
@@ -2243,6 +2208,7 @@ def reload_replies_from_file() -> dict:
 class BackgroundTasks:
     """
     🧠 v7.8.1: كاش المشرفين بتكيّف TTL + batch subscriptions.
+    🕐 v7.8.4: _do_backup يستخدم utc_now() لأسماء الملفات (توحيد مع DB).
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
@@ -2422,7 +2388,6 @@ class BackgroundTasks:
                     await asyncio.sleep(60)
                     continue
 
-                # ✅ v7.8.1: batch check للاشتراكات (استعلام واحد)
                 user_ids = list({
                     ch.get('user_id') for ch in channels
                     if ch.get('user_id')
@@ -2500,16 +2465,26 @@ class BackgroundTasks:
 
     @staticmethod
     async def _do_backup() -> None:
+        """
+        🕐 v7.8.4: توحيد التوقيت — استخدام utc_now() لأسماء الملفات.
+
+        السبب: قاعدة البيانات تخزّن UTC + سجلات Render بتوقيت UTC
+        → اسم الملف يجب أن يطابقهما لتفادي الالتباس (كان mecca_now
+        يُنتج فرق 3 ساعات عن السجل).
+        """
         import time as _time
         t_start = _time.monotonic()
         try:
             if not await DB.get_auto_backup():
                 return
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
+
+            # ✅ v7.8.4: utc_now() بدل mecca_now() — توحيد مع DB + Logs
             backup_file = (
                 PATHS.BACKUPS /
-                f"backup_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+                f"backup_{TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')}.db"
             )
+
             success = False
             if hasattr(DB, "backup_database"):
                 try:
@@ -2593,6 +2568,10 @@ class BackgroundTasks:
 
     @staticmethod
     async def heartbeat(bot) -> None:
+        """
+        🕐 v7.8.4: يبقى mecca_iso() للعرض (توقيت المستخدم).
+        القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
+        """
         while True:
             await asyncio.sleep(CONFIG.HEARTBEAT_INTERVAL)
             try:
@@ -2725,7 +2704,6 @@ class BackgroundTasks:
 async def warmup_all() -> Dict[str, Any]:
     """
     🧠 v7.8.3: تحميل كل الموارد في الذاكرة عند بدء التشغيل.
-    يشمل: اللغات، الأزرار، الكلمات المحظورة (utils + Database)، الردود.
     """
     result = {
         'translations_loaded': 0,
@@ -2738,20 +2716,15 @@ async def warmup_all() -> Dict[str, Any]:
     t_start = time.monotonic()
 
     try:
-        # 1) اللغات
         result['translations_loaded'] = TranslationManager.preload_all()
-
-        # 2) الأزرار
         result['buttons_loaded'] = KeyboardFactory.preload_all()
 
-        # 3) الكلمات المحظورة العامة (utils cache)
         try:
             words = await asyncio.wait_for(_get_global_words_cached(), timeout=5)
             result['banned_words_loaded'] = len(words)
         except Exception as e:
             logger.debug(f"warmup banned_words (utils): {e}")
 
-        # 4) ✅ v7.8.3: الكلمات المحظورة في Database cache أيضاً
         try:
             if hasattr(DB, 'get_banned_words'):
                 db_words = await asyncio.wait_for(
@@ -2761,7 +2734,6 @@ async def warmup_all() -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"warmup banned_words (DB): {e}")
 
-        # 5) الردود
         result['replies_loaded'] = len(_REPLIES_FROM_FILE) if _REPLIES_FROM_FILE else 0
 
     except Exception as e:
