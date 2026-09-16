@@ -2,38 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.11)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.12)
 ================================================================================
+🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX):
+  ✅ _run_maintenance_* : VACUUM ANALYZE تلقائي كل 24 ساعة
+  ✅ +2 فهارس: idx_posts_channel_pub_at, idx_auto_replies_active_keyword
+  ✅ CURRENT_SCHEMA_VERSION: 11 → 12
+  ✅ EXPECTED_INDEX_COUNT: 70 → 72
+  ✅ يحل بطء: UPDATE posts (3.30s)، auto_replies (1.71s)
+  ✅ VACUUM على: posts, auto_replies, subscriptions, user_channels, user_penalties, banned_words
+
 🚀 v7.6.11 (MISSING-TABLES-MIGRATION):
-  ✅ إضافة جدول chat_locks إلى SQLite/PG/MySQL (كان مفقوداً)
-  ✅ إضافة عمودي violation_penalty + violation_penalty_duration إلى group_security
-  ✅ Migration تلقائي (ALTER TABLE ADD COLUMN) لقواعد البيانات الموجودة
-  ✅ نقل idx_penalties_end_time إلى DEPRECATED_INDEXES
-  ✅ CURRENT_SCHEMA_VERSION: 10 → 11
-  ✅ يحل مشكلة /lock و/unlock عند rebuild كامل
+  ✅ إضافة جدول chat_locks
+  ✅ إضافة violation_penalty + violation_penalty_duration
+  ✅ Migration تلقائي (ALTER TABLE ADD COLUMN)
 
-🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS):
-  ✅ تنظيف تلقائي عند كل إقلاع (fast-path + rebuild)
-  ✅ حذف المعرّفات السالبة (chat_id) من user_groups_link
-  ✅ حذف GroupAnonymousBot/ChannelBot من anonymous_admins
-
-🚀 v7.6.9 (SLOW-QUERY-INDEX-FIX):
-  ✅ +4 فهارس: idx_penalties_status_end, idx_auto_replies_keyword_active,
-     idx_user_violations_chat, idx_user_warnings_chat
-
-🚀 v7.6.8 (CURSOR-CLEANUP):
-  ✅ إغلاق cursors في كل دوال SQLite
-
-🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX):
-  ✅ CRITICAL_INDEX_NAMES: idx_banned_words_chat + idx_banned_words_chat_word
-
-🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES): فحص الفهارس الحرجة مع fast-path
-🚀 v7.6.5 (LOG-CHANNEL-ID): bot_groups.log_channel_id
-🚀 v7.6.4 (MySQL DESC): _normalize_columns_mysql
-🚀 v7.6.3: Smart Check
-🚀 v7.6.2: حذف 11 فهرساً
-🚀 v7.6.1: توحيد الفهارس
-🚀 v7.6.0: Fast-path
+🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS)
+🚀 v7.6.9 (SLOW-QUERY-INDEX-FIX)
+🚀 v7.6.8 (CURSOR-CLEANUP)
+🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX)
+🚀 v7.6.6..v7.6.0
 ================================================================================
 """
 
@@ -45,11 +33,26 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.11: 10 → 11 (إجبار rebuild لإنشاء chat_locks والأعمدة الناقصة)
-CURRENT_SCHEMA_VERSION = 11
+# ✅ v7.6.12: 11 → 12 (إجبار rebuild + تفعيل VACUUM)
+CURRENT_SCHEMA_VERSION = 12
 
-# ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية (للتنظيف التلقائي)
+# ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
+
+# ✅ v7.6.12: فاصل VACUUM التلقائي (24 ساعة)
+MAINTENANCE_INTERVAL_SECONDS = 86400
+
+# ✅ v7.6.12: الجداول التي تحتاج VACUUM دوري
+MAINTENANCE_TABLES = (
+    "posts",
+    "auto_replies",
+    "subscriptions",
+    "user_channels",
+    "user_penalties",
+    "banned_words",
+    "schedule",
+    "admin_logs",
+)
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -58,7 +61,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 70
+# ✅ v7.6.12: 70 → 72
+EXPECTED_INDEX_COUNT = 72
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -78,7 +82,7 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (5) ═══
+    # ═══ POSTS (6) — ✅ v7.6.12: +idx_posts_channel_pub_at ═══
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel", "posts(channel_db_id)"),
     ("posts", "idx_posts_published", "posts(published)"),
@@ -86,6 +90,8 @@ COMMON_INDEXES = [
      "posts(channel_db_id, published)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
+    ("posts", "idx_posts_channel_pub_at",
+     "posts(channel_db_id, published, published_at)"),
 
     # ═══ BOT_GROUPS (3) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
@@ -130,7 +136,7 @@ COMMON_INDEXES = [
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    # ═══ AUTO_REPLIES (5) ═══
+    # ═══ AUTO_REPLIES (6) — ✅ v7.6.12: +idx_auto_replies_active_keyword ═══
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
@@ -140,6 +146,8 @@ COMMON_INDEXES = [
      "auto_replies(usage_count DESC)"),
     ("auto_replies", "idx_auto_replies_keyword_active",
      "auto_replies(keyword, is_active, chat_id)"),
+    ("auto_replies", "idx_auto_replies_active_keyword",
+     "auto_replies(is_active, keyword, chat_id)"),
 
     # ═══ SCHEDULE (2) ═══
     ("schedule", "idx_schedule_next_publish",
@@ -261,15 +269,15 @@ DEPRECATED_INDEXES = [
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
 
-    # ═══ USER_PENALTIES ✅ v7.6.11: +idx_penalties_end_time ═══
+    # ═══ USER_PENALTIES ═══
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
     "idx_user_penalties_active_end", "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup", "idx_penalties_chat_status",
-    "idx_penalties_expiry",              # ← من DB dump
-    "idx_penalties_cleanup",             # ← من DB dump
-    "idx_penalties_end_time",            # ✅ v7.6.11: من DB dump
-    "idx_security_chat",                 # ✅ v7.6.11: من DB dump
-    "idx_group_security_chat",           # ✅ v7.6.11: من DB dump
+    "idx_penalties_expiry",
+    "idx_penalties_cleanup",
+    "idx_penalties_end_time",
+    "idx_security_chat",
+    "idx_group_security_chat",
 
     # ═══ BANNED_WORDS ═══
     "idx_banned_words_word",
@@ -335,6 +343,7 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_posts_channel",
     "idx_posts_channel_published",
     "idx_posts_channel_pub_fail_created",
+    "idx_posts_channel_pub_at",
     "idx_penalties_user_chat_status_end",
     "idx_penalties_status_end",
     "idx_user_channels_user_banned",
@@ -343,6 +352,7 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_banned_words_chat",
     "idx_banned_words_chat_word",
     "idx_auto_replies_keyword_active",
+    "idx_auto_replies_active_keyword",
     "idx_user_violations_chat",
     "idx_user_warnings_chat",
 })
@@ -414,10 +424,217 @@ def _get_expected_cols_for_index(idx_name: str) -> str:
 
 
 # =====================================================================
-# ✅ v7.6.11: Migrations — إضافة أعمدة مفقودة لقواعد البيانات الموجودة
+# ✅ v7.6.12: VACUUM ANALYZE الدوري (ينظّف الجداول + يحدّث الإحصائيات)
 # =====================================================================
 
-# الأعمدة المفقودة من group_security في الإصدارات القديمة
+async def _run_maintenance_postgres(conn, logger):
+    """
+    ✅ v7.6.12: VACUUM ANALYZE على الجداول الحرجة كل 24 ساعة.
+    يحل بطء: UPDATE posts (3.30s)، SELECT auto_replies (1.71s)
+
+    ملاحظة: VACUUM لا يمكن أن يعمل داخل transaction.
+    """
+    try:
+        # ─── فحص وقت آخر صيانة ───
+        try:
+            last_val = await conn.fetchval(
+                "SELECT value FROM settings WHERE key = 'last_maintenance_at'"
+            )
+        except Exception:
+            last_val = None
+
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    if logger:
+                        logger.debug(
+                            f"⏩ PG maintenance: تخطي (آخر صيانة منذ "
+                            f"{age / 3600:.1f}h)"
+                        )
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info("🧹 PG: بدء VACUUM ANALYZE على الجداول الحرجة...")
+
+        done = 0
+        failed = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                # VACUUM ANALYZE يجب أن يعمل خارج transaction
+                await conn.execute(f"VACUUM ANALYZE {tbl}")
+                done += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.debug(f"⚠️ VACUUM {tbl}: {e}")
+
+        # ─── تسجيل وقت الصيانة ───
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                "last_maintenance_at",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ record maintenance time: {e}")
+
+        if logger and done:
+            logger.info(
+                f"✅ PG: VACUUM ANALYZE على {done} جدول "
+                f"({failed} فشل)"
+            )
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_postgres: {e}")
+        return 0
+
+
+async def _run_maintenance_sqlite(conn, logger):
+    """✅ v7.6.12: SQLite — VACUUM + ANALYZE كل 24 ساعة."""
+    try:
+        try:
+            cursor = await conn.execute(
+                "SELECT value FROM settings WHERE key = 'last_maintenance_at'"
+            )
+            try:
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+        except Exception:
+            row = None
+
+        last_val = row[0] if row else None
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info("🧹 SQLite: بدء VACUUM + ANALYZE...")
+
+        try:
+            await conn.execute("VACUUM")
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ SQLite VACUUM: {e}")
+
+        try:
+            await conn.execute("ANALYZE")
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ SQLite ANALYZE: {e}")
+
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("last_maintenance_at", datetime.now(timezone.utc).isoformat()),
+            )
+            await conn.commit()
+        except Exception:
+            pass
+
+        if logger:
+            logger.info("✅ SQLite: VACUUM + ANALYZE مكتمل")
+        return 1
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_sqlite: {e}")
+        return 0
+
+
+async def _run_maintenance_mysql(conn, logger):
+    """✅ v7.6.12: MySQL — ANALYZE TABLE + OPTIMIZE TABLE كل 24 ساعة."""
+    try:
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT `value` FROM settings "
+                    "WHERE `key` = 'last_maintenance_at'"
+                )
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+        except Exception:
+            row = None
+
+        last_val = row[0] if row else None
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info("🧹 MySQL: بدء ANALYZE + OPTIMIZE...")
+
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE TABLE `{tbl}`")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "INSERT INTO settings (`key`, `value`) VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                    ("last_maintenance_at",
+                     datetime.now(timezone.utc).isoformat()),
+                )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            await conn.commit()
+        except Exception:
+            pass
+
+        if logger and done:
+            logger.info(f"✅ MySQL: ANALYZE على {done} جدول")
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# ✅ v7.6.11: Migrations — إضافة أعمدة مفقودة
+# =====================================================================
+
 _GROUP_SECURITY_NEW_COLUMNS = [
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -425,7 +642,6 @@ _GROUP_SECURITY_NEW_COLUMNS = [
 
 
 async def _migrate_missing_columns_sqlite(conn, logger):
-    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (SQLite)."""
     added = 0
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
@@ -437,7 +653,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             if logger:
                 logger.info(f"✅ SQLite: أُضيف عمود {col_name}")
         except Exception as e:
-            # "duplicate column name" يعني العمود موجود — تجاهل
             err = str(e).lower()
             if "duplicate" in err or "already exists" in err:
                 continue
@@ -449,7 +664,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
 
 
 async def _migrate_missing_columns_postgres(conn, logger):
-    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (PostgreSQL)."""
     added = 0
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
@@ -467,9 +681,7 @@ async def _migrate_missing_columns_postgres(conn, logger):
 
 
 async def _migrate_missing_columns_mysql(conn, logger):
-    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (MySQL)."""
     added = 0
-    # MySQL لا يدعم "IF NOT EXISTS" لـ ADD COLUMN — نتحقق يدوياً
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
             cursor = await conn.cursor()
@@ -1287,6 +1499,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         await _verify_critical_indexes_sqlite(conn, logger)
         await _cleanup_stale_links_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
+        await _run_maintenance_sqlite(conn, logger)
         if logger:
             logger.info(
                 f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
@@ -1400,7 +1613,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.11: جدول chat_locks
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id INTEGER PRIMARY KEY,
@@ -1456,7 +1668,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -1888,7 +2099,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "missing-tables-migration"),
+             "vacuum-migration"),
         )
         await conn.commit()
     except Exception as e:
@@ -1909,6 +2120,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _verify_critical_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
+        await _run_maintenance_postgres(conn, logger)
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -2022,7 +2234,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.11: chat_locks
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_locks (
             chat_id BIGINT PRIMARY KEY,
@@ -2078,7 +2289,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -2515,7 +2725,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "missing-tables-migration",
+            "vacuum-migration",
         )
     except Exception as e:
         if logger:
@@ -2535,6 +2745,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _verify_critical_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
+        await _run_maintenance_mysql(conn, logger)
         if logger:
             logger.info(
                 f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
@@ -2659,7 +2870,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.11: chat_locks
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_locks (
                 chat_id BIGINT PRIMARY KEY,
@@ -2715,7 +2925,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -3151,7 +3360,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "missing-tables-migration",
+                    "vacuum-migration",
                 ),
             )
         except Exception as e:
@@ -3184,4 +3393,6 @@ __all__ = [
     "CRITICAL_INDEX_NAMES",
     "DEPRECATED_INDEXES",
     "DEFAULT_SETTINGS",
+    "MAINTENANCE_INTERVAL_SECONDS",
+    "MAINTENANCE_TABLES",
 ]
