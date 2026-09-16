@@ -1,67 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.14 — FIX-DB-SIZE-STATS)
+database.py - قاعدة البيانات المتكاملة (v7.7.15 — ANALYTICS-MIXIN)
 ================================================================================
+🆕 v7.7.15 (ANALYTICS-MIXIN):
+  ✅ دمج AnalyticsMixin (database_analytics.py)
+  ✅ تتبّع الاستعلامات البطيئة في الذاكرة (_slow_queries_log)
+  ✅ حفظ آخر 100 استعلام بطيء
+  ✅ يدعم get_slow_queries / get_pool_live / get_user_growth / ...
+  ✅ لا تأثير على الأداء (تسجيل فقط عند elapsed > threshold)
+
 🆕 v7.7.14 (FIX-DB-SIZE-STATS):
   ✅ إضافة get_db_size_kb() — يدعم PostgreSQL + MySQL + SQLite
   ✅ حل مشكلة "حجم قاعدة البيانات: 0.0 KB" في /stats
-  ✅ يُستدعى من StatsMixin.get_bot_stats
 
 🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
   ✅ استعادة _compute_text_hash المحذوفة سهواً في v7.7.9 PERF-3
-  ✅ حل نهائي لـ: AttributeError: 'Database' object has no
-     attribute '_compute_text_hash'
-  ✅ متوافقة مع database_channels_posts.py (Mixin Contract)
 
-🔍 v7.7.12 (AUDIT-UTC-CLEAN — لا تغيير وظيفي):
-  ✅ مراجعة شاملة: كل استدعاءات التخزين تستخدم TimeUtils.utc_now()
-  ✅ لا يوجد أي استخدام لـ mecca_now() في سياق التخزين
-  ✅ mecca_iso() تُستعمل فقط عند الحاجة للعرض (وهي غير مستدعاة هنا)
-  ✅ متوافق مع utils.py v7.8.5 (Pool Monitor + UTC Consistency)
-  ⚠️ لا تعديلات وظيفية — هذا إصدار توثيقي فقط
-
-🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL):
-  ✅ __init__: إضافة المتغيرات الناقصة التي يستخدمها Mixin.get_banned_words
-  ✅ حل نهائي لـ: AttributeError: 'Database' object has no
-     attribute '_banned_words_cache_ttl'
-
-🚨 v7.7.10 (FIX-INT32):
-  ✅ _ensure_bigint_ids: تحويل تلقائي للأعمدة INT32 → BIGINT
-  ✅ log_channel_id: INTEGER → BIGINT (Telegram Channel IDs)
-  ✅ BOOTSTRAP_DATA_VERSION = 7
-  ✅ حل invalid input for query argument (value out of int32 range)
-
-🚀 v7.7.9 (PERF-1..6):
-  PERF-1 tables_hash: تخطي create_tables عند عدم تغيّر schema
-  PERF-2 _fetch_all_columns_map: استعلام واحد لأعمدة كل الجداول
-  PERF-3 حذف _ensure_text_hash_column المكرّرة
-  PERF-4 SQLite PRAGMA مستقل لكل أمر
-  PERF-5 _upsert_setting موحّد
-  PERF-6 _init_default_data: batch INSERT بدل loop
-
-🔥 v7.7.8 (FIX-PG-BOOTSTRAP):
-  ✅ _bootstrap: لا transaction لـPG/MySQL — DDL في autocommit
-  ✅ حل InFailedSQLTransactionError نهائياً
-
-إصلاحات v7.7.7 (LOG-CHANNEL):
-  LOG-1  _migrate_schema: عمود log_channel_id في bot_groups
-
-إصلاحات v7.7.6 (HOTFIX-1):
-  HOTFIX-1 __init__: self._lock = asyncio.Lock()
-
-إصلاحات v7.7.5 (ISSUE-1..3, FIX-A..D, NOTE-1..2, FIX-MISSING):
-  ISSUE-1 _destroy_connection(MySQL): close ثم release
-  ISSUE-2 transaction(): except BaseException
-  ISSUE-3 _recover_pool: تتبّع في _bg_tasks
-  FIX-A   _find_values_end: parser متوازن
-  FIX-B   _insert_before_returning: يكتشف RETURNING بعد \n/\t/\r
-  FIX-C   DATABASE_URL: urlparse
-  FIX-D   close(): _initialized=False في finally
-  FIX-MISSING استعادة _get_secondary_indexes
-
-إصلاحات v7.7.4 (B-1..B-5, M-1..M-6, N-2, N-4):
-  B-1..B-5, M-1..M-6, N-2, N-4
+🔍 v7.7.12 (AUDIT-UTC-CLEAN — لا تغيير وظيفي)
+🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL)
+🚨 v7.7.10 (FIX-INT32)
+🚀 v7.7.9 (PERF-1..6)
+🔥 v7.7.8 (FIX-PG-BOOTSTRAP)
+إصلاحات v7.7.7..v7.7.4
 ================================================================================
 """
 
@@ -204,6 +165,11 @@ BackupMixin, BACKUP_MIXIN_AVAILABLE = _load_mixin(
 )
 RemindersMixin, REMINDERS_MIXIN_AVAILABLE = _load_mixin(
     "database_reminders", "RemindersMixin"
+)
+
+# ✅ v7.7.15: AnalyticsMixin
+AnalyticsMixin, ANALYTICS_MIXIN_AVAILABLE = _load_mixin(
+    "database_analytics", "AnalyticsMixin"
 )
 
 # =====================================================================
@@ -1474,12 +1440,6 @@ async def _table_exists(conn, table: str) -> bool:
 # =====================================================================
 
 class TimeUtils:
-    """
-    🕐 القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
-
-    - utc_now():    للتخزين، الحسابات، المقارنات — مستخدمة في كل الكود ✅
-    - mecca_now():  للعرض فقط (غير مستدعاة في database.py)
-    """
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(UTC).replace(tzinfo=None)
@@ -1549,6 +1509,7 @@ class Database(
     ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin,
     TicketsMixin, ContestsMixin, StatsMixin, SettingsMixin,
     PointsMixin, BackupMixin, RemindersMixin,
+    AnalyticsMixin,
 ):
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
@@ -1836,6 +1797,11 @@ class Database(
             )
             self._banned_words_cache_lock = asyncio.Lock()
 
+            # ✅ v7.7.15: تتبّع الاستعلامات البطيئة
+            self._slow_queries_log: List[Dict[str, Any]] = []
+            self._slow_queries_lock = asyncio.Lock()
+            self._SLOW_QUERIES_MAX = 100
+
             self._group_security_columns_cache: Optional[set] = None
 
             self._singleton_init_done = True
@@ -1850,12 +1816,6 @@ class Database(
     async def get_db_size_kb(self) -> float:
         """
         ✅ v7.7.14: إرجاع حجم قاعدة البيانات بالكيلوبايت.
-
-        - PostgreSQL: pg_database_size(current_database())
-        - MySQL:      information_schema.tables (data_length + index_length)
-        - SQLite:     page_count * page_size (PRAGMA)
-
-        يُستدعى من StatsMixin.get_bot_stats لحساب /stats.
         """
         try:
             if USE_POSTGRES:
@@ -1879,7 +1839,6 @@ class Database(
                 return 0.0
 
             else:
-                # SQLite
                 page_count = await self.fetchval(
                     "PRAGMA page_count", default=0
                 )
@@ -1898,15 +1857,10 @@ class Database(
             return 0.0
 
     # =================================================================
-    # 🔍 v7.7.12: Pool stats (اختياري — utils.py يقرأ _pool مباشرة)
+    # 🔍 v7.7.12: Pool stats
     # =================================================================
 
     async def get_pool_stats(self) -> Dict[str, Any]:
-        """
-        🔍 v7.7.12: يُرجِع حالة Pool PostgreSQL/MySQL.
-        ملاحظة: utils.BackgroundTasks._read_pool_stats يقرأ _pool مباشرة،
-        لكن هذه الدالة تُوفّر واجهة نظيفة لمن يفضّلها.
-        """
         if not (USE_POSTGRES or USE_MYSQL):
             return {"type": "sqlite_or_other"}
         pool = self._pool
@@ -2184,9 +2138,7 @@ class Database(
                 try:
                     await conn.execute(f"PRAGMA {name}={value}")
                 except Exception as pe:
-                    logger.debug(
-                        f"⚠️ PRAGMA {name}={value}: {pe}"
-                    )
+                    logger.debug(f"⚠️ PRAGMA {name}={value}: {pe}")
 
             self._track_sqlite_conn(conn)
             return conn
@@ -2697,6 +2649,23 @@ class Database(
                     r"\b\d{6,}\b", "[REDACTED]", query[:200]
                 )
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
+
+                # ✅ v7.7.15: تسجيل في الذاكرة
+                try:
+                    entry = {
+                        'time': time.time(),
+                        'elapsed': round(elapsed, 3),
+                        'query': safe_query.replace('\n', ' ').strip(),
+                    }
+                    async with self._slow_queries_lock:
+                        self._slow_queries_log.append(entry)
+                        if len(self._slow_queries_log) > self._SLOW_QUERIES_MAX:
+                            self._slow_queries_log = (
+                                self._slow_queries_log[-self._SLOW_QUERIES_MAX:]
+                            )
+                except Exception:
+                    pass
+
                 if self._explain_slow_queries and not skip_explain:
                     await self._log_explain(query, params, conn)
             return result
@@ -3751,22 +3720,15 @@ class Database(
         try:
             migrations = {
                 "group_security": [
-                    ("antiflood_penalty_duration",
-                     "INTEGER DEFAULT 3600"),
-                    ("night_mode_action_duration",
-                     "INTEGER DEFAULT 3600"),
-                    ("warn_penalty_duration",
-                     "INTEGER DEFAULT 3600"),
-                    ("mute_default_duration",
-                     "INTEGER DEFAULT 3600"),
+                    ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
+                    ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("mute_default_duration", "INTEGER DEFAULT 3600"),
                     ("ban_default_duration", "INTEGER DEFAULT 0"),
                     ("warn_default_duration", "INTEGER DEFAULT 0"),
-                    ("restrict_default_duration",
-                     "INTEGER DEFAULT 1800"),
-                    ("enable_timed_penalties",
-                     "INTEGER DEFAULT 1"),
-                    ("auto_remove_penalties",
-                     "INTEGER DEFAULT 1"),
+                    ("restrict_default_duration", "INTEGER DEFAULT 1800"),
+                    ("enable_timed_penalties", "INTEGER DEFAULT 1"),
+                    ("auto_remove_penalties", "INTEGER DEFAULT 1"),
                     ("violation_strikes", "INTEGER DEFAULT 3"),
                     ("violation_duration", "INTEGER DEFAULT 60"),
                     ("delete_links", "INTEGER DEFAULT 0"),
@@ -3810,14 +3772,10 @@ class Database(
                     ("auto_penalty", "TEXT DEFAULT 'mute'"),
                     ("auto_mute_duration", "INTEGER DEFAULT 3600"),
                     ("delete_penalty", "INTEGER DEFAULT 0"),
-                    ("delete_penalty_duration",
-                     "INTEGER DEFAULT 3600"),
-                    ("delete_penalty_messages",
-                     "INTEGER DEFAULT 0"),
-                    ("violation_penalty_duration",
-                     "INTEGER DEFAULT 3600"),
-                    ("violation_penalty",
-                     "TEXT DEFAULT 'none'"),
+                    ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("delete_penalty_messages", "INTEGER DEFAULT 0"),
+                    ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+                    ("violation_penalty", "TEXT DEFAULT 'none'"),
                 ],
                 "users": [
                     ("active_channel", "INTEGER DEFAULT NULL")
@@ -3835,13 +3793,10 @@ class Database(
                     ("fail_count", "INTEGER DEFAULT 0"),
                 ],
                 "user_reminder_settings": [
-                    ("subscription_reminder",
-                     "INTEGER DEFAULT 1"),
-                    ("daily_stats_reminder",
-                     "INTEGER DEFAULT 0"),
+                    ("subscription_reminder", "INTEGER DEFAULT 1"),
+                    ("daily_stats_reminder", "INTEGER DEFAULT 0"),
                     ("weekly_report", "INTEGER DEFAULT 1"),
-                    ("reminder_days_before",
-                     "INTEGER DEFAULT 3"),
+                    ("reminder_days_before", "INTEGER DEFAULT 3"),
                     ("last_daily_sent", "TIMESTAMP"),
                     ("last_weekly_sent", "TIMESTAMP"),
                     ("last_subscription_sent", "TIMESTAMP"),
@@ -4104,12 +4059,10 @@ class Database(
 
     async def _init_default_data(self, conn):
         default_plans = [
-            {"name": "تجربة",
-             "description": "تجربة مجانية 30 يوم",
+            {"name": "تجربة", "description": "تجربة مجانية 30 يوم",
              "price": 0, "duration_days": 30,
              "max_channels": 100, "max_posts": 200,
-             "features":
-                 '{"auto_publish":true,"security":true}',
+             "features": '{"auto_publish":true,"security":true}',
              "is_gift": 0},
             {"name": "يوم", "description": "باقة يوم",
              "price": 5, "duration_days": 1,
@@ -4118,33 +4071,24 @@ class Database(
             {"name": "أسبوع", "description": "باقة 7 أيام",
              "price": 25, "duration_days": 7,
              "max_channels": 3, "max_posts": 300,
-             "features":
-                 '{"auto_publish":true,"security":true}',
+             "features": '{"auto_publish":true,"security":true}',
              "is_gift": 0},
             {"name": "شهر", "description": "باقة 30 يوم",
              "price": 75, "duration_days": 30,
              "max_channels": 10, "max_posts": 1500,
-             "features":
-                 '{"auto_publish":true,"security":true,'
-                 '"support":true}',
+             "features": '{"auto_publish":true,"security":true,"support":true}',
              "is_gift": 0},
             {"name": "3 أشهر", "description": "باقة 90 يوم",
              "price": 200, "duration_days": 90,
              "max_channels": 25, "max_posts": 5000,
-             "features":
-                 '{"auto_publish":true,"security":true,'
-                 '"support":true,"analytics":true}',
+             "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true}',
              "is_gift": 0},
             {"name": "سنة", "description": "باقة 365 يوم",
              "price": 700, "duration_days": 365,
              "max_channels": 100, "max_posts": 99999,
-             "features":
-                 '{"auto_publish":true,"security":true,'
-                 '"support":true,"analytics":true,'
-                 '"priority":true}',
+             "features": '{"auto_publish":true,"security":true,"support":true,"analytics":true,"priority":true}',
              "is_gift": 0},
-            {"name": "هدية شهر",
-             "description": "كود هدية 30 يوم",
+            {"name": "هدية شهر", "description": "كود هدية 30 يوم",
              "price": 75, "duration_days": 30,
              "max_channels": 100, "max_posts": 1500,
              "features": '{}', "is_gift": 1},
@@ -4434,12 +4378,6 @@ class Database(
         ).hexdigest()
 
     def _compute_text_hash(self, text: str) -> str:
-        """
-        🔐 يحسب SHA-256 hash للنص — يُستخدم لمنع تكرار المنشورات.
-
-        يُستدعى من ChannelsPostsMixin.add_posts (database_channels_posts.py).
-        يُخزَّن الناتج في posts.text_hash (CHAR(64) في MySQL).
-        """
         if not text:
             return ""
         return hashlib.sha256(
