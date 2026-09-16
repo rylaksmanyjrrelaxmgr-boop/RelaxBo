@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.16 — SLOW-QUERY-CALLER)
+database.py - قاعدة البيانات المتكاملة (v7.7.17 — SLOW-QUERY-CALLER-FIX)
 ================================================================================
+🆕 v7.7.17 (SLOW-QUERY-CALLER-FIX):
+  ✅ _get_caller_info() : فلترة صارمة لـ asyncio/stdlib/site-packages
+  ✅ skip_frames أصبح مُستخدماً فعلياً
+  ✅ استبعاد tasks.py القياسي (asyncio/tasks.py) من النتائج
+  ✅ stack يعرض فقط الإطارات الخارجية المتتالية
+  ✅ get_slow_queries_report() : تقرير منظَّم للاستعلامات البطيئة
+  ✅ clear_slow_queries_log() : مسح السجل
+  ✅ لا تأثير على الأداء
+
 🆕 v7.7.16 (SLOW-QUERY-CALLER):
   ✅ _get_caller_info() : استخراج الملف/السطر/الدالة من stack
   ✅ _execute_with_logging : تسجيل مصدر كل استعلام بطيء
   ✅ slow_queries_log يحوي الآن: caller_file, caller_line, caller_func, stack
   ✅ يدعم تشخيص: "من أين جاء الاستعلام البطيء؟"
-  ✅ لا تأثير على الأداء (يعمل فقط عند elapsed > threshold)
 
 🆕 v7.7.15 (ANALYTICS-MIXIN):
   ✅ دمج AnalyticsMixin (database_analytics.py)
-  ✅ تتبّع الاستعلامات البطيئة في الذاكرة (_slow_queries_log)
-  ✅ حفظ آخر 100 استعلام بطيء
 
 🆕 v7.7.14 (FIX-DB-SIZE-STATS):
-  ✅ إضافة get_db_size_kb() — يدعم PostgreSQL + MySQL + SQLite
+  ✅ إضافة get_db_size_kb()
 
 🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
-  ✅ استعادة _compute_text_hash المحذوفة سهواً في v7.7.9 PERF-3
-  ✅ حل AttributeError: 'Database' has no attribute '_compute_text_hash'
-
-🔍 v7.7.12 (AUDIT-UTC-CLEAN)
-🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL)
-🚨 v7.7.10 (FIX-INT32)
-🚀 v7.7.9 (PERF-1..6)
-🔥 v7.7.8 (FIX-PG-BOOTSTRAP)
-إصلاحات v7.7.7..v7.7.4
+  ✅ استعادة _compute_text_hash
 ================================================================================
 """
 
@@ -51,7 +49,7 @@ from typing import (
     Callable, Awaitable, Set,
 )
 from contextlib import asynccontextmanager
-from collections import defaultdict
+from collections import defaultdict, deque
 
 # =====================================================================
 # 0) كشف نوع قاعدة البيانات
@@ -87,6 +85,88 @@ USE_MYSQL = (DB_TYPE == "mysql")
 
 logger = logging.getLogger(__name__)
 logger.info(f"📌 قاعدة البيانات: {DB_TYPE.upper()}")
+
+# =====================================================================
+# 0.0) مسارات stdlib و asyncio (لـ _get_caller_info)
+# =====================================================================
+
+_ASYNCIO_DIR = ""
+_STDLIB_DIR = ""
+try:
+    import asyncio as _asyncio_module
+    _ASYNCIO_DIR = os.path.abspath(
+        os.path.dirname(_asyncio_module.__file__)
+    )
+except Exception:
+    pass
+
+try:
+    _STDLIB_DIR = os.path.abspath(os.path.dirname(os.__file__))
+except Exception:
+    pass
+
+_SITE_PACKAGES_MARKERS = (
+    os.sep + "site-packages" + os.sep,
+    os.sep + "dist-packages" + os.sep,
+)
+
+_INTERNAL_DB_FILES = frozenset({
+    "database.py",
+    "database_stats.py",
+    "database_analytics.py",
+    "database_groups.py",
+    "database_channels_posts.py",
+    "database_subscriptions.py",
+    "database_tickets.py",
+    "database_contests.py",
+    "database_settings.py",
+    "database_points.py",
+    "database_backup.py",
+    "database_reminders.py",
+})
+
+
+def _is_internal_frame(filename: str) -> bool:
+    """
+    ✅ v7.7.17: تحديد ما إذا كان الإطار داخلياً (database_*.py /
+    asyncio / stdlib / site-packages).
+    """
+    if not filename:
+        return False
+    try:
+        full = os.path.abspath(filename)
+    except Exception:
+        return False
+
+    base = os.path.basename(full)
+
+    # 1) ملفات database_*.py
+    if base in _INTERNAL_DB_FILES:
+        return True
+
+    # 2) asyncio/*.py (tasks.py, events.py, base_events.py, ...)
+    if _ASYNCIO_DIR:
+        try:
+            if os.path.commonpath([_ASYNCIO_DIR, full]) == _ASYNCIO_DIR:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # 3) مكتبة Python القياسية (contextlib.py, functools.py, ...)
+    if _STDLIB_DIR:
+        try:
+            if os.path.commonpath([_STDLIB_DIR, full]) == _STDLIB_DIR:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # 4) site-packages / dist-packages
+    for marker in _SITE_PACKAGES_MARKERS:
+        if marker in full:
+            return True
+
+    return False
+
 
 # =====================================================================
 # 0.1) التكوينات
@@ -1800,10 +1880,12 @@ class Database(
             )
             self._banned_words_cache_lock = asyncio.Lock()
 
-            # ✅ v7.7.15: تتبّع الاستعلامات البطيئة
-            self._slow_queries_log: List[Dict[str, Any]] = []
-            self._slow_queries_lock = asyncio.Lock()
+            # ✅ v7.7.15/v7.7.17: تتبّع الاستعلامات البطيئة (deque)
             self._SLOW_QUERIES_MAX = 100
+            self._slow_queries_log: deque = deque(
+                maxlen=self._SLOW_QUERIES_MAX
+            )
+            self._slow_queries_lock = asyncio.Lock()
 
             self._group_security_columns_cache: Optional[set] = None
 
@@ -1813,22 +1895,23 @@ class Database(
             raise
 
     # =================================================================
-    # ✅ v7.7.16: استخراج مصدر الاستعلام من الـstack
+    # ✅ v7.7.17: استخراج مصدر الاستعلام من الـstack
     # =================================================================
 
     def _get_caller_info(self, skip_frames: int = 2) -> Dict[str, Any]:
         """
-        ✅ v7.7.16: استخراج معلومات المستدعي من الـstack trace.
+        ✅ v7.7.17: استخراج معلومات المستدعي من الـstack trace مع
+        فلترة صارمة لـ asyncio / stdlib / site-packages.
 
         Returns:
             {
-                'file': str,     # اسم الملف (مثلاً handlers_group_log.py)
+                'file': str,     # اسم الملف (مثلاً utils.py)
                 'line': int,     # رقم السطر
                 'func': str,     # اسم الدالة
-                'stack': list,   # أول 3 مستويات خارجية
+                'stack': list,   # أول 3 إطارات خارجية
             }
 
-        skip_frames يتخطى الإطارات الداخلية (database*.py).
+        skip_frames: عدد الإطارات الخارجية التي يتم تخطيها من البداية.
         """
         try:
             stack = inspect.stack()
@@ -1839,48 +1922,73 @@ class Database(
                 'stack': [],
             }
 
-            # الملفات الداخلية التي نتجاهلها
-            internal_files = {
-                'database.py',
-                'database_stats.py',
-                'database_analytics.py',
-                'database_groups.py',
-                'database_channels_posts.py',
-                'database_subscriptions.py',
-                'database_tickets.py',
-                'database_contests.py',
-                'database_settings.py',
-                'database_points.py',
-                'database_backup.py',
-                'database_reminders.py',
-            }
-
-            # ابحث عن أول إطار خارج الملفات الداخلية
-            first_external = None
-            for i, frame_info in enumerate(stack):
-                fname = os.path.basename(frame_info.filename)
-                if fname in internal_files:
+            # اجمع الإطارات الخارجية (متتالية، مُفلترة)
+            external: List[Any] = []
+            for fi in stack:
+                if _is_internal_frame(fi.filename):
                     continue
-                first_external = i
-                result['file'] = fname
-                result['line'] = frame_info.lineno
-                result['func'] = frame_info.function
-                break
+                external.append(fi)
 
-            # اجمع أول 3 إطارات خارجية متتالية
-            if first_external is not None:
-                for j in range(first_external, min(first_external + 3, len(stack))):
-                    fr = stack[j]
-                    result['stack'].append({
-                        'file': os.path.basename(fr.filename),
-                        'line': fr.lineno,
-                        'func': fr.function,
-                    })
+            if not external:
+                return result
+
+            # تطبيق skip_frames
+            try:
+                skip_n = max(0, int(skip_frames))
+            except (TypeError, ValueError):
+                skip_n = 0
+            selected = external[skip_n:]
+            if not selected:
+                selected = external[:1]
+
+            top = selected[0]
+            result['file'] = os.path.basename(top.filename)
+            result['line'] = top.lineno
+            result['func'] = top.function
+
+            # أول 3 إطارات (بعد التخطي)
+            for fr in selected[:3]:
+                result['stack'].append({
+                    'file': os.path.basename(fr.filename),
+                    'line': fr.lineno,
+                    'func': fr.function,
+                })
 
             return result
         except Exception as e:
             logger.debug(f"_get_caller_info: {e}")
             return {'file': '?', 'line': 0, 'func': '?', 'stack': []}
+
+    # =================================================================
+    # ✅ v7.7.17: تقرير الاستعلامات البطيئة
+    # =================================================================
+
+    async def get_slow_queries_report(
+        self, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """
+        ✅ v7.7.17: إرجاع آخر N استعلام بطيء (الأحدث أولاً).
+        """
+        try:
+            async with self._slow_queries_lock:
+                items = list(self._slow_queries_log)
+            items = items[-limit:] if limit > 0 else items
+            items.reverse()  # الأحدث أولاً
+            return items
+        except Exception as e:
+            logger.warning(f"⚠️ get_slow_queries_report: {e}")
+            return []
+
+    async def clear_slow_queries_log(self) -> int:
+        """✅ v7.7.17: مسح سجل الاستعلامات البطيئة."""
+        try:
+            async with self._slow_queries_lock:
+                count = len(self._slow_queries_log)
+                self._slow_queries_log.clear()
+            return count
+        except Exception as e:
+            logger.warning(f"⚠️ clear_slow_queries_log: {e}")
+            return 0
 
     # =================================================================
     # 🔍 v7.7.14: حجم قاعدة البيانات (PostgreSQL + MySQL + SQLite)
@@ -2723,9 +2831,9 @@ class Database(
                 )
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
 
-                # ✅ v7.7.16: تسجيل مع مصدر الاستعلام
+                # ✅ v7.7.17: تسجيل مع مصدر الاستعلام (فلترة صارمة)
                 try:
-                    caller_info = self._get_caller_info(skip_frames=2)
+                    caller_info = self._get_caller_info(skip_frames=0)
 
                     entry = {
                         'time': time.time(),
@@ -2743,10 +2851,6 @@ class Database(
                     }
                     async with self._slow_queries_lock:
                         self._slow_queries_log.append(entry)
-                        if len(self._slow_queries_log) > self._SLOW_QUERIES_MAX:
-                            self._slow_queries_log = (
-                                self._slow_queries_log[-self._SLOW_QUERIES_MAX:]
-                            )
                 except Exception as e:
                     logger.debug(f"slow log entry failed: {e}")
 
@@ -6147,4 +6251,5 @@ __all__ = [
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
     "_adapt_params", "_table_exists",
+    "_is_internal_frame",
 ]
