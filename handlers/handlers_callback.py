@@ -2,18 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.2)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.3)
 =====================================================================
-✅ v9.4.2 — تحليلات متقدمة:
-  - زر "📊 تحليلات متقدمة" في لوحة الأدمن
-  - 8 تقارير: نمو، أفضل قنوات، متوسط، نسبة نجاح، اشتراكات، Pool، بطيء، Excel
-  - ألوان ديناميكية 🟢/🟡/🔴
-  - تنبيه Pool تلقائي عند > 80%
+✅ v9.4.3 — إصلاح مسار التحليلات (FIX-ANALYTICS-ROUTING):
+  - إضافة admin_analytics و analytics_* قبل admin_ العام
+  - حل مشكلة "⚠️ غير متوفر" عند الضغط على زر التحليلات
+  - لا تغيير في باقي السلوك
 
-✅ v9.4.1 — إصلاح حجم قاعدة البيانات:
-  - ADMIN_METRICS: DB.get_db_size_kb() بدل PATHS.DB.stat()
-
-✅ v9.4.0..v9.0.0: كل الإصلاحات السابقة
+✅ v9.4.2 — تحليلات متقدمة
+✅ v9.4.1 — إصلاح حجم قاعدة البيانات
+✅ v9.4.0..v9.0.0 — كل الإصلاحات السابقة
 =====================================================================
 """
 
@@ -886,7 +884,6 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ غير مصرح", bot=context.bot)
                     return
                 kb = KeyboardFactory.build("admin_panel", lang=lang)
-                # ✅ v9.4.2: زر التحليلات
                 try:
                     rows = list(kb.inline_keyboard)
                     has_analytics = any(
@@ -912,6 +909,27 @@ class CallbackHandlers:
 
             if data.startswith("sec_"):
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
+                return
+
+            # ═══════════════════════════════════════════════════════
+            # ✅ v9.4.3: معالجات التحليلات — قبل admin_ العام!
+            # ═══════════════════════════════════════════════════════
+            if data == "admin_analytics":
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query, "❌ غير مصرح", bot=context.bot)
+                    return
+                await CallbackHandlers._show_analytics_menu(
+                    query, context, user_id, lang
+                )
+                return
+
+            if data.startswith("analytics_"):
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query, "❌ غير مصرح", bot=context.bot)
+                    return
+                await CallbackHandlers._handle_analytics(
+                    update, context, query, user_id, lang, data
+                )
                 return
 
             if data.startswith("admin_"):
@@ -1004,7 +1022,7 @@ class CallbackHandlers:
             pass
 
     # =================================================================
-    # 🧠 v9.1.0: دوال مساعدة للأمان
+    # دوال مساعدة للأمان
     # =================================================================
 
     @staticmethod
@@ -3877,7 +3895,6 @@ class CallbackHandlers:
         action = data.replace("analytics_", "", 1)
 
         try:
-            # ═════ 1) نمو المستخدمين ═════
             if action == "user_growth":
                 rows = await DB.get_user_growth(30)
                 if not rows:
@@ -3919,7 +3936,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 2) أفضل 10 قنوات ═════
             if action == "top_channels":
                 rows = await DB.get_top_channels(10)
                 if not rows:
@@ -3954,7 +3970,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 3) متوسط النشر + نسبة النجاح ═════
             if action == "publish_stats":
                 stats = await DB.get_publish_stats()
                 total_ch = stats['total_channels']
@@ -3990,7 +4005,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 4) نسبة نجاح القنوات ═════
             if action == "channels_rate":
                 rows = await DB.get_top_channels(20)
                 if not rows:
@@ -4029,7 +4043,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 5) معدل الاشتراكات ═════
             if action == "subscriptions":
                 rows = await DB.get_subscription_rate(6)
                 if not rows:
@@ -4067,7 +4080,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 6) Pool مباشر ═════
             if action == "pool":
                 pool_data = await DB.get_pool_live()
                 if not pool_data.get('available'):
@@ -4116,7 +4128,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 7) الاستعلامات البطيئة ═════
             if action == "slow":
                 rows = await DB.get_slow_queries(20)
                 if not rows:
@@ -4158,7 +4169,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═════ 9) تصدير Excel ═════
             if action == "export":
                 await safe_edit(
                     query,
@@ -4221,7 +4231,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _generate_excel_report() -> str:
-        """📤 توليد تقرير Excel شامل."""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
 
