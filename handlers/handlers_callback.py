@@ -2,40 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.1)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.2)
 =====================================================================
+✅ v9.4.2 — تحليلات متقدمة:
+  - زر "📊 تحليلات متقدمة" في لوحة الأدمن
+  - 8 تقارير: نمو، أفضل قنوات، متوسط، نسبة نجاح، اشتراكات، Pool، بطيء، Excel
+  - ألوان ديناميكية 🟢/🟡/🔴
+  - تنبيه Pool تلقائي عند > 80%
+
 ✅ v9.4.1 — إصلاح حجم قاعدة البيانات:
-  - ADMIN_METRICS: استخدام DB.get_db_size_kb() بدل PATHS.DB.stat()
-  - تنسيق تلقائي: KB → MB → GB
-  - يعمل على PostgreSQL/MySQL/SQLite
+  - ADMIN_METRICS: DB.get_db_size_kb() بدل PATHS.DB.stat()
 
-✅ v9.4.0 — تحسين أداء قناة السجل:
-  - _get_log_channel_menu_data: cache 30s + parallel fetch
-  - _invalidate_log_channel_menu_cache: إبطال ذكي
-  - _show_log_channel_menu: من 3 queries → 0 (cached)
-  - إبطال الكاش عند set/remove/test
-
-✅ v9.3.0 — ذكاء المشاركة في قناة السجل:
-  - _show_log_channel_menu: عرض "قناة مشتركة" + عدد المجموعات + الأسماء
-  - _handle_log_channel: قسم remove يُنبّه إذا كانت القناة مشتركة
-  - قسم test يعرض الوجهة الحالية
-
-✅ v9.2.0 — تكامل قناة سجل المجموعة:
-  - استيراد group_log بشكل آمن
-  - معالجات log_channel_btn / set / remove / test
-  - إدارة كاملة من لوحة الأمان
-
-✅ v9.1.0 — تحسينات أداء أزرار الأمان:
-  - _get_security_settings_cached (5s TTL)
-  - two-phase rendering
-  - _load_stats_and_edit helper موحد
-  - _preload_first_group
-
-✅ v9.0.5: إبطال context.user_data['lang'] عند تغيير اللغة
-✅ v9.0.4: كاش في context.user_data
-✅ v9.0.3: إصلاح sec_auto_reply_menu
-✅ v9.0.2: sec_maxlen, act_pin, HTML escape
-✅ v9.0.0: كل الإصلاحات الـ 90+
+✅ v9.4.0..v9.0.0: كل الإصلاحات السابقة
 =====================================================================
 """
 
@@ -60,6 +38,20 @@ from telegram.error import BadRequest, RetryAfter, Forbidden
 
 from config import CONFIG, PATHS
 from database import DB, TimeUtils, internal_cache
+
+# ✅ v9.4.2: دالة الألوان الديناميكية
+try:
+    from database_analytics import color_emoji
+except ImportError:
+    def color_emoji(value, thresholds=(0.3, 0.7), inverse=False):
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return "⚪"
+        low, high = thresholds
+        if inverse:
+            return "🟢" if v <= low else ("🟡" if v <= high else "🔴")
+        return "🟢" if v >= high else ("🟡" if v >= low else "🔴")
 
 # ─── utils ────────────────────────────────────────────────────────────
 try:
@@ -121,7 +113,6 @@ try:
 except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
-# ✅ v9.2.0: استيراد group_log بشكل آمن
 try:
     import group_log as _group_log_module
     _GROUP_LOG_MODULE_AVAILABLE = True
@@ -150,8 +141,6 @@ PUBLISH_ACQUIRE_TIMEOUT = 30
 
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
-
-# ✅ v9.4.0: cache لقائمة قناة السجل
 LOG_CHANNEL_MENU_CACHE_TTL = 30
 
 try:
@@ -219,22 +208,16 @@ def _safe_str(value, default='?') -> str:
 
 
 def _get_group_log():
-    """✅ v9.2.0: وصول ديناميكي لـgroup_log instance."""
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
     return getattr(_group_log_module, "group_log", None)
 
-
-# =====================================================================
-# ✅ v9.4.0: cache + parallel fetch لقناة السجل
-# =====================================================================
 
 def _log_channel_cache_key(chat_id: int) -> str:
     return f"log_ch_menu_{chat_id}"
 
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
-    """✅ v9.4.0: إبطال كاش قائمة قناة السجل."""
     try:
         await internal_cache.invalidate(_log_channel_cache_key(chat_id))
     except Exception:
@@ -242,20 +225,6 @@ async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
 
 
 async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
-    """
-    ✅ v9.4.0: جلب بيانات قناة السجل مع:
-    - cache 30s (يتفادى 3 queries متكررة)
-    - parallel fetch لـ current + effective
-    - try/except لـ get_groups_using_channel (توافق إصدارات)
-
-    Returns:
-        {
-            'current': int | None,
-            'effective': int | None,
-            'share_count': int,
-            'share_names': list[str],
-        }
-    """
     cache_key = _log_channel_cache_key(chat_id)
     cached = await internal_cache.get(cache_key)
     if cached is not None:
@@ -270,7 +239,6 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     if gl is None:
         return empty_result
 
-    # ✅ parallel fetch: current + effective في نفس الوقت
     async def _get_current():
         try:
             return await gl.get_private(chat_id)
@@ -294,19 +262,16 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
         logger.debug(f"gather log_channel info: {e}")
         current, effective = None, None
 
-    # ✅ جلب المجموعات المشتركة (اختياري)
     share_count = 0
     share_names: list = []
     if current:
         try:
             others = None
             try:
-                # حاول مع kwarg (إصدار حديث)
                 others = await gl.get_groups_using_channel(
                     current, exclude_group_id=chat_id
                 )
             except TypeError:
-                # إصدار قديم — بدون kwarg
                 others = await gl.get_groups_using_channel(current)
                 if others:
                     others = [
@@ -336,10 +301,6 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     )
     return data
 
-
-# =====================================================================
-# دوال مساعدة عامة
-# =====================================================================
 
 async def _safe_answer(query, text=None, show_alert=False) -> bool:
     if not query:
@@ -925,10 +886,24 @@ class CallbackHandlers:
                     await safe_edit(query, "❌ غير مصرح", bot=context.bot)
                     return
                 kb = KeyboardFactory.build("admin_panel", lang=lang)
+                # ✅ v9.4.2: زر التحليلات
+                try:
+                    rows = list(kb.inline_keyboard)
+                    has_analytics = any(
+                        btn.callback_data == "admin_analytics"
+                        for row in rows for btn in row
+                    )
+                    if not has_analytics:
+                        rows.insert(0, [InlineKeyboardButton(
+                            "📊 تحليلات متقدمة",
+                            callback_data="admin_analytics"
+                        )])
+                        kb = InlineKeyboardMarkup(rows)
+                except Exception:
+                    pass
                 await safe_edit(query, "👑 لوحة الأدمن", reply_markup=kb, bot=context.bot)
                 return
 
-            # ✅ v9.2.0: معالجات قناة السجل
             if data.startswith("log_channel_"):
                 await CallbackHandlers._handle_log_channel(
                     update, context, query, user_id, lang
@@ -1837,7 +1812,6 @@ class CallbackHandlers:
         if not await _is_group_owner(user_id, chat_id):
             await safe_edit(query, "❌ لا تملك هذه المجموعة", bot=context.bot)
             return
-        # ✅ v9.4.0: إبطال كاش قناة السجل
         try:
             await _invalidate_log_channel_menu_cache(chat_id)
         except Exception:
@@ -2687,19 +2661,11 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # ✅ v9.4.0: قناة سجل المجموعة (cached + parallel)
+    # قناة السجل
     # =================================================================
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
-        """
-        عرض قائمة إدارة قناة السجل — v9.4.0.
-
-        ✅ من 3 queries متتالية → 0 (cached 30s)
-        ✅ parallel fetch عند first call
-        ✅ إبطال تلقائي عند set/remove/test
-        """
-        # ✅ v9.4.0: fetch عبر cache
         data = await _get_log_channel_menu_data(chat_id)
 
         current = data.get('current')
@@ -2707,7 +2673,6 @@ class CallbackHandlers:
         share_count = data.get('share_count', 0)
         share_names = data.get('share_names', [])
 
-        # ─── بناء نص الحالة ───
         if current:
             if share_count == 0:
                 status_block = (
@@ -2753,7 +2718,6 @@ class CallbackHandlers:
             f"🆔 مجموعتك: <code>{chat_id}</code>"
         )
 
-        # ─── الأزرار ───
         set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗 تعيين قناة السجل"
         test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 اختبار"
         remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️ إزالة"
@@ -2792,11 +2756,9 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_log_channel(update, context, query, user_id, lang):
-        """معالج أزرار قناة السجل."""
         data = query.data or ""
         parts = data.split(":")
 
-        # ─── استخراج chat_id ───
         chat_id = None
         if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
             chat_id = int(parts[1])
@@ -2819,7 +2781,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
 
-        # ─── تحديد الإجراء ───
         if parts[0] == "log_channel_btn":
             action = "menu"
         elif parts[0].startswith("log_channel_"):
@@ -2828,14 +2789,12 @@ class CallbackHandlers:
             action = parts[0]
 
         try:
-            # ─── القائمة ───
             if action in ("menu", "btn", "show"):
                 await CallbackHandlers._show_log_channel_menu(
                     query, context, chat_id, user_id, lang
                 )
                 return
 
-            # ─── تعيين ───
             if action == "set":
                 gl = _get_group_log()
                 if gl is None:
@@ -2864,7 +2823,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # ─── إزالة (ذكية) ───
             if action == "remove":
                 gl = _get_group_log()
                 if gl is None:
@@ -2875,7 +2833,6 @@ class CallbackHandlers:
                     )
                     return
 
-                # ✅ v9.3.0: فحص المشاركة قبل الحذف
                 current = await gl.get_private(chat_id)
                 share_info = ""
                 if current:
@@ -2904,7 +2861,6 @@ class CallbackHandlers:
                     )
                     return
 
-                # ✅ v9.4.0: إبطال الكاش
                 await _invalidate_log_channel_menu_cache(chat_id)
 
                 back_text = KeyboardFactory.get_text(
@@ -2926,7 +2882,6 @@ class CallbackHandlers:
                 )
                 return
 
-            # ─── اختبار ───
             if action == "test":
                 gl = _get_group_log()
                 if gl is None:
@@ -2961,7 +2916,6 @@ class CallbackHandlers:
                         event="general",
                         silent=False,
                     )
-                    # ✅ v9.4.0: إبطال الكاش (قد يتغير الوقت/الحالة)
                     await _invalidate_log_channel_menu_cache(chat_id)
                     await safe_edit(
                         query,
@@ -3421,19 +3375,15 @@ class CallbackHandlers:
                 except Exception:
                     stats = {}
 
-                # ✅ v9.4.1: استخدام get_db_size_kb() الموحّدة (PostgreSQL/MySQL/SQLite)
                 db_size_kb = 0.0
                 try:
-                    # الأولوية 1: من الإحصائيات (تم حسابها مسبقاً)
                     db_size_kb = float(stats.get('db_size_kb', 0) or 0)
-                    # الأولوية 2: حساب مباشر من DB
                     if db_size_kb == 0:
                         db_size_kb = await DB.get_db_size_kb()
                 except Exception as e:
                     logger.debug(f"get_db_size_kb: {e}")
                     db_size_kb = 0.0
 
-                # تنسيق تلقائي: KB → MB → GB
                 if db_size_kb >= 1024 * 1024:
                     size_display = f"{db_size_kb / (1024 * 1024):.2f} GB"
                 elif db_size_kb >= 1024:
@@ -3887,6 +3837,477 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_show_restore_backups: {e}", exc_info=True)
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
+
+    # =================================================================
+    # 🎨 v9.4.2: التحليلات المتقدمة
+    # =================================================================
+
+    @staticmethod
+    async def _show_analytics_menu(query, context, user_id, lang):
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📈 نمو المستخدمين (30 يوم)",
+                                  callback_data="analytics_user_growth")],
+            [InlineKeyboardButton("🏆 أفضل 10 قنوات",
+                                  callback_data="analytics_top_channels")],
+            [InlineKeyboardButton("📊 متوسط النشر + النجاح",
+                                  callback_data="analytics_publish_stats")],
+            [InlineKeyboardButton("🎯 نسبة نجاح القنوات",
+                                  callback_data="analytics_channels_rate")],
+            [InlineKeyboardButton("💎 معدل الاشتراكات",
+                                  callback_data="analytics_subscriptions")],
+            [InlineKeyboardButton("🚀 Pool مباشر",
+                                  callback_data="analytics_pool")],
+            [InlineKeyboardButton("🐌 استعلامات بطيئة",
+                                  callback_data="analytics_slow")],
+            [InlineKeyboardButton("📤 تصدير Excel",
+                                  callback_data="analytics_export")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CB.ADMIN)],
+        ])
+        await safe_edit(
+            query,
+            "📊 <b>التحليلات المتقدمة</b>\n\n"
+            "اختر التقرير الذي تريد عرضه:",
+            reply_markup=kb,
+            parse_mode='HTML',
+            bot=context.bot,
+        )
+
+    @staticmethod
+    async def _handle_analytics(update, context, query, user_id, lang, data):
+        action = data.replace("analytics_", "", 1)
+
+        try:
+            # ═════ 1) نمو المستخدمين ═════
+            if action == "user_growth":
+                rows = await DB.get_user_growth(30)
+                if not rows:
+                    await safe_edit(
+                        query,
+                        "📈 <b>نمو المستخدمين</b>\n\n"
+                        "📭 لا توجد بيانات كافية",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                max_cnt = max(r['count'] for r in rows) or 1
+                text = "📈 <b>نمو المستخدمين — 30 يوم</b>\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                total = sum(r['count'] for r in rows)
+                avg = total / len(rows) if rows else 0
+
+                text += f"👥 <b>الإجمالي:</b> {total}\n"
+                text += f"📊 <b>المتوسط اليومي:</b> {avg:.1f}\n"
+                text += f"📅 <b>عدد الأيام:</b> {len(rows)}\n\n"
+                text += "<b>آخر 10 أيام:</b>\n"
+
+                for r in rows[-10:]:
+                    bar_len = int((r['count'] / max_cnt) * 10)
+                    bar = "█" * bar_len + "░" * (10 - bar_len)
+                    date_short = r['date'][5:]
+                    text += f"<code>{date_short}</code> {bar} {r['count']}\n"
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 2) أفضل 10 قنوات ═════
+            if action == "top_channels":
+                rows = await DB.get_top_channels(10)
+                if not rows:
+                    await safe_edit(
+                        query,
+                        "🏆 <b>أفضل 10 قنوات</b>\n\n📭 لا توجد قنوات",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                text = "🏆 <b>أفضل 10 قنوات</b>\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                for i, ch in enumerate(rows[:10], 1):
+                    rate = ch['success_rate']
+                    color = color_emoji(rate, (30, 70))
+                    name = _html.escape(str(ch['name'])[:25])
+                    text += (
+                        f"{i}. {color} <b>{name}</b>\n"
+                        f"   📝 {ch['total']} | ✅ {ch['published']} "
+                        f"| ❌ {ch['failed']} | {rate}%\n\n"
+                    )
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 3) متوسط النشر + نسبة النجاح ═════
+            if action == "publish_stats":
+                stats = await DB.get_publish_stats()
+                total_ch = stats['total_channels']
+                avg_posts = stats['avg_posts_per_channel']
+                rate = stats['success_rate']
+                rate_color = color_emoji(rate, (30, 70))
+
+                if avg_posts >= 20:
+                    avg_color = "🟢"
+                elif avg_posts >= 10:
+                    avg_color = "🟡"
+                else:
+                    avg_color = "🔴"
+
+                text = (
+                    "📊 <b>متوسط النشر + نسبة النجاح</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📡 <b>القنوات النشطة:</b> {total_ch}\n"
+                    f"📝 <b>إجمالي المنشورات:</b> {stats['total_posts']}\n"
+                    f"✅ <b>المنشورة:</b> {stats['published']}\n"
+                    f"❌ <b>الفاشلة:</b> {stats['failed']}\n\n"
+                    f"{avg_color} <b>متوسط المنشورات/قناة:</b> "
+                    f"{avg_posts}\n"
+                    f"{avg_color} <b>متوسط المنشور/قناة:</b> "
+                    f"{stats['avg_published_per_channel']}\n\n"
+                    f"{rate_color} <b>نسبة النجاح العامة:</b> {rate}%\n"
+                )
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 4) نسبة نجاح القنوات ═════
+            if action == "channels_rate":
+                rows = await DB.get_top_channels(20)
+                if not rows:
+                    await safe_edit(
+                        query,
+                        "🎯 <b>نسبة نجاح القنوات</b>\n\n📭 لا توجد بيانات",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                text = "🎯 <b>نسبة نجاح القنوات</b>\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                sorted_rows = sorted(rows, key=lambda x: x['success_rate'])
+                for ch in sorted_rows[:10]:
+                    rate = ch['success_rate']
+                    color = color_emoji(rate, (30, 70))
+                    name = _html.escape(str(ch['name'])[:25])
+                    text += (
+                        f"{color} <b>{name}</b>\n"
+                        f"   ✅ {ch['published']}/{ch['total']} "
+                        f"({rate}%) — ❌ {ch['failed']}\n\n"
+                    )
+
+                text += "💡 <i>الأقل نجاحاً أولاً — لتصحيح المشاكل</i>\n"
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 5) معدل الاشتراكات ═════
+            if action == "subscriptions":
+                rows = await DB.get_subscription_rate(6)
+                if not rows:
+                    await safe_edit(
+                        query,
+                        "💎 <b>معدل الاشتراكات</b>\n\n📭 لا توجد بيانات",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                text = "💎 <b>معدل الاشتراكات — آخر 6 أشهر</b>\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                max_cnt = max(r['count'] for r in rows) or 1
+                total = sum(r['count'] for r in rows)
+
+                for r in rows:
+                    bar_len = int((r['count'] / max_cnt) * 12)
+                    bar = "█" * bar_len + "░" * (12 - bar_len)
+                    text += f"<code>{r['month']}</code> {bar} {r['count']}\n"
+
+                text += f"\n📊 <b>الإجمالي:</b> {total}\n"
+                avg = total / len(rows) if rows else 0
+                text += f"📈 <b>المتوسط الشهري:</b> {avg:.1f}\n"
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 6) Pool مباشر ═════
+            if action == "pool":
+                pool_data = await DB.get_pool_live()
+                if not pool_data.get('available'):
+                    await safe_edit(
+                        query,
+                        f"🚀 <b>Pool</b>\n\n"
+                        f"⚠️ غير متاح ({pool_data.get('type')})",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                util = pool_data['utilization_pct']
+
+                if util >= 80:
+                    alert = "🔴 <b>تحذير: Pool مشبع!</b>\n\n"
+                elif util >= 60:
+                    alert = "🟡 <b>Pool تحت الضغط</b>\n\n"
+                else:
+                    alert = "🟢 <b>Pool سليم</b>\n\n"
+
+                bar_len = int(util / 100 * 15)
+                bar = "█" * bar_len + "░" * (15 - bar_len)
+
+                text = (
+                    "🚀 <b>Pool مباشر</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{alert}"
+                    f"<code>{bar}</code> {util}%\n\n"
+                    f"📊 <b>النوع:</b> {pool_data['type']}\n"
+                    f"🔝 <b>الحد الأقصى:</b> {pool_data['max_size']}\n"
+                    f"📦 <b>الإجمالي:</b> {pool_data['current_size']}\n"
+                    f"💤 <b>خامل:</b> {pool_data['idle_size']}\n"
+                    f"⚡ <b>مستخدم:</b> {pool_data['in_use']}\n"
+                )
+
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 تحديث", callback_data="analytics_pool"),
+                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics"),
+                ]])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 7) الاستعلامات البطيئة ═════
+            if action == "slow":
+                rows = await DB.get_slow_queries(20)
+                if not rows:
+                    await safe_edit(
+                        query,
+                        "🐌 <b>الاستعلامات البطيئة</b>\n\n"
+                        "📭 لا توجد استعلامات بطيئة (ممتاز!)",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        parse_mode='HTML',
+                        bot=context.bot,
+                    )
+                    return
+
+                text = "🐌 <b>أبطأ الاستعلامات (20)</b>\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                for i, q in enumerate(rows[:15], 1):
+                    elapsed = q.get('elapsed', 0)
+                    if elapsed >= 3:
+                        color = "🔴"
+                    elif elapsed >= 1.5:
+                        color = "🟡"
+                    else:
+                        color = "🟢"
+                    qs = _html.escape(str(q.get('query', ''))[:60])
+                    text += (
+                        f"{i}. {color} <code>{elapsed:.2f}s</code>\n"
+                        f"   <i>{qs}</i>\n\n"
+                    )
+
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تحديث", callback_data="analytics_slow")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")],
+                ])
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            # ═════ 9) تصدير Excel ═════
+            if action == "export":
+                await safe_edit(
+                    query,
+                    "⏳ جارٍ إنشاء الملف...",
+                    bot=context.bot,
+                )
+                try:
+                    file_path = await CallbackHandlers._generate_excel_report()
+                    with open(file_path, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id=user_id,
+                            document=f,
+                            filename=os.path.basename(file_path),
+                            caption="📊 <b>تقرير التحليلات الشامل</b>",
+                            parse_mode='HTML',
+                        )
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                    await safe_edit(
+                        query,
+                        "✅ تم إرسال التقرير",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        bot=context.bot,
+                    )
+                except ImportError:
+                    await safe_edit(
+                        query,
+                        "❌ مكتبة openpyxl غير مثبتة\n"
+                        "<code>pip install openpyxl</code>",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        bot=context.bot,
+                    )
+                except Exception as e:
+                    logger.error(f"❌ export: {e}", exc_info=True)
+                    await safe_edit(
+                        query,
+                        f"❌ فشل التصدير: {str(e)[:80]}",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 رجوع",
+                                                 callback_data="admin_analytics")
+                        ]]),
+                        bot=context.bot,
+                    )
+                return
+
+            await safe_edit(query, "⚠️ غير معروف", bot=context.bot)
+
+        except Exception as e:
+            logger.error(f"❌ _handle_analytics({action}): {e}", exc_info=True)
+            await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
+
+    @staticmethod
+    async def _generate_excel_report() -> str:
+        """📤 توليد تقرير Excel شامل."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
+        wb = Workbook()
+        header_font = Font(bold=True, size=12)
+        header_fill = PatternFill(start_color="4472C4",
+                                  end_color="4472C4", fill_type="solid")
+
+        ws1 = wb.active
+        ws1.title = "نمو المستخدمين"
+        ws1['A1'] = "التاريخ"
+        ws1['B1'] = "العدد"
+        ws1['A1'].font = header_font
+        ws1['B1'].font = header_font
+        ws1['A1'].fill = header_fill
+        ws1['B1'].fill = header_fill
+
+        growth = await DB.get_user_growth(30)
+        for i, r in enumerate(growth, start=2):
+            ws1[f'A{i}'] = r['date']
+            ws1[f'B{i}'] = r['count']
+
+        ws2 = wb.create_sheet("أفضل القنوات")
+        headers = ["#", "الاسم", "إجمالي", "منشورة", "فاشلة", "نسبة النجاح %"]
+        for i, h in enumerate(headers, 1):
+            c = ws2.cell(row=1, column=i, value=h)
+            c.font = header_font
+            c.fill = header_fill
+
+        top = await DB.get_top_channels(20)
+        for i, ch in enumerate(top, start=2):
+            ws2.cell(row=i, column=1, value=i - 1)
+            ws2.cell(row=i, column=2, value=ch['name'])
+            ws2.cell(row=i, column=3, value=ch['total'])
+            ws2.cell(row=i, column=4, value=ch['published'])
+            ws2.cell(row=i, column=5, value=ch['failed'])
+            ws2.cell(row=i, column=6, value=ch['success_rate'])
+
+        ws3 = wb.create_sheet("الاشتراكات")
+        ws3['A1'] = "الشهر"
+        ws3['B1'] = "العدد"
+        ws3['A1'].font = header_font
+        ws3['B1'].font = header_font
+        ws3['A1'].fill = header_fill
+        ws3['B1'].fill = header_fill
+
+        subs = await DB.get_subscription_rate(12)
+        for i, r in enumerate(subs, start=2):
+            ws3[f'A{i}'] = r['month']
+            ws3[f'B{i}'] = r['count']
+
+        ws4 = wb.create_sheet("إحصائيات عامة")
+        stats = await DB.get_general_stats()
+        pub_stats = await DB.get_publish_stats()
+        pool = await DB.get_pool_live()
+
+        rows = [
+            ("المستخدمون", stats.get('users', 0)),
+            ("القنوات", stats.get('channels', 0)),
+            ("المجموعات", stats.get('groups', 0)),
+            ("المنشورات", stats.get('posts', 0)),
+            ("المنشورة", stats.get('published', 0)),
+            ("الفواتير", stats.get('invoices', 0)),
+            ("التذاكر", stats.get('tickets', 0)),
+            ("حجم DB (KB)", stats.get('db_size_kb', 0)),
+            ("", ""),
+            ("متوسط المنشورات/قناة", pub_stats['avg_posts_per_channel']),
+            ("نسبة النجاح العامة", f"{pub_stats['success_rate']}%"),
+            ("", ""),
+            ("Pool متاح", pool.get('available', False)),
+        ]
+        for i, (k, v) in enumerate(rows, start=1):
+            ws4[f'A{i}'] = k
+            ws4[f'B{i}'] = v
+            if i == 1:
+                ws4[f'A{i}'].font = header_font
+                ws4[f'B{i}'].font = header_font
+
+        import tempfile
+        ts = TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')
+        file_path = os.path.join(
+            tempfile.gettempdir(),
+            f"analytics_{ts}.xlsx"
+        )
+        wb.save(file_path)
+        return file_path
 
     # =================================================================
     # الردود التلقائية
