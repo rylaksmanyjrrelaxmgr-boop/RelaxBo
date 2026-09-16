@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.0)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.1)
 ================================================================================
+🔍 v5.4.1 (Analytics check):
+    ✅ فحص تحميل AnalyticsMixin بعد logging.basicConfig
+    ✅ يسجّل بوضوح: "✅ AnalyticsMixin محمّل" أو "⚠️ مفقود"
+    ✅ يحل مشكلة صمت _load_mixin بسبب ترتيب التحميل
+
 🔍 v5.4.0 (Pool Monitor integration):
     ✅ استيراد BackgroundTasks.monitor_pool + monitor_pool_alert
     ✅ تشغيل monitor_pool (يسجّل حالة Pool كل 60s)
@@ -119,6 +124,57 @@ logging.getLogger("telegram.ext.ExtBot").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔍 v5.4.1: فحص تحميل AnalyticsMixin
+# ═══════════════════════════════════════════════════════════════════
+try:
+    from database import ANALYTICS_MIXIN_AVAILABLE
+    if ANALYTICS_MIXIN_AVAILABLE:
+        logger.info("✅ AnalyticsMixin محمّل (database_analytics.py)")
+    else:
+        logger.warning(
+            "⚠️ AnalyticsMixin مفقود — database_analytics.py غير موجود"
+        )
+except Exception as _e:
+    logger.error(f"❌ فحص Analytics: {_e}")
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔍 v5.4.1: فحص تحميل باقي Mixins (اختياري، للتشخيص)
+# ═══════════════════════════════════════════════════════════════════
+try:
+    from database import (
+        CHANNELS_POSTS_MIXIN_AVAILABLE,
+        SUBSCRIPTIONS_MIXIN_AVAILABLE,
+        GROUPS_MIXIN_AVAILABLE,
+        TICKETS_MIXIN_AVAILABLE,
+        CONTESTS_MIXIN_AVAILABLE,
+        STATS_MIXIN_AVAILABLE,
+        SETTINGS_MIXIN_AVAILABLE,
+        POINTS_MIXIN_AVAILABLE,
+        BACKUP_MIXIN_AVAILABLE,
+        REMINDERS_MIXIN_AVAILABLE,
+    )
+    _mixins_status = {
+        "channels_posts": CHANNELS_POSTS_MIXIN_AVAILABLE,
+        "subscriptions": SUBSCRIPTIONS_MIXIN_AVAILABLE,
+        "groups": GROUPS_MIXIN_AVAILABLE,
+        "tickets": TICKETS_MIXIN_AVAILABLE,
+        "contests": CONTESTS_MIXIN_AVAILABLE,
+        "stats": STATS_MIXIN_AVAILABLE,
+        "settings": SETTINGS_MIXIN_AVAILABLE,
+        "points": POINTS_MIXIN_AVAILABLE,
+        "backup": BACKUP_MIXIN_AVAILABLE,
+        "reminders": REMINDERS_MIXIN_AVAILABLE,
+        "analytics": ANALYTICS_MIXIN_AVAILABLE,
+    }
+    _missing = [k for k, v in _mixins_status.items() if not v]
+    if _missing:
+        logger.warning(f"⚠️ Mixins مفقودة: {_missing}")
+    else:
+        logger.info(f"✅ كل الـ {len(_mixins_status)} Mixins محمّلة")
+except Exception as _e:
+    logger.debug(f"⚠️ فحص Mixins: {_e}")
 
 ALLOWED_UPDATES = [
     "message",
