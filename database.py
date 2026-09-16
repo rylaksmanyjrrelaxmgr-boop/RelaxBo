@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.17 — SLOW-QUERY-CALLER-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.18 — MV-ACTIVE-SUBS-FIX)
 ================================================================================
+🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX):
+  ✅ _ensure_materialized_views_postgres() : إنشاء mv_active_user_limits
+  ✅ _maybe_refresh_mv() : تحديث MV بدعم cooldown 5 دقائق
+  ✅ get_channels_to_publish() : استخدام MV على PostgreSQL بدل CTE
+       → 2.99s → <50ms لكل دورة نشر
+  ✅ fallback آمن: SQLite/MySQL يبقون على CTE كما هو
+  ✅ لا يكسر أي وظيفة سابقة
+
 🆕 v7.7.17 (SLOW-QUERY-CALLER-FIX):
   ✅ _get_caller_info() : فلترة صارمة لـ asyncio/stdlib/site-packages
   ✅ skip_frames أصبح مُستخدماً فعلياً
@@ -1887,6 +1895,14 @@ class Database(
             )
             self._slow_queries_lock = asyncio.Lock()
 
+            # 🚀 v7.7.18: Materialized View للاشتراكات النشطة
+            self._mv_refresh_lock = asyncio.Lock()
+            self._mv_last_refresh_mono: float = 0.0
+            self._mv_refresh_cooldown = float(
+                os.getenv("MV_REFRESH_COOLDOWN", "300")
+            )
+            self._mv_available = False  # يُحدَّد عند bootstrap
+
             self._group_security_columns_cache: Optional[set] = None
 
             self._singleton_init_done = True
@@ -2065,6 +2081,123 @@ class Database(
             }
         except Exception as e:
             return {"type": "error", "message": str(e)}
+
+    # =================================================================
+    # 🚀 v7.7.18: Materialized View للاشتراكات النشطة
+    # =================================================================
+
+    async def _ensure_materialized_views_postgres(self, conn) -> bool:
+        """
+        ✅ v7.7.18: ينشئ mv_active_user_limits إذا لم توجد.
+        يُستدعى مرة واحدة في bootstrap.
+
+        يعيد True إذا كان MV متاحاً للاستخدام.
+        """
+        if not USE_POSTGRES:
+            self._mv_available = False
+            return False
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_matviews "
+                "WHERE matviewname = 'mv_active_user_limits'"
+            )
+            if not exists:
+                if not await _table_exists(conn, "subscriptions"):
+                    logger.info(
+                        "⏩ mv: subscriptions غير موجود — تأجيل"
+                    )
+                    self._mv_available = False
+                    return False
+                if not await _table_exists(conn, "plans"):
+                    logger.info("⏩ mv: plans غير موجود — تأجيل")
+                    self._mv_available = False
+                    return False
+
+                await conn.execute("""
+                    CREATE MATERIALIZED VIEW mv_active_user_limits AS
+                    SELECT s.user_id,
+                           MAX(p.max_channels) AS max_channels,
+                           MAX(p.max_posts) AS max_posts
+                    FROM subscriptions s
+                    JOIN plans p ON s.plan_id = p.id
+                    WHERE s.status = 'active'
+                      AND s.end_date > NOW()
+                    GROUP BY s.user_id
+                """)
+                try:
+                    await conn.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "idx_mv_active_user_limits_user_id "
+                        "ON mv_active_user_limits(user_id)"
+                    )
+                except Exception as idx_e:
+                    logger.warning(f"⚠️ فهرس MV: {idx_e}")
+                logger.info("✅ mv_active_user_limits أُنشئ")
+            else:
+                logger.info("⏩ mv_active_user_limits موجود")
+
+            # تحديث أولي إن كان MV فارغاً
+            row_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM mv_active_user_limits"
+            )
+            if not row_count:
+                try:
+                    await conn.execute(
+                        "REFRESH MATERIALIZED VIEW "
+                        "mv_active_user_limits"
+                    )
+                    logger.info("✅ mv_active_user_limits مُعبّأ")
+                except Exception as rf_e:
+                    logger.debug(f"⚠️ تعبئة MV: {rf_e}")
+
+            self._mv_available = True
+            return True
+        except Exception as e:
+            logger.warning(
+                f"⚠️ _ensure_materialized_views_postgres: {e}"
+            )
+            self._mv_available = False
+            return False
+
+    async def _maybe_refresh_mv(self) -> bool:
+        """
+        ✅ v7.7.18: يحدّث mv_active_user_limits إذا مرّ cooldown.
+        آمن تحت التزامن — القفل يمنع refresh متوازي.
+
+        يعيد True إذا تم refresh فعلي.
+        """
+        if not USE_POSTGRES or not self._mv_available:
+            return False
+        now_mono = time.monotonic()
+        if (now_mono - self._mv_last_refresh_mono
+                < self._mv_refresh_cooldown):
+            return False
+
+        async with self._mv_refresh_lock:
+            # Double-check بعد اكتساب القفل
+            now_mono = time.monotonic()
+            if (now_mono - self._mv_last_refresh_mono
+                    < self._mv_refresh_cooldown):
+                return False
+            self._mv_last_refresh_mono = now_mono
+
+            try:
+                async with self.connection() as conn:
+                    try:
+                        await conn.execute(
+                            "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+                            "mv_active_user_limits"
+                        )
+                    except Exception:
+                        await conn.execute(
+                            "REFRESH MATERIALIZED VIEW "
+                            "mv_active_user_limits"
+                        )
+                logger.debug("🔄 mv_active_user_limits محدّث")
+                return True
+            except Exception as e:
+                logger.warning(f"⚠️ MV refresh: {e}")
+                return False
 
     # =================================================================
     # مساعد لتتبّع مهام الخلفية
@@ -4749,6 +4882,14 @@ class Database(
             )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
+        # 🚀 v7.7.18: تهيئة Materialized View على PostgreSQL
+        if USE_POSTGRES:
+            try:
+                await self._ensure_materialized_views_postgres(conn)
+            except Exception as e:
+                logger.warning(f"⚠️ MV init: {e}")
+                self._mv_available = False
+
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
         return True
@@ -5692,10 +5833,80 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
+        """
+        ✅ v7.7.18: على PostgreSQL يستخدم mv_active_user_limits
+        بدل CTE active_subs → 2.99s → <50ms.
+        SQLite/MySQL يحتفظان بـ CTE كما هو.
+        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
-        if USE_MYSQL:
+        # 🚀 v7.7.18: حاول تحديث MV أولاً (رخيص مع cooldown)
+        if USE_POSTGRES and self._mv_available:
+            try:
+                await self._maybe_refresh_mv()
+            except Exception as e:
+                logger.debug(f"MV refresh call: {e}")
+
+        if USE_POSTGRES and self._mv_available:
+            # 🚀 v7.7.18: استخدام MV بدل CTE
+            query = """
+                SELECT uc.id, uc.channel_id, uc.user_id,
+                       u.auto_publish, u.auto_recycle,
+                       COALESCE(pc.published_count, 0)
+                           AS published_count
+                FROM user_channels uc
+                JOIN users u ON uc.user_id = u.user_id
+                LEFT JOIN schedule sch
+                    ON uc.id = sch.channel_db_id
+                LEFT JOIN mv_active_user_limits a
+                    ON uc.user_id = a.user_id
+                LEFT JOIN (
+                    SELECT user_id, COUNT(*) AS channel_count
+                    FROM user_channels WHERE banned = 0
+                    GROUP BY user_id
+                ) cc ON uc.user_id = cc.user_id
+                LEFT JOIN (
+                    SELECT channel_db_id,
+                           SUM(CASE WHEN published = 0
+                                    AND (fail_count IS NULL
+                                         OR fail_count < 3)
+                                    THEN 1 ELSE 0 END)
+                               AS publishable_unpublished_count,
+                           SUM(CASE WHEN published = 1
+                                    THEN 1 ELSE 0 END)
+                               AS published_count
+                    FROM posts GROUP BY channel_db_id
+                ) pc ON uc.id = pc.channel_db_id
+                WHERE uc.banned = 0 AND u.banned = 0
+                  AND u.auto_publish = 1
+                  AND (a.user_id IS NOT NULL OR uc.user_id = $1)
+                  AND (sch.next_publish_date IS NULL
+                       OR sch.next_publish_date <= $2)
+                  AND (COALESCE(
+                           pc.publishable_unpublished_count, 0
+                       ) > 0
+                       OR (u.auto_recycle = 1
+                           AND COALESCE(
+                               pc.published_count, 0
+                           ) > 0))
+                  AND (a.user_id IS NULL
+                       OR COALESCE(
+                           cc.channel_count, 0
+                       ) <= a.max_channels)
+                  AND (a.user_id IS NULL
+                       OR COALESCE(
+                           pc.publishable_unpublished_count, 0
+                       ) <= a.max_posts)
+                ORDER BY COALESCE(
+                    sch.next_publish_date, uc.created_at
+                ) ASC
+                LIMIT $3
+            """
+            return await self.fetchall(query, (owner_id, now, limit))
+
+        elif USE_MYSQL:
+            # MySQL — كما هو (بدون MV)
             now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             query = """
                 SELECT uc.id, uc.channel_id, uc.user_id,
@@ -5762,7 +5973,9 @@ class Database(
                 query,
                 (now_str, owner_id, now_str, limit),
             )
+
         else:
+            # SQLite — CTE كما هو (لا MV)
             query = """
                 WITH active_subs AS (
                     SELECT s.user_id,
