@@ -2,47 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.10)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.11)
 ================================================================================
+🚀 v7.6.11 (MISSING-TABLES-MIGRATION):
+  ✅ إضافة جدول chat_locks إلى SQLite/PG/MySQL (كان مفقوداً)
+  ✅ إضافة عمودي violation_penalty + violation_penalty_duration إلى group_security
+  ✅ Migration تلقائي (ALTER TABLE ADD COLUMN) لقواعد البيانات الموجودة
+  ✅ نقل idx_penalties_end_time إلى DEPRECATED_INDEXES
+  ✅ CURRENT_SCHEMA_VERSION: 10 → 11
+  ✅ يحل مشكلة /lock و/unlock عند rebuild كامل
+
 🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS):
   ✅ تنظيف تلقائي عند كل إقلاع (fast-path + rebuild)
   ✅ حذف المعرّفات السالبة (chat_id) من user_groups_link
   ✅ حذف GroupAnonymousBot/ChannelBot من anonymous_admins
-  ✅ CURRENT_SCHEMA_VERSION: 9 → 10
-  ✅ دوال: _cleanup_stale_links_sqlite/_postgres/_mysql
-  ✅ حل مشكلة "❌ غير مصرح" بعد التفعيل من مشرف مجهول
 
 🚀 v7.6.9 (SLOW-QUERY-INDEX-FIX):
   ✅ +4 فهارس: idx_penalties_status_end, idx_auto_replies_keyword_active,
      idx_user_violations_chat, idx_user_warnings_chat
-  ✅ CURRENT_SCHEMA_VERSION: 8 → 9
-  ✅ EXPECTED_INDEX_COUNT: 66 → 70
-  ✅ CRITICAL_INDEX_NAMES: +4 فهارس
-  ✅ DEPRECATED_INDEXES: إزالة idx_user_violations_chat + idx_user_warnings_chat
 
 🚀 v7.6.8 (CURSOR-CLEANUP):
-  ✅ إغلاق cursors في كل دوال SQLite (5 أماكن) — منع resource leak
-  ✅ _get_current_schema_version_mysql: try/finally لضمان الإغلاق
-  ✅ حذف import os و import json غير المستخدمين
-  ✅ تحسين assert إلى raise RuntimeError (يعمل مع -O)
+  ✅ إغلاق cursors في كل دوال SQLite
 
 🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX):
-  ✅ CURRENT_SCHEMA_VERSION: 7 → 8
-  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat + idx_banned_words_chat_word
+  ✅ CRITICAL_INDEX_NAMES: idx_banned_words_chat + idx_banned_words_chat_word
 
-🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
-  ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
-
-🚀 v7.6.5 (LOG-CHANNEL-ID):
-  ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
-
-🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
-  ✅ _normalize_columns_mysql() — يُزيل ASC/DESC
-
-🚀 v7.6.3: فحص تعريفات الفهارس (Smart Check)
-🚀 v7.6.2: حذف 11 فهرساً من DEPRECATED_INDEXES
-🚀 v7.6.1: توحيد الفهارس + 3 فهارس من database.py
-🚀 v7.6.0: Fast-path (~0.5s بدل ~31s)
+🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES): فحص الفهارس الحرجة مع fast-path
+🚀 v7.6.5 (LOG-CHANNEL-ID): bot_groups.log_channel_id
+🚀 v7.6.4 (MySQL DESC): _normalize_columns_mysql
+🚀 v7.6.3: Smart Check
+🚀 v7.6.2: حذف 11 فهرساً
+🚀 v7.6.1: توحيد الفهارس
+🚀 v7.6.0: Fast-path
 ================================================================================
 """
 
@@ -54,8 +45,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.10: 9 → 10 (إجبار rebuild لمرة واحدة لتفعيل التنظيف التلقائي)
-CURRENT_SCHEMA_VERSION = 10
+# ✅ v7.6.11: 10 → 11 (إجبار rebuild لإنشاء chat_locks والأعمدة الناقصة)
+CURRENT_SCHEMA_VERSION = 11
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية (للتنظيف التلقائي)
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -67,7 +58,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 70  # ✅ v7.6.9: 66 → 70
+EXPECTED_INDEX_COUNT = 70
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -270,10 +261,15 @@ DEPRECATED_INDEXES = [
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
 
-    # ═══ USER_PENALTIES ═══
+    # ═══ USER_PENALTIES ✅ v7.6.11: +idx_penalties_end_time ═══
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
     "idx_user_penalties_active_end", "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup", "idx_penalties_chat_status",
+    "idx_penalties_expiry",              # ← من DB dump
+    "idx_penalties_cleanup",             # ← من DB dump
+    "idx_penalties_end_time",            # ✅ v7.6.11: من DB dump
+    "idx_security_chat",                 # ✅ v7.6.11: من DB dump
+    "idx_group_security_chat",           # ✅ v7.6.11: من DB dump
 
     # ═══ BANNED_WORDS ═══
     "idx_banned_words_word",
@@ -327,18 +323,13 @@ DEPRECATED_INDEXES = [
 
     # ═══ USER_VIOLATIONS / WARNINGS ═══
     "idx_user_violations_user",
-    # "idx_user_violations_chat",   ← في COMMON_INDEXES الآن
     "idx_violations_user_chat",
     "idx_user_warnings_user",
-    # "idx_user_warnings_chat",     ← في COMMON_INDEXES الآن
 
     # ═══ USER_GROUPS_LINK ═══
     "idx_ugl_user",
 ]
 
-# ✅ v7.6.6: فهارس حرجة يجب فحصها حتى مع fast-path
-# ✅ v7.6.7: إضافة فهارس banned_words
-# ✅ v7.6.9: إضافة الفهارس الأربعة الجديدة
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel",
@@ -356,7 +347,6 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_warnings_chat",
 })
 
-# ✅ v7.6.8: raise بدل assert (يعمل مع -O)
 if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
     raise RuntimeError(
         f"❌ عدد الفهارس غير مطابق: "
@@ -424,6 +414,98 @@ def _get_expected_cols_for_index(idx_name: str) -> str:
 
 
 # =====================================================================
+# ✅ v7.6.11: Migrations — إضافة أعمدة مفقودة لقواعد البيانات الموجودة
+# =====================================================================
+
+# الأعمدة المفقودة من group_security في الإصدارات القديمة
+_GROUP_SECURITY_NEW_COLUMNS = [
+    ("violation_penalty", "TEXT DEFAULT 'none'"),
+    ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+]
+
+
+async def _migrate_missing_columns_sqlite(conn, logger):
+    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (SQLite)."""
+    added = 0
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        try:
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(f"✅ SQLite: أُضيف عمود {col_name}")
+        except Exception as e:
+            # "duplicate column name" يعني العمود موجود — تجاهل
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(f"⚠️ SQLite migration {col_name}: {e}")
+    if added:
+        await conn.commit()
+    return added
+
+
+async def _migrate_missing_columns_postgres(conn, logger):
+    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (PostgreSQL)."""
+    added = 0
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        try:
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN IF NOT EXISTS {col_name} {col_def}"
+            )
+            added += 1
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ PG migration {col_name}: {e}")
+    if added and logger:
+        logger.info(f"✅ PG: فُحص {added} عمود (IF NOT EXISTS)")
+    return added
+
+
+async def _migrate_missing_columns_mysql(conn, logger):
+    """✅ v7.6.11: إضافة أعمدة مفقودة إلى group_security (MySQL)."""
+    added = 0
+    # MySQL لا يدعم "IF NOT EXISTS" لـ ADD COLUMN — نتحقق يدوياً
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'group_security' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(f"✅ MySQL: أُضيف عمود {col_name}")
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ MySQL migration {col_name}: {e}")
+    return added
+
+
+# =====================================================================
 # Fast-path: قراءة schema_version
 # =====================================================================
 
@@ -440,7 +522,6 @@ async def _get_current_schema_version_postgres(conn):
 
 
 async def _get_current_schema_version_sqlite(conn):
-    """✅ v7.6.8: إغلاق cursor."""
     try:
         cursor = await conn.execute(
             "SELECT MAX(version) FROM schema_version"
@@ -460,7 +541,6 @@ async def _get_current_schema_version_sqlite(conn):
 
 
 async def _get_current_schema_version_mysql(conn):
-    """✅ v7.6.8: try/finally لضمان الإغلاق."""
     try:
         cursor = await conn.cursor()
         try:
@@ -479,18 +559,12 @@ async def _get_current_schema_version_mysql(conn):
 
 
 # =====================================================================
-# ✅ v7.6.10: التنظيف التلقائي للبيانات القديمة (idempotent)
+# ✅ v7.6.10: التنظيف التلقائي للبيانات القديمة
 # =====================================================================
 
 async def _cleanup_stale_links_sqlite(conn, logger):
-    """
-    ✅ v7.6.10: تنظيف تلقائي SQLite:
-    - حذف المعرّفات السالبة (chat_id) من user_groups_link
-    - حذف بوتات تليجرام الرسمية من anonymous_admins
-    """
     cleaned_links = 0
     cleaned_anon = 0
-
     try:
         cursor = await conn.execute(
             "DELETE FROM user_groups_link WHERE user_id < 0"
@@ -535,10 +609,8 @@ async def _cleanup_stale_links_sqlite(conn, logger):
 
 
 async def _cleanup_stale_links_postgres(conn, logger):
-    """✅ v7.6.10: تنظيف تلقائي PostgreSQL."""
     cleaned_links = 0
     cleaned_anon = 0
-
     try:
         result = await conn.execute(
             "DELETE FROM user_groups_link WHERE user_id < 0"
@@ -576,10 +648,8 @@ async def _cleanup_stale_links_postgres(conn, logger):
 
 
 async def _cleanup_stale_links_mysql(conn, logger):
-    """✅ v7.6.10: تنظيف تلقائي MySQL."""
     cleaned_links = 0
     cleaned_anon = 0
-
     try:
         cursor = await conn.cursor()
         try:
@@ -626,7 +696,7 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 
 # =====================================================================
-# فحص سريع للفهارس الحرجة (يعمل حتى مع fast-path)
+# فحص سريع للفهارس الحرجة
 # =====================================================================
 
 async def _verify_critical_indexes_postgres(conn, logger):
@@ -638,15 +708,12 @@ async def _verify_critical_indexes_postgres(conn, logger):
         )
         existing = {r["indexname"] for r in rows}
         missing = CRITICAL_INDEX_NAMES - existing
-
         if not missing:
             return 0
-
         if logger:
             logger.warning(
                 f"⚠️ PG: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
             )
-
         created = 0
         for idx_name in missing:
             if not _is_valid_index_name(idx_name):
@@ -664,7 +731,6 @@ async def _verify_critical_indexes_postgres(conn, logger):
             except Exception as e:
                 if logger:
                     logger.warning(f"⚠️ PG فشل إنشاء {idx_name}: {e}")
-
         return created
     except Exception as e:
         if logger:
@@ -673,7 +739,6 @@ async def _verify_critical_indexes_postgres(conn, logger):
 
 
 async def _verify_critical_indexes_sqlite(conn, logger):
-    """✅ v7.6.8: إغلاق cursor."""
     try:
         placeholders = ",".join(["?"] * len(CRITICAL_INDEX_NAMES))
         cursor = await conn.execute(
@@ -688,18 +753,14 @@ async def _verify_critical_indexes_sqlite(conn, logger):
                 await cursor.close()
             except Exception:
                 pass
-
         existing = {r[0] for r in rows}
         missing = CRITICAL_INDEX_NAMES - existing
-
         if not missing:
             return 0
-
         if logger:
             logger.warning(
                 f"⚠️ SQLite: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
             )
-
         created = 0
         for idx_name in missing:
             if not _is_valid_index_name(idx_name):
@@ -717,7 +778,6 @@ async def _verify_critical_indexes_sqlite(conn, logger):
             except Exception as e:
                 if logger:
                     logger.warning(f"⚠️ SQLite فشل {idx_name}: {e}")
-
         return created
     except Exception as e:
         if logger:
@@ -731,24 +791,19 @@ async def _verify_critical_indexes_mysql(conn, logger):
         for _t, idx_name, _c in COMMON_INDEXES:
             if idx_name in CRITICAL_INDEX_NAMES:
                 tables.add(_t)
-
         if not tables:
             return 0
-
         existing_pairs = await _fetch_existing_indexes_mysql(
             conn, list(tables)
         )
         existing_names = {idx for _, idx in existing_pairs}
         missing = CRITICAL_INDEX_NAMES - existing_names
-
         if not missing:
             return 0
-
         if logger:
             logger.warning(
                 f"⚠️ MySQL: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
             )
-
         created = 0
         for idx_name in missing:
             if not _is_valid_index_name(idx_name):
@@ -771,7 +826,6 @@ async def _verify_critical_indexes_mysql(conn, logger):
                     continue
                 if logger:
                     logger.warning(f"⚠️ MySQL فشل {idx_name}: {e}")
-
         return created
     except Exception as e:
         if logger:
@@ -799,7 +853,6 @@ async def _fetch_existing_indexes_postgres(conn, index_names):
 
 
 async def _fetch_existing_indexes_sqlite(conn):
-    """✅ v7.6.8: إغلاق cursor."""
     try:
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master "
@@ -862,7 +915,6 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
     checked = 0
     dropped = 0
     missing = 0
-
     try:
         rows = await conn.fetch(
             "SELECT indexname, indexdef FROM pg_indexes "
@@ -870,14 +922,12 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
             [name for _, name, _ in COMMON_INDEXES],
         )
         existing = {row["indexname"]: row["indexdef"] for row in rows}
-
         for _table, idx_name, cols in COMMON_INDEXES:
             if not _is_valid_index_name(idx_name):
                 continue
             if idx_name not in existing:
                 missing += 1
                 continue
-
             actual_def = existing[idx_name]
             m = re.search(
                 r"USING\s+\w+\s+\(([^)]+)\)",
@@ -886,10 +936,8 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
             )
             if not m:
                 continue
-
             actual_cols = _normalize_columns(m.group(1))
             expected_cols = _normalize_columns(_parse_expected_columns(cols))
-
             if actual_cols != expected_cols:
                 logger.warning(
                     f"⚠️ PG: {idx_name} تعريف مختلف "
@@ -901,34 +949,24 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
                 except Exception as e:
                     logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
             checked += 1
-
-        if logger:
-            if dropped > 0:
-                logger.info(
-                    f"🔧 PG: أُعيد بناء {dropped} فهرس (تعريف مختلف) — "
-                    f"فُحص {checked}، مفقود {missing}"
-                )
-            else:
-                logger.debug(
-                    f"✅ PG: كل الفهارس ({checked}) بتعريف صحيح، "
-                    f"مفقود {missing}"
-                )
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 PG: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ _ensure_index_definitions_match_postgres: {e}")
 
 
 async def _ensure_index_definitions_match_sqlite(conn, logger):
-    """✅ v7.6.8: إغلاق cursor."""
     checked = 0
     dropped = 0
     missing = 0
-
     try:
         names = [name for _, name, _ in COMMON_INDEXES]
         if not names:
             return
-
         placeholders = ",".join(["?"] * len(names))
         cursor = await conn.execute(
             f"SELECT name, sql FROM sqlite_master "
@@ -943,14 +981,12 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
             except Exception:
                 pass
         existing = {r[0]: (r[1] or "") for r in rows}
-
         for _table, idx_name, cols in COMMON_INDEXES:
             if not _is_valid_index_name(idx_name):
                 continue
             if idx_name not in existing:
                 missing += 1
                 continue
-
             sql_def = existing[idx_name]
             m = re.search(
                 r"ON\s+\w+\s*\(([^)]+)\)",
@@ -959,21 +995,16 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
             )
             if not m:
                 continue
-
             actual_cols = _normalize_columns(m.group(1))
             expected_cols = _normalize_columns(_parse_expected_columns(cols))
-
             if actual_cols != expected_cols:
-                logger.warning(
-                    f"⚠️ SQLite: {idx_name} تعريف مختلف — يُحذف"
-                )
+                logger.warning(f"⚠️ SQLite: {idx_name} تعريف مختلف — يُحذف")
                 try:
                     await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
                     dropped += 1
                 except Exception as e:
                     logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
             checked += 1
-
         if logger and dropped > 0:
             logger.info(
                 f"🔧 SQLite: أُعيد بناء {dropped} فهرس — "
@@ -988,13 +1019,11 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
     checked = 0
     dropped = 0
     missing = 0
-
     try:
         tables = set(t for t, _, _ in COMMON_INDEXES)
         for table in tables:
             if not _is_valid_index_name(table):
                 continue
-
             try:
                 cursor = await conn.cursor()
                 try:
@@ -1004,14 +1033,12 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     await cursor.close()
             except Exception:
                 continue
-
             by_key = {}
             for r in rows:
                 key_name = r[2]
                 seq = r[3]
                 col_name = r[4]
                 by_key.setdefault(key_name, []).append((seq, col_name))
-
             for _t, idx_name, cols in COMMON_INDEXES:
                 if _t != table:
                     continue
@@ -1020,7 +1047,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                 if idx_name not in by_key:
                     missing += 1
                     continue
-
                 sorted_cols = sorted(by_key[idx_name], key=lambda x: x[0])
                 actual_cols = _normalize_columns_mysql(
                     ",".join(c for _, c in sorted_cols)
@@ -1028,11 +1054,9 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                 expected_cols = _normalize_columns_mysql(
                     _parse_expected_columns(cols)
                 )
-
                 if actual_cols != expected_cols:
                     logger.warning(
-                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف "
-                        f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
+                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف — يُحذف"
                     )
                     try:
                         await conn.execute(
@@ -1042,7 +1066,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     except Exception as e:
                         logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
                 checked += 1
-
         if logger and dropped > 0:
             logger.info(
                 f"🔧 MySQL: أُعيد بناء {dropped} فهرس — "
@@ -1069,7 +1092,6 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
         existing = {row["indexname"] for row in rows}
         if not existing:
             return
-
         dropped = 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
@@ -1079,7 +1101,6 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
                 dropped += 1
             except Exception as e:
                 logger.warning(f"⚠️ فشل حذف فهرس {idx_name}: {e}")
-
         if dropped > 0:
             logger.info(f"🧹 PG: حُذف {dropped} فهرس قديم")
     except Exception as e:
@@ -1087,7 +1108,6 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
 
 
 async def _drop_deprecated_indexes_sqlite(conn, logger):
-    """✅ v7.6.8: إغلاق cursor."""
     if not DEPRECATED_INDEXES:
         return
     try:
@@ -1105,7 +1125,6 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
             except Exception:
                 pass
         existing = {row[0] for row in rows}
-
         dropped = 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
@@ -1115,7 +1134,6 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
                 dropped += 1
             except Exception as e:
                 logger.warning(f"⚠️ SQLite فشل حذف {idx_name}: {e}")
-
         if dropped > 0:
             logger.info(f"🧹 SQLite: حُذف {dropped} فهرس قديم")
     except Exception as e:
@@ -1128,7 +1146,6 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
     try:
         tables = set(t for t, _, _ in COMMON_INDEXES)
         existing = await _fetch_existing_indexes_mysql(conn, tables)
-
         dropped = 0
         for table, idx_name in existing:
             if idx_name in DEPRECATED_INDEXES:
@@ -1147,7 +1164,6 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
                         logger.warning(
                             f"⚠️ MySQL فشل حذف {idx_name}: {e}"
                         )
-
         if dropped > 0:
             logger.info(f"🧹 MySQL: حُذف {dropped} فهرس قديم")
     except Exception as e:
@@ -1270,6 +1286,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_sqlite(conn, logger)
         await _cleanup_stale_links_sqlite(conn, logger)
+        await _migrate_missing_columns_sqlite(conn, logger)
         if logger:
             logger.info(
                 f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
@@ -1383,6 +1400,16 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.11: جدول chat_locks
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_locks (
+            chat_id INTEGER PRIMARY KEY,
+            locked INTEGER DEFAULT 0,
+            locked_at TEXT,
+            locked_by INTEGER
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id INTEGER,
@@ -1429,6 +1456,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id INTEGER PRIMARY KEY,
@@ -1485,7 +1513,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             enable_timed_penalties INTEGER DEFAULT 1,
             auto_remove_penalties INTEGER DEFAULT 1,
             violation_strikes INTEGER DEFAULT 3,
-            violation_duration INTEGER DEFAULT 60
+            violation_duration INTEGER DEFAULT 60,
+            violation_penalty TEXT DEFAULT 'none',
+            violation_penalty_duration INTEGER DEFAULT 3600
         )
     """)
 
@@ -1850,6 +1880,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
     await _cleanup_stale_links_sqlite(conn, logger)
+    await _migrate_missing_columns_sqlite(conn, logger)
 
     try:
         await conn.execute(
@@ -1857,7 +1888,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "auto-cleanup-stale-links"),
+             "missing-tables-migration"),
         )
         await conn.commit()
     except Exception as e:
@@ -1877,6 +1908,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
+        await _migrate_missing_columns_postgres(conn, logger)
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -1990,6 +2022,16 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.11: chat_locks
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_locks (
+            chat_id BIGINT PRIMARY KEY,
+            locked INTEGER DEFAULT 0,
+            locked_at TIMESTAMP,
+            locked_by BIGINT
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_groups_link (
             user_id BIGINT,
@@ -2036,6 +2078,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS group_security (
             chat_id BIGINT PRIMARY KEY,
@@ -2092,7 +2135,9 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             enable_timed_penalties INTEGER DEFAULT 1,
             auto_remove_penalties INTEGER DEFAULT 1,
             violation_strikes INTEGER DEFAULT 3,
-            violation_duration INTEGER DEFAULT 60
+            violation_duration INTEGER DEFAULT 60,
+            violation_penalty TEXT DEFAULT 'none',
+            violation_penalty_duration INTEGER DEFAULT 3600
         )
     """)
 
@@ -2461,6 +2506,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
+    await _migrate_missing_columns_postgres(conn, logger)
 
     try:
         await conn.execute(
@@ -2469,7 +2515,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "auto-cleanup-stale-links",
+            "missing-tables-migration",
         )
     except Exception as e:
         if logger:
@@ -2488,6 +2534,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
+        await _migrate_missing_columns_mysql(conn, logger)
         if logger:
             logger.info(
                 f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
@@ -2612,6 +2659,16 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.11: chat_locks
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id BIGINT PRIMARY KEY,
+                locked TINYINT(1) DEFAULT 0,
+                locked_at DATETIME,
+                locked_by BIGINT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_groups_link (
                 user_id BIGINT,
@@ -2658,6 +2715,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.11: +violation_penalty +violation_penalty_duration
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS group_security (
                 chat_id BIGINT PRIMARY KEY,
@@ -2716,7 +2774,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 enable_timed_penalties TINYINT(1) DEFAULT 1,
                 auto_remove_penalties TINYINT(1) DEFAULT 1,
                 violation_strikes INT DEFAULT 3,
-                violation_duration INT DEFAULT 60
+                violation_duration INT DEFAULT 60,
+                violation_penalty VARCHAR(50) DEFAULT 'none',
+                violation_penalty_duration INT DEFAULT 3600
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
@@ -3081,6 +3141,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
+        await _migrate_missing_columns_mysql(conn, logger)
 
         try:
             await conn.execute(
@@ -3090,7 +3151,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "auto-cleanup-stale-links",
+                    "missing-tables-migration",
                 ),
             )
         except Exception as e:
