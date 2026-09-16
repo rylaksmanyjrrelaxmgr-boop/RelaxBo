@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.8)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.9)
 ================================================================================
+🚀 v7.6.9 (SLOW-QUERY-INDEX-FIX):
+  ✅ +4 فهارس جديدة لحل البطء في السجل:
+     • idx_penalties_status_end           → user_penalties(status, end_time)
+     • idx_auto_replies_keyword_active    → auto_replies(keyword, is_active, chat_id)
+     • idx_user_violations_chat           → user_violations(chat_id)
+     • idx_user_warnings_chat             → user_warnings(chat_id)
+  ✅ CURRENT_SCHEMA_VERSION: 8 → 9
+  ✅ EXPECTED_INDEX_COUNT: 66 → 70
+  ✅ CRITICAL_INDEX_NAMES: +4 فهارس جديدة
+  ✅ DEPRECATED_INDEXES: إزالة idx_user_violations_chat + idx_user_warnings_chat
+  ✅ حل: 5.18s (user_penalties) + 4.37s (auto_replies) + 1.66s (user_violations)
+
 🚀 v7.6.8 (CURSOR-CLEANUP):
   ✅ إغلاق cursors في كل دوال SQLite (5 أماكن) — منع resource leak
   ✅ _get_current_schema_version_mysql: try/finally لضمان الإغلاق
@@ -20,7 +32,6 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
   ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
   ✅ إصلاح فقدان الفهارس الصامت (lost index silent failure)
-  ✅ _verify_critical_indexes_* لكل DB
 
 🚀 v7.6.5 (LOG-CHANNEL-ID):
   ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
@@ -43,8 +54,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.7: 7 → 8 (إجبار rebuild لإنشاء فهارس banned_words المفقودة)
-CURRENT_SCHEMA_VERSION = 8
+# ✅ v7.6.9: 8 → 9 (إجبار rebuild لإنشاء الفهارس الأربعة الجديدة)
+CURRENT_SCHEMA_VERSION = 9
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -53,7 +64,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 66  # ✅ v7.6.7: 66 (لم يتغير)
+EXPECTED_INDEX_COUNT = 70  # ✅ v7.6.9: 66 → 70
 
 COMMON_INDEXES = [
     # ═══ USERS (6) ═══
@@ -125,7 +136,7 @@ COMMON_INDEXES = [
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    # ═══ AUTO_REPLIES (4) ═══
+    # ═══ AUTO_REPLIES (5) — ✅ v7.6.9: +idx_auto_replies_keyword_active ═══
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
@@ -133,6 +144,8 @@ COMMON_INDEXES = [
      "auto_replies(chat_id, keyword)"),
     ("auto_replies", "idx_ar_usage",
      "auto_replies(usage_count DESC)"),
+    ("auto_replies", "idx_auto_replies_keyword_active",
+     "auto_replies(keyword, is_active, chat_id)"),
 
     # ═══ SCHEDULE (2) ═══
     ("schedule", "idx_schedule_next_publish",
@@ -174,7 +187,7 @@ COMMON_INDEXES = [
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    # ═══ USER_PENALTIES (4) ═══
+    # ═══ USER_PENALTIES (5) — ✅ v7.6.9: +idx_penalties_status_end ═══
     ("user_penalties", "idx_penalties_user",
      "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat",
@@ -183,6 +196,8 @@ COMMON_INDEXES = [
      "user_penalties(status)"),
     ("user_penalties", "idx_penalties_user_chat_status_end",
      "user_penalties(user_id, chat_id, status, end_time)"),
+    ("user_penalties", "idx_penalties_status_end",
+     "user_penalties(status, end_time)"),
 
     # ═══ USER_POINTS (2) ═══
     ("user_points", "idx_points_user", "user_points(user_id)"),
@@ -222,9 +237,18 @@ COMMON_INDEXES = [
     # ═══ USER_REMINDER_SETTINGS (1) ═══
     ("user_reminder_settings", "idx_reminder_subscription",
      "user_reminder_settings(subscription_reminder)"),
+
+    # ═══ USER_VIOLATIONS (1) — ✅ v7.6.9: جديد ═══
+    ("user_violations", "idx_user_violations_chat",
+     "user_violations(chat_id)"),
+
+    # ═══ USER_WARNINGS (1) — ✅ v7.6.9: جديد ═══
+    ("user_warnings", "idx_user_warnings_chat",
+     "user_warnings(chat_id)"),
 ]
 
 DEPRECATED_INDEXES = [
+    # ═══ POSTS ═══
     "idx_posts_channel_pub_fail_created_optimized",
     "idx_posts_next", "idx_posts_channel_unpub",
     "idx_posts_channel_pub", "idx_posts_channel_pub_fail",
@@ -232,51 +256,101 @@ DEPRECATED_INDEXES = [
     "idx_posts_fail", "idx_posts_created_at",
     "idx_posts_fail_count", "idx_posts_channel_created",
     "idx_posts_channel_fail",
+
+    # ═══ SUBSCRIPTIONS ═══
     "idx_sub_user_status_end", "idx_subscriptions_active",
     "idx_subscriptions_active_end",
+
+    # ═══ USER_CHANNELS ═══
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
+
+    # ═══ USER_PENALTIES ═══
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
     "idx_user_penalties_active_end", "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup", "idx_penalties_chat_status",
+
+    # ═══ BANNED_WORDS ═══
     "idx_banned_words_word",
+
+    # ═══ REMINDERS ═══
     "idx_reminders_subscription", "idx_reminders_user",
+
+    # ═══ ADMIN_LOGS ═══
     "idx_admin_logs_created", "idx_admin_logs_admin",
+
+    # ═══ ANONYMOUS_ADMINS ═══
     "idx_anonymous_admins_chat", "idx_anonymous_admins_user",
+
+    # ═══ HIDDEN_ADMINS ═══
     "idx_hidden_admin_admin",
+
+    # ═══ GROUP_ADMINS ═══
     "idx_group_admins_user", "idx_group_admins_chat",
+
+    # ═══ SCHEDULE ═══
     "idx_sched_next", "idx_schedule_next", "idx_schedule_next_channel",
+
+    # ═══ CONTEST_PARTICIPANTS ═══
     "idx_contest_participants_user",
+
+    # ═══ USERS ═══
     "idx_users_updated", "idx_users_trial_used",
     "idx_users_subscription", "idx_users_referral",
     "idx_users_banned_publish",
+
+    # ═══ REFERRALS ═══
     "idx_referrals_referred", "idx_referrals_created",
-    "idx_contests_end", "idx_hidden_owner_owner",
+
+    # ═══ CONTESTS ═══
+    "idx_contests_end",
+
+    # ═══ HIDDEN_OWNER_GROUPS ═══
+    "idx_hidden_owner_owner",
+
+    # ═══ SUPPORT_TICKETS ═══
     "idx_tickets_user", "idx_tickets_number",
+
+    # ═══ INVOICES ═══
     "idx_inv_status", "idx_inv_number",
+
+    # ═══ AUTO_REPLIES ═══
     "idx_auto_replies_keyword", "idx_ar_keyword",
+
+    # ═══ SETTINGS ═══
     "idx_settings_key",
-    "idx_user_violations_user", "idx_user_violations_chat",
+
+    # ═══ USER_VIOLATIONS / WARNINGS — ✅ v7.6.9: أُزيلت (عادت كفهارس شرعية) ═══
+    "idx_user_violations_user",
+    # "idx_user_violations_chat",   ← حُذف — الآن في COMMON_INDEXES
     "idx_violations_user_chat",
-    "idx_user_warnings_user", "idx_user_warnings_chat",
+    "idx_user_warnings_user",
+    # "idx_user_warnings_chat",     ← حُذف — الآن في COMMON_INDEXES
+
+    # ═══ USER_GROUPS_LINK ═══
     "idx_ugl_user",
 ]
 
 # ✅ v7.6.6: فهارس حرجة يجب فحصها حتى مع fast-path
 # ✅ v7.6.7: إضافة فهارس banned_words
+# ✅ v7.6.9: إضافة الفهارس الأربعة الجديدة
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
     "idx_posts_channel",
     "idx_posts_channel_published",
     "idx_posts_channel_pub_fail_created",
     "idx_penalties_user_chat_status_end",
+    "idx_penalties_status_end",              # ← v7.6.9 جديد
     "idx_user_channels_user_banned",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
     "idx_banned_words_chat",
     "idx_banned_words_chat_word",
+    "idx_auto_replies_keyword_active",       # ← v7.6.9 جديد
+    "idx_user_violations_chat",              # ← v7.6.9 جديد
+    "idx_user_warnings_chat",                # ← v7.6.9 جديد
 })
 
 # ✅ v7.6.8: raise بدل assert (يعمل مع -O)
@@ -1631,7 +1705,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "initial schema"),
+             "slow-query-index-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -2241,7 +2315,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "initial schema",
+            "slow-query-index-fix",
         )
     except Exception as e:
         if logger:
@@ -2860,7 +2934,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "initial schema",
+                    "slow-query-index-fix",
                 ),
             )
         except Exception as e:
