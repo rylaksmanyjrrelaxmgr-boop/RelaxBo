@@ -1,10 +1,14 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.0)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.1)
 =====================================================================
+✅ v9.4.1 — إصلاح حجم قاعدة البيانات:
+  - ADMIN_METRICS: استخدام DB.get_db_size_kb() بدل PATHS.DB.stat()
+  - تنسيق تلقائي: KB → MB → GB
+  - يعمل على PostgreSQL/MySQL/SQLite
+
 ✅ v9.4.0 — تحسين أداء قناة السجل:
   - _get_log_channel_menu_data: cache 30s + parallel fetch
   - _invalidate_log_channel_menu_cache: إبطال ذكي
@@ -3416,10 +3420,27 @@ class CallbackHandlers:
                         stats = _row_to_dict(stats) or {}
                 except Exception:
                     stats = {}
+
+                # ✅ v9.4.1: استخدام get_db_size_kb() الموحّدة (PostgreSQL/MySQL/SQLite)
+                db_size_kb = 0.0
                 try:
-                    db_size = PATHS.DB.stat().st_size / 1024
-                except Exception:
-                    db_size = 0
+                    # الأولوية 1: من الإحصائيات (تم حسابها مسبقاً)
+                    db_size_kb = float(stats.get('db_size_kb', 0) or 0)
+                    # الأولوية 2: حساب مباشر من DB
+                    if db_size_kb == 0:
+                        db_size_kb = await DB.get_db_size_kb()
+                except Exception as e:
+                    logger.debug(f"get_db_size_kb: {e}")
+                    db_size_kb = 0.0
+
+                # تنسيق تلقائي: KB → MB → GB
+                if db_size_kb >= 1024 * 1024:
+                    size_display = f"{db_size_kb / (1024 * 1024):.2f} GB"
+                elif db_size_kb >= 1024:
+                    size_display = f"{db_size_kb / 1024:.2f} MB"
+                else:
+                    size_display = f"{db_size_kb:.1f} KB"
+
                 text = (f"📊 مقاييس النظام\n\n"
                         f"👥 المستخدمون: {stats.get('users', 0)}\n"
                         f"📡 القنوات: {stats.get('channels', 0)}\n"
@@ -3428,7 +3449,7 @@ class CallbackHandlers:
                         f"✅ المنشورة: {stats.get('published', 0)}\n"
                         f"🧾 الفواتير: {stats.get('invoices', 0)}\n"
                         f"🎫 تذاكر معلقة: {stats.get('tickets', 0)}\n"
-                        f"💾 حجم قاعدة البيانات: {db_size:.1f} KB")
+                        f"💾 حجم قاعدة البيانات: {size_display}")
                 await safe_edit(query, text, bot=context.bot)
                 return
 
