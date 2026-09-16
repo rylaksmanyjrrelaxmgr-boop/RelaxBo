@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.3)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.4)
 =====================================================================
-✅ v9.4.3 — إصلاح مسار التحليلات (FIX-ANALYTICS-ROUTING):
-  - إضافة admin_analytics و analytics_* قبل admin_ العام
-  - حل مشكلة "⚠️ غير متوفر" عند الضغط على زر التحليلات
-  - لا تغيير في باقي السلوك
+✅ v9.4.4 — عرض مصدر الاستعلامات البطيئة:
+  - عرض 📍 الملف:السطر + 🔧 الدالة المستدعية
+  - عرض سلسلة الاستدعاء (Stack, مستويان)
+  - يعتمد على caller_file/caller_line/caller_func/stack
+    من database.py v7.7.16
+
+✅ v9.4.3 — إصلاح مسار التحليلات:
+  - admin_analytics و analytics_* قبل admin_ العام
 
 ✅ v9.4.2 — تحليلات متقدمة
 ✅ v9.4.1 — إصلاح حجم قاعدة البيانات
@@ -3857,7 +3861,7 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # 🎨 v9.4.2: التحليلات المتقدمة
+    # 🎨 التحليلات المتقدمة
     # =================================================================
 
     @staticmethod
@@ -4128,6 +4132,9 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
+            # ═══════════════════════════════════════════════════════
+            # ✅ v9.4.4: عرض مصدر الاستعلامات البطيئة
+            # ═══════════════════════════════════════════════════════
             if action == "slow":
                 rows = await DB.get_slow_queries(20)
                 if not rows:
@@ -4147,7 +4154,7 @@ class CallbackHandlers:
                 text = "🐌 <b>أبطأ الاستعلامات (20)</b>\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-                for i, q in enumerate(rows[:15], 1):
+                for i, q in enumerate(rows[:10], 1):
                     elapsed = q.get('elapsed', 0)
                     if elapsed >= 3:
                         color = "🔴"
@@ -4155,11 +4162,48 @@ class CallbackHandlers:
                         color = "🟡"
                     else:
                         color = "🟢"
-                    qs = _html.escape(str(q.get('query', ''))[:60])
+
+                    caller_file = q.get('caller_file', '?') or '?'
+                    caller_line = q.get('caller_line', 0)
+                    caller_func = q.get('caller_func', '?') or '?'
+                    conn_type = q.get('conn_type', '?')
+                    params_count = q.get('params_count', 0)
+
+                    qs = _html.escape(str(q.get('query', ''))[:70])
+
+                    text += f"{i}. {color} <code>{elapsed:.2f}s</code>\n"
+                    text += f"   <i>{qs}</i>\n"
                     text += (
-                        f"{i}. {color} <code>{elapsed:.2f}s</code>\n"
-                        f"   <i>{qs}</i>\n\n"
+                        f"   📍 <b>المصدر:</b> "
+                        f"<code>{_html.escape(caller_file)}:{caller_line}</code>\n"
                     )
+                    text += (
+                        f"   🔧 <b>الدالة:</b> "
+                        f"<code>{_html.escape(caller_func)}</code>\n"
+                    )
+
+                    # معلومات إضافية مفيدة
+                    extra = []
+                    if conn_type and conn_type != '?':
+                        extra.append(f"🗄️ {conn_type}")
+                    if params_count:
+                        extra.append(f"🔢 {params_count} param")
+                    if extra:
+                        text += f"   {' | '.join(extra)}\n"
+
+                    # stack trace (أول مستويين بعد المستدعي المباشر)
+                    stack = q.get('stack', [])
+                    if stack and len(stack) > 1:
+                        for level in stack[1:3]:
+                            lf = level.get('file', '?')
+                            ll = level.get('line', 0)
+                            lfn = level.get('func', '?')
+                            text += (
+                                f"   ↳ <code>{_html.escape(lf)}:{ll}</code> "
+                                f"<i>({_html.escape(lfn)})</i>\n"
+                            )
+
+                    text += "\n"
 
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 تحديث", callback_data="analytics_slow")],
