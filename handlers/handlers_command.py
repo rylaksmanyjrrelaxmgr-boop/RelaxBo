@@ -2,14 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.19.1
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.20
 ===================================================================================
-🆕 v7.5.19.1 (إصلاح واحد فقط على v7.5.19):
+🆕 v7.5.20 (AUTO-DELETE-ACTIVATION-MSG):
+    ✅ _send_and_auto_delete(): إرسال + حذف تلقائي بعد N ثانية
+    ✅ _delete_message_after(): جدولة حذف رسالة في الخلفية
+    ✅ syncgroup: رسالة "تم التفعيل" تُحذف تلقائياً بعد 10 ثوانٍ
+    ✅ يعمل من المشرف العادي والمجهول على حد سواء
+
+🆕 v7.5.19.1 (GROUP-REPLY-FIX):
     ✅ _safe_edit_or_send: يرد في المجموعة إذا كانت الرسالة من مجموعة
        → يحل مشكلة "User_bot_to_bot_disabled" عند المشرف المجهول
-    ✅ كل ما تبقى مطابق تماماً لـ v7.5.19 (بدون تغيير سلوك)
 
-🆕 v7.5.19 (الأصلي):
+🆕 v7.5.19:
     ✅ _moderation_command: default duration حسب action
     ✅ restore: أزرار قابلة للنقر + safe_mtime
     ✅ channels/posts/gift_plans: row access آمن
@@ -80,8 +85,73 @@ def _row_to_dict(row) -> dict:
         return {}
 
 
+def _mask_id(id_value, prefix=3, suffix=2):
+    if id_value is None:
+        return "***"
+    s = str(id_value)
+    if len(s) <= 5:
+        return "***"
+    return s[:prefix] + "***" + s[-suffix:] if len(s) > prefix + suffix else s[:prefix] + "***"
+
+
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.19.1: الإصلاح الوحيد — الرد في المكان الصحيح
+# ✅ v7.5.20: حذف تلقائي للرسائل
+# ═══════════════════════════════════════════════════════════════════
+
+async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int = 10):
+    """✅ v7.5.20: حذف رسالة تلقائياً بعد `delay` ثانية."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.debug(f"حذف تلقائي فشل: {e}")
+
+
+async def _send_and_auto_delete(
+    context, chat_id: int, text: str,
+    reply_markup=None, parse_mode=None, delay: int = 10,
+):
+    """
+    ✅ v7.5.20: إرسال رسالة جديدة + جدولة حذفها بعد delay ثانية.
+    مفيد لرسائل التفعيل/التأكيد التي لا يجب أن تبقى.
+    """
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        asyncio.create_task(
+            _delete_message_after(context.bot, chat_id, msg.message_id, delay)
+        )
+        return msg
+    except BadRequest as e:
+        err = str(e).lower()
+        # fallback بدون parse_mode
+        if "can't parse" in err or "parse" in err:
+            try:
+                msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=None,
+                )
+                asyncio.create_task(
+                    _delete_message_after(context.bot, chat_id, msg.message_id, delay)
+                )
+                return msg
+            except Exception as e2:
+                logger.error(f"فشل إرسال (بدون parse): {e2}")
+        logger.error(f"فشل إرسال+حذف: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"فشل إرسال+حذف: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.19.1: الرد في المكان الصحيح
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
@@ -94,12 +164,12 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
     """
     query = update.callback_query
 
-    # ✅ v7.5.19.1: تحديد الهدف الصحيح
+    # ✅ تحديد الهدف الصحيح
     chat = update.effective_chat if update else None
     if chat and chat.type in ('group', 'supergroup'):
-        target = chat.id                     # ← المجموعة
+        target = chat.id
     else:
-        target = update.effective_user.id    # ← الخاص
+        target = update.effective_user.id
 
     # ─── 1) محاولة تعديل رسالة الكولباك ───
     if query and query.message:
@@ -151,15 +221,6 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
     except Exception as e:
         logger.error(f"فشل إرسال: {e}")
         return False
-
-
-def _mask_id(id_value, prefix=3, suffix=2):
-    if id_value is None:
-        return "***"
-    s = str(id_value)
-    if len(s) <= 5:
-        return "***"
-    return s[:prefix] + "***" + s[-suffix:] if len(s) > prefix + suffix else s[:prefix] + "***"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1294,8 +1355,14 @@ class CommandHandlers:
             f"💡 استخدم /security للإعدادات"
         )
 
-        # ✅ v7.5.19.1: سيرد في المجموعة تلقائياً بفضل تعديل _safe_edit_or_send
-        await _safe_edit_or_send(update, context, msg, parse_mode='HTML')
+        # ✅ v7.5.20: إرسال في المجموعة + حذف تلقائي بعد 10 ثوانٍ
+        await _send_and_auto_delete(
+            context,
+            chat_id=chat_id,
+            text=msg,
+            parse_mode='HTML',
+            delay=10,
+        )
 
     # ═══════════════════════════════════════════════════════════════
     # أوامر الإشراف
