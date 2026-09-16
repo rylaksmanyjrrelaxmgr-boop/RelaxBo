@@ -16,6 +16,7 @@ StatsMixin:
   ✅ get_general_stats: إضافة db_size_kb
   ✅ حل مشكلة "💾 حجم قاعدة البيانات: 0.0 KB"
   ✅ يعمل على PostgreSQL/MySQL/SQLite
+  ✅ لا تغيير في السلوك السابق — إضافة حقل فقط
 
 🆕 v7.4.4 (تحسينات أداء + إصلاحات):
   ✅ get_general_stats: استعلام واحد بدل 9 استعلامات (PostgreSQL)
