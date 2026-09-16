@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.13 — FIX-RESTORE-COMPUTE-TEXT-HASH)
+database.py - قاعدة البيانات المتكاملة (v7.7.14 — FIX-DB-SIZE-STATS)
 ================================================================================
+🆕 v7.7.14 (FIX-DB-SIZE-STATS):
+  ✅ إضافة get_db_size_kb() — يدعم PostgreSQL + MySQL + SQLite
+  ✅ حل مشكلة "حجم قاعدة البيانات: 0.0 KB" في /stats
+  ✅ يُستدعى من StatsMixin.get_bot_stats
+
 🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
   ✅ استعادة _compute_text_hash المحذوفة سهواً في v7.7.9 PERF-3
   ✅ حل نهائي لـ: AttributeError: 'Database' object has no
@@ -1837,6 +1842,60 @@ class Database(
         except Exception:
             self._singleton_init_done = False
             raise
+
+    # =================================================================
+    # 🔍 v7.7.14: حجم قاعدة البيانات (PostgreSQL + MySQL + SQLite)
+    # =================================================================
+
+    async def get_db_size_kb(self) -> float:
+        """
+        ✅ v7.7.14: إرجاع حجم قاعدة البيانات بالكيلوبايت.
+
+        - PostgreSQL: pg_database_size(current_database())
+        - MySQL:      information_schema.tables (data_length + index_length)
+        - SQLite:     page_count * page_size (PRAGMA)
+
+        يُستدعى من StatsMixin.get_bot_stats لحساب /stats.
+        """
+        try:
+            if USE_POSTGRES:
+                size_bytes = await self.fetchval(
+                    "SELECT pg_database_size(current_database())",
+                    default=0,
+                )
+                if size_bytes:
+                    return round(float(size_bytes) / 1024.0, 2)
+                return 0.0
+
+            elif USE_MYSQL:
+                size_bytes = await self.fetchval(
+                    "SELECT SUM(data_length + index_length) "
+                    "FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE()",
+                    default=0,
+                )
+                if size_bytes:
+                    return round(float(size_bytes) / 1024.0, 2)
+                return 0.0
+
+            else:
+                # SQLite
+                page_count = await self.fetchval(
+                    "PRAGMA page_count", default=0
+                )
+                page_size = await self.fetchval(
+                    "PRAGMA page_size", default=0
+                )
+                if page_count and page_size:
+                    return round(
+                        (int(page_count) * int(page_size)) / 1024.0,
+                        2,
+                    )
+                return 0.0
+
+        except Exception as e:
+            logger.warning(f"⚠️ get_db_size_kb: {e}")
+            return 0.0
 
     # =================================================================
     # 🔍 v7.7.12: Pool stats (اختياري — utils.py يقرأ _pool مباشرة)
@@ -4374,17 +4433,12 @@ class Database(
             json.dumps(data, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
-    # ✅ v7.7.13: استعادة الدالة المحذوفة سهواً — عقد Mixin Contract
     def _compute_text_hash(self, text: str) -> str:
         """
         🔐 يحسب SHA-256 hash للنص — يُستخدم لمنع تكرار المنشورات.
 
         يُستدعى من ChannelsPostsMixin.add_posts (database_channels_posts.py).
         يُخزَّن الناتج في posts.text_hash (CHAR(64) في MySQL).
-
-        ⚠️ ملاحظة مهمة: لا تضف normalization (lower/strip) هنا —
-        لأن add_posts يستدعيها بالنص بعد القصّ فقط، وأي تغيير
-        سيسبب تكرارات وهمية للمنشورات القديمة المخزّنة مسبقاً.
         """
         if not text:
             return ""
