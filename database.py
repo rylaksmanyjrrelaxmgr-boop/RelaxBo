@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.15 — ANALYTICS-MIXIN)
+database.py - قاعدة البيانات المتكاملة (v7.7.16 — SLOW-QUERY-CALLER)
 ================================================================================
+🆕 v7.7.16 (SLOW-QUERY-CALLER):
+  ✅ _get_caller_info() : استخراج الملف/السطر/الدالة من stack
+  ✅ _execute_with_logging : تسجيل مصدر كل استعلام بطيء
+  ✅ slow_queries_log يحوي الآن: caller_file, caller_line, caller_func, stack
+  ✅ يدعم تشخيص: "من أين جاء الاستعلام البطيء؟"
+  ✅ لا تأثير على الأداء (يعمل فقط عند elapsed > threshold)
+
 🆕 v7.7.15 (ANALYTICS-MIXIN):
   ✅ دمج AnalyticsMixin (database_analytics.py)
   ✅ تتبّع الاستعلامات البطيئة في الذاكرة (_slow_queries_log)
   ✅ حفظ آخر 100 استعلام بطيء
-  ✅ يدعم get_slow_queries / get_pool_live / get_user_growth / ...
-  ✅ لا تأثير على الأداء (تسجيل فقط عند elapsed > threshold)
 
 🆕 v7.7.14 (FIX-DB-SIZE-STATS):
   ✅ إضافة get_db_size_kb() — يدعم PostgreSQL + MySQL + SQLite
-  ✅ حل مشكلة "حجم قاعدة البيانات: 0.0 KB" في /stats
 
 🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
   ✅ استعادة _compute_text_hash المحذوفة سهواً في v7.7.9 PERF-3
+  ✅ حل AttributeError: 'Database' has no attribute '_compute_text_hash'
 
-🔍 v7.7.12 (AUDIT-UTC-CLEAN — لا تغيير وظيفي)
+🔍 v7.7.12 (AUDIT-UTC-CLEAN)
 🆕 v7.7.11 (FIX-BANNED-WORDS-CACHE-TTL)
 🚨 v7.7.10 (FIX-INT32)
 🚀 v7.7.9 (PERF-1..6)
@@ -166,8 +171,6 @@ BackupMixin, BACKUP_MIXIN_AVAILABLE = _load_mixin(
 RemindersMixin, REMINDERS_MIXIN_AVAILABLE = _load_mixin(
     "database_reminders", "RemindersMixin"
 )
-
-# ✅ v7.7.15: AnalyticsMixin
 AnalyticsMixin, ANALYTICS_MIXIN_AVAILABLE = _load_mixin(
     "database_analytics", "AnalyticsMixin"
 )
@@ -1810,6 +1813,76 @@ class Database(
             raise
 
     # =================================================================
+    # ✅ v7.7.16: استخراج مصدر الاستعلام من الـstack
+    # =================================================================
+
+    def _get_caller_info(self, skip_frames: int = 2) -> Dict[str, Any]:
+        """
+        ✅ v7.7.16: استخراج معلومات المستدعي من الـstack trace.
+
+        Returns:
+            {
+                'file': str,     # اسم الملف (مثلاً handlers_group_log.py)
+                'line': int,     # رقم السطر
+                'func': str,     # اسم الدالة
+                'stack': list,   # أول 3 مستويات خارجية
+            }
+
+        skip_frames يتخطى الإطارات الداخلية (database*.py).
+        """
+        try:
+            stack = inspect.stack()
+            result: Dict[str, Any] = {
+                'file': '?',
+                'line': 0,
+                'func': '?',
+                'stack': [],
+            }
+
+            # الملفات الداخلية التي نتجاهلها
+            internal_files = {
+                'database.py',
+                'database_stats.py',
+                'database_analytics.py',
+                'database_groups.py',
+                'database_channels_posts.py',
+                'database_subscriptions.py',
+                'database_tickets.py',
+                'database_contests.py',
+                'database_settings.py',
+                'database_points.py',
+                'database_backup.py',
+                'database_reminders.py',
+            }
+
+            # ابحث عن أول إطار خارج الملفات الداخلية
+            first_external = None
+            for i, frame_info in enumerate(stack):
+                fname = os.path.basename(frame_info.filename)
+                if fname in internal_files:
+                    continue
+                first_external = i
+                result['file'] = fname
+                result['line'] = frame_info.lineno
+                result['func'] = frame_info.function
+                break
+
+            # اجمع أول 3 إطارات خارجية متتالية
+            if first_external is not None:
+                for j in range(first_external, min(first_external + 3, len(stack))):
+                    fr = stack[j]
+                    result['stack'].append({
+                        'file': os.path.basename(fr.filename),
+                        'line': fr.lineno,
+                        'func': fr.function,
+                    })
+
+            return result
+        except Exception as e:
+            logger.debug(f"_get_caller_info: {e}")
+            return {'file': '?', 'line': 0, 'func': '?', 'stack': []}
+
+    # =================================================================
     # 🔍 v7.7.14: حجم قاعدة البيانات (PostgreSQL + MySQL + SQLite)
     # =================================================================
 
@@ -2650,12 +2723,23 @@ class Database(
                 )
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
 
-                # ✅ v7.7.15: تسجيل في الذاكرة
+                # ✅ v7.7.16: تسجيل مع مصدر الاستعلام
                 try:
+                    caller_info = self._get_caller_info(skip_frames=2)
+
                     entry = {
                         'time': time.time(),
                         'elapsed': round(elapsed, 3),
                         'query': safe_query.replace('\n', ' ').strip(),
+                        'caller_file': caller_info.get('file', '?'),
+                        'caller_line': caller_info.get('line', 0),
+                        'caller_func': caller_info.get('func', '?'),
+                        'stack': caller_info.get('stack', []),
+                        'params_count': len(params) if params else 0,
+                        'conn_type': (
+                            'pg' if USE_POSTGRES
+                            else ('mysql' if USE_MYSQL else 'sqlite')
+                        ),
                     }
                     async with self._slow_queries_lock:
                         self._slow_queries_log.append(entry)
@@ -2663,8 +2747,8 @@ class Database(
                             self._slow_queries_log = (
                                 self._slow_queries_log[-self._SLOW_QUERIES_MAX:]
                             )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"slow log entry failed: {e}")
 
                 if self._explain_slow_queries and not skip_explain:
                     await self._log_explain(query, params, conn)
