@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.9)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.10)
 ================================================================================
+🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS):
+  ✅ تنظيف تلقائي عند كل إقلاع (fast-path + rebuild)
+  ✅ حذف المعرّفات السالبة (chat_id) من user_groups_link
+  ✅ حذف GroupAnonymousBot/ChannelBot من anonymous_admins
+  ✅ CURRENT_SCHEMA_VERSION: 9 → 10
+  ✅ دوال: _cleanup_stale_links_sqlite/_postgres/_mysql
+  ✅ حل مشكلة "❌ غير مصرح" بعد التفعيل من مشرف مجهول
+
 🚀 v7.6.9 (SLOW-QUERY-INDEX-FIX):
-  ✅ +4 فهارس جديدة لحل البطء في السجل:
-     • idx_penalties_status_end           → user_penalties(status, end_time)
-     • idx_auto_replies_keyword_active    → auto_replies(keyword, is_active, chat_id)
-     • idx_user_violations_chat           → user_violations(chat_id)
-     • idx_user_warnings_chat             → user_warnings(chat_id)
+  ✅ +4 فهارس: idx_penalties_status_end, idx_auto_replies_keyword_active,
+     idx_user_violations_chat, idx_user_warnings_chat
   ✅ CURRENT_SCHEMA_VERSION: 8 → 9
   ✅ EXPECTED_INDEX_COUNT: 66 → 70
-  ✅ CRITICAL_INDEX_NAMES: +4 فهارس جديدة
+  ✅ CRITICAL_INDEX_NAMES: +4 فهارس
   ✅ DEPRECATED_INDEXES: إزالة idx_user_violations_chat + idx_user_warnings_chat
-  ✅ حل: 5.18s (user_penalties) + 4.37s (auto_replies) + 1.66s (user_violations)
 
 🚀 v7.6.8 (CURSOR-CLEANUP):
   ✅ إغلاق cursors في كل دوال SQLite (5 أماكن) — منع resource leak
@@ -23,21 +27,17 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
   ✅ تحسين assert إلى raise RuntimeError (يعمل مع -O)
 
 🚀 v7.6.7 (BANNED-WORDS-INDEX-FIX):
-  ✅ CURRENT_SCHEMA_VERSION: 7 → 8 (إجبار rebuild لمرة واحدة)
-  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat
-  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat_word
-  ✅ حل بطء 4.55s على SELECT DISTINCT word FROM banned_words
-  ✅ حل بطء 1.67s على SELECT word FROM banned_words
+  ✅ CURRENT_SCHEMA_VERSION: 7 → 8
+  ✅ CRITICAL_INDEX_NAMES: إضافة idx_banned_words_chat + idx_banned_words_chat_word
 
 🚀 v7.6.6 (VERIFY-CRITICAL-INDEXES):
   ✅ فحص سريع للفهارس الحرجة حتى مع fast-path
-  ✅ إصلاح فقدان الفهارس الصامت (lost index silent failure)
 
 🚀 v7.6.5 (LOG-CHANNEL-ID):
   ✅ إضافة log_channel_id إلى bot_groups (SQLite + PG + MySQL)
 
 🚀 v7.6.4 (إصلاح MySQL DESC mismatch):
-  ✅ _normalize_columns_mysql() — يُزيل ASC/DESC من الأعمدة
+  ✅ _normalize_columns_mysql() — يُزيل ASC/DESC
 
 🚀 v7.6.3: فحص تعريفات الفهارس (Smart Check)
 🚀 v7.6.2: حذف 11 فهرساً من DEPRECATED_INDEXES
@@ -54,8 +54,11 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.9: 8 → 9 (إجبار rebuild لإنشاء الفهارس الأربعة الجديدة)
-CURRENT_SCHEMA_VERSION = 9
+# ✅ v7.6.10: 9 → 10 (إجبار rebuild لمرة واحدة لتفعيل التنظيف التلقائي)
+CURRENT_SCHEMA_VERSION = 10
+
+# ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية (للتنظيف التلقائي)
+CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -136,7 +139,7 @@ COMMON_INDEXES = [
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    # ═══ AUTO_REPLIES (5) — ✅ v7.6.9: +idx_auto_replies_keyword_active ═══
+    # ═══ AUTO_REPLIES (5) ═══
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
@@ -187,7 +190,7 @@ COMMON_INDEXES = [
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    # ═══ USER_PENALTIES (5) — ✅ v7.6.9: +idx_penalties_status_end ═══
+    # ═══ USER_PENALTIES (5) ═══
     ("user_penalties", "idx_penalties_user",
      "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat",
@@ -238,11 +241,11 @@ COMMON_INDEXES = [
     ("user_reminder_settings", "idx_reminder_subscription",
      "user_reminder_settings(subscription_reminder)"),
 
-    # ═══ USER_VIOLATIONS (1) — ✅ v7.6.9: جديد ═══
+    # ═══ USER_VIOLATIONS (1) ═══
     ("user_violations", "idx_user_violations_chat",
      "user_violations(chat_id)"),
 
-    # ═══ USER_WARNINGS (1) — ✅ v7.6.9: جديد ═══
+    # ═══ USER_WARNINGS (1) ═══
     ("user_warnings", "idx_user_warnings_chat",
      "user_warnings(chat_id)"),
 ]
@@ -322,12 +325,12 @@ DEPRECATED_INDEXES = [
     # ═══ SETTINGS ═══
     "idx_settings_key",
 
-    # ═══ USER_VIOLATIONS / WARNINGS — ✅ v7.6.9: أُزيلت (عادت كفهارس شرعية) ═══
+    # ═══ USER_VIOLATIONS / WARNINGS ═══
     "idx_user_violations_user",
-    # "idx_user_violations_chat",   ← حُذف — الآن في COMMON_INDEXES
+    # "idx_user_violations_chat",   ← في COMMON_INDEXES الآن
     "idx_violations_user_chat",
     "idx_user_warnings_user",
-    # "idx_user_warnings_chat",     ← حُذف — الآن في COMMON_INDEXES
+    # "idx_user_warnings_chat",     ← في COMMON_INDEXES الآن
 
     # ═══ USER_GROUPS_LINK ═══
     "idx_ugl_user",
@@ -342,15 +345,15 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_posts_channel_published",
     "idx_posts_channel_pub_fail_created",
     "idx_penalties_user_chat_status_end",
-    "idx_penalties_status_end",              # ← v7.6.9 جديد
+    "idx_penalties_status_end",
     "idx_user_channels_user_banned",
     "idx_subscriptions_user_status_end",
     "idx_schedule_channel_next",
     "idx_banned_words_chat",
     "idx_banned_words_chat_word",
-    "idx_auto_replies_keyword_active",       # ← v7.6.9 جديد
-    "idx_user_violations_chat",              # ← v7.6.9 جديد
-    "idx_user_warnings_chat",                # ← v7.6.9 جديد
+    "idx_auto_replies_keyword_active",
+    "idx_user_violations_chat",
+    "idx_user_warnings_chat",
 })
 
 # ✅ v7.6.8: raise بدل assert (يعمل مع -O)
@@ -473,6 +476,153 @@ async def _get_current_schema_version_mysql(conn):
     except Exception:
         pass
     return 0
+
+
+# =====================================================================
+# ✅ v7.6.10: التنظيف التلقائي للبيانات القديمة (idempotent)
+# =====================================================================
+
+async def _cleanup_stale_links_sqlite(conn, logger):
+    """
+    ✅ v7.6.10: تنظيف تلقائي SQLite:
+    - حذف المعرّفات السالبة (chat_id) من user_groups_link
+    - حذف بوتات تليجرام الرسمية من anonymous_admins
+    """
+    cleaned_links = 0
+    cleaned_anon = 0
+
+    try:
+        cursor = await conn.execute(
+            "DELETE FROM user_groups_link WHERE user_id < 0"
+        )
+        try:
+            cleaned_links = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup user_groups_link: {e}")
+
+    try:
+        placeholders = ",".join(["?"] * len(CLEANUP_ANONYMOUS_BOT_IDS))
+        cursor = await conn.execute(
+            f"DELETE FROM anonymous_admins "
+            f"WHERE anonymous_id IN ({placeholders})",
+            CLEANUP_ANONYMOUS_BOT_IDS,
+        )
+        try:
+            cleaned_anon = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 SQLite cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
+
+
+async def _cleanup_stale_links_postgres(conn, logger):
+    """✅ v7.6.10: تنظيف تلقائي PostgreSQL."""
+    cleaned_links = 0
+    cleaned_anon = 0
+
+    try:
+        result = await conn.execute(
+            "DELETE FROM user_groups_link WHERE user_id < 0"
+        )
+        if result and isinstance(result, str) and result.startswith("DELETE "):
+            try:
+                cleaned_links = int(result.split()[1])
+            except (IndexError, ValueError):
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup user_groups_link: {e}")
+
+    try:
+        result = await conn.execute(
+            "DELETE FROM anonymous_admins "
+            "WHERE anonymous_id = ANY($1::bigint[])",
+            list(CLEANUP_ANONYMOUS_BOT_IDS),
+        )
+        if result and isinstance(result, str) and result.startswith("DELETE "):
+            try:
+                cleaned_anon = int(result.split()[1])
+            except (IndexError, ValueError):
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 PG cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
+
+
+async def _cleanup_stale_links_mysql(conn, logger):
+    """✅ v7.6.10: تنظيف تلقائي MySQL."""
+    cleaned_links = 0
+    cleaned_anon = 0
+
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute(
+                "DELETE FROM user_groups_link WHERE user_id < 0"
+            )
+            cleaned_links = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup user_groups_link: {e}")
+
+    try:
+        cursor = await conn.cursor()
+        try:
+            placeholders = ",".join(["%s"] * len(CLEANUP_ANONYMOUS_BOT_IDS))
+            await cursor.execute(
+                f"DELETE FROM anonymous_admins "
+                f"WHERE anonymous_id IN ({placeholders})",
+                CLEANUP_ANONYMOUS_BOT_IDS,
+            )
+            cleaned_anon = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 MySQL cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
 
 
 # =====================================================================
@@ -1119,6 +1269,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_sqlite(conn, logger)
+        await _cleanup_stale_links_sqlite(conn, logger)
         if logger:
             logger.info(
                 f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
@@ -1698,6 +1849,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     await _drop_deprecated_indexes_sqlite(conn, logger)
     await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
+    await _cleanup_stale_links_sqlite(conn, logger)
 
     try:
         await conn.execute(
@@ -1705,7 +1857,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "slow-query-index-fix"),
+             "auto-cleanup-stale-links"),
         )
         await conn.commit()
     except Exception as e:
@@ -1724,6 +1876,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_postgres(conn, logger)
+        await _cleanup_stale_links_postgres(conn, logger)
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -2307,6 +2460,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _drop_deprecated_indexes_postgres(conn, logger)
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
+    await _cleanup_stale_links_postgres(conn, logger)
 
     try:
         await conn.execute(
@@ -2315,7 +2469,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "slow-query-index-fix",
+            "auto-cleanup-stale-links",
         )
     except Exception as e:
         if logger:
@@ -2333,6 +2487,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_mysql(conn, logger)
+        await _cleanup_stale_links_mysql(conn, logger)
         if logger:
             logger.info(
                 f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
@@ -2925,6 +3080,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _drop_deprecated_indexes_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
+        await _cleanup_stale_links_mysql(conn, logger)
 
         try:
             await conn.execute(
@@ -2934,7 +3090,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "slow-query-index-fix",
+                    "auto-cleanup-stale-links",
                 ),
             )
         except Exception as e:
@@ -2961,6 +3117,7 @@ __all__ = [
     "create_tables_postgres",
     "create_tables_mysql",
     "CURRENT_SCHEMA_VERSION",
+    "CLEANUP_ANONYMOUS_BOT_IDS",
     "COMMON_INDEXES",
     "EXPECTED_INDEX_COUNT",
     "CRITICAL_INDEX_NAMES",
