@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_stats.py - دوال الإحصائيات والمشرفين (v7.4.4)
+database_stats.py - دوال الإحصائيات والمشرفين (v7.4.5)
 ================================================================================
 StatsMixin:
   - get_bot_stats      : إحصائيات البوت الأساسية
@@ -10,6 +10,12 @@ StatsMixin:
   - add_admin          : إضافة مشرف (UPSERT متوافق)
   - remove_admin       : إزالة مشرف
   - get_admin_list     : قائمة المشرفين
+
+🆕 v7.4.5 (FIX-DB-SIZE-STATS):
+  ✅ get_bot_stats: إضافة db_size_kb (via self.get_db_size_kb())
+  ✅ get_general_stats: إضافة db_size_kb
+  ✅ حل مشكلة "💾 حجم قاعدة البيانات: 0.0 KB"
+  ✅ يعمل على PostgreSQL/MySQL/SQLite
 
 🆕 v7.4.4 (تحسينات أداء + إصلاحات):
   ✅ get_general_stats: استعلام واحد بدل 9 استعلامات (PostgreSQL)
@@ -29,6 +35,7 @@ StatsMixin:
   - self.CACHE_AVAILABLE
   - self.auth_cache
   - self.USE_POSTGRES / self.USE_MYSQL
+  - self.get_db_size_kb()  ← ✅ v7.4.5 (من database.py v7.7.14)
 ================================================================================
 """
 
@@ -47,11 +54,12 @@ class StatsMixin:
 
     async def get_bot_stats(self) -> Dict:
         """
-        ✅ v7.4.4: استعلام واحد بدل 7 استعلامات.
+        ✅ v7.4.5: استعلام واحد + حساب حجم DB.
 
         يعمل على PostgreSQL/MySQL/SQLite.
         """
         try:
+            stats: Dict[str, int] = {}
             if getattr(self, "USE_POSTGRES", False):
                 # ✅ PostgreSQL: استعلام واحد بـ UNION ALL
                 query = """
@@ -77,63 +85,68 @@ class StatsMixin:
                 rows = await self.fetchall(query, (self.TimeUtils.utc_now(),))
                 stats = {row['metric']: row['value'] for row in rows} if rows else {}
 
-                return {
-                    "users": int(stats.get('users', 0) or 0),
-                    "channels": int(stats.get('channels', 0) or 0),
-                    "groups": int(stats.get('groups', 0) or 0),
-                    "posts": int(stats.get('posts', 0) or 0),
-                    "published": int(stats.get('published', 0) or 0),
-                    "active_subs": int(stats.get('active_subs', 0) or 0),
-                    "tickets": int(stats.get('tickets', 0) or 0),
-                }
-
             else:
                 # SQLite/MySQL: استعلامات منفصلة (أسرع في هذه المحركات)
                 async with self.connection() as conn:
-                    users = await self._fetchval_with_conn(
+                    stats['users'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM users", default=0
                     )
-                    channels = await self._fetchval_with_conn(
+                    stats['channels'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM user_channels", default=0
                     )
-                    groups = await self._fetchval_with_conn(
+                    stats['groups'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM bot_groups", default=0
                     )
-                    posts = await self._fetchval_with_conn(
+                    stats['posts'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM posts", default=0
                     )
-                    published = await self._fetchval_with_conn(
+                    stats['published'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM posts WHERE published = 1",
                         default=0,
                     )
-                    active_subs = await self._fetchval_with_conn(
+                    stats['active_subs'] = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM subscriptions "
                         "WHERE status = 'active' AND end_date > ?",
                         self.TimeUtils.utc_now(), default=0,
                     )
-                    tickets = await self._fetchval_with_conn(
+                    stats['tickets'] = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM support_tickets "
                         "WHERE status = 'pending'",
                         default=0,
                     )
 
-                return {
-                    "users": int(users or 0),
-                    "channels": int(channels or 0),
-                    "groups": int(groups or 0),
-                    "posts": int(posts or 0),
-                    "published": int(published or 0),
-                    "active_subs": int(active_subs or 0),
-                    "tickets": int(tickets or 0),
-                }
+            # ✅ v7.4.5: حساب حجم قاعدة البيانات
+            db_size_kb = 0.0
+            try:
+                db_size_kb = await self.get_db_size_kb()
+            except AttributeError:
+                logger.debug(
+                    "⚠️ get_db_size_kb غير متاح "
+                    "(database.py قديم؟) — استخدم 0.0"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ get_db_size_kb: {e}")
+
+            return {
+                "users": int(stats.get('users', 0) or 0),
+                "channels": int(stats.get('channels', 0) or 0),
+                "groups": int(stats.get('groups', 0) or 0),
+                "posts": int(stats.get('posts', 0) or 0),
+                "published": int(stats.get('published', 0) or 0),
+                "active_subs": int(stats.get('active_subs', 0) or 0),
+                "tickets": int(stats.get('tickets', 0) or 0),
+                "db_size_kb": float(db_size_kb or 0.0),
+            }
+
         except Exception as e:
             logger.error(f"❌ get_bot_stats: {e}", exc_info=True)
             return {
                 "users": 0, "channels": 0, "groups": 0,
                 "posts": 0, "published": 0,
                 "active_subs": 0, "tickets": 0,
+                "db_size_kb": 0.0,
             }
 
     # =====================================================================
@@ -142,11 +155,12 @@ class StatsMixin:
 
     async def get_general_stats(self) -> Dict:
         """
-        ✅ v7.4.4: استعلام واحد بدل 9 استعلامات (PostgreSQL).
+        ✅ v7.4.5: استعلام واحد + حجم DB (PostgreSQL).
 
         يحسّن admin_stats من 4.24s → ~200ms.
         """
         try:
+            stats: Dict[str, int] = {}
             if getattr(self, "USE_POSTGRES", False):
                 # ✅ PostgreSQL: استعلام واحد بـ UNION ALL
                 query = """
@@ -178,70 +192,72 @@ class StatsMixin:
                 rows = await self.fetchall(query, (self.TimeUtils.utc_now(),))
                 stats = {row['metric']: row['value'] for row in rows} if rows else {}
 
-                return {
-                    "users": int(stats.get('users', 0) or 0),
-                    "channels": int(stats.get('channels', 0) or 0),
-                    "groups": int(stats.get('groups', 0) or 0),
-                    "posts": int(stats.get('posts', 0) or 0),
-                    "published": int(stats.get('published', 0) or 0),
-                    "active_subs": int(stats.get('active_subs', 0) or 0),
-                    "tickets": int(stats.get('tickets', 0) or 0),
-                    "invoices": int(stats.get('invoices', 0) or 0),
-                    "active_penalties": int(stats.get('active_penalties', 0) or 0),
-                }
-
             else:
                 # SQLite/MySQL: استعلامات منفصلة
                 async with self.connection() as conn:
-                    users = await self._fetchval_with_conn(
+                    stats['users'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM users", default=0
                     )
-                    channels = await self._fetchval_with_conn(
+                    stats['channels'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM user_channels", default=0
                     )
-                    groups = await self._fetchval_with_conn(
+                    stats['groups'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM bot_groups", default=0
                     )
-                    posts = await self._fetchval_with_conn(
+                    stats['posts'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM posts", default=0
                     )
-                    published = await self._fetchval_with_conn(
+                    stats['published'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM posts WHERE published = 1",
                         default=0,
                     )
-                    active_subs = await self._fetchval_with_conn(
+                    stats['active_subs'] = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM subscriptions "
                         "WHERE status = 'active' AND end_date > ?",
                         self.TimeUtils.utc_now(), default=0,
                     )
-                    tickets = await self._fetchval_with_conn(
+                    stats['tickets'] = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM support_tickets "
                         "WHERE status = 'pending'",
                         default=0,
                     )
-                    invoices = await self._fetchval_with_conn(
+                    stats['invoices'] = await self._fetchval_with_conn(
                         conn, "SELECT COUNT(*) FROM invoices", default=0
                     )
-                    active_penalties = await self._fetchval_with_conn(
+                    stats['active_penalties'] = await self._fetchval_with_conn(
                         conn,
                         "SELECT COUNT(*) FROM user_penalties "
                         "WHERE status = 'active'",
                         default=0,
                     )
 
-                return {
-                    "users": int(users or 0),
-                    "channels": int(channels or 0),
-                    "groups": int(groups or 0),
-                    "posts": int(posts or 0),
-                    "published": int(published or 0),
-                    "active_subs": int(active_subs or 0),
-                    "tickets": int(tickets or 0),
-                    "invoices": int(invoices or 0),
-                    "active_penalties": int(active_penalties or 0),
-                }
+            # ✅ v7.4.5: حساب حجم قاعدة البيانات
+            db_size_kb = 0.0
+            try:
+                db_size_kb = await self.get_db_size_kb()
+            except AttributeError:
+                logger.debug(
+                    "⚠️ get_db_size_kb غير متاح "
+                    "(database.py قديم؟) — استخدم 0.0"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ get_db_size_kb: {e}")
+
+            return {
+                "users": int(stats.get('users', 0) or 0),
+                "channels": int(stats.get('channels', 0) or 0),
+                "groups": int(stats.get('groups', 0) or 0),
+                "posts": int(stats.get('posts', 0) or 0),
+                "published": int(stats.get('published', 0) or 0),
+                "active_subs": int(stats.get('active_subs', 0) or 0),
+                "tickets": int(stats.get('tickets', 0) or 0),
+                "invoices": int(stats.get('invoices', 0) or 0),
+                "active_penalties": int(stats.get('active_penalties', 0) or 0),
+                "db_size_kb": float(db_size_kb or 0.0),
+            }
+
         except Exception as e:
             logger.error(f"❌ get_general_stats: {e}", exc_info=True)
             return {
@@ -249,6 +265,7 @@ class StatsMixin:
                 "posts": 0, "published": 0,
                 "active_subs": 0, "tickets": 0,
                 "invoices": 0, "active_penalties": 0,
+                "db_size_kb": 0.0,
             }
 
     # =====================================================================
