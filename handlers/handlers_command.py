@@ -2,26 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.19
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.19.1
 ===================================================================================
-🆕 v7.5.19 (إصلاحات شاملة):
+🆕 v7.5.19.1 (إصلاح واحد فقط على v7.5.19):
+    ✅ _safe_edit_or_send: يرد في المجموعة إذا كانت الرسالة من مجموعة
+       → يحل مشكلة "User_bot_to_bot_disabled" عند المشرف المجهول
+    ✅ كل ما تبقى مطابق تماماً لـ v7.5.19 (بدون تغيير سلوك)
+
+🆕 v7.5.19 (الأصلي):
     ✅ _moderation_command: default duration حسب action
-       - /ban بدون مدة → دائم
-       - /mute بدون مدة → ساعة
-       - /restrict بدون مدة → 30 دقيقة
     ✅ restore: أزرار قابلة للنقر + safe_mtime
-    ✅ channels/posts/gift_plans: row access آمن (_get_channel_field)
+    ✅ channels/posts/gift_plans: row access آمن
     ✅ _force_sub_cache: key = (user_id, force_ch)
-    ✅ إزالة dead imports + _safe_answer غير المستخدمة
+    ✅ إزالة dead imports + _safe_answer
     ✅ stats: حماية None
-    ✅ _safe_edit_or_send: default parse_mode=None
-
-🆕 v7.5.18:
-    ✅ start: فحص وجود المستخدم قبل register_user
-
-🆕 v7.5.17:
-    ✅ developer: @RelaxMggr + تعديل بدل إرسال جديدة
-    ✅ gift_plans: إضافة lang المفقودة
 ===================================================================================
 """
 
@@ -54,7 +48,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 def _safe_mtime(p):
-    """✅ v7.5.19: قراءة آمنة لـ mtime (تتجنب FileNotFoundError)."""
     try:
         return p.stat().st_mtime
     except (OSError, FileNotFoundError):
@@ -62,9 +55,6 @@ def _safe_mtime(p):
 
 
 def _get_field(row, key, default=None):
-    """
-    ✅ v7.5.19: قراءة آمنة لحقل من row (dict/Row/tuple).
-    """
     if row is None:
         return default
     if isinstance(row, dict):
@@ -80,7 +70,6 @@ def _get_field(row, key, default=None):
 
 
 def _row_to_dict(row) -> dict:
-    """✅ v7.5.19: تحويل موحد لصف DB."""
     if row is None:
         return {}
     if isinstance(row, dict):
@@ -91,15 +80,28 @@ def _row_to_dict(row) -> dict:
         return {}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.19.1: الإصلاح الوحيد — الرد في المكان الصحيح
+# ═══════════════════════════════════════════════════════════════════
+
 async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
     """
-    ✅ v7.5.19: parse_mode default = None.
-    إذا كان من callback → عدّل الرسالة الحالية.
-    إذا كان من أمر → أرسل رسالة جديدة.
+    ✅ v7.5.19.1:
+    - إذا كان من callback → عدّل الرسالة الحالية
+    - إذا كان من أمر في مجموعة → أرسل في المجموعة
+    - إذا كان من أمر في الخاص → أرسل في الخاص
+    - يحل خطأ User_bot_to_bot_disabled عند المشرف المجهول
     """
     query = update.callback_query
-    user_id = update.effective_user.id
 
+    # ✅ v7.5.19.1: تحديد الهدف الصحيح
+    chat = update.effective_chat if update else None
+    if chat and chat.type in ('group', 'supergroup'):
+        target = chat.id                     # ← المجموعة
+    else:
+        target = update.effective_user.id    # ← الخاص
+
+    # ─── 1) محاولة تعديل رسالة الكولباك ───
     if query and query.message:
         try:
             await query.edit_message_text(
@@ -124,10 +126,10 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
         except Exception as e:
             logger.debug(f"edit error: {e}")
 
-    # fallback: إرسال جديدة
+    # ─── 2) fallback: إرسال جديدة ───
     try:
         await context.bot.send_message(
-            user_id,
+            target,
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
@@ -138,7 +140,8 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
         if "can't parse" in err or "parse" in err:
             try:
                 await context.bot.send_message(
-                    user_id, text, reply_markup=reply_markup, parse_mode=None
+                    target, text,
+                    reply_markup=reply_markup, parse_mode=None
                 )
                 return True
             except Exception:
@@ -151,7 +154,6 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
 
 
 def _mask_id(id_value, prefix=3, suffix=2):
-    """إخفاء جزء من المعرفات الحساسة."""
     if id_value is None:
         return "***"
     s = str(id_value)
@@ -161,7 +163,7 @@ def _mask_id(id_value, prefix=3, suffix=2):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# كاش الاشتراك الإجباري — ✅ v7.5.19: key=(user_id, force_ch)
+# كاش الاشتراك الإجباري
 # ═══════════════════════════════════════════════════════════════════
 
 _force_sub_cache: dict = {}
@@ -172,7 +174,6 @@ _FORCE_CHANNEL_CACHE_TTL = 600
 
 
 async def _get_force_channel_cached(bot, force_ch: str):
-    """جلب معلومات قناة الاشتراك الإجباري مع كاش."""
     now = _time_module.time()
     cached = _force_channel_cache.get(force_ch)
     if cached:
@@ -195,10 +196,6 @@ async def _get_force_channel_cached(bot, force_ch: str):
 
 
 async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> bool:
-    """
-    ✅ v7.5.19: cache key = (user_id, force_ch).
-    السبب: لو غُيّرت قناة الاشتراك، الكاش القديم لا يُستخدم خطأً.
-    """
     now = _time_module.time()
     cache_key = (user_id, force_ch)
 
@@ -220,9 +217,6 @@ async def _check_force_subscription_cached(bot, user_id: int, force_ch: str) -> 
 
 
 def _invalidate_force_sub_cache(user_id: int = None):
-    """
-    ✅ v7.5.19: إبطال كل مفاتيح المستخدم (بغض النظر عن القناة).
-    """
     if user_id is None:
         _force_sub_cache.clear()
         _force_channel_cache.clear()
@@ -233,7 +227,6 @@ def _invalidate_force_sub_cache(user_id: int = None):
 
 
 async def _trans(key, lang, default_ar):
-    """جلب النص المترجم مع fallback."""
     try:
         text = await get_text(lang, key)
         if not text or text == key:
@@ -248,16 +241,13 @@ async def _trans(key, lang, default_ar):
 # ═══════════════════════════════════════════════════════════════════
 
 class CommandHandlers:
-    """جميع معالجات الأوامر"""
 
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """الأمر /start - القائمة الرئيسية."""
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
 
-        # ✅ v7.5.18: فحص وجود المستخدم قبل register_user
         try:
             user_exists = await DB.fetchval(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
@@ -271,7 +261,6 @@ class CommandHandlers:
             except Exception:
                 pass
 
-        # معالجة الإحالات
         args = context.args or []
         if args and args[0].startswith('ref_'):
             ref_code = args[0][4:]
@@ -292,7 +281,6 @@ class CommandHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
 
-        # فحص الاشتراك الإجباري
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
             try:
@@ -457,9 +445,7 @@ class CommandHandlers:
 
     @staticmethod
     async def developer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """معلومات المطور — تُعرض في نفس الرسالة."""
         user_id = update.effective_user.id
-
         dev_name = getattr(CONFIG, 'DEVELOPER_NAME', "ريلاكس") or "ريلاكس"
         dev_contact = getattr(CONFIG, 'DEVELOPER_CONTACT', "@RelaxMggr") or "@RelaxMggr"
 
@@ -499,7 +485,6 @@ class CommandHandlers:
             )
             return
 
-        # ✅ v7.5.19: حماية من None
         try:
             stats_data = await DB.get_bot_stats()
             if not isinstance(stats_data, dict):
@@ -792,7 +777,6 @@ class CommandHandlers:
 
     @staticmethod
     async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.19: عرض النسخ بأزرار قابلة للنقر + safe_mtime."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -860,7 +844,6 @@ class CommandHandlers:
 
     @staticmethod
     async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         channels = await DB.get_user_channels(user_id)
         if not channels:
@@ -878,7 +861,6 @@ class CommandHandlers:
 
     @staticmethod
     async def posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         active = await DB.get_active_channel(user_id)
         if not active:
@@ -1312,6 +1294,7 @@ class CommandHandlers:
             f"💡 استخدم /security للإعدادات"
         )
 
+        # ✅ v7.5.19.1: سيرد في المجموعة تلقائياً بفضل تعديل _safe_edit_or_send
         await _safe_edit_or_send(update, context, msg, parse_mode='HTML')
 
     # ═══════════════════════════════════════════════════════════════
@@ -1374,9 +1357,6 @@ class CommandHandlers:
     async def _moderation_command(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str
     ) -> None:
-        """
-        ✅ v7.5.19: default duration حسب action.
-        """
         if not update.effective_chat or \
                 update.effective_chat.type not in ['group', 'supergroup']:
             return
@@ -1424,13 +1404,12 @@ class CommandHandlers:
             )
             return
 
-        # ✅ v7.5.19: default duration حسب action
         default_durations = {
-            'ban': 0,           # دائم
-            'mute': 3600,       # ساعة
-            'restrict': 1800,   # 30 دقيقة
-            'warn': 0,          # لا يحتاج
-            'kick': 0,          # لا يحتاج
+            'ban': 0,
+            'mute': 3600,
+            'restrict': 1800,
+            'warn': 0,
+            'kick': 0,
         }
         duration_seconds = default_durations.get(action, 60)
 
@@ -1577,7 +1556,6 @@ class CommandHandlers:
 
     @staticmethod
     async def gift_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.19: row access آمن."""
         user_id = update.effective_user.id
         lang = await DB.get_user_language(user_id) or 'ar'
 
