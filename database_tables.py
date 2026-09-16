@@ -2,8 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.12)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.13)
 ================================================================================
+🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE):
+  ✅ _ensure_all_indexes_exist_{postgres,sqlite,mysql} :
+       فحص جماعي (رخيص) لكل COMMON_INDEXES في fast-path
+       → يمنع فقدان أي فهرس غير حرج بسبب fast-path
+  ✅ _quick_analyze_{postgres,mysql} :
+       ANALYZE في كل bootstrap (رخيص، يُحدّث planner stats)
+       → يحل "Seq Scan بعد Index موجود" الناتج عن stats قديمة
+  ✅ _run_maintenance_postgres :
+       VACUUM (ANALYZE, SKIP_LOCKED) بدل VACUUM ANALYZE
+       + asyncio.sleep(0.5) بين الجداول لتقليل I/O contention
+  ✅ _run_maintenance_mysql :
+       ANALYZE + OPTIMIZE مع تأخير بين الجداول
+  ✅ fast-path يستدعي _ensure_all_indexes ثم _quick_analyze
+  ✅ يمنع 3.73s على SELECT 1 (I/O stall من VACUUM أثناء bootstrap)
+  ✅ لا يكسر أي وظيفة سابقة
+
 🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX):
   ✅ _run_maintenance_* : VACUUM ANALYZE تلقائي كل 24 ساعة
   ✅ +2 فهارس: idx_posts_channel_pub_at, idx_auto_replies_active_keyword
@@ -25,6 +41,7 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
 ================================================================================
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -34,6 +51,7 @@ from datetime import datetime, timezone
 # =====================================================================
 
 # ✅ v7.6.12: 11 → 12 (إجبار rebuild + تفعيل VACUUM)
+# ✅ v7.6.13: نُبقيها 12 — الإصلاحات لا تغيّر schema، فقط runtime
 CURRENT_SCHEMA_VERSION = 12
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
@@ -53,6 +71,9 @@ MAINTENANCE_TABLES = (
     "schedule",
     "admin_logs",
 )
+
+# ✅ v7.6.13: فاصل بين عمليات VACUUM لكل جدول (تقليل I/O contention)
+VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 
 DEFAULT_SETTINGS = (
     ("publish_interval", "12"),
@@ -424,13 +445,250 @@ def _get_expected_cols_for_index(idx_name: str) -> str:
 
 
 # =====================================================================
-# ✅ v7.6.12: VACUUM ANALYZE الدوري (ينظّف الجداول + يحدّث الإحصائيات)
+# ✅ v7.6.13: فحص جماعي لكل الفهارس المطلوبة (رخيص)
+# =====================================================================
+
+async def _ensure_all_indexes_exist_postgres(conn, logger):
+    """
+    ✅ v7.6.13: فحص جماعي واحد لكل COMMON_INDEXES في fast-path.
+    يمنع فقدان أي فهرس غير حرج بعد حذف متعمد أو حادث.
+    """
+    try:
+        all_names = [n for _, n, _ in COMMON_INDEXES]
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[])",
+            all_names,
+        )
+        existing = {r["indexname"] for r in rows}
+        missing = [n for n in all_names if n not in existing]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ PG: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            cols = _get_expected_cols_for_index(idx_name)
+            if not cols:
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ PG fast-path فهرس {idx_name}: {e}"
+                    )
+        if logger and created:
+            logger.info(
+                f"✅ PG fast-path: أُعيد إنشاء {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_postgres: {e}")
+        return 0
+
+
+async def _ensure_all_indexes_exist_sqlite(conn, logger):
+    """✅ v7.6.13: نفس المنطق لـ SQLite."""
+    try:
+        all_names = [n for _, n, _ in COMMON_INDEXES]
+        placeholders = ",".join(["?"] * len(all_names))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(all_names),
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        existing = {r[0] for r in rows}
+        missing = [n for n in all_names if n not in existing]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ SQLite: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            cols = _get_expected_cols_for_index(idx_name)
+            if not cols:
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ SQLite fast-path فهرس {idx_name}: {e}"
+                    )
+        if created:
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        if logger and created:
+            logger.info(
+                f"✅ SQLite fast-path: أُعيد إنشاء {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_sqlite: {e}")
+        return 0
+
+
+async def _ensure_all_indexes_exist_mysql(conn, logger):
+    """✅ v7.6.13: نفس المنطق لـ MySQL."""
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        try:
+            existing_pairs = await _fetch_existing_indexes_mysql(
+                conn, list(tables)
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ MySQL fetch indexes: {e}")
+            return 0
+
+        # (table, index) → موجود
+        existing = {(t, idx) for (t, idx) in existing_pairs}
+        missing = [
+            (t, n, c) for t, n, c in COMMON_INDEXES
+            if (t, n) not in existing
+        ]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ MySQL: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for _table, idx_name, cols in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX {idx_name} ON {cols}"
+                )
+                created += 1
+            except Exception as e:
+                err_msg = str(e).lower()
+                if (
+                    "duplicate" in err_msg
+                    or "already exists" in err_msg
+                    or "1061" in err_msg
+                ):
+                    continue
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ MySQL fast-path فهرس {idx_name}: {e}"
+                    )
+        if logger and created:
+            logger.info(
+                f"✅ MySQL fast-path: أُنشئ {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# ✅ v7.6.13: ANALYZE سريع في كل bootstrap (يُحدّث planner stats)
+# =====================================================================
+
+async def _quick_analyze_postgres(conn, logger):
+    """
+    ✅ v7.6.13: ANALYZE فقط — رخيص ولا يحصل على قفل حصري.
+    يُحدّث إحصائيات planner → يحل Seq Scan على جداول لها فهارس.
+    """
+    try:
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE {tbl}")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+        if logger and done:
+            logger.info(f"📊 PG: ANALYZE على {done} جدول")
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _quick_analyze_postgres: {e}")
+        return 0
+
+
+async def _quick_analyze_mysql(conn, logger):
+    """✅ v7.6.13: ANALYZE TABLE سريع لـ MySQL."""
+    try:
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE TABLE `{tbl}`")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+        if logger and done:
+            logger.info(f"📊 MySQL: ANALYZE على {done} جدول")
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _quick_analyze_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# ✅ v7.6.12 + v7.6.13: VACUUM ANALYZE الدوري (محسّن)
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
     """
-    ✅ v7.6.12: VACUUM ANALYZE على الجداول الحرجة كل 24 ساعة.
-    يحل بطء: UPDATE posts (3.30s)، SELECT auto_replies (1.71s)
+    ✅ v7.6.13: VACUUM (ANALYZE, SKIP_LOCKED) بدل VACUUM ANALYZE
+    + تأخير 0.5s بين الجداول لتقليل I/O contention.
 
     ملاحظة: VACUUM لا يمكن أن يعمل داخل transaction.
     """
@@ -460,19 +718,31 @@ async def _run_maintenance_postgres(conn, logger):
                 pass
 
         if logger:
-            logger.info("🧹 PG: بدء VACUUM ANALYZE على الجداول الحرجة...")
+            logger.info(
+                "🧹 PG: بدء VACUUM (ANALYZE, SKIP_LOCKED) "
+                "على الجداول الحرجة..."
+            )
 
         done = 0
         failed = 0
         for tbl in MAINTENANCE_TABLES:
             try:
-                # VACUUM ANALYZE يجب أن يعمل خارج transaction
-                await conn.execute(f"VACUUM ANALYZE {tbl}")
+                # ✅ v7.6.13: SKIP_LOCKED يتجنب الانتظار على الأقفال
+                await conn.execute(
+                    f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
+                )
                 done += 1
             except Exception as e:
                 failed += 1
                 if logger:
                     logger.debug(f"⚠️ VACUUM {tbl}: {e}")
+            # ✅ v7.6.13: فاصل بين الجداول — يسمح للاستعلامات بالمرور
+            try:
+                await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
 
         # ─── تسجيل وقت الصيانة ───
         try:
@@ -488,10 +758,12 @@ async def _run_maintenance_postgres(conn, logger):
 
         if logger and done:
             logger.info(
-                f"✅ PG: VACUUM ANALYZE على {done} جدول "
+                f"✅ PG: VACUUM (ANALYZE, SKIP_LOCKED) على {done} جدول "
                 f"({failed} فشل)"
             )
         return done
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ _run_maintenance_postgres: {e}")
@@ -499,7 +771,7 @@ async def _run_maintenance_postgres(conn, logger):
 
 
 async def _run_maintenance_sqlite(conn, logger):
-    """✅ v7.6.12: SQLite — VACUUM + ANALYZE كل 24 ساعة."""
+    """✅ v7.6.12 + v7.6.13: SQLite — VACUUM + ANALYZE كل 24 ساعة."""
     try:
         try:
             cursor = await conn.execute(
@@ -562,7 +834,9 @@ async def _run_maintenance_sqlite(conn, logger):
 
 
 async def _run_maintenance_mysql(conn, logger):
-    """✅ v7.6.12: MySQL — ANALYZE TABLE + OPTIMIZE TABLE كل 24 ساعة."""
+    """
+    ✅ v7.6.12 + v7.6.13: MySQL — ANALYZE + OPTIMIZE مع تأخير بين الجداول.
+    """
     try:
         try:
             cursor = await conn.cursor()
@@ -603,6 +877,12 @@ async def _run_maintenance_mysql(conn, logger):
             except Exception as e:
                 if logger:
                     logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+            try:
+                await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
 
         try:
             cursor = await conn.cursor()
@@ -625,6 +905,8 @@ async def _run_maintenance_mysql(conn, logger):
         if logger and done:
             logger.info(f"✅ MySQL: ANALYZE على {done} جدول")
         return done
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         if logger:
             logger.warning(f"⚠️ _run_maintenance_mysql: {e}")
@@ -1496,7 +1778,9 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.13: فحص كل الفهارس (ليس فقط الحرجة)
         await _verify_critical_indexes_sqlite(conn, logger)
+        await _ensure_all_indexes_exist_sqlite(conn, logger)
         await _cleanup_stale_links_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
         await _run_maintenance_sqlite(conn, logger)
@@ -2117,9 +2401,12 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.13: فحص كل الفهارس (ليس فقط الحرجة) + ANALYZE سريع
         await _verify_critical_indexes_postgres(conn, logger)
+        await _ensure_all_indexes_exist_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
+        await _quick_analyze_postgres(conn, logger)
         await _run_maintenance_postgres(conn, logger)
         if logger:
             logger.info(
@@ -2717,6 +3004,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _migrate_missing_columns_postgres(conn, logger)
+    # ✅ v7.6.13: ANALYZE أولي بعد أول إنشاء
+    await _quick_analyze_postgres(conn, logger)
 
     try:
         await conn.execute(
@@ -2742,9 +3031,12 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.13: فحص كل الفهارس (ليس فقط الحرجة) + ANALYZE سريع
         await _verify_critical_indexes_mysql(conn, logger)
+        await _ensure_all_indexes_exist_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
+        await _quick_analyze_mysql(conn, logger)
         await _run_maintenance_mysql(conn, logger)
         if logger:
             logger.info(
@@ -3351,6 +3643,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _create_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
+        # ✅ v7.6.13: ANALYZE أولي بعد أول إنشاء
+        await _quick_analyze_mysql(conn, logger)
 
         try:
             await conn.execute(
@@ -3395,4 +3689,5 @@ __all__ = [
     "DEFAULT_SETTINGS",
     "MAINTENANCE_INTERVAL_SECONDS",
     "MAINTENANCE_TABLES",
+    "VACUUM_INTER_TABLE_DELAY_SECONDS",
 ]
