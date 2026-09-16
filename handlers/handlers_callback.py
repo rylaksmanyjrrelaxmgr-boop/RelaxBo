@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.4)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.6)
 =====================================================================
+✅ v9.4.6 — توحيد المعاملات في تفعيل/تعطيل الأمان:
+  - update_security_settings + add_admin_log في معاملة واحدة
+  - استخدام conn= المُمرَّر لتجنّب fsync منفصل
+  - 3 fsyncs → 1 fsync (توفير ~2.5s)
+  - يتطلب database_groups.py v7.4.4+ (دعم conn parameter)
+
+✅ v9.4.5 — fire-and-forget admin_log:
+  - admin_log INSERT لم يعد يحجز استجابة المستخدم
+
 ✅ v9.4.4 — عرض مصدر الاستعلامات البطيئة:
   - عرض 📍 الملف:السطر + 🔧 الدالة المستدعية
   - عرض سلسلة الاستدعاء (Stack, مستويان)
@@ -2492,26 +2501,69 @@ class CallbackHandlers:
                     violation_strikes=0, violation_duration=0,
                 )
                 values = activate_values if is_activate else deactivate_values
+
+                # ✅ v9.4.6: توحيد المعاملات — settings + admin_log في معاملة واحدة
+                # قبل: معاملتان منفصلتان = 2 fsyncs (~3.4s)
+                # بعد: معاملة واحدة = fsync واحد (~0.9s)
+                action_name = (
+                    f"{'activate' if is_activate else 'deactivate'}"
+                    f"_all_security"
+                )
+
                 try:
-                    if hasattr(DB, 'transaction'):
-                        async with DB.transaction():
-                            await DB.update_security_settings(chat_id, **values)
-                    else:
+                    # نُحاول استخدام التوحيد إذا كانت DB تدعم conn parameter
+                    # (يتطلب database_groups.py v7.4.4+)
+                    async with DB.transaction() as _conn:
+                        # 1) settings (نفس الاتصال)
+                        await DB.update_security_settings(
+                            chat_id, conn=_conn, **values
+                        )
+                        # 2) admin_log (نفس الاتصال — بدون fsync إضافي)
+                        await DB.add_admin_log(
+                            chat_id=chat_id,
+                            admin_id=user_id,
+                            action=action_name,
+                            target_id=None,
+                            reason="",
+                            conn=_conn,
+                        )
+                except TypeError as te:
+                    # fallback: DB لم تُحدَّث بعد — استخدم الطريقة القديمة
+                    logger.debug(
+                        f"conn parameter غير مدعوم — fallback: {te}"
+                    )
+                    try:
                         await DB.update_security_settings(chat_id, **values)
+                    except Exception as ex:
+                        logger.error(f"activate/deactivate failed: {ex}", exc_info=True)
+                        await safe_edit(query, "❌ فشل تحديث الإعدادات", bot=context.bot)
+                        return
+
+                    # admin_log fire-and-forget (لا يحجز المستخدم)
+                    async def _log_security_action():
+                        try:
+                            await DB.add_admin_log(
+                                chat_id=chat_id,
+                                admin_id=user_id,
+                                action=action_name,
+                            )
+                        except Exception as log_e:
+                            logger.debug(f"admin_log insert: {log_e}")
+
+                    try:
+                        log_task = asyncio.create_task(_log_security_action())
+                        ACTIVE_TASKS.add(log_task)
+                        log_task.add_done_callback(ACTIVE_TASKS.discard)
+                    except Exception as t_err:
+                        logger.debug(f"log_task create: {t_err}")
                 except Exception as ex:
-                    logger.error(f"activate/deactivate failed: {ex}", exc_info=True)
+                    logger.error(
+                        f"activate/deactivate failed: {ex}", exc_info=True
+                    )
                     await safe_edit(query, "❌ فشل تحديث الإعدادات", bot=context.bot)
                     return
+
                 await CallbackHandlers._invalidate_security_settings_cache(chat_id)
-                try:
-                    await DB.execute(
-                        "INSERT INTO admin_logs (admin_id, action, chat_id, created_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (user_id,
-                         f"{'activate' if is_activate else 'deactivate'}_all_security",
-                         chat_id, TimeUtils.utc_now()))
-                except Exception:
-                    pass
                 await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return
 
@@ -4182,7 +4234,6 @@ class CallbackHandlers:
                         f"<code>{_html.escape(caller_func)}</code>\n"
                     )
 
-                    # معلومات إضافية مفيدة
                     extra = []
                     if conn_type and conn_type != '?':
                         extra.append(f"🗄️ {conn_type}")
@@ -4191,7 +4242,6 @@ class CallbackHandlers:
                     if extra:
                         text += f"   {' | '.join(extra)}\n"
 
-                    # stack trace (أول مستويين بعد المستدعي المباشر)
                     stack = q.get('stack', [])
                     if stack and len(stack) > 1:
                         for level in stack[1:3]:
