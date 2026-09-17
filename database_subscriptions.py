@@ -2,12 +2,21 @@
 # -*- coding: utf-8 -*-
 """
 database_subscriptions.py - وحدة الباقات والاشتراكات والفواتير والإحالات
-v7.7.0 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+v7.7.29 — دعم كامل لـ SQLite + PostgreSQL + MySQL
 =====================================================================
-✅ v7.7.0 — إصلاحات حرجة:
-  1) activate_trial: فحص ذرّي لـ trial_used داخل المعاملة
+✅ v7.7.29 — إصلاحات ما بعد التدقيق:
+  1) get_users_for_reminder: HAVING بلا alias — PG كان يفشل بالكامل
+  2) add_referral: نطاق زمني بدل date() — أسرع + متوافق مع asyncpg
+  3) redeem_gift_code: UPDATE ذرّي (WHERE used_by IS NULL) — منع سباق
+  4) has_active_subscription: JOIN plans + p.is_active = 1
+     (توحيد مع Database.has_active_subscription)
+  5) expire_expired_subscriptions: تُرجع عدد المنتهين
+     + استخدام _execute_with_conn للـ rowcount الصحيح
+
+✅ v7.7.0 — إصلاحات حرجة (محفوظة):
+  1) activate_trial: فحص ذرّي لـ trial_used
   2) create_gift_code: معاملة جديدة لكل محاولة
-  3) activate_trial: تُرجع -1 عند وجود اشتراك أطول
+  3) activate_trial: -1 عند وجود اشتراك أطول
   4) expire_expired_subscriptions: فلترة المنتهين الآن فقط
   5) create_subscription: توحيد نمط PG
 =====================================================================
@@ -201,7 +210,7 @@ class SubscriptionMixin:
         return TimeUtils.safe_parse_iso(result) if result else None
 
     # -----------------------------------------------------------------
-    # Helper: INSERT subscription (8 أعمدة — trial/gift/referral)
+    # Helper: INSERT subscription (8 أعمدة)
     # -----------------------------------------------------------------
     async def _insert_subscription_simple(
         self, conn, user_id: int, plan_id: int,
@@ -374,7 +383,7 @@ class SubscriptionMixin:
         await self._execute_with_conn(conn, sql, user_id)
 
     # -----------------------------------------------------------------
-    # Helper: قراءة total_reward / claimed من referral_rewards
+    # Helper: قراءة total_reward / claimed
     # -----------------------------------------------------------------
     async def _read_referral_reward(self, conn, user_id: int) -> Optional[Dict]:
         sql = (
@@ -388,10 +397,17 @@ class SubscriptionMixin:
     # الاشتراك الأساسي
     # =================================================================
     async def has_active_subscription(self, user_id: int) -> bool:
+        """
+        ✅ v7.7.29: JOIN plans + p.is_active = 1
+        (توحيد مع Database.has_active_subscription v7.7.26)
+        """
         sql = (
-            f"SELECT 1 FROM subscriptions "
-            f"WHERE user_id = {_ph(1)} AND status = 'active' "
-            f"AND end_date > {_ph(2)} LIMIT 1"
+            f"SELECT 1 FROM subscriptions s "
+            f"JOIN plans p ON s.plan_id = p.id "
+            f"WHERE s.user_id = {_ph(1)} AND s.status = 'active' "
+            f"AND s.end_date > {_ph(2)} "
+            f"AND p.is_active = 1 "
+            f"LIMIT 1"
         )
         now_param = TimeUtils.utc_now() if USE_POSTGRES else TimeUtils.sql_iso()
         result = await self.fetchval(sql, (user_id, now_param))
@@ -404,19 +420,16 @@ class SubscriptionMixin:
 
     async def activate_trial(self, user_id: int) -> int:
         """
-        تفعيل التجربة المجانية (30 يوم).
-
         Returns:
-            30   : تم تفعيل التجربة بنجاح
-            0    : فشل حقيقي، أو المستخدم استخدم التجربة مسبقاً
-            -1   : التجربة فُعّلت، لكن اشتراك المستخدم الحالي أطول
+            30   : تم تفعيل التجربة
+            0    : فشل، أو المستخدم استخدم التجربة مسبقاً
+            -1   : فُعّلت، لكن اشتراك المستخدم الحالي أطول
         """
         try:
             async with await self._get_user_lock(user_id):
                 now = TimeUtils.utc_now()
                 trial_end = now + timedelta(days=30)
                 async with self.transaction() as conn:
-                    # ✅ v7.7.0: فحص ذرّي — يمنع التجربة المزدوجة
                     trial_used = await self._fetchval_with_conn(
                         conn,
                         f"SELECT trial_used FROM users WHERE user_id = {_ph(1)}",
@@ -557,6 +570,10 @@ class SubscriptionMixin:
     # استرداد كود الهدية
     # =================================================================
     async def redeem_gift_code(self, user_id: int, code: str) -> tuple:
+        """
+        ✅ v7.7.29: UPDATE ذرّي (WHERE used_by IS NULL) لمنع سباق
+        استرداد مزدوج للكود نفسه.
+        """
         try:
             code = code.strip()
             async with await self._get_user_lock(user_id):
@@ -586,17 +603,25 @@ class SubscriptionMixin:
                     if not plan:
                         return False, 0
 
+                    # ✅ v7.7.29: WHERE used_by IS NULL — منع سباق
                     sql_upd = (
                         f"UPDATE gift_codes SET used_by = {_ph(1)}, "
-                        f"used_at = {_ph(2)} WHERE id = {_ph(3)}"
+                        f"used_at = {_ph(2)} "
+                        f"WHERE id = {_ph(3)} AND used_by IS NULL"
                     )
                     used_at = (
                         TimeUtils.utc_now() if USE_POSTGRES
                         else TimeUtils.sql_iso()
                     )
-                    await self._execute_with_conn(
+                    updated = await self._execute_with_conn(
                         conn, sql_upd, user_id, used_at, gift_code['id']
                     )
+                    if updated == 0:
+                        # سباق — استُبدل الكود من process آخر
+                        logger.info(
+                            f"ℹ️ gift_code '{code}' سُبق في الاسترداد"
+                        )
+                        return False, 0
 
                     current_end = await self._get_current_end(conn, user_id)
                     now = TimeUtils.utc_now()
@@ -758,7 +783,12 @@ class SubscriptionMixin:
     # =================================================================
     # انتهاء الاشتراكات
     # =================================================================
-    async def expire_expired_subscriptions(self) -> None:
+    async def expire_expired_subscriptions(self) -> int:
+        """
+        ✅ v7.7.29: تُرجع عدد الاشتراكات المُنتهية.
+        تستخدم _execute_with_conn لـ rowcount موحد عبر DBs.
+        """
+        expired_count = 0
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
@@ -768,10 +798,11 @@ class SubscriptionMixin:
                         "WHERE status = 'active' "
                         "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
                     )
-                    await conn.execute(
+                    expired_count = await self._execute_with_conn(
+                        conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
-                        "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
+                        "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
                     )
                 elif USE_MYSQL:
                     soon_expiring = await self._fetchall_with_conn(
@@ -780,10 +811,11 @@ class SubscriptionMixin:
                         "WHERE status = 'active' "
                         "AND end_date <= UTC_TIMESTAMP()",
                     )
-                    await conn.execute(
+                    expired_count = await self._execute_with_conn(
+                        conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
-                        "AND end_date <= UTC_TIMESTAMP()"
+                        "AND end_date <= UTC_TIMESTAMP()",
                     )
                 else:
                     soon_expiring = await self._fetchall_with_conn(
@@ -792,10 +824,11 @@ class SubscriptionMixin:
                         "WHERE status = 'active' "
                         "AND end_date <= datetime('now')",
                     )
-                    await conn.execute(
+                    expired_count = await self._execute_with_conn(
+                        conn,
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
-                        "AND end_date <= datetime('now')"
+                        "AND end_date <= datetime('now')",
                     )
 
                 for user in soon_expiring:
@@ -807,6 +840,7 @@ class SubscriptionMixin:
             logger.error(
                 f"❌ expire_expired_subscriptions: {e}", exc_info=True
             )
+        return expired_count or 0
 
     async def _refresh_user_subscription_end(self, conn, user_id: int) -> None:
         if USE_POSTGRES:
@@ -1038,31 +1072,32 @@ class SubscriptionMixin:
     async def add_referral(
         self, referrer_id: int, referred_id: int
     ) -> bool:
+        """
+        ✅ v7.7.29: نطاق زمني [day_start, day_end) بدل date(created_at).
+        - يستفيد من index على created_at
+        - متوافق مع asyncpg (لا اعتماد على implicit cast text→date)
+        """
         if referrer_id == referred_id:
             return False
         try:
             async with await self._get_user_lock(referrer_id):
                 async with self.transaction() as conn:
-                    today = TimeUtils.utc_now().strftime('%Y-%m-%d')
+                    now = TimeUtils.utc_now()
+                    day_start = now.replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                    day_end = day_start + timedelta(days=1)
 
-                    if USE_POSTGRES:
-                        sql_cnt = (
-                            "SELECT COUNT(*) FROM referrals "
-                            "WHERE referrer_id = $1 AND date(created_at) = $2"
-                        )
-                    elif USE_MYSQL:
-                        sql_cnt = (
-                            "SELECT COUNT(*) FROM referrals "
-                            "WHERE referrer_id = %s "
-                            "AND DATE(created_at) = %s"
-                        )
-                    else:
-                        sql_cnt = (
-                            "SELECT COUNT(*) FROM referrals "
-                            "WHERE referrer_id = ? AND date(created_at) = ?"
-                        )
+                    sql_cnt = (
+                        f"SELECT COUNT(*) FROM referrals "
+                        f"WHERE referrer_id = {_ph(1)} "
+                        f"AND created_at >= {_ph(2)} "
+                        f"AND created_at < {_ph(3)}"
+                    )
                     count = await self._fetchval_with_conn(
-                        conn, sql_cnt, referrer_id, today, default=0
+                        conn, sql_cnt,
+                        referrer_id, day_start, day_end,
+                        default=0,
                     )
 
                     max_ref = getattr(CONFIG, 'MAX_DAILY_REFERRALS', 10)
@@ -1250,11 +1285,17 @@ class SubscriptionMixin:
     # التذكيرات
     # =================================================================
     async def get_users_for_reminder(self) -> List[Dict]:
+        """
+        ✅ v7.7.29: HAVING يكرر التعبير بدل استخدام alias —
+        PostgreSQL لا يسمح بـ SELECT aliases في HAVING
+        (كان الاستعلام يفشل بالكامل على PG قبل هذا الإصلاح).
+        """
         now = TimeUtils.utc_now()
         if USE_POSTGRES:
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          EXTRACT(DAY FROM (MAX(s.end_date) - $1)) AS days_left,
+                          EXTRACT(DAY FROM (MAX(s.end_date) - $1))
+                              AS days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
@@ -1263,16 +1304,20 @@ class SubscriptionMixin:
                    WHERE r.subscription_reminder = 1
                    GROUP BY u.user_id, u.language,
                             r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
+                   HAVING EXTRACT(DAY FROM (MAX(s.end_date) - $1))
+                              <= r.reminder_days_before
+                      AND EXTRACT(DAY FROM (MAX(s.end_date) - $1)) > 0
                       AND (r.last_reminder_sent IS NULL
-                           OR EXTRACT(DAY FROM ($3 - r.last_reminder_sent)) >= 1)""",
+                           OR EXTRACT(DAY FROM
+                                ($3 - r.last_reminder_sent)) >= 1)""",
                 (now, now, now),
             )
         elif USE_MYSQL:
+            now_str = now.strftime('%Y-%m-%d %H:%M:%S')
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) AS days_left,
+                          TIMESTAMPDIFF(DAY, %s, MAX(s.end_date))
+                              AS days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
@@ -1281,19 +1326,20 @@ class SubscriptionMixin:
                    WHERE r.subscription_reminder = 1
                    GROUP BY u.user_id, u.language,
                             r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
+                   HAVING TIMESTAMPDIFF(DAY, %s, MAX(s.end_date))
+                              <= r.reminder_days_before
+                      AND TIMESTAMPDIFF(DAY, %s, MAX(s.end_date)) > 0
                       AND (r.last_reminder_sent IS NULL
-                           OR TIMESTAMPDIFF(DAY, r.last_reminder_sent, %s) >= 1)""",
-                (now.strftime('%Y-%m-%d %H:%M:%S'),
-                 now.strftime('%Y-%m-%d %H:%M:%S'),
-                 now.strftime('%Y-%m-%d %H:%M:%S')),
+                           OR TIMESTAMPDIFF(DAY,
+                                r.last_reminder_sent, %s) >= 1)""",
+                (now_str, now_str, now_str, now_str, now_str),
             )
         else:
+            now_str = now.strftime('%Y-%m-%d %H:%M:%S')
             return await self.fetchall(
                 """SELECT u.user_id, u.language, r.reminder_days_before,
-                          CAST(julianday(MAX(s.end_date)) - julianday(?) AS INTEGER)
-                              AS days_left,
+                          CAST(julianday(MAX(s.end_date))
+                               - julianday(?) AS INTEGER) AS days_left,
                           r.last_reminder_sent
                    FROM users u
                    JOIN user_reminder_settings r ON u.user_id = r.user_id
@@ -1302,13 +1348,15 @@ class SubscriptionMixin:
                    WHERE r.subscription_reminder = 1
                    GROUP BY u.user_id, u.language,
                             r.reminder_days_before, r.last_reminder_sent
-                   HAVING days_left <= r.reminder_days_before
-                      AND days_left > 0
+                   HAVING CAST(julianday(MAX(s.end_date))
+                               - julianday(?) AS INTEGER)
+                              <= r.reminder_days_before
+                      AND CAST(julianday(MAX(s.end_date))
+                               - julianday(?) AS INTEGER) > 0
                       AND (r.last_reminder_sent IS NULL
-                           OR julianday(?) - julianday(r.last_reminder_sent) >= 1)""",
-                (now.strftime('%Y-%m-%d %H:%M:%S'),
-                 now.strftime('%Y-%m-%d %H:%M:%S'),
-                 now.strftime('%Y-%m-%d %H:%M:%S')),
+                           OR julianday(?) - julianday(r.last_reminder_sent)
+                              >= 1)""",
+                (now_str, now_str, now_str, now_str, now_str),
             )
 
     async def update_reminder_sent(self, user_id: int) -> bool:
