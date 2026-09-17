@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.10)
+handlers_message.py - معالجات الرسائل (v7.7.11)
 =====================================================================
+🆕 v7.7.11 (إصلاح تأخير 60 ثانية بعد إضافة قناة/منشور):
+    ✅ _invalidate_after_channel_change(): إبطال شامل لكاش
+       start_data_{user_id} و user_{user_id} و channels_{user_id}
+       بعد أي تغيير في القنوات/المنشورات.
+    ✅ _handle_channel_input: استدعاء الإبطال بعد add_channel ناجح
+       → الواجهة الرئيسية تعكس القناة الجديدة فوراً (بدل 60ث).
+    ✅ _handle_adding_posts: استدعاء الإبطال بعد add_posts ناجح
+       → عدد المنشورات يتحدّث فوراً في القائمة الرئيسية.
+
 🆕 v7.7.10 (إصلاح تحذير حذف الرسائل):
     ✅ _delete_and_warn: تجاهل BadRequest "Message to delete not found"
        و "message can't be deleted" بصمت (logger.debug)
@@ -165,6 +174,57 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
             return True
         logger.warning(f"تعذر حذف الرسالة: {e}")
         return False
+
+
+# =====================================================================
+# ✅ v7.7.11: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات
+# =====================================================================
+
+async def _invalidate_after_channel_change(
+    user_id: int, channel_db_id: Optional[int] = None
+) -> None:
+    """
+    ✅ v7.7.11: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
+
+    يحل مشكلة: الواجهة الرئيسية تُظهر بيانات قديمة لمدة 60 ثانية
+    (TTL start_data_{user_id}) بعد إضافة/حذف قناة أو منشور.
+
+    يبطّل:
+      - start_data_{user_id}         (تُقرأ في _show_main_menu_inline)
+      - user_{user_id}*              (كاشات داخليّة في database.py)
+      - channels_{user_id}           (قائمة القنوات)
+      - has_active_sub*              (يعتمد على وجود قناة/اشتراك)
+      - channel_info_{channel_db_id} (إن مُرِّر)
+      - user_cache[user_id]          (كاش cache.py)
+    """
+    try:
+        from database import internal_cache
+        keys = [
+            f"start_data_{user_id}",
+            f"user_{user_id}",
+            f"user_{user_id}_True",
+            f"user_{user_id}_False",
+            f"channels_{user_id}",
+            f"has_active_sub_{user_id}",
+            f"has_active_subscription_{user_id}",
+            f"subscription_active_{user_id}",
+            f"subscription_{user_id}",
+        ]
+        if channel_db_id is not None:
+            keys.append(f"channel_info_{channel_db_id}")
+        for k in keys:
+            try:
+                await internal_cache.invalidate(k)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"internal_cache invalidate: {e}")
+
+    try:
+        from cache import invalidate_user_cache
+        await invalidate_user_cache(user_id)
+    except Exception as e:
+        logger.debug(f"user_cache invalidate: {e}")
 
 
 # =====================================================================
@@ -1154,6 +1214,9 @@ class MessageHandlers:
             ch_db_id = await DB.add_channel(user_id, channel_id, channel_name)
 
             if ch_db_id:
+                # ✅ v7.7.11: إبطال الكاش — وإلا الواجهة تُظهر القناة بعد 60ث
+                await _invalidate_after_channel_change(user_id, ch_db_id)
+
                 msg = await _trans('channel_added', lang, f"✅ تمت إضافة القناة: {escape(channel_name)}")
                 await safe_send(context.bot, user_id, msg)
             else:
@@ -1250,6 +1313,9 @@ class MessageHandlers:
             return
 
         if count > 0:
+            # ✅ v7.7.11: إبطال الكاش ليعكس عدد المنشورات الجديد فوراً
+            await _invalidate_after_channel_change(user_id, channel_db_id)
+
             msg = await _trans('post_added', lang, "✅ تمت إضافة المنشور")
             await safe_send(context.bot, user_id, msg)
         else:
@@ -2713,4 +2779,5 @@ __all__ = [
     "clear_lang_cache",
     "_safe_delete_message",
     "_is_delete_ignore_error",
+    "_invalidate_after_channel_change",
 ]
