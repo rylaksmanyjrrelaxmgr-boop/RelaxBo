@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.21
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.22
 ===================================================================================
+🆕 v7.5.22 (SUBSCRIPTION-CACHE-FIX):
+    ✅ trial: invalidate_subscription_cache بعد activate_trial
+    ✅ redeem_gift: invalidate_subscription_cache بعد redeem_gift_code
+    ✅ grant: invalidate_subscription_cache بعد grant_subscription_days
+    ✅ يحل: ظهور "❌ يتطلب اشتراك نشط" مباشرة بعد تفعيل التجربة
+
 🆕 v7.5.21 (ANONYMOUS-ADMIN-FIX):
     ✅ _is_anonymous_sender() + ثوابت ANONYMOUS_BOT_ID / CHANNEL_BOT_ID
     ✅ syncgroup: عند المشرف المجهول → real_user_id = creator_id (ليس معرّف المجموعة)
@@ -447,8 +453,20 @@ class CommandHandlers:
             msg = msg.format(days=days)
         else:
             msg = await _trans('trial_failed', lang, "❌ تعذر تفعيل التجربة")
+
+        # ✅ v7.5.22: إبطال كاش الاشتراك (كان مفقوداً)
+        # السبب: has_active_subscription يستخدم internal_cache بـ TTL=60
+        # بدون إبطال → "❌ يتطلب اشتراك نشط" لمدة 60 ثانية بعد التفعيل
+        try:
+            await DB.invalidate_subscription_cache(user_id)
+        except Exception as e:
+            logger.warning(f"⚠️ invalidate_subscription_cache: {e}")
+        try:
+            await user_cache.invalidate(user_id)
+        except Exception:
+            pass
+
         await _safe_edit_or_send(update, context, msg, parse_mode=None)
-        await user_cache.invalidate(user_id)
 
     @staticmethod
     async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1364,6 +1382,11 @@ class CommandHandlers:
             return
         success = await DB.grant_subscription_days(target_id, days, plan_id=plan_id, provider='manual')
         if success:
+            # ✅ v7.5.22: إبطال كاش الاشتراك
+            try:
+                await DB.invalidate_subscription_cache(target_id)
+            except Exception:
+                pass
             await _safe_edit_or_send(
                 update, context,
                 f"✅ تم منح {days} يوم للمستخدم <code>{_mask_id(target_id)}</code>",
@@ -1416,6 +1439,11 @@ class CommandHandlers:
         else:
             success, days = (bool(result), 0)
         if success and days > 0:
+            # ✅ v7.5.22: إبطال كاش الاشتراك
+            try:
+                await DB.invalidate_subscription_cache(user_id)
+            except Exception:
+                pass
             await _safe_edit_or_send(update, context, f"🎉 تم تفعيل اشتراك {days} يوم", parse_mode=None)
             await user_cache.invalidate(user_id)
         elif days == -1:
