@@ -2310,6 +2310,7 @@ def reload_replies_from_file() -> dict:
 # =====================================================================
 # 17. المهام الخلفية — Adaptive + Batch + Pool Monitor
 # 🔴 v7.9.0: فصل sleep عن semaphore في auto_publish
+# ✅ v7.9.1: نفس منطق النشر الأصلي (12 دقيقة) — لا حلقة موحّدة
 # =====================================================================
 
 class BackgroundTasks:
@@ -2319,6 +2320,7 @@ class BackgroundTasks:
     🔍 v7.8.5: monitor_pool + monitor_pool_alert.
     🚀 v7.8.6: auto_publish يحذف batch subs المكرر.
     🔴 v7.9.0: sleep خارج semaphore — يمنع احتجازها حتى 60 دقيقة.
+    ✅ v7.9.1: auto_publish يعمل بـ 12 دقيقة كما الأصلي (بدون حلقة موحّدة).
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
@@ -2588,6 +2590,7 @@ class BackgroundTasks:
         """
         🚀 v7.8.6: حذف batch subs check المكرر.
         🔴 v7.9.0: sleep بعد الخروج من semaphore (لا احتجاز طويل).
+        ✅ v7.9.1: نفس منطق النشر الأصلي (12 دقيقة لكل قناة).
         """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
