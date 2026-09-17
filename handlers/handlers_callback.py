@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.6)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.7)
 =====================================================================
+✅ v9.4.7 — إبطال كاش الاشتراك في trial:
+  - after DB.activate_trial → DB.invalidate_subscription_cache(user_id)
+  - يحل: ظهور "❌ يتطلب اشتراك نشط" مباشرة بعد تفعيل التجربة
+  - السبب: has_active_subscription يستخدم internal_cache بـ TTL=60
+  - بدون إبطال → العطل لمدة 60 ثانية بعد التفعيل
+
 ✅ v9.4.6 — توحيد المعاملات في تفعيل/تعطيل الأمان:
   - update_security_settings + add_admin_log في معاملة واحدة
   - استخدام conn= المُمرَّر لتجنّب fsync منفصل
@@ -641,11 +647,19 @@ class CallbackHandlers:
                 return
 
             if base_data == CB.TRIAL:
+                # ✅ v9.4.7: إبطال كاش الاشتراك بعد التفعيل
                 if await DB.has_used_trial(user_id):
                     await safe_edit(query, await _trans('trial_used', lang, "❌ لقد استخدمت التجربة المجانية بالفعل."), bot=context.bot)
                     return
                 days = await DB.activate_trial(user_id)
                 text = f"✅ تم تفعيل التجربة المجانية لمدة {days} يوم" if days > 0 else "❌ تعذر تفعيل التجربة"
+
+                # ✅ FIX: إبطال كاش الاشتراك
+                try:
+                    await DB.invalidate_subscription_cache(user_id)
+                except Exception as e:
+                    logger.warning(f"invalidate_subscription_cache: {e}")
+
                 await safe_edit(query, text, bot=context.bot)
                 await invalidate_user_cache(user_id)
                 return
