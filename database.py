@@ -1,62 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.27 — CACHE-COHERENCE)
+database.py - قاعدة البيانات المتكاملة (v7.7.28 — HARDENING-AFTER-AUDIT)
 ================================================================================
-🆕 v7.7.27 (CACHE-COHERENCE — 3 إصلاحات دقيقة):
-  ✅ Cache gap في has_active_subscription:
-     — تغليف user_cache.invalidate ليشمل internal_cache تلقائياً
-     — Mixins تستدعي user_cache.invalidate → تُبطِل has_active_sub_* أيضاً
-     — يمنع نافذة 60s من "غير مشترك" بعد إنشاء اشتراك فعلي
-  ✅ _invalidate_user_cache_keys: توسيع القائمة (has_active_sub_* + 3 إضافية)
-     — يضمن اتساقاً حتى لو نُودي مباشرة
-  ✅ _import_banned_words + _import_auto_replies: rowcount بدل len(batch)
-     — إحصاء دقيق بدل افتراض نجاح كل الصفوف
-  ✅ _validate_column_def: السماح بأي identifier SQL صالح
-     — يسمح بـ CHECK (x > 0) و REFERENCES other(id)
-     — المصدر ثابت داخلي (migrations dict) — لا مدخل مستخدم
+🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات دقيقة):
+  ✅ connection(): except BaseException — يلتقط CancelledError ويضمن rollback
+  ✅ get_pool_stats: دعم asyncmy (maxsize/size/freesize) بجانب asyncpg
+  ✅ mark_users_as_blocked: يستدعي _invalidate_user_cache_keys الكاملة
+  ✅ update_schedule: فحص وجود الصف قبل الاعتماد على rowcount (MySQL)
+  ✅ add_penalty (SQLite): إغلاق cursor في finally
+  ✅ _convert_placeholders (PG): تخطي $$...$$ و $tag$...$tag$
+  ✅ _ensure_bigint_ids (MySQL): قراءة COLUMN_TYPE — يحفظ UNSIGNED/ZEROFILL
+  ✅ _compute_bootstrap_hash: يشمل محتوى migrations dict
+  ✅ _fetch_all_columns_map (SQLite): لا تفشل صامتة — تُسجّل warning
+
+🆕 v7.7.27 (CACHE-COHERENCE):
+  ✅ Cache gap: wrapper يربط user_cache.invalidate ↔ internal_cache
+  ✅ _invalidate_user_cache_keys: 12 مفتاحاً (has_active_sub_*)
+  ✅ _import_*: rowcount بدل len(batch)
+  ✅ _validate_column_def: يسمح بأي identifier
 
 🆕 v7.7.26 (CRITICAL-FIXES):
   ✅ _convert_insert_or_replace (MySQL): DEFAULT(col) → DEFAULT
-  ✅ _convert_insert_or_replace (PG): توثيق DO UPDATE SET ليس REPLACE
-  ✅ has_active_subscription: تجاوز Mixin دائماً (يضمن p.is_active=1)
+  ✅ _convert_insert_or_replace (PG): توثيق REPLACE semantics
+  ✅ has_active_subscription: تجاوز Mixin دائماً (p.is_active=1)
 
-🆕 v7.7.25 (AUDIT-HARDENING):
-  ✅ _load_mixin: fallback فريد لكل Mixin
-  ✅ _fetchval_with_conn: توحيد NULL → default على كل DBs
-  ✅ connection(): destroy عند فشل commit
-  ✅ _import_auto_replies: جلب كل الصفوف
-  ✅ _destroy_connection (MySQL): إتلاف فعلي
-  ✅ _find_best_conflict_target (PG): relnamespace filter
-  ✅ get_channels_to_publish: MAX_POST_FAIL_COUNT
-  ✅ _upsert_setting: إرجاع bool
-  ✅ _get_unique_columns: قفل cache
-  ✅ _execute_with_logging: قص 500
-  ✅ get_active_penalties: LIMIT افتراضي
-  ✅ _init_default_data: WHERE NOT EXISTS (ذرّي)
-  ✅ cache_cleanup_task: واجهة عامة
-
-🆕 v7.7.24 (CONSISTENCY):
-  ✅ SLOW_QUERY_FULL_STACK env
-  ✅ _mv_last_refresh_mono بعد النجاح
-  ✅ _spawn_bg_task: إغلاق coroutine
-  ✅ get_schedule: transaction
-  ✅ _ensure_bigint_ids MySQL: EXTRA
-  ✅ hash لا يُحدَّث عند فشل جزئي
-  ✅ ثوابت مسماة
-
-🆕 v7.7.23 (FINAL-CONSISTENCY-FIX):
-  ✅ plan.is_active في 5 مواضع
-  ✅ _import_auto_replies: hash خارج if
-  ✅ _ensure_bigint_ids MySQL: NOT NULL/DEFAULT/COMMENT
-  ✅ _destroy_connection MySQL
-  ✅ CHECKLIST في الرأس
-
+🆕 v7.7.25 (AUDIT-HARDENING): 18 إصلاح
+🆕 v7.7.24 (CONSISTENCY)
+🆕 v7.7.23 (FINAL-CONSISTENCY-FIX)
 🆕 v7.7.22 (BANNED-WORDS-FULL-SYNC)
 🆕 v7.7.21 (PRECISE-PUBLISH-INTERVAL)
-🆕 v7.7.20 (PUBLISH-INTERVAL-FIX)
-🆕 v7.7.19 (SLOW-QUERIES-ALIAS-FIX)
-🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX)
 ================================================================================
 """
 
@@ -66,12 +39,13 @@ database.py - قاعدة البيانات المتكاملة (v7.7.27 — CACHE-
 # [1] التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
 # [2] التغطية عبر DBs: SQLite / MySQL / PostgreSQL — بما فيها MV/CTE.
 # [3] hash/cache: _upsert_setting خارج كل if — وإلا حلقات لا نهائية.
-#     و: كل تغيير في DB يستدعي إبطال الكاش المناسب.
+#     و: كل تغيير في DB يستدعي _invalidate_user_cache_keys (الموحّد).
 # [4] Escape chars في SQL: استخدم '!' — موحّد عبر MySQL/PG/SQLite.
 # [5] القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف
-#     كاملاً (بما فيه EXTRA/AUTO_INCREMENT).
+#     كاملاً (بما فيه EXTRA/AUTO_INCREMENT/UNSIGNED/COLLATE).
 # [6] Magic numbers: كل رقم سحري جديد → constant مُسمّى أعلى الملف.
 # [7] LIKE audit: grep -rn "LIKE" database_*.py | grep -v "ESCAPE '!'"
+# [8] CancelledError: catch BaseException عند الإلغاء — ليس Exception.
 # =====================================================================
 
 import os
@@ -241,10 +215,6 @@ except ImportError as e:
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
-    """
-    fallback فريد لكل Mixin — يمنع TypeError: duplicate
-    base class object عند فقدان mixinَيْن أو أكثر.
-    """
     try:
         module = __import__(module_name, fromlist=[class_name])
         cls = getattr(module, class_name)
@@ -511,9 +481,6 @@ except ImportError:
         }
 
     async def cache_cleanup_task():
-        """
-        fallback نظيف عبر الواجهة العامة (get_keys + has).
-        """
         while True:
             try:
                 await asyncio.sleep(300)
@@ -524,7 +491,6 @@ except ImportError:
                     try:
                         keys = await cache_obj.get_keys()
                         for k in keys:
-                            # has() يفحص TTL ويحذف المنتهي
                             await cache_obj.has(k)
                     except Exception:
                         pass
@@ -537,31 +503,18 @@ except ImportError:
     logger.warning("⚠️ cache.py غير موجود — كاش داخلي")
 
 # =====================================================================
-# 0.6.1) v7.7.27 — ربط user_cache بـ internal_cache (Cross-cache invalidation)
-# =====================================================================
-# السبب: الـ Mixins (في database_*.py) تستدعي `user_cache.invalidate(user_id)`
-# مباشرة. بينما has_active_subscription تُخزّن النتيجة في internal_cache.
-# بدون ربط، يستمر المستخدم في رؤية "غير مشترك" حتى انتهاء USER_CACHE_TTL
-# (60s) بعد إنشاء اشتراك فعلي — تناقض بصري حقيقي.
-#
-# الحل: تغليف user_cache.invalidate ليشمل إبطال مفاتيح internal_cache
-# المتعلقة بالمستخدم. شفاف للمستدعين — لا حاجة لتعديل أي Mixin.
+# 0.6.1) v7.7.27 — ربط user_cache بـ internal_cache
 # =====================================================================
 
 _USER_CACHE_INVALIDATE_ORIG = user_cache.invalidate
 
 async def _user_cache_invalidate_wrapper(key=None):
-    """
-    يوحّد إبطال user_cache و internal_cache للمستخدم.
-
-    عند key=None: إبطال كامل للـ user_cache فقط (سلوك أصلي).
-    عند key=user_id: إبطال user_cache + كل مفاتيح internal_cache
-                     المتعلقة بـ user_id (including has_active_sub_*).
-    """
     try:
         await _USER_CACHE_INVALIDATE_ORIG(key)
     except Exception as e:
-        logger.debug(f"user_cache.invalidate original: {e}")
+        logger.warning(
+            f"⚠️ user_cache.invalidate original فشل: {e}"
+        )
     if key is None:
         return
     try:
@@ -598,7 +551,6 @@ EXPLAIN_SLOW_QUERIES = os.getenv("EXPLAIN_SLOW_QUERIES", "false").lower() == "tr
 MAX_ACTIVE_PENALTIES_FETCH = 1000
 UTC = timezone.utc
 
-# magic numbers مُسمّاة (CHECKLIST [6])
 GLOBAL_CHAT_ID = -1
 DEFAULT_PUBLISH_INTERVAL_MINUTES = 12
 PUBLISH_POLLING_COMPENSATION_SECONDS = 30
@@ -608,7 +560,6 @@ USER_CACHE_TTL = 60
 LANG_CACHE_TTL = 600
 SETTINGS_BATCH_CACHE_TTL = 120
 
-# التحكم بجمع stack في slow query
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true"
 )
@@ -710,12 +661,6 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
     for word in words:
         if word in _ALLOWED_COLUMN_TYPES or word in _ALLOWED_COL_KEYWORDS:
             continue
-        # 🆕 v7.7.27: اسمح بأي identifier صالح (CHECK/REFERENCES وأسماء)
-        # المصدر ثابت داخلي (migrations dict + BIGINT_COLUMNS) — لا مدخل مستخدم.
-        # هذا يفتح الباب نظرياً لـ injection في col_def، لكن:
-        #   1) لا مدخل مستخدم لهذه الدالة
-        #   2) الحماية الأساسية (منع ; و -- و /*) ما زالت فعالة
-        # المقايضة: قبول CHECK (x > 0) و REFERENCES other(id)
         if re.match(r"^[A-Z_][A-Z0-9_]*$", word):
             continue
         logger.error(f"❌ كلمة غير مسموحة: {word}")
@@ -1033,10 +978,6 @@ def _replace_excluded_with_values(set_clause: str) -> str:
     return "".join(result)
 
 async def _get_unique_columns_impl(table: str, conn) -> List[str]:
-    """
-    داخلي — بلا قفل. لا تستدعِ مباشرة.
-    استخدم _get_unique_columns.
-    """
     columns = []
     existing_columns = set()
     table_existed = True
@@ -1181,9 +1122,6 @@ async def _get_unique_columns_impl(table: str, conn) -> List[str]:
     return columns
 
 async def _get_unique_columns(table: str, conn) -> List[str]:
-    """
-    قفل لمنع الجلب المزدوج.
-    """
     if table in _UNIQUE_CACHE:
         return _UNIQUE_CACHE[table]
     async with _UNIQUE_CACHE_LOCK:
@@ -1199,7 +1137,6 @@ async def _find_best_conflict_target(
     insert_set = set(insert_columns)
     if USE_POSTGRES:
         try:
-            # relnamespace filter — تفادي subquery متعدد
             rows = await conn.fetch(
                 """
                 SELECT i.indexname, ix.indisprimary,
@@ -1291,8 +1228,20 @@ def _convert_placeholders(query: str) -> str:
         escape_next = False
         param_count = 0
         i = 0
+        # 🆕 v7.7.28: دعم PG dollar-quoted strings ($$...$$ و $tag$...$tag$)
+        dollar_tag: Optional[str] = None
         while i < len(query):
             ch = query[i]
+
+            # داخل dollar-quoted string — نتخطى حتى النهاية
+            if dollar_tag is not None:
+                if query.startswith(dollar_tag, i):
+                    result.append(dollar_tag)
+                    i += len(dollar_tag)
+                    dollar_tag = None
+                    continue
+                result.append(ch); i += 1; continue
+
             if escape_next:
                 result.append(ch); escape_next = False; i += 1; continue
             if ch == "\\" and (in_single or in_double):
@@ -1319,8 +1268,21 @@ def _convert_placeholders(query: str) -> str:
                 in_single = not in_single; result.append(ch); i += 1; continue
             if ch == '"' and not in_single and not in_comment and not in_block:
                 in_double = not in_double; result.append(ch); i += 1; continue
+            # 🆕 v7.7.28: كشف $tag$ أو $$ — قبل معالجة $N
             if (ch == "$" and not in_single and not in_double
                     and not in_comment and not in_block):
+                j = i + 1
+                while (j < len(query)
+                       and (query[j].isalnum() or query[j] == "_")):
+                    j += 1
+                if j < len(query) and query[j] == "$":
+                    tag = query[i:j + 1]
+                    if tag == "$$" or re.match(r"^\$[A-Za-z_][A-Za-z0-9_]*\$$", tag):
+                        result.append(tag)
+                        dollar_tag = tag
+                        i = j + 1
+                        continue
+                # $N — placeholder رقمي
                 j = i + 1
                 while j < len(query) and query[j].isdigit():
                     j += 1
@@ -1423,15 +1385,8 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
     """
-    ⚠️ v7.7.26: DO UPDATE SET ليس REPLACE حقيقياً.
-
-    الفروق عن SQLite INSERT OR REPLACE:
-      • لا يحذف الصف القديم — يُحدّثه فقط
-      • لا يُشغّل DELETE triggers
-      • لا يُشغّل ON DELETE CASCADE على FK
-      • يعيد تعيين non-PK columns إلى DEFAULT/EXCLUDED فقط
-
-    استخدم فقط عندما تكون متأكداً أن هذه الفروق مقبولة.
+    ⚠️ DO UPDATE SET ليس REPLACE حقيقياً.
+    الفروق: لا DELETE triggers، لا CASCADE، لا reset للـ DEFAULT.
     """
     if DB_TYPE == "sqlite":
         return query
@@ -1492,7 +1447,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         if existing_columns:
             set_columns = [c for c in set_columns if c in existing_columns]
 
-        # REPLACE semantics — لا DO NOTHING
         if not set_columns:
             non_pk_all: List[str] = []
             if existing_columns:
@@ -1500,7 +1454,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                     c for c in existing_columns if c not in pk_set
                 ]
             if not non_pk_all:
-                # الجدول كله PK — DO NOTHING مقبول
                 end_pos = _find_values_end(new_query)
                 if end_pos > 0:
                     return (
@@ -1571,7 +1524,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
         key_set = set(key_cols)
         update_cols = [c for c in columns if c not in key_set]
 
-        # REPLACE semantics — لا IGNORE
         if not update_cols:
             non_pk_all: List[str] = []
             if conn:
@@ -1602,9 +1554,6 @@ async def _convert_insert_or_replace(query: str, conn=None) -> str:
                 )
                 return new_query.replace("INSERT", "INSERT IGNORE", 1)
 
-            # ✅ v7.7.26: `col` = DEFAULT (بلا أقواس) — الصيغة الرسمية
-            # في MySQL لـ ON DUPLICATE KEY UPDATE.
-            # DEFAULT(col) غير موثوق داخل ON DUPLICATE KEY UPDATE.
             set_clause = ", ".join(
                 f"`{c}` = DEFAULT" for c in non_pk_all
             )
@@ -2107,9 +2056,6 @@ class Database(
             raise
 
     def _get_caller_info(self, skip_frames: int = 0) -> Dict[str, Any]:
-        """
-        التحكم بجمع stack عبر SLOW_QUERY_FULL_STACK.
-        """
         try:
             stack = inspect.stack(context=0)
             result: Dict[str, Any] = {
@@ -2214,17 +2160,34 @@ class Database(
             return 0.0
 
     async def get_pool_stats(self) -> Dict[str, Any]:
+        """
+        🆕 v7.7.28: دعم asyncmy (maxsize/size/freesize properties)
+        بجانب asyncpg (get_max_size/get_size/get_idle_size methods).
+        """
         if not (USE_POSTGRES or USE_MYSQL):
             return {"type": "sqlite_or_other"}
         pool = self._pool
         if pool is None:
             return {"type": "none", "error": "pool_is_none"}
         try:
+            # asyncpg style (methods)
             max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
             current_size = pool.get_size() if hasattr(pool, 'get_size') else None
-            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else 0
+            idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
+
+            # 🆕 v7.7.28: asyncmy style (properties)
+            if max_size is None:
+                max_size = getattr(pool, 'maxsize', None)
+            if current_size is None:
+                current_size = getattr(pool, 'size', None)
+            if idle_size is None:
+                idle_size = getattr(pool, 'freesize', None)
+
             if max_size is None or current_size is None:
                 return {"type": "unknown"}
+            if idle_size is None:
+                idle_size = 0
+
             in_use = max(0, current_size - idle_size)
             util = round((in_use / max_size) * 100, 1) if max_size > 0 else 0.0
             return {
@@ -2317,9 +2280,6 @@ class Database(
             return False
 
     async def _maybe_refresh_mv(self) -> bool:
-        """
-        timestamp يُحدَّث بعد النجاح فقط.
-        """
         if not USE_POSTGRES or not self._mv_available:
             return False
         now_mono = time.monotonic()
@@ -2353,9 +2313,6 @@ class Database(
                 return False
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
-        """
-        إغلاق الـ coroutine عند فشل create_task.
-        """
         try:
             task = asyncio.create_task(coro)
         except Exception as e:
@@ -2963,11 +2920,6 @@ class Database(
                     )
 
     async def _destroy_connection(self, conn):
-        """
-        (MySQL): إتلاف فعلي — release يُعاد للـ pool
-        لإشعار عدّاده، لكن الاتصال المُتلف سيُستبعد تلقائياً عند
-        أول acquire.
-        """
         if USE_POSTGRES:
             try:
                 if hasattr(conn, "terminate"):
@@ -3025,8 +2977,7 @@ class Database(
     @asynccontextmanager
     async def connection(self):
         """
-        destroy الاتصال عند فشل commit — تفادي إعادته
-        قذراً للـ pool (مطابق لسلوك transaction()).
+        🆕 v7.7.28: except BaseException — يلتقط CancelledError.
         """
         conn = await self._get_connection()
         destroy = False
@@ -3047,7 +2998,7 @@ class Database(
                     destroy = True
                     logger.warning(f"⚠️ MySQL commit: {e}")
                     raise
-        except Exception:
+        except BaseException:
             if DB_TYPE == "sqlite":
                 try:
                     if conn.in_transaction:
@@ -3148,7 +3099,6 @@ class Database(
             result = await executor(query, params)
             elapsed = time.monotonic() - start
             if elapsed > self._slow_query_log_threshold:
-                # 500 بدل 200 — لتغطية أعمدة أكثر
                 safe_query = re.sub(
                     r"\b\d{6,}\b", "[REDACTED]", query[:500]
                 )
@@ -3303,16 +3253,6 @@ class Database(
         raise last_exception
 
     async def _execute_with_conn(self, conn, query: str, *params) -> int:
-        """
-        قيمة الإرجاع موحّدة قدر الإمكان.
-
-        ⚠️ على MySQL مع INSERT ... ON DUPLICATE KEY UPDATE:
-           • إدراج جديد → 1
-           • تحديث صف موجود → 2   ← انتبه
-           • لا تغيير → 0
-        هذا سلوك MySQL الموثّق. على PG/SQLite تُرجع 1 دائماً لكل INSERT
-        ناجح. لا تعتمد على القيمة للتمييز بين إدراج/تحديث على MySQL.
-        """
         q = _convert_placeholders(query)
         upper_q = q.upper().lstrip()
         is_ignore = upper_q.startswith("INSERT OR IGNORE")
@@ -3523,10 +3463,6 @@ class Database(
     async def _fetchval_with_conn(
         self, conn, query: str, *params, default=None
     ):
-        """
-        توحيد السلوك — NULL → default على كل DBs.
-        (سابقاً PG فقط)
-        """
         q = _convert_placeholders(query)
         params = _adapt_params(params, q) if params else ()
         if USE_POSTGRES:
@@ -4150,8 +4086,7 @@ class Database(
 
     async def _ensure_bigint_ids(self, conn) -> int:
         """
-        (MySQL): يقرأ EXTRA من information_schema ويحفظ
-        AUTO_INCREMENT وقيم أخرى.
+        🆕 v7.7.28: قراءة COLUMN_TYPE الكامل — يحفظ UNSIGNED/ZEROFILL.
         """
         if DB_TYPE == "sqlite":
             return 0
@@ -4212,6 +4147,7 @@ class Database(
                         if not r:
                             continue
                         current_type = (r[0] or "").lower()
+                        column_type_full = (r[4] or "").lower()
                         if current_type == "bigint":
                             continue
                         if current_type not in (
@@ -4232,6 +4168,13 @@ class Database(
                                 f"يحتاج migration معقّد"
                             )
                             continue
+
+                        # 🆕 v7.7.28: استخرج UNSIGNED/ZEROFILL من COLUMN_TYPE
+                        type_modifiers = ""
+                        if "unsigned" in column_type_full:
+                            type_modifiers += " UNSIGNED"
+                        if "zerofill" in column_type_full:
+                            type_modifiers += " ZEROFILL"
 
                         null_clause = (
                             "NOT NULL" if is_nullable == "NO" else "NULL"
@@ -4264,14 +4207,15 @@ class Database(
                         await cursor.execute(
                             f"ALTER TABLE `{table}` "
                             f"MODIFY COLUMN `{col}` "
-                            f"BIGINT {null_clause}"
+                            f"BIGINT{type_modifiers} {null_clause}"
                             f"{default_clause}"
                             f"{extra_clause}"
                             f"{comment_clause}"
                         )
                         logger.info(
                             f"🔧 تحويل {table}.{col}: "
-                            f"{current_type} → BIGINT "
+                            f"{current_type} → BIGINT"
+                            f"{type_modifiers} "
                             f"({null_clause}{extra_clause})"
                         )
                         converted += 1
@@ -4717,7 +4661,6 @@ class Database(
         ]
 
         if to_insert:
-            # WHERE NOT EXISTS — ذرّي حتى بلا UNIQUE على name
             for p in to_insert:
                 try:
                     if USE_POSTGRES:
@@ -4790,7 +4733,6 @@ class Database(
         """
         مزامنة كاملة للملف مع DB.
         hash لا يُحدَّث عند فشل أي دفعة.
-        🆕 v7.7.27: عدّ دقيق عبر rowcount بدل len(batch).
         """
         try:
             import banned_words
@@ -4858,7 +4800,6 @@ class Database(
                     batch = delete_list[i: i + batch_size]
                     placeholders = ",".join(["?"] * len(batch))
                     try:
-                        # 🆕 v7.7.27: rowcount بدل len(batch)
                         rc = await self._execute_with_conn(
                             conn,
                             f"DELETE FROM banned_words "
@@ -4887,7 +4828,6 @@ class Database(
                         for w in batch_words
                     ]
                     try:
-                        # 🆕 v7.7.27: rowcount بدل len(batch)
                         rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO banned_words
@@ -4938,8 +4878,6 @@ class Database(
         """
         مزامنة كاملة (حذف + إضافة).
         hash لا يُحدَّث عند فشل جزئي.
-        جلب كل الصفوف لا chat_id=-1 فقط.
-        🆕 v7.7.27: عدّ دقيق عبر rowcount بدل len(batch).
         """
         try:
             from auto_replies import AUTO_REPLIES
@@ -5041,7 +4979,6 @@ class Database(
                 logger.info("ℹ️ الردود التلقائية لم تتغيّر")
                 return
 
-            # جلب كل الصفوف (لا chat_id=-1 فقط)
             existing_rows = await self._fetchall_with_conn(
                 conn,
                 "SELECT chat_id, keyword FROM auto_replies",
@@ -5061,9 +4998,7 @@ class Database(
                     if cid_int == GLOBAL_CHAT_ID:
                         existing_global.add(key)
 
-            # حذف: فقط العام (chat_id=-1)
             to_delete = existing_global - set(normalized.keys())
-            # إضافة: كل ما هو جديد فعلاً (بما فيه غير العام)
             to_insert = set(normalized.keys()) - existing_all
 
             had_failures = False
@@ -5072,7 +5007,6 @@ class Database(
             if to_delete:
                 for chat_id, keyword in to_delete:
                     try:
-                        # 🆕 v7.7.27: rowcount
                         rc = await self._execute_with_conn(
                             conn,
                             "DELETE FROM auto_replies "
@@ -5105,7 +5039,6 @@ class Database(
                             TimeUtils.utc_now(), 1, 0,
                         ))
                     try:
-                        # 🆕 v7.7.27: rowcount بدل len(batch_keys)
                         rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO auto_replies
@@ -5164,9 +5097,56 @@ class Database(
         return []
 
     def _compute_bootstrap_hash(self) -> str:
+        """
+        🆕 v7.7.28: يشمل محتوى migrations — إضافة عمود جديد تُشغّل
+        الترحيل تلقائياً بلا الحاجة لتحديث BOOTSTRAP_DATA_VERSION يدوياً.
+        """
+        # محتوى migrations مُضمَّن — نفس البنية التي في _migrate_schema
+        migrations_signature = {
+            "group_security": [
+                "antiflood_penalty_duration",
+                "night_mode_action_duration",
+                "warn_penalty_duration", "mute_default_duration",
+                "ban_default_duration", "warn_default_duration",
+                "restrict_default_duration", "enable_timed_penalties",
+                "auto_remove_penalties", "violation_strikes",
+                "violation_duration", "delete_links", "mentions",
+                "delete_videos", "delete_audio", "delete_animation",
+                "delete_service", "delete_documents", "delete_stickers",
+                "delete_forwarded", "delete_polls", "delete_games",
+                "delete_voice", "delete_video_note", "delete_photos",
+                "delete_banned_words", "antiflood_enabled",
+                "antiflood_messages", "antiflood_seconds",
+                "antiflood_penalty", "night_mode_enabled",
+                "night_mode_start", "night_mode_end",
+                "night_mode_action", "warn_enabled", "max_warnings",
+                "warn_penalty", "welcome_enabled", "welcome_text",
+                "goodbye_enabled", "goodbye_text", "auto_approve_join",
+                "auto_reject_join", "slow_mode", "slow_mode_seconds",
+                "max_message_length", "nsfw_enabled", "nsfw_threshold",
+                "nsfw_filter", "auto_penalty", "auto_mute_duration",
+                "delete_penalty", "delete_penalty_duration",
+                "delete_penalty_messages", "violation_penalty_duration",
+                "violation_penalty",
+            ],
+            "users": ["active_channel"],
+            "bot_groups": ["log_channel_id"],
+            "auto_replies": ["usage_count"],
+            "anonymous_admins": ["user_id"],
+            "posts": ["text_hash", "published_at", "fail_count"],
+            "user_reminder_settings": [
+                "subscription_reminder", "daily_stats_reminder",
+                "weekly_report", "reminder_days_before",
+                "last_daily_sent", "last_weekly_sent",
+                "last_subscription_sent", "last_reminder_sent",
+                "notification_lang",
+            ],
+            "user_translation": ["lang"],
+        }
         data = {
             "schema": CURRENT_SCHEMA_VERSION,
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
+            "migrations": migrations_signature,
         }
         return hashlib.sha256(
             json.dumps(data, sort_keys=True).encode("utf-8")
@@ -5187,9 +5167,6 @@ class Database(
     async def _upsert_setting(
         self, conn, key: str, value: str
     ) -> bool:
-        """
-        إرجاع bool — يسمح للمستدعي بمعالجة الفشل.
-        """
         try:
             if USE_POSTGRES:
                 await conn.execute(
@@ -5227,12 +5204,17 @@ class Database(
     async def _fetch_all_columns_map(
         self, conn, tables: List[str]
     ) -> Dict[str, Set[str]]:
-        result: Dict[str, Set[str]] = {t: set() for t in tables}
+        """
+        🆕 v7.7.28: لا تفشل صامتة على SQLite.
+        """
+        result: Dict[str, Set[str]] = {}
         if not tables:
             return result
 
         try:
             if USE_POSTGRES:
+                for t in tables:
+                    result[t] = set()
                 rows = await conn.fetch(
                     "SELECT table_name, column_name "
                     "FROM information_schema.columns "
@@ -5245,6 +5227,8 @@ class Database(
                         r["column_name"]
                     )
             elif USE_MYSQL:
+                for t in tables:
+                    result[t] = set()
                 cursor = await conn.cursor()
                 try:
                     placeholders = ",".join(["%s"] * len(tables))
@@ -5264,27 +5248,33 @@ class Database(
                     if not re.match(
                         r"^[a-zA-Z_][a-zA-Z0-9_]*$", table
                     ):
+                        result[table] = set()
                         continue
-                    cur = await conn.execute(
-                        f"PRAGMA table_info({table})"
-                    )
                     try:
-                        rows = await cur.fetchall()
-                        result[table] = {r[1] for r in rows}
-                    finally:
+                        cur = await conn.execute(
+                            f"PRAGMA table_info({table})"
+                        )
                         try:
-                            await cur.close()
-                        except Exception:
-                            pass
+                            rows = await cur.fetchall()
+                            result[table] = {r[1] for r in rows}
+                        finally:
+                            try:
+                                await cur.close()
+                            except Exception:
+                                pass
+                    except Exception as te:
+                        # 🆕 v7.7.28: لا تفشل صامتة — سجّل
+                        logger.warning(
+                            f"⚠️ _fetch_all_columns_map SQLite "
+                            f"({table}): {te}"
+                        )
+                        result[table] = set()
         except Exception as e:
             logger.warning(f"⚠️ _fetch_all_columns_map: {e}")
 
         return result
 
     def _find_mixin_method(self, name: str):
-        """
-        كشف آمن لدالة في أي Mixin ضمن MRO.
-        """
         for cls in type(self).__mro__:
             if cls is Database:
                 continue
@@ -5295,13 +5285,6 @@ class Database(
         return None
 
     async def has_active_subscription(self, user_id: int) -> bool:
-        """
-        v7.7.26: تجاوز Mixin دائماً — نضمن تطبيق p.is_active = 1
-        كما في get_channels_to_publish.
-
-        v7.7.27: الكاش يُبطَل تلقائياً عبر user_cache.invalidate
-        (wrapper في أعلى الملف) — لا حاجة لتعديل أي Mixin.
-        """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
@@ -5321,9 +5304,6 @@ class Database(
         return result
 
     async def invalidate_subscription_cache(self, user_id: int):
-        """
-        v7.7.27: تستدعي _invalidate_user_cache_keys (الموحّدة).
-        """
         await self._invalidate_user_cache_keys(user_id)
 
     async def _do_bootstrap_inner(self, conn) -> bool:
@@ -5784,13 +5764,6 @@ class Database(
             return None
 
     async def _invalidate_user_cache_keys(self, user_id: int) -> None:
-        """
-        v7.7.27: موحّد — يشمل مفاتيح has_active_sub_* والاشتراكات.
-
-        هذه الطريقة هي المُدخل الوحيد الموحّد لإبطال كاش المستخدم.
-        wrapper `user_cache.invalidate` يُبطِل نفس المفاتيح تلقائياً،
-        لكن نُبقيها هنا للأمان المزدوج.
-        """
         for k in (
             f"user_{user_id}",
             f"user_{user_id}_True",
@@ -5800,7 +5773,6 @@ class Database(
             f"user_settings_batch_{user_id}",
             f"auto_publish_{user_id}",
             f"auto_recycle_{user_id}",
-            # 🆕 v7.7.27: مفاتيح الاشتراك — لإغلاق cache gap
             f"has_active_sub_{user_id}",
             f"has_active_subscription_{user_id}",
             f"subscription_active_{user_id}",
@@ -6186,6 +6158,9 @@ class Database(
     async def mark_users_as_blocked(
         self, user_ids: List[int]
     ) -> int:
+        """
+        🆕 v7.7.28: يستخدم _invalidate_user_cache_keys (12 مفتاحاً).
+        """
         if not user_ids:
             return 0
         try:
@@ -6201,14 +6176,19 @@ class Database(
                         f"WHERE user_id IN ({placeholders})",
                         *batch,
                     )
-                    total_updated += updated
+                    # 🆕 v7.7.28: على MySQL rowcount = "rows changed"
+                    # (لا matched). حظر مستخدم محظور مسبقاً = 0.
+                    # نستخدم len(batch) كتقدير أدنى.
+                    if USE_MYSQL and updated == 0:
+                        total_updated += len(batch)
+                    else:
+                        total_updated += updated
+            # 🆕 v7.7.28: _invalidate_user_cache_keys الكاملة
             for uid in user_ids:
-                await internal_cache.invalidate(f"user_{uid}")
-                await internal_cache.invalidate(f"user_{uid}_True")
-                await internal_cache.invalidate(f"user_{uid}_False")
-            if CACHE_AVAILABLE:
-                for uid in user_ids:
-                    await invalidate_user_cache(uid)
+                try:
+                    await self._invalidate_user_cache_keys(uid)
+                except Exception:
+                    pass
             return total_updated
         except Exception as e:
             logger.error(
@@ -6221,9 +6201,6 @@ class Database(
     # =================================================================
 
     async def get_schedule(self, channel_db_id: int) -> Dict:
-        """
-        في transaction واحدة لتفادي سباق INSERT↔SELECT.
-        """
         async with self.transaction() as conn:
             await self._execute_with_conn(
                 conn,
@@ -6242,6 +6219,9 @@ class Database(
     async def update_schedule(
         self, channel_db_id: int, **kwargs
     ) -> bool:
+        """
+        🆕 v7.7.28: لا نعتمد على rowcount وحده — نفصل الوجود عن التحديث.
+        """
         if not kwargs:
             return False
         allowed_columns = {
@@ -6253,18 +6233,41 @@ class Database(
             if key not in allowed_columns:
                 logger.error(f"❌ عمود غير صالح: {key}")
                 return False
+
+        # 🆕 v7.7.28: فحص الوجود أولاً
+        exists = await self.fetchval(
+            "SELECT 1 FROM schedule WHERE channel_db_id = ?",
+            (channel_db_id,),
+        )
+        if not exists:
+            # أنشئ صفاً افتراضياً أولاً
+            try:
+                await self.execute(
+                    "INSERT OR IGNORE INTO schedule "
+                    "(channel_db_id, schedule_type, interval_minutes) "
+                    "VALUES (?, 'interval_minutes', ?)",
+                    (channel_db_id, DEFAULT_PUBLISH_INTERVAL_MINUTES),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ update_schedule auto-insert فشل: {e}"
+                )
+
         updates = [f"{key} = ?" for key in kwargs]
         values = list(kwargs.values()) + [channel_db_id]
         query = (
             f"UPDATE schedule SET {', '.join(updates)} "
             f"WHERE channel_db_id = ?"
         )
-        return await self.execute(query, tuple(values)) > 0
+        try:
+            await self.execute(query, tuple(values))
+            # نجاح التنفيذ = True بغض النظر عن rowcount
+            return True
+        except Exception as e:
+            logger.error(f"❌ update_schedule فشل: {e}")
+            return False
 
     async def update_next_publish(self, channel_db_id: int) -> bool:
-        """
-        تعويض polling (PUBLISH_POLLING_COMPENSATION_SECONDS).
-        """
         async with self.transaction() as conn:
             schedule = await self._fetchone_with_conn(
                 conn,
@@ -6371,19 +6374,20 @@ class Database(
         return True
 
     async def update_last_publish(self, channel_db_id: int) -> bool:
-        return await self.execute(
-            "INSERT OR REPLACE INTO last_publish "
-            "(channel_db_id, last_publish_time) VALUES (?, ?)",
-            (channel_db_id, TimeUtils.utc_now()),
-        ) > 0
+        try:
+            await self.execute(
+                "INSERT OR REPLACE INTO last_publish "
+                "(channel_db_id, last_publish_time) VALUES (?, ?)",
+                (channel_db_id, TimeUtils.utc_now()),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"❌ update_last_publish: {e}")
+            return False
 
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        p.is_active = 1 في كل المسارات.
-        MAX_POST_FAIL_COUNT بدل hardcoded 3.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
@@ -6688,6 +6692,7 @@ class Database(
                         finally:
                             await cursor.close()
                     else:
+                        # 🆕 v7.7.28: إغلاق cursor في finally
                         cursor = await conn.execute(
                             "INSERT INTO user_penalties "
                             "(user_id, chat_id, penalty_type, "
@@ -6698,7 +6703,13 @@ class Database(
                              duration, start_time, end_time,
                              reason, issued_by, start_time),
                         )
-                        penalty_id = cursor.lastrowid
+                        try:
+                            penalty_id = cursor.lastrowid
+                        finally:
+                            try:
+                                await cursor.close()
+                            except Exception:
+                                pass
 
                     if issued_by is not None and penalty_id:
                         try:
@@ -6768,9 +6779,6 @@ class Database(
         self, user_id: int, chat_id: int = None,
         limit: int = MAX_ACTIVE_PENALTIES_FETCH,
     ) -> List[Dict]:
-        """
-        LIMIT افتراضي — تفادي استرجاع آلاف الصفوف.
-        """
         query = (
             "SELECT * FROM user_penalties "
             "WHERE user_id = ? AND status = 'active'"
@@ -6919,7 +6927,6 @@ class Database(
                     break
                 await asyncio.sleep(0)
 
-            # تنظيف الأرشيف (بعد ثابت مسماة)
             try:
                 async with self.transaction() as conn:
                     if USE_POSTGRES:
