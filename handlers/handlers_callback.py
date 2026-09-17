@@ -2,43 +2,37 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.8)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.10)
 =====================================================================
+✅ v9.4.10 — إبطال كاش شامل بعد حذف/تعديل القنوات والمجموعات:
+  - _invalidate_after_channel_change(): دالة موحّدة لإبطال
+    start_data_{user_id}, user_{user_id}*, channels_{user_id},
+    channel_info_{ch_db_id}, user_cache[user_id].
+  - _handle_channel_delete: إبطال بعد delete_channel ناجح
+  - _handle_channel_select: إبطال بعد set_active_channel
+  - _handle_post_delete: إبطال بعد delete_post
+  - POST_REC: إبطال بعد reset_posts
+  - POST_CLEAR: إبطال بعد مسح الكل
+  - _handle_group_delete: إبطال بعد delete_group
+  - يحل: تأخير 60 ثانية في الواجهة الرئيسية بعد أي تغيير
+
+✅ v9.4.9 — تمييز -1 (اشتراك أطول) عن 0 (فشل حقيقي) في trial
+
 ✅ v9.4.8 — تصحيح تفعيل التجربة المجانية:
-  - استخدام _coerce_int(activate_trial(...), 0) لمنع TypeError
-    عند إرجاع None (فشل داخلي في DB) → رسالة واضحة بدل "❌ حدث خطأ"
-  - try/finally حول invalidate_subscription_cache:
-    الإبطال يحدث دائماً حتى لو رمت activate_trial استثناءً
-    (يمنع ظهور "❌ يتطلب اشتراك نشط" بعد فشل جزئي)
-  - days تبقى 0 عند الفشل → الرسالة صحيحة دائماً
+  - _coerce_int(activate_trial(...), 0) لمنع TypeError عند None
+  - try/finally حول invalidate_subscription_cache
 
-✅ v9.4.7 — إبطال كاش الاشتراك في trial:
-  - after DB.activate_trial → DB.invalidate_subscription_cache(user_id)
-  - يحل: ظهور "❌ يتطلب اشتراك نشط" مباشرة بعد تفعيل التجربة
-  - السبب: has_active_subscription يستخدم internal_cache بـ TTL=60
-  - بدون إبطال → العطل لمدة 60 ثانية بعد التفعيل
+✅ v9.4.7 — إبطال كاش الاشتراك في trial
 
-✅ v9.4.6 — توحيد المعاملات في تفعيل/تعطيل الأمان:
-  - update_security_settings + add_admin_log في معاملة واحدة
-  - استخدام conn= المُمرَّر لتجنّب fsync منفصل
-  - 3 fsyncs → 1 fsync (توفير ~2.5s)
-  - يتطلب database_groups.py v7.4.4+ (دعم conn parameter)
+✅ v9.4.6 — توحيد المعاملات في تفعيل/تعطيل الأمان
 
-✅ v9.4.5 — fire-and-forget admin_log:
-  - admin_log INSERT لم يعد يحجز استجابة المستخدم
+✅ v9.4.5 — fire-and-forget admin_log
 
-✅ v9.4.4 — عرض مصدر الاستعلامات البطيئة:
-  - عرض 📍 الملف:السطر + 🔧 الدالة المستدعية
-  - عرض سلسلة الاستدعاء (Stack, مستويان)
-  - يعتمد على caller_file/caller_line/caller_func/stack
-    من database.py v7.7.16
+✅ v9.4.4 — عرض مصدر الاستعلامات البطيئة
 
-✅ v9.4.3 — إصلاح مسار التحليلات:
-  - admin_analytics و analytics_* قبل admin_ العام
+✅ v9.4.3 — إصلاح مسار التحليلات
 
-✅ v9.4.2 — تحليلات متقدمة
-✅ v9.4.1 — إصلاح حجم قاعدة البيانات
-✅ v9.4.0..v9.0.0 — كل الإصلاحات السابقة
+✅ v9.4.2..v9.0.0 — كل الإصلاحات السابقة
 =====================================================================
 """
 
@@ -529,6 +523,55 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
 
 
 # =====================================================================
+# ✅ v9.4.10: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات
+# =====================================================================
+
+async def _invalidate_after_channel_change(
+    user_id: int, channel_db_id: Optional[int] = None
+) -> None:
+    """
+    ✅ v9.4.10: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
+
+    يحل مشكلة: الواجهة الرئيسية تُظهر بيانات قديمة لمدة 60 ثانية
+    (TTL start_data_{user_id}) بعد إضافة/حذف/تعديل قناة أو منشور.
+
+    يبطّل:
+      - start_data_{user_id}         (تُقرأ في _show_main_menu_inline)
+      - user_{user_id}*              (كاشات داخليّة في database.py)
+      - channels_{user_id}           (قائمة القنوات)
+      - has_active_sub*              (يعتمد على وجود قناة/اشتراك)
+      - channel_info_{channel_db_id} (إن مُرِّر)
+      - user_cache[user_id]          (كاش cache.py)
+    """
+    try:
+        keys = [
+            f"start_data_{user_id}",
+            f"user_{user_id}",
+            f"user_{user_id}_True",
+            f"user_{user_id}_False",
+            f"channels_{user_id}",
+            f"has_active_sub_{user_id}",
+            f"has_active_subscription_{user_id}",
+            f"subscription_active_{user_id}",
+            f"subscription_{user_id}",
+        ]
+        if channel_db_id is not None:
+            keys.append(f"channel_info_{channel_db_id}")
+        for k in keys:
+            try:
+                await internal_cache.invalidate(k)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"internal_cache invalidate: {e}")
+
+    try:
+        await invalidate_user_cache(user_id)
+    except Exception as e:
+        logger.debug(f"user_cache invalidate: {e}")
+
+
+# =====================================================================
 # CallbackHandlers
 # =====================================================================
 
@@ -654,7 +697,7 @@ class CallbackHandlers:
                 await CommandHandlers.help_command(update, context)
                 return
 
-            # ✅ v9.4.8: إبطال كاش الاشتراك في finally + حماية من None
+            # ✅ v9.4.9: تمييز -1 (اشتراك أطول) عن 0 (فشل حقيقي)
             if base_data == CB.TRIAL:
                 if await DB.has_used_trial(user_id):
                     await safe_edit(
@@ -674,18 +717,20 @@ class CallbackHandlers:
                     )
                 finally:
                     # ✅ FIX: إبطال كاش الاشتراك دائماً حتى عند الفشل الجزئي
-                    # السبب: has_active_subscription يستخدم internal_cache بـ TTL=60
-                    # بدون إبطال → "❌ يتطلب اشتراك نشط" لمدة 60 ثانية بعد التفعيل
                     try:
                         await DB.invalidate_subscription_cache(user_id)
                     except Exception as e:
                         logger.warning(f"invalidate_subscription_cache: {e}")
 
-                text = (
-                    f"✅ تم تفعيل التجربة المجانية لمدة {days} يوم"
-                    if days > 0
-                    else "❌ تعذر تفعيل التجربة"
-                )
+                if days == -1:
+                    text = (
+                        "ℹ️ تم تفعيل التجربة، لكن اشتراكك الحالي أطول "
+                        "— لم تُضف أيام إضافية."
+                    )
+                elif days > 0:
+                    text = f"✅ تم تفعيل التجربة المجانية لمدة {days} يوم"
+                else:
+                    text = "❌ تعذر تفعيل التجربة"
 
                 await safe_edit(query, text, bot=context.bot)
                 await invalidate_user_cache(user_id)
@@ -890,8 +935,10 @@ class CallbackHandlers:
                 active = await DB.get_active_channel(user_id)
                 if active:
                     count = await DB.reset_posts(user_id, active)
+                    # ✅ v9.4.10: إبطال كاش بعد إعادة التدوير
+                    await _invalidate_after_channel_change(user_id, active)
                     try:
-                        await invalidate_user_cache(user_id)
+                        await posts_cache.invalidate(active)
                     except Exception:
                         pass
                     context.user_data['post_page'] = 0
@@ -905,17 +952,15 @@ class CallbackHandlers:
                 active = await DB.get_active_channel(user_id)
                 if active:
                     await DB.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
+                    # ✅ v9.4.10: إبطال كاش بعد مسح الكل
+                    await _invalidate_after_channel_change(user_id, active)
                     try:
-                        from database import internal_cache
-                        await internal_cache.invalidate(f"channel_info_{active}")
+                        from database import internal_cache as _ic
+                        await _ic.invalidate(f"channel_info_{active}")
                     except Exception:
                         pass
                     try:
                         await posts_cache.invalidate(active)
-                    except Exception:
-                        pass
-                    try:
-                        await invalidate_user_cache(user_id)
                     except Exception:
                         pass
                     context.user_data['post_page'] = 0
@@ -1889,6 +1934,8 @@ class CallbackHandlers:
         except Exception:
             pass
         if await DB.delete_group(chat_id):
+            # ✅ v9.4.10: إبطال كاش بعد حذف المجموعة
+            await _invalidate_after_channel_change(user_id)
             await safe_edit(query, "✅ تم حذف المجموعة", bot=context.bot)
         else:
             await safe_edit(query, "❌ فشل الحذف", bot=context.bot)
@@ -1919,8 +1966,9 @@ class CallbackHandlers:
             await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
             return
         if await DB.set_active_channel(user_id, ch_id):
+            # ✅ v9.4.10: إبطال كاش بعد تغيير القناة النشطة
+            await _invalidate_after_channel_change(user_id, ch_id)
             await safe_edit(query, "✅ تم تحديد القناة!", bot=context.bot)
-            await invalidate_user_cache(user_id)
         else:
             await safe_edit(query, "❌ لا يمكنك تحديد هذه القناة", bot=context.bot)
 
@@ -1933,8 +1981,9 @@ class CallbackHandlers:
             return
         if await DB.delete_channel(user_id, ch_id):
             context.user_data['channel_page'] = 0
+            # ✅ v9.4.10: إبطال كاش بعد حذف القناة
+            await _invalidate_after_channel_change(user_id, ch_id)
             await CallbackHandlers._show_channel_list(update, context, query, user_id, lang)
-            await invalidate_user_cache(user_id)
         else:
             await safe_edit(query, "❌ فشل", bot=context.bot)
 
@@ -2028,6 +2077,9 @@ class CallbackHandlers:
                     await safe_send(bot, user_id, f"✅ تم النشر بنجاح{suffix}")
                 else:
                     await safe_send(bot, user_id, f"❌ فشل النشر{suffix}")
+                # ✅ v9.4.10: إبطال بعد نشر ناجح (يُحدّث عدد غير المنشور)
+                if result:
+                    await _invalidate_after_channel_change(user_id, active)
             except Exception as e:
                 logger.error(f"❌ _publish_task: {e}", exc_info=True)
                 try:
@@ -2050,6 +2102,8 @@ class CallbackHandlers:
             return
         active = await DB.get_active_channel(user_id)
         if active and await DB.delete_post(user_id, post_id, active):
+            # ✅ v9.4.10: إبطال كاش بعد حذف منشور
+            await _invalidate_after_channel_change(user_id, active)
             await CallbackHandlers._show_post_list(update, context, query, user_id, lang)
         else:
             await safe_edit(query, "❌ فشل", bot=context.bot)
@@ -2304,6 +2358,12 @@ class CallbackHandlers:
             if lost_count:
                 summary += f" | ⚠️ فقد {lost_count}"
             await safe_send(bot, user_id, summary)
+
+            # ✅ v9.4.10: إبطال كاش بعد النشر الجماعي
+            try:
+                await _invalidate_after_channel_change(user_id)
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"❌ _publish_all: {e}", exc_info=True)
             try:
@@ -4925,4 +4985,8 @@ class CallbackHandlers:
 # تصدير
 # =====================================================================
 
-__all__ = ["CallbackHandlers", "_invalidate_sec_auth_cache"]
+__all__ = [
+    "CallbackHandlers",
+    "_invalidate_sec_auth_cache",
+    "_invalidate_after_channel_change",
+]
