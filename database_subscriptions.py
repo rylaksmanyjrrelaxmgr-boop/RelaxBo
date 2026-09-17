@@ -2,7 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 database_subscriptions.py - وحدة الباقات والاشتراكات والفواتير والإحالات
-v7.6.0 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+v7.7.0 — دعم كامل لـ SQLite + PostgreSQL + MySQL
+=====================================================================
+✅ v7.7.0 — إصلاحات حرجة:
+  1) activate_trial: فحص ذرّي لـ trial_used داخل المعاملة
+  2) create_gift_code: معاملة جديدة لكل محاولة
+  3) activate_trial: تُرجع -1 عند وجود اشتراك أطول
+  4) expire_expired_subscriptions: فلترة المنتهين الآن فقط
+  5) create_subscription: توحيد نمط PG
+=====================================================================
 """
 
 import os
@@ -25,10 +33,9 @@ USE_MYSQL = "mysql" in _URL_LOWER or "mariadb" in _URL_LOWER
 
 
 # =====================================================================
-# 0.1) Placeholder Helpers — قلب دعم الأنظمة الثلاثة
+# 0.1) Placeholder Helpers
 # =====================================================================
 def _ph(n: int = 1) -> str:
-    """Placeholder واحد للباراميتر رقم n (مفهرس من 1 لـPostgres)."""
     if USE_POSTGRES:
         return f"${n}"
     if USE_MYSQL:
@@ -37,7 +44,6 @@ def _ph(n: int = 1) -> str:
 
 
 def _phs(count: int) -> str:
-    """قائمة placeholders مفصولة بفواصل لعدد count."""
     if USE_POSTGRES:
         return ", ".join(f"${i}" for i in range(1, count + 1))
     if USE_MYSQL:
@@ -223,7 +229,7 @@ class SubscriptionMixin:
         return True
 
     # -----------------------------------------------------------------
-    # Helper: INSERT subscription (10 أعمدة — مع auto_renew + provider_sub_id)
+    # Helper: INSERT subscription (10 أعمدة)
     # -----------------------------------------------------------------
     async def _insert_subscription_full(
         self, conn, user_id: int, plan_id: int,
@@ -382,7 +388,6 @@ class SubscriptionMixin:
     # الاشتراك الأساسي
     # =================================================================
     async def has_active_subscription(self, user_id: int) -> bool:
-        # parent fetchval يتعامل مع ? — لكن لضمان التوافق:
         sql = (
             f"SELECT 1 FROM subscriptions "
             f"WHERE user_id = {_ph(1)} AND status = 'active' "
@@ -398,11 +403,29 @@ class SubscriptionMixin:
         return result == 1
 
     async def activate_trial(self, user_id: int) -> int:
+        """
+        تفعيل التجربة المجانية (30 يوم).
+
+        Returns:
+            30   : تم تفعيل التجربة بنجاح
+            0    : فشل حقيقي، أو المستخدم استخدم التجربة مسبقاً
+            -1   : التجربة فُعّلت، لكن اشتراك المستخدم الحالي أطول
+        """
         try:
             async with await self._get_user_lock(user_id):
                 now = TimeUtils.utc_now()
                 trial_end = now + timedelta(days=30)
                 async with self.transaction() as conn:
+                    # ✅ v7.7.0: فحص ذرّي — يمنع التجربة المزدوجة
+                    trial_used = await self._fetchval_with_conn(
+                        conn,
+                        f"SELECT trial_used FROM users WHERE user_id = {_ph(1)}",
+                        user_id,
+                        default=1,
+                    )
+                    if trial_used == 1:
+                        return 0
+
                     trial_plan_id = await self._fetchval_with_conn(
                         conn,
                         "SELECT id FROM plans WHERE name = 'تجربة' "
@@ -412,13 +435,12 @@ class SubscriptionMixin:
                     current_end_dt = await self._get_current_end(conn, user_id)
 
                     if current_end_dt and current_end_dt > trial_end:
-                        days_granted = 0
+                        days_granted = -1
                         new_end = current_end_dt
                     else:
                         days_granted = 30
                         new_end = trial_end
 
-                    # UPDATE users trial_used
                     sql_upd = (
                         f"UPDATE users SET trial_used = 1, "
                         f"updated_at = {_ph(1)} WHERE user_id = {_ph(2)}"
@@ -431,7 +453,6 @@ class SubscriptionMixin:
                         conn, sql_upd, upd_now, user_id
                     )
 
-                    # UPDATE users subscription_end
                     sql_end = (
                         f"UPDATE users SET subscription_end = {_ph(1)} "
                         f"WHERE user_id = {_ph(2)}"
@@ -676,20 +697,20 @@ class SubscriptionMixin:
                     )
                     new_end = base + timedelta(days=plan['duration_days'])
 
-                    # INSERT مع RETURNING (PG) / lastrowid
                     if USE_POSTGRES:
                         sql = (
                             f"INSERT INTO subscriptions "
                             f"(user_id, plan_id, status, start_date, end_date, "
                             f" auto_renew, provider, provider_subscription_id, "
                             f" created_at, updated_at) "
-                            f"VALUES ({_phs(9)}, {_ph(9)}) "
+                            f"VALUES ({_phs(10)}) "
                             f"RETURNING id"
                         )
                         row = await self._fetchone_with_conn(
                             conn, sql, user_id, plan_id, 'active',
                             TimeUtils.utc_now(), new_end, 0, provider,
                             provider_sub_id, TimeUtils.utc_now(),
+                            TimeUtils.utc_now(),
                         )
                         sub_id = row['id'] if row else 0
                     elif USE_MYSQL:
@@ -741,29 +762,43 @@ class SubscriptionMixin:
         try:
             async with self.transaction() as conn:
                 if USE_POSTGRES:
+                    soon_expiring = await self._fetchall_with_conn(
+                        conn,
+                        "SELECT DISTINCT user_id FROM subscriptions "
+                        "WHERE status = 'active' "
+                        "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+                    )
                     await conn.execute(
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
                         "AND end_date <= CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
                     )
                 elif USE_MYSQL:
+                    soon_expiring = await self._fetchall_with_conn(
+                        conn,
+                        "SELECT DISTINCT user_id FROM subscriptions "
+                        "WHERE status = 'active' "
+                        "AND end_date <= UTC_TIMESTAMP()",
+                    )
                     await conn.execute(
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
                         "AND end_date <= UTC_TIMESTAMP()"
                     )
                 else:
+                    soon_expiring = await self._fetchall_with_conn(
+                        conn,
+                        "SELECT DISTINCT user_id FROM subscriptions "
+                        "WHERE status = 'active' "
+                        "AND end_date <= datetime('now')",
+                    )
                     await conn.execute(
                         "UPDATE subscriptions SET status = 'expired' "
                         "WHERE status = 'active' "
                         "AND end_date <= datetime('now')"
                     )
-                users = await self._fetchall_with_conn(
-                    conn,
-                    "SELECT DISTINCT user_id FROM subscriptions "
-                    "WHERE status = 'expired'",
-                )
-                for user in users:
+
+                for user in soon_expiring:
                     await self._refresh_user_subscription_end(
                         conn, user['user_id']
                     )
@@ -966,31 +1001,33 @@ class SubscriptionMixin:
         self, plan_id: int, creator_id: int
     ) -> Optional[str]:
         try:
-            async with self.connection() as conn:
-                for _ in range(5):
-                    code = secrets.token_urlsafe(12)
-                    try:
-                        sql = (
-                            f"INSERT INTO gift_codes "
-                            f"(code, plan_id, creator_id, created_at) "
-                            f"VALUES ({_phs(4)})"
-                        )
-                        created = (
-                            TimeUtils.utc_now() if USE_POSTGRES
-                            else TimeUtils.sql_iso()
-                        )
+            sql = (
+                f"INSERT INTO gift_codes "
+                f"(code, plan_id, creator_id, created_at) "
+                f"VALUES ({_phs(4)})"
+            )
+            created = (
+                TimeUtils.utc_now() if USE_POSTGRES
+                else TimeUtils.sql_iso()
+            )
+            for _ in range(5):
+                code = secrets.token_urlsafe(12)
+                try:
+                    async with self.transaction() as conn:
                         await self._execute_with_conn(
                             conn, sql, code, plan_id, creator_id, created
                         )
-                        return code
-                    except Exception as e:
-                        if (
-                            "unique" in str(e).lower()
-                            or "duplicate" in str(e).lower()
-                        ):
-                            continue
-                        raise
-                return None
+                    return code
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "unique" in msg or "duplicate" in msg:
+                        continue
+                    logger.error(
+                        f"❌ create_gift_code (non-dup): {e}",
+                        exc_info=True,
+                    )
+                    return None
+            return None
         except Exception as e:
             logger.error(f"❌ create_gift_code: {e}", exc_info=True)
             return None
@@ -1008,7 +1045,6 @@ class SubscriptionMixin:
                 async with self.transaction() as conn:
                     today = TimeUtils.utc_now().strftime('%Y-%m-%d')
 
-                    # COUNT TODAY — كل DB بتنسيق مختلف
                     if USE_POSTGRES:
                         sql_cnt = (
                             "SELECT COUNT(*) FROM referrals "
@@ -1036,7 +1072,6 @@ class SubscriptionMixin:
                         )
                         return False
 
-                    # INSERT OR IGNORE referrals
                     if USE_POSTGRES:
                         sql_ins = (
                             "INSERT INTO referrals "
@@ -1117,7 +1152,6 @@ class SubscriptionMixin:
                     if available <= 0:
                         return 0
 
-                    # إيجاد plan_id
                     if USE_POSTGRES:
                         sql_plan = (
                             "SELECT s.plan_id FROM subscriptions s "
