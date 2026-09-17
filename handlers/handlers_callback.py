@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.7)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.8)
 =====================================================================
+✅ v9.4.8 — تصحيح تفعيل التجربة المجانية:
+  - استخدام _coerce_int(activate_trial(...), 0) لمنع TypeError
+    عند إرجاع None (فشل داخلي في DB) → رسالة واضحة بدل "❌ حدث خطأ"
+  - try/finally حول invalidate_subscription_cache:
+    الإبطال يحدث دائماً حتى لو رمت activate_trial استثناءً
+    (يمنع ظهور "❌ يتطلب اشتراك نشط" بعد فشل جزئي)
+  - days تبقى 0 عند الفشل → الرسالة صحيحة دائماً
+
 ✅ v9.4.7 — إبطال كاش الاشتراك في trial:
   - after DB.activate_trial → DB.invalidate_subscription_cache(user_id)
   - يحل: ظهور "❌ يتطلب اشتراك نشط" مباشرة بعد تفعيل التجربة
@@ -646,19 +654,38 @@ class CallbackHandlers:
                 await CommandHandlers.help_command(update, context)
                 return
 
+            # ✅ v9.4.8: إبطال كاش الاشتراك في finally + حماية من None
             if base_data == CB.TRIAL:
-                # ✅ v9.4.7: إبطال كاش الاشتراك بعد التفعيل
                 if await DB.has_used_trial(user_id):
-                    await safe_edit(query, await _trans('trial_used', lang, "❌ لقد استخدمت التجربة المجانية بالفعل."), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans(
+                            'trial_used', lang,
+                            "❌ لقد استخدمت التجربة المجانية بالفعل."
+                        ),
+                        bot=context.bot,
+                    )
                     return
-                days = await DB.activate_trial(user_id)
-                text = f"✅ تم تفعيل التجربة المجانية لمدة {days} يوم" if days > 0 else "❌ تعذر تفعيل التجربة"
 
-                # ✅ FIX: إبطال كاش الاشتراك
+                days = 0
                 try:
-                    await DB.invalidate_subscription_cache(user_id)
-                except Exception as e:
-                    logger.warning(f"invalidate_subscription_cache: {e}")
+                    days = _coerce_int(
+                        await DB.activate_trial(user_id), 0
+                    )
+                finally:
+                    # ✅ FIX: إبطال كاش الاشتراك دائماً حتى عند الفشل الجزئي
+                    # السبب: has_active_subscription يستخدم internal_cache بـ TTL=60
+                    # بدون إبطال → "❌ يتطلب اشتراك نشط" لمدة 60 ثانية بعد التفعيل
+                    try:
+                        await DB.invalidate_subscription_cache(user_id)
+                    except Exception as e:
+                        logger.warning(f"invalidate_subscription_cache: {e}")
+
+                text = (
+                    f"✅ تم تفعيل التجربة المجانية لمدة {days} يوم"
+                    if days > 0
+                    else "❌ تعذر تفعيل التجربة"
+                )
 
                 await safe_edit(query, text, bot=context.bot)
                 await invalidate_user_cache(user_id)
