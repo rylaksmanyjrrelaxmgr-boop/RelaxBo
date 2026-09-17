@@ -1,49 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.19 — SLOW-QUERIES-ALIAS-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.21 — PRECISE-PUBLISH-INTERVAL)
 ================================================================================
+🆕 v7.7.21 (PRECISE-PUBLISH-INTERVAL):
+  ✅ update_next_publish: تعويض 30s من polling
+     — next_publish_date = last_time + interval_seconds - 30
+     — عند interval=12: next = last + 690s
+     — الحلقة الرئيسية تلتقطها عند 11:30-12:30
+     — الفارق الفعلي = 12:00 بالضبط → 5 منشورات/ساعة ✅
+
+🆕 v7.7.20 (PUBLISH-INTERVAL-FIX):
+  ✅ update_next_publish: قراءة `min_publish_interval` من settings
+     بدل الاعتماد على schedule.interval_minutes = 12 (الافتراضي)
+  ✅ delay_seconds: من `1 + (channel_db_id % 60) * 5` إلى `1` (ثابت)
+
 🆕 v7.7.19 (SLOW-QUERIES-ALIAS-FIX):
   ✅ get_slow_queries = get_slow_queries_report (alias)
-     → يحل AttributeError في handlers_callback.py v9.4.x
-       عند الضغط على زر "🐌 استعلامات بطيئة"
-  ✅ _get_caller_info: inspect.stack(context=0) بدل inspect.stack()
-     → توفير 30–100ms لكل استعلام بطيء (لا يقرأ source code)
-  ✅ _get_caller_info: skip_frames: int = 0 (افتراضي متوافق مع المُستدعي)
-  ✅ _ensure_materialized_views_postgres: تحديث _mv_last_refresh_mono
-     بعد التعبئة الأولى (يمنع refresh مزدوج عند الإقلاع)
+  ✅ _get_caller_info: inspect.stack(context=0)
+  ✅ _get_caller_info: skip_frames: int = 0
+  ✅ MV refresh: _mv_last_refresh_mono يُحدَّث بعد التعبئة
 
 🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX):
-  ✅ _ensure_materialized_views_postgres() : إنشاء mv_active_user_limits
-  ✅ _maybe_refresh_mv() : تحديث MV بدعم cooldown 5 دقائق
+  ✅ _ensure_materialized_views_postgres() : mv_active_user_limits
+  ✅ _maybe_refresh_mv() : تحديث MV بـ cooldown 5 دقائق
   ✅ get_channels_to_publish() : استخدام MV على PostgreSQL بدل CTE
-       → 2.99s → <50ms لكل دورة نشر
-  ✅ fallback آمن: SQLite/MySQL يبقون على CTE كما هو
-  ✅ لا يكسر أي وظيفة سابقة
 
 🆕 v7.7.17 (SLOW-QUERY-CALLER-FIX):
-  ✅ _get_caller_info() : فلترة صارمة لـ asyncio/stdlib/site-packages
-  ✅ skip_frames أصبح مُستخدماً فعلياً
-  ✅ استبعاد tasks.py القياسي (asyncio/tasks.py) من النتائج
-  ✅ stack يعرض فقط الإطارات الخارجية المتتالية
-  ✅ get_slow_queries_report() : تقرير منظَّم للاستعلامات البطيئة
-  ✅ clear_slow_queries_log() : مسح السجل
-  ✅ لا تأثير على الأداء
+  ✅ _get_caller_info() : فلترة asyncio/stdlib/site-packages
+  ✅ get_slow_queries_report() / clear_slow_queries_log()
 
 🆕 v7.7.16 (SLOW-QUERY-CALLER):
-  ✅ _get_caller_info() : استخراج الملف/السطر/الدالة من stack
-  ✅ _execute_with_logging : تسجيل مصدر كل استعلام بطيء
-  ✅ slow_queries_log يحوي الآن: caller_file, caller_line, caller_func, stack
-  ✅ يدعم تشخيص: "من أين جاء الاستعلام البطيء؟"
-
-🆕 v7.7.15 (ANALYTICS-MIXIN):
-  ✅ دمج AnalyticsMixin (database_analytics.py)
-
-🆕 v7.7.14 (FIX-DB-SIZE-STATS):
-  ✅ إضافة get_db_size_kb()
-
-🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH):
-  ✅ استعادة _compute_text_hash
+🆕 v7.7.15 (ANALYTICS-MIXIN)
+🆕 v7.7.14 (FIX-DB-SIZE-STATS)
+🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH)
 ================================================================================
 """
 
@@ -145,10 +135,6 @@ _INTERNAL_DB_FILES = frozenset({
 
 
 def _is_internal_frame(filename: str) -> bool:
-    """
-    ✅ v7.7.17: تحديد ما إذا كان الإطار داخلياً (database_*.py /
-    asyncio / stdlib / site-packages).
-    """
     if not filename:
         return False
     try:
@@ -158,11 +144,9 @@ def _is_internal_frame(filename: str) -> bool:
 
     base = os.path.basename(full)
 
-    # 1) ملفات database_*.py
     if base in _INTERNAL_DB_FILES:
         return True
 
-    # 2) asyncio/*.py (tasks.py, events.py, base_events.py, ...)
     if _ASYNCIO_DIR:
         try:
             if os.path.commonpath([_ASYNCIO_DIR, full]) == _ASYNCIO_DIR:
@@ -170,7 +154,6 @@ def _is_internal_frame(filename: str) -> bool:
         except (ValueError, TypeError):
             pass
 
-    # 3) مكتبة Python القياسية (contextlib.py, functools.py, ...)
     if _STDLIB_DIR:
         try:
             if os.path.commonpath([_STDLIB_DIR, full]) == _STDLIB_DIR:
@@ -178,7 +161,6 @@ def _is_internal_frame(filename: str) -> bool:
         except (ValueError, TypeError):
             pass
 
-    # 4) site-packages / dist-packages
     for marker in _SITE_PACKAGES_MARKERS:
         if marker in full:
             return True
@@ -698,7 +680,7 @@ def _mysql_random() -> str:
     return "RAND()" if USE_MYSQL else "RANDOM()"
 
 # =====================================================================
-# Parser للأقواس — FIX-A
+# Parser للأقواس
 # =====================================================================
 
 def _find_values_end(query: str) -> int:
@@ -1885,7 +1867,6 @@ class Database(
             self.PATHS = PATHS
             self.DATABASE_URL = DATABASE_URL
 
-            # v7.7.11: متغيرات كاش الكلمات المحظورة
             self._banned_words_local_cache = {}
             self._global_banned_words_cache: List[str] = []
             self._global_banned_words_loaded = False
@@ -1898,20 +1879,18 @@ class Database(
             )
             self._banned_words_cache_lock = asyncio.Lock()
 
-            # ✅ v7.7.15/v7.7.17: تتبّع الاستعلامات البطيئة (deque)
             self._SLOW_QUERIES_MAX = 100
             self._slow_queries_log: deque = deque(
                 maxlen=self._SLOW_QUERIES_MAX
             )
             self._slow_queries_lock = asyncio.Lock()
 
-            # 🚀 v7.7.18: Materialized View للاشتراكات النشطة
             self._mv_refresh_lock = asyncio.Lock()
             self._mv_last_refresh_mono: float = 0.0
             self._mv_refresh_cooldown = float(
                 os.getenv("MV_REFRESH_COOLDOWN", "300")
             )
-            self._mv_available = False  # يُحدَّد عند bootstrap
+            self._mv_available = False
 
             self._group_security_columns_cache: Optional[set] = None
 
@@ -1920,39 +1899,13 @@ class Database(
             self._singleton_init_done = False
             raise
 
-    # =================================================================
-    # ✅ v7.7.19: استخراج مصدر الاستعلام من الـstack
-    # =================================================================
-
     def _get_caller_info(self, skip_frames: int = 0) -> Dict[str, Any]:
-        """
-        ✅ v7.7.19: استخراج معلومات المستدعي من الـstack trace مع
-        فلترة صارمة لـ asyncio / stdlib / site-packages.
-
-        Returns:
-            {
-                'file': str,     # اسم الملف (مثلاً utils.py)
-                'line': int,     # رقم السطر
-                'func': str,     # اسم الدالة
-                'stack': list,   # أول 3 إطارات خارجية
-            }
-
-        skip_frames: عدد الإطارات الخارجية التي يتم تخطيها من البداية.
-
-        🆕 v7.7.19: inspect.stack(context=0) — لا يقرأ source code
-        → توفير 30–100ms لكل استعلام بطيء
-        """
         try:
-            # ✅ v7.7.19: context=0 يمنع قراءة source code لكل إطار
             stack = inspect.stack(context=0)
             result: Dict[str, Any] = {
-                'file': '?',
-                'line': 0,
-                'func': '?',
-                'stack': [],
+                'file': '?', 'line': 0, 'func': '?', 'stack': [],
             }
 
-            # اجمع الإطارات الخارجية (متتالية، مُفلترة)
             external: List[Any] = []
             for fi in stack:
                 if _is_internal_frame(fi.filename):
@@ -1962,7 +1915,6 @@ class Database(
             if not external:
                 return result
 
-            # تطبيق skip_frames
             try:
                 skip_n = max(0, int(skip_frames))
             except (TypeError, ValueError):
@@ -1976,7 +1928,6 @@ class Database(
             result['line'] = top.lineno
             result['func'] = top.function
 
-            # أول 3 إطارات (بعد التخطي)
             for fr in selected[:3]:
                 result['stack'].append({
                     'file': os.path.basename(fr.filename),
@@ -1989,31 +1940,22 @@ class Database(
             logger.debug(f"_get_caller_info: {e}")
             return {'file': '?', 'line': 0, 'func': '?', 'stack': []}
 
-    # =================================================================
-    # ✅ v7.7.17: تقرير الاستعلامات البطيئة
-    # =================================================================
-
     async def get_slow_queries_report(
         self, limit: int = 20
     ) -> List[Dict[str, Any]]:
-        """
-        ✅ v7.7.17: إرجاع آخر N استعلام بطيء (الأحدث أولاً).
-        """
         try:
             async with self._slow_queries_lock:
                 items = list(self._slow_queries_log)
             items = items[-limit:] if limit > 0 else items
-            items.reverse()  # الأحدث أولاً
+            items.reverse()
             return items
         except Exception as e:
             logger.warning(f"⚠️ get_slow_queries_report: {e}")
             return []
 
-    # ✅ v7.7.19: alias متوافق مع handlers_callback v9.4.x
     get_slow_queries = get_slow_queries_report
 
     async def clear_slow_queries_log(self) -> int:
-        """✅ v7.7.17: مسح سجل الاستعلامات البطيئة."""
         try:
             async with self._slow_queries_lock:
                 count = len(self._slow_queries_log)
@@ -2023,14 +1965,7 @@ class Database(
             logger.warning(f"⚠️ clear_slow_queries_log: {e}")
             return 0
 
-    # =================================================================
-    # 🔍 v7.7.14: حجم قاعدة البيانات (PostgreSQL + MySQL + SQLite)
-    # =================================================================
-
     async def get_db_size_kb(self) -> float:
-        """
-        ✅ v7.7.14: إرجاع حجم قاعدة البيانات بالكيلوبايت.
-        """
         try:
             if USE_POSTGRES:
                 size_bytes = await self.fetchval(
@@ -2070,10 +2005,6 @@ class Database(
             logger.warning(f"⚠️ get_db_size_kb: {e}")
             return 0.0
 
-    # =================================================================
-    # 🔍 v7.7.12: Pool stats
-    # =================================================================
-
     async def get_pool_stats(self) -> Dict[str, Any]:
         if not (USE_POSTGRES or USE_MYSQL):
             return {"type": "sqlite_or_other"}
@@ -2099,20 +2030,7 @@ class Database(
         except Exception as e:
             return {"type": "error", "message": str(e)}
 
-    # =================================================================
-    # 🚀 v7.7.18: Materialized View للاشتراكات النشطة
-    # =================================================================
-
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
-        """
-        ✅ v7.7.18: ينشئ mv_active_user_limits إذا لم توجد.
-        يُستدعى مرة واحدة في bootstrap.
-
-        يعيد True إذا كان MV متاحاً للاستخدام.
-
-        🆕 v7.7.19: بعد التعبئة الأولى، نضبط _mv_last_refresh_mono
-        لمنع refresh مزدوج عند الإقلاع.
-        """
         if not USE_POSTGRES:
             self._mv_available = False
             return False
@@ -2156,7 +2074,6 @@ class Database(
             else:
                 logger.info("⏩ mv_active_user_limits موجود")
 
-            # تحديث أولي إن كان MV فارغاً
             row_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM mv_active_user_limits"
             )
@@ -2167,8 +2084,6 @@ class Database(
                         "mv_active_user_limits"
                     )
                     logger.info("✅ mv_active_user_limits مُعبّأ")
-                    # ✅ v7.7.19: علّم أننا حدّثناها للتو
-                    # (يمنع _maybe_refresh_mv من التحديث الفوري)
                     self._mv_last_refresh_mono = time.monotonic()
                 except Exception as rf_e:
                     logger.debug(f"⚠️ تعبئة MV: {rf_e}")
@@ -2183,12 +2098,6 @@ class Database(
             return False
 
     async def _maybe_refresh_mv(self) -> bool:
-        """
-        ✅ v7.7.18: يحدّث mv_active_user_limits إذا مرّ cooldown.
-        آمن تحت التزامن — القفل يمنع refresh متوازي.
-
-        يعيد True إذا تم refresh فعلي.
-        """
         if not USE_POSTGRES or not self._mv_available:
             return False
         now_mono = time.monotonic()
@@ -2197,7 +2106,6 @@ class Database(
             return False
 
         async with self._mv_refresh_lock:
-            # Double-check بعد اكتساب القفل
             now_mono = time.monotonic()
             if (now_mono - self._mv_last_refresh_mono
                     < self._mv_refresh_cooldown):
@@ -2222,10 +2130,6 @@ class Database(
                 logger.warning(f"⚠️ MV refresh: {e}")
                 return False
 
-    # =================================================================
-    # مساعد لتتبّع مهام الخلفية
-    # =================================================================
-
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
         try:
             task = asyncio.create_task(coro)
@@ -2235,10 +2139,6 @@ class Database(
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
         return task
-
-    # =================================================================
-    # تتبع SQLite conns
-    # =================================================================
 
     def _track_sqlite_conn(self, conn) -> None:
         if conn is None:
@@ -2274,10 +2174,6 @@ class Database(
                 self._sqlite_alive_ts.pop(conn, None)
             except (TypeError, KeyError):
                 pass
-
-    # =================================================================
-    # التهيئة
-    # =================================================================
 
     async def initialize(self):
         if self._initialized:
@@ -2713,10 +2609,6 @@ class Database(
         finally:
             self._recovering_pool = False
 
-    # =================================================================
-    # _get_connection
-    # =================================================================
-
     async def _get_connection(self):
         if self._closing:
             raise RuntimeError("Database is closing")
@@ -2969,10 +2861,6 @@ class Database(
             else:
                 await self._return_connection(conn)
 
-    # =================================================================
-    # Query layer
-    # =================================================================
-
     async def _execute_with_logging(
         self, query: str, params: tuple, conn, executor,
         skip_explain: bool = False,
@@ -2987,7 +2875,6 @@ class Database(
                 )
                 logger.warning(f"🐌 بطيء ({elapsed:.2f}s): {safe_query}")
 
-                # ✅ v7.7.17: تسجيل مع مصدر الاستعلام (فلترة صارمة)
                 try:
                     caller_info = self._get_caller_info(skip_frames=0)
 
@@ -3466,10 +3353,6 @@ class Database(
             logger.error(f"❌ timeout executemany: {query[:100]}")
             raise
 
-    # =================================================================
-    # الأقفال
-    # =================================================================
-
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         async with self._user_locks_lock:
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
@@ -3700,10 +3583,6 @@ class Database(
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 break
-
-    # =================================================================
-    # إنشاء الجداول
-    # =================================================================
 
     async def _create_tables(self, conn=None):
         if not TABLES_MODULE_AVAILABLE:
@@ -4311,10 +4190,6 @@ class Database(
         except Exception as e:
             logger.error(f"❌ فهارس: {e}")
 
-    # =================================================================
-    # ضمان المستخدم/المجموعة
-    # =================================================================
-
     async def _ensure_user_exists(
         self,
         user_id: int,
@@ -4396,10 +4271,6 @@ class Database(
                 f"❌ _ensure_group_exists({chat_id}): {e}"
             )
             return False
-
-    # =================================================================
-    # البيانات الافتراضية
-    # =================================================================
 
     async def _init_default_data(self, conn):
         default_plans = [
@@ -4861,10 +4732,6 @@ class Database(
             except Exception:
                 pass
 
-    # =================================================================
-    # Bootstrap
-    # =================================================================
-
     async def _do_bootstrap_inner(self, conn) -> bool:
         tables_hash = self._compute_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
@@ -4905,7 +4772,6 @@ class Database(
             )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
-        # 🚀 v7.7.18: تهيئة Materialized View على PostgreSQL
         if USE_POSTGRES:
             try:
                 await self._ensure_materialized_views_postgres(conn)
@@ -4955,10 +4821,6 @@ class Database(
         return result
 
     pre_initialize = initialize_db
-
-    # =================================================================
-    # المستخدمون
-    # =================================================================
 
     async def get_start_data(self, user_id: int) -> Optional[Dict]:
         cache_key = f"start_data_{user_id}"
@@ -5775,6 +5637,23 @@ class Database(
         return await self.execute(query, tuple(values)) > 0
 
     async def update_next_publish(self, channel_db_id: int) -> bool:
+        """
+        ✅ v7.7.21: تعويض polling للحصول على معدل نشر دقيق.
+
+        الفكرة:
+          - الحلقة الرئيسية تفحص القنوات كل 60 ثانية
+          - بعد نوم المهمة، يأخذ الأمر 0-60s لاكتشافها
+          - نطرح 30s كمتوسط → الفارق الفعلي = 11:30-12:30
+          - عند interval=12: 5 منشورات/ساعة بالضبط
+
+        قراءة interval:
+          - إذا schedule.interval_minutes ≠ 12 → استخدمها (تحكم فردي)
+          - إذا schedule.interval_minutes = 12 → استخدم الإعداد العام
+          - وإلا → 12 كـ fallback
+
+        Returns:
+            True دائماً
+        """
         async with self.transaction() as conn:
             schedule = await self._fetchone_with_conn(
                 conn,
@@ -5805,13 +5684,37 @@ class Database(
             last_time = TimeUtils.safe_parse_iso(last_publish)
             if last_time is None:
                 last_time = TimeUtils.utc_now()
+
             schedule_type = schedule.get(
                 "schedule_type", "interval_minutes"
             )
+
+            # ✅ v7.7.20: قراءة الإعداد العام min_publish_interval
+            try:
+                global_interval_str = await self._fetchval_with_conn(
+                    conn,
+                    _sql_get_setting_value(),
+                    "min_publish_interval",
+                )
+                global_interval = int(global_interval_str) if global_interval_str else 0
+            except (ValueError, TypeError, Exception):
+                global_interval = 0
+
             if schedule_type == "interval_minutes":
-                interval_seconds = max(
-                    1, schedule.get("interval_minutes", 12)
-                ) * 60
+                sched_mins = schedule.get("interval_minutes") or 0
+                try:
+                    sched_mins = int(sched_mins)
+                except (ValueError, TypeError):
+                    sched_mins = 0
+
+                if sched_mins and sched_mins != 12:
+                    interval_minutes = max(1, sched_mins)
+                elif global_interval > 0:
+                    interval_minutes = max(1, global_interval)
+                else:
+                    interval_minutes = 12
+
+                interval_seconds = interval_minutes * 60
             elif schedule_type == "interval_hours":
                 interval_seconds = max(
                     1, schedule.get("interval_hours", 1)
@@ -5821,23 +5724,29 @@ class Database(
                     1, schedule.get("interval_days", 1)
                 ) * 86400
             else:
-                interval_seconds = 12 * 60
-            next_date = last_time + timedelta(
-                seconds=interval_seconds
-            )
-            delay_seconds = 1 + (channel_db_id % 60) * 5
-            next_date += timedelta(seconds=delay_seconds)
+                if global_interval > 0:
+                    interval_seconds = global_interval * 60
+                else:
+                    interval_seconds = 12 * 60
+
+            # ✅ v7.7.21: تعويض 30s من polling
+            #     next = last_time + (interval_seconds - 30)
+            #     → عند interval=12: next = last + 690s
+            #     → الحلقة تلتقطها عند 11:30-12:30 → متوسط 12:00
+            compensated_seconds = max(60, interval_seconds - 30)
+            next_date = last_time + timedelta(seconds=compensated_seconds)
+
             now = TimeUtils.utc_now()
             if next_date <= now:
                 delta = now - last_time
                 intervals_needed = (
-                    int(delta.total_seconds() // interval_seconds)
+                    int(delta.total_seconds() // compensated_seconds)
                     + 1
                 )
                 next_date = last_time + timedelta(
-                    seconds=interval_seconds * intervals_needed
+                    seconds=compensated_seconds * intervals_needed
                 )
-                next_date += timedelta(seconds=delay_seconds)
+
             await self._execute_with_conn(
                 conn,
                 "UPDATE schedule SET next_publish_date = ? "
@@ -5856,15 +5765,9 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        ✅ v7.7.18: على PostgreSQL يستخدم mv_active_user_limits
-        بدل CTE active_subs → 2.99s → <50ms.
-        SQLite/MySQL يحتفظان بـ CTE كما هو.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
-        # 🚀 v7.7.18: حاول تحديث MV أولاً (رخيص مع cooldown)
         if USE_POSTGRES and self._mv_available:
             try:
                 await self._maybe_refresh_mv()
@@ -5872,7 +5775,6 @@ class Database(
                 logger.debug(f"MV refresh call: {e}")
 
         if USE_POSTGRES and self._mv_available:
-            # 🚀 v7.7.18: استخدام MV بدل CTE
             query = """
                 SELECT uc.id, uc.channel_id, uc.user_id,
                        u.auto_publish, u.auto_recycle,
@@ -5929,7 +5831,6 @@ class Database(
             return await self.fetchall(query, (owner_id, now, limit))
 
         elif USE_MYSQL:
-            # MySQL — كما هو (بدون MV)
             now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             query = """
                 SELECT uc.id, uc.channel_id, uc.user_id,
@@ -5998,7 +5899,6 @@ class Database(
             )
 
         else:
-            # SQLite — CTE كما هو (لا MV)
             query = """
                 WITH active_subs AS (
                     SELECT s.user_id,
