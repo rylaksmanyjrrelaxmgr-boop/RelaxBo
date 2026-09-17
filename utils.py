@@ -2,12 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.1 - Deadlock-Free + Behavior-Preserved)
+utils.py - الأدوات المساعدة للبوت (v7.9.2 - Post-Audit Hardening)
 =================================================================================
+🔴 v7.9.2 (إصلاحات ما بعد التدقيق):
+    ✅ _read_pool_stats: دعم asyncmy (maxsize/size/freesize) — كان صامتاً على MySQL
+    ✅ _get_global_words_cached: loaded_at>0 بدل قائمة غير فارغة —
+       كان يستعلم DB عند كل استدعاء عندما القائمة مشروعة فارغة
+    ✅ _send_media: تمرير parse_mode للـ captions — كان يُهمَل صامتاً
+    ✅ safe_send: BadRequest fallback يمرّر parse_mode=None صراحة
+    ✅ safe_parse_iso: توحيد naive/aware — كل المخرجات naive UTC
+       (كان fromisoformat يُعيد aware بينما datetime يُعيد naive)
+    ✅ SmartCache: time.monotonic() بدل time.time() — محصّن ضد قفزات NTP
+    ✅ _publish_single_channel: has_sub=None يُحسب من DB
+       (كان فرع الفحص ميتاً لأن auto_publish يمرّر True دائماً)
+    ✅ _publish_single_channel/auto_publish: تحسين توثيق
+
 🔴 v7.9.1 (تحسين):
     ✅ get_reply_from_file: قائمة أنماط مُسبَق تصريفها (بدل pattern واحد)
-       — يحفظ السلوك الأصلي 100% (ترتيب dict) مع الحفاظ على السرعة
-       — لا فرق سلوكي حتى مع مفاتيح متداخلة
 
 🔴 v7.9.0 (إصلاحات حرجة):
     ✅ TranslationManager: تحميل خارج القفل (يمنع deadlock)
@@ -16,20 +27,12 @@ utils.py - الأدوات المساعدة للبوت (v7.9.1 - Deadlock-Free + 
     ✅ SmartCache.get_or_set: try/finally + هوية القفل
     ✅ invalidate_banned_words_cache_async: variant آمن ضد race
     ✅ import_auto_replies: قراءة الملف عبر asyncio.to_thread
-    ✅ get_reply_from_file: precompiled patterns (O(n) بلا compile overhead)
+    ✅ get_reply_from_file: precompiled patterns
 
-🚀 v7.8.6 (إصلاحات أداء حرجة):
-    ✅ auto_publish: حذف batch subs check المكرر
-    ✅ _banned_words_locks: cleanup تلقائي عند تجاوز 1000 قفل
-    ✅ _get_global_words_cached: قفل موحّد لمنع thundering herd
-    ✅ _GLOBAL_WORDS_TTL: 120 → 1800 (30 دقيقة)
-
-🔍 v7.8.5 (مراقبة Pool + تنبيه تلقائي)
-🕐 v7.8.4 (توحيد التوقيت على UTC)
-🧠 v7.8.3 (حماية مزدوجة للكلمات المحظورة)
-🧠 v7.8.2 (دمج سجل قناة المجموعات)
-🧠 v7.8.1 (حماية من thundering herd + batch subscriptions)
-🧠 v7.8.0 (تحسينات ذكية شاملة)
+🚀 v7.8.6: auto_publish batch subs check مكرر محذوف
+🚀 v7.8.6: _banned_words_locks cleanup تلقائي عند 1000 قفل
+🚀 v7.8.6: _get_global_words_cached قفل موحّد
+🚀 v7.8.6: _GLOBAL_WORDS_TTL: 120 → 1800
 =================================================================================
 """
 
@@ -76,6 +79,7 @@ class SmartCache:
     """
     🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
     🔴 v7.9.0: إصلاح تسرّب الأقفال عند فشل loader (try/finally + هوية).
+    🔴 v7.9.2: time.monotonic() بدل time.time() — محصّن ضد قفزات NTP.
     """
     __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
@@ -92,7 +96,8 @@ class SmartCache:
             if item is None:
                 return default
             value, exp = item
-            if time.time() > exp:
+            # ✅ v7.9.2: time.monotonic() — لا يتأثر بتغيير ساعة النظام
+            if time.monotonic() > exp:
                 del self._cache[key]
                 return default
             return value
@@ -136,7 +141,8 @@ class SmartCache:
             if len(self._cache) >= self._max_size and key not in self._cache:
                 for k in list(self._cache.keys())[: self._max_size // 4]:
                     self._cache.pop(k, None)
-            self._cache[key] = (value, time.time() + effective_ttl)
+            # ✅ v7.9.2: time.monotonic()
+            self._cache[key] = (value, time.monotonic() + effective_ttl)
 
     async def delete(self, key: str):
         async with self._lock:
@@ -200,14 +206,24 @@ class TimeUtils:
 
     @staticmethod
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
+        """
+        🕐 v7.9.2: توحيد naive/aware — كل المخرجات naive UTC.
+        - datetime input: aware → UTC naive، naive → كما هو
+        - str ISO/space: aware → UTC naive (كان يُعيد aware)
+        """
         if not date_str:
             return None
         if isinstance(date_str, datetime):
             if date_str.tzinfo is not None:
                 return date_str.astimezone(timezone.utc).replace(tzinfo=None)
             return date_str
+        # ✅ v7.9.2: normalize "Z" → "+00:00" (Python <3.11 لا يدعم Z)
         try:
-            return datetime.fromisoformat(date_str)
+            s = date_str.replace("Z", "+00:00") if "Z" in date_str else date_str
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
         except (ValueError, TypeError):
             pass
         try:
@@ -1420,6 +1436,7 @@ class KeyboardFactory:
 # 10. كاش الكلمات المحظورة
 # ✅ v7.8.6: cleanup locks + قفل موحّد للكلمات العامة + TTL أطول
 # 🔴 v7.9.0: variant async آمن ضد race مع _get_global_words_cached
+# 🔴 v7.9.2: loaded_at>0 بدل قائمة غير فارغة (كان يستعلم كل مرة إذا القائمة فارغة)
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -1470,15 +1487,23 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
 
 
 async def _get_global_words_cached() -> List[str]:
+    """
+    🔴 v7.9.2: يعتمد على _global_words_loaded_at>0 للكشف عن "تم التحميل".
+    النسخة السابقة كانت:
+        if _global_words_cache and ...:
+    — إذا القائمة مشروعة فارغة (لا كلمات)، الفحص يفشل → استعلام DB
+    عند كل استدعاء لـ get_banned_words_cached لمجموعة ليست -1.
+    """
     global _global_words_cache, _global_words_loaded_at
 
     now = time.time()
-    if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
+    # ✅ v7.9.2: loaded_at > 0 هو المؤشر الصحيح (لا truthiness قائمة)
+    if _global_words_loaded_at > 0 and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
         return _global_words_cache
 
     async with _global_words_lock:
         now = time.time()
-        if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
+        if _global_words_loaded_at > 0 and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
             return _global_words_cache
 
         try:
@@ -1735,37 +1760,54 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 
 # =====================================================================
 # 12. إرسال آمن — Exponential backoff
+# 🔴 v7.9.2: تمرير parse_mode للـ captions (كان يُهمَل صامتاً)
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
-                      caption=None, reply_markup=None, **kwargs):
+                      caption=None, reply_markup=None, parse_mode=None, **kwargs):
+    """
+    ✅ v7.9.2: parse_mode يُمرَّر للوسائط التي تحمل caption
+    (photo/video/document/audio/animation) وللـ send_message في
+    voice/sticker/video_note.
+    """
     if media_type == 'photo':
-        return await bot.send_photo(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        return await bot.send_photo(chat_id, media_file_id, caption=caption,
+                                    reply_markup=reply_markup,
+                                    parse_mode=parse_mode, **kwargs)
     elif media_type == 'video':
-        return await bot.send_video(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        return await bot.send_video(chat_id, media_file_id, caption=caption,
+                                    reply_markup=reply_markup,
+                                    parse_mode=parse_mode, **kwargs)
     elif media_type == 'document':
-        return await bot.send_document(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        return await bot.send_document(chat_id, media_file_id, caption=caption,
+                                       reply_markup=reply_markup,
+                                       parse_mode=parse_mode, **kwargs)
     elif media_type == 'audio':
-        return await bot.send_audio(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        return await bot.send_audio(chat_id, media_file_id, caption=caption,
+                                    reply_markup=reply_markup,
+                                    parse_mode=parse_mode, **kwargs)
     elif media_type == 'voice':
         sent = await bot.send_voice(chat_id, media_file_id, reply_markup=reply_markup, **kwargs)
         if caption:
-            await bot.send_message(chat_id, caption)
+            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
         return sent
     elif media_type == 'animation':
-        return await bot.send_animation(chat_id, media_file_id, caption=caption, reply_markup=reply_markup, **kwargs)
+        return await bot.send_animation(chat_id, media_file_id, caption=caption,
+                                        reply_markup=reply_markup,
+                                        parse_mode=parse_mode, **kwargs)
     elif media_type == 'sticker':
         sent = await bot.send_sticker(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            await bot.send_message(chat_id, caption)
+            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
         return sent
     elif media_type == 'video_note':
         sent = await bot.send_video_note(chat_id, media_file_id, reply_markup=reply_markup)
         if caption:
-            await bot.send_message(chat_id, caption)
+            await bot.send_message(chat_id, caption, parse_mode=parse_mode)
         return sent
     else:
-        return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup, **kwargs)
+        return await bot.send_message(chat_id, caption or ".", reply_markup=reply_markup,
+                                      parse_mode=parse_mode, **kwargs)
 
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
@@ -1797,10 +1839,13 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     for attempt in range(max_attempts):
         try:
             if media_type:
+                # ✅ v7.9.2: parse_mode يُمرَّر
                 return await _send_media(
                     bot, chat_id, media_type, media_file_id,
                     caption=caption_text or None,
-                    reply_markup=reply_markup, **kwargs
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    **kwargs
                 )
             else:
                 return await bot.send_message(
@@ -1824,11 +1869,15 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             error_msg = str(e).lower()
             if "can't parse entities" in error_msg or "parse" in error_msg:
                 try:
+                    # ✅ v7.9.2: fallback يمرّر parse_mode=None صراحة
+                    # (لأن خطأ parse في media caption يحتاج إعادة إرسال بلا parse)
                     if media_type:
                         return await _send_media(
                             bot, chat_id, media_type, media_file_id,
                             caption=caption_text or None,
-                            reply_markup=reply_markup, **kwargs
+                            reply_markup=reply_markup,
+                            parse_mode=None,
+                            **kwargs
                         )
                     else:
                         return await bot.send_message(
@@ -2234,9 +2283,6 @@ else:
 
 
 # ✅ v7.9.1: قائمة (مفتاح, pattern) — تُحافظ على ترتيب dict الأصلي
-# - لا ترتيب عشوائي: نتبع ترتيب _REPLIES_FROM_FILE
-# - لا compile overhead: الأنماط مُجمَّعة مرة واحدة
-# - نفس نتائج الأصل بالحرف، بما في ذلك المفاتيح المتداخلة
 _COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
 
 
@@ -2309,8 +2355,8 @@ def reload_replies_from_file() -> dict:
 
 # =====================================================================
 # 17. المهام الخلفية — Adaptive + Batch + Pool Monitor
-# 🔴 v7.9.0: فصل sleep عن semaphore في auto_publish
-# ✅ v7.9.1: نفس منطق النشر الأصلي (12 دقيقة) — لا حلقة موحّدة
+# 🔴 v7.9.2: _read_pool_stats يدعم asyncmy (MySQL)
+# 🔴 v7.9.2: _publish_single_channel has_sub=None يُحسب من DB
 # =====================================================================
 
 class BackgroundTasks:
@@ -2319,8 +2365,9 @@ class BackgroundTasks:
     🕐 v7.8.4: _do_backup يستخدم utc_now().
     🔍 v7.8.5: monitor_pool + monitor_pool_alert.
     🚀 v7.8.6: auto_publish يحذف batch subs المكرر.
-    🔴 v7.9.0: sleep خارج semaphore — يمنع احتجازها حتى 60 دقيقة.
-    ✅ v7.9.1: auto_publish يعمل بـ 12 دقيقة كما الأصلي (بدون حلقة موحّدة).
+    🔴 v7.9.0: sleep خارج semaphore.
+    ✅ v7.9.1: auto_publish يعمل بـ 12 دقيقة كما الأصلي.
+    🔴 v7.9.2: _read_pool_stats asyncmy + has_sub محسوب.
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
@@ -2345,11 +2392,16 @@ class BackgroundTasks:
         return 60
 
     # =================================================================
-    # 🔍 v7.8.5: مراقبة Pool
+    # 🔍 v7.8.5 + v7.9.2: مراقبة Pool
     # =================================================================
 
     @staticmethod
     def _read_pool_stats() -> Optional[Dict[str, Any]]:
+        """
+        ✅ v7.9.2: يدعم asyncmy (maxsize/size/freesize) بجانب
+        asyncpg (get_max_size/get_size/get_idle_size).
+        قبل هذا الإصلاح: صامت تماماً على MySQL.
+        """
         try:
             if not (getattr(DB, 'USE_POSTGRES', False) or getattr(DB, 'USE_MYSQL', False)):
                 return None
@@ -2357,13 +2409,21 @@ class BackgroundTasks:
             if pool is None:
                 return None
 
+            # asyncpg style (methods)
             max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
             current_size = pool.get_size() if hasattr(pool, 'get_size') else None
             idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
 
+            # ✅ v7.9.2: asyncmy style (properties)
+            if max_size is None:
+                max_size = getattr(pool, 'maxsize', None)
+            if current_size is None:
+                current_size = getattr(pool, 'size', None)
+            if idle_size is None:
+                idle_size = getattr(pool, 'freesize', None)
+
             if max_size is None or current_size is None:
                 return None
-
             if idle_size is None:
                 idle_size = 0
 
@@ -2551,7 +2611,8 @@ class BackgroundTasks:
                                        has_sub: bool = None) -> bool:
         """
         🔴 v7.9.0: ينشر منشوراً واحداً ويعيد True عند النجاح.
-        لا ينام — النوم مسؤولية المُستدعي خارج الـ semaphore.
+        🔴 v7.9.2: has_sub=None → يُحسب من DB.
+        (النسخة السابقة: auto_publish يمرّر True دائماً → الفحص ميت)
         """
         user_id = None
         try:
@@ -2591,6 +2652,7 @@ class BackgroundTasks:
         🚀 v7.8.6: حذف batch subs check المكرر.
         🔴 v7.9.0: sleep بعد الخروج من semaphore (لا احتجاز طويل).
         ✅ v7.9.1: نفس منطق النشر الأصلي (12 دقيقة لكل قناة).
+        🔴 v7.9.2: has_sub=None (يُحسب داخل _publish_single_channel).
         """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
@@ -2623,7 +2685,8 @@ class BackgroundTasks:
                     if channel_id in active_tasks and not active_tasks[channel_id].done():
                         continue
                     published_count = ch.get('published_count', 0)
-                    has_sub = True
+                    # ✅ v7.9.2: has_sub=None — يُحسب داخل _publish_single_channel
+                    has_sub = None
 
                     # ✅ v7.9.0: النوم خارج الـ semaphore
                     # — يمنع احتجازها حتى 60 دقيقة أثناء sleep_seconds
