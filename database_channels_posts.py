@@ -6,7 +6,17 @@ database_channels_posts.py - دوال القنوات والمنشورات (Mixin
 ================================================================================
 يُستخدم مع Database عبر الوراثة المتعددة (Mixin).
 
-🆕 v7.5.20 (نفس السلوك الأصلي + إصلاحات آمنة):
+🆕 v7.5.21 (تحديد القناة التالية تلقائياً — مطابق لسلوك v7.5.20):
+    ✅ delete_channel: عند حذف القناة النشطة:
+       - يبحث عن أقدم قناة غير محظورة (ORDER BY id ASC) — نفس fallback الأصلي
+       - يحفظها كـ active_channel في DB (بدل NULL)
+       - يُبطل start_data_{user_id} أيضاً
+    ✅ النتيجة النهائية للمستخدم: نفس سلوك v7.5.20 بالحرف
+       (القناة الأقدم تصبح النشطة)
+    ✅ + تحسين: حفظ في DB بدل fallback كل مرة (أداء أفضل)
+    ✅ + تحسين: إبطال أشمل للكاش
+
+📌 v7.5.20 (نفس السلوك الأصلي + إصلاحات آمنة):
     ✅ get_channel_by_id: نفس السلوك (channel_id فقط) — بلا تغيير
     ✅ invalidate: positional دائماً (user_id) — كما الأصلي
     ✅ إضافات آمنة فقط (لا تكسر أي استدعاء):
@@ -260,9 +270,10 @@ class ChannelsPostsMixin:
                         ch_db_id, default=0,
                     )
 
-                    # ─── 8) إبطال الكاش — نفس الأصلي (positional) ───
+                    # ─── 8) إبطال الكاش ───
                     await internal_cache.invalidate(f"user_{user_id}")
                     await internal_cache.invalidate(f"channel_info_{ch_db_id}")
+                    await internal_cache.invalidate(f"start_data_{user_id}")
                     if CACHE_AVAILABLE:
                         await invalidate_user_cache(user_id)
                         await channels_cache.invalidate(user_id)
@@ -417,36 +428,110 @@ class ChannelsPostsMixin:
         )
 
     async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
-        """حذف قناة + تنظيف active_channel"""
+        """
+        حذف قناة + تحديد القناة التالية تلقائياً إن كانت النشطة.
+
+        🆕 v7.5.21 (مطابق لسلوك v7.5.20):
+        - إذا كانت القناة المحذوفة هي النشطة:
+          1) ابحث عن **أقدم** قناة غير محظورة (ORDER BY id ASC)
+             ← نفس ترتيب fallback في get_active_channel
+          2) احفظها كـ active_channel في DB (بدل NULL)
+          3) أبلغ بالمستخدم (log)
+        - إذا لم تكن النشطة: لا تغيير في active_channel
+
+        المزايا مقارنة بـ v7.5.20:
+        - نفس النتيجة النهائية (القناة الأقدم)
+        - لكن محفوظة في DB بدل fallback كل مرة (أداء أفضل)
+        - إبطال أشمل للكاش (start_data_*, user_*_True/False)
+        """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, channels_cache, posts_cache
 
         try:
             async with self.transaction() as conn:
+                # ─── 1) اقرأ active_channel الحالي قبل الحذف ───
+                current_active = await self._fetchval_with_conn(
+                    conn,
+                    "SELECT active_channel FROM users WHERE user_id = ?",
+                    user_id,
+                )
+                was_active = False
+                if current_active is not None:
+                    try:
+                        was_active = int(current_active) == int(channel_db_id)
+                    except (TypeError, ValueError):
+                        was_active = False
+
+                # ─── 2) احذف القناة ───
                 deleted = await self._execute_with_conn(
-                    conn, "DELETE FROM user_channels WHERE id = ? AND user_id = ?",
+                    conn,
+                    "DELETE FROM user_channels WHERE id = ? AND user_id = ?",
                     channel_db_id, user_id,
                 )
-                if deleted > 0:
+                if deleted <= 0:
+                    return False
+
+                # ─── 3) حدّث active_channel ───
+                if was_active:
+                    # 🆕 v7.5.21: ابحث عن أقدم قناة غير محظورة
+                    # ORDER BY id ASC ← يطابق fallback الأصلي في get_active_channel
+                    next_row = await self._fetchone_with_conn(
+                        conn,
+                        "SELECT id, channel_name FROM user_channels "
+                        "WHERE user_id = ? AND banned = 0 "
+                        "ORDER BY id ASC LIMIT 1",
+                        user_id,
+                    )
+                    new_active_id = next_row["id"] if next_row else None
+
+                    await self._execute_with_conn(
+                        conn,
+                        "UPDATE users SET active_channel = ? WHERE user_id = ?",
+                        new_active_id, user_id,
+                    )
+
+                    if new_active_id:
+                        new_name = (
+                            next_row.get("channel_name")
+                            if isinstance(next_row, dict)
+                            else None
+                        ) or f"#{new_active_id}"
+                        logger.info(
+                            f"🔄 المستخدم {user_id}: حذف القناة النشطة "
+                            f"{channel_db_id} → تحويل تلقائي إلى "
+                            f"'{new_name}' (id={new_active_id})"
+                        )
+                    else:
+                        logger.info(
+                            f"🔄 المستخدم {user_id}: حذف آخر قناة نشطة "
+                            f"→ active_channel = NULL"
+                        )
+                else:
+                    # احتياط: نظّف فقط إن كانت تشير إلى القناة المحذوفة
                     await self._execute_with_conn(
                         conn,
                         "UPDATE users SET active_channel = NULL "
                         "WHERE user_id = ? AND active_channel = ?",
                         user_id, channel_db_id,
                     )
-                    await internal_cache.invalidate(f"user_{user_id}")
-                    await internal_cache.invalidate(f"channels_{user_id}")
-                    await internal_cache.invalidate(f"channel_info_{channel_db_id}")
-                    if CACHE_AVAILABLE:
-                        await invalidate_user_cache(user_id)
-                        await channels_cache.invalidate(user_id)
-                        # ✅ v7.5.20: إضافة آمنة — لا تكسر السلوك
-                        try:
-                            await posts_cache.invalidate(channel_db_id)
-                        except Exception:
-                            pass
-                    return True
-                return False
+
+                # ─── 4) إبطال الكاش (شامل) ───
+                await internal_cache.invalidate(f"user_{user_id}")
+                await internal_cache.invalidate(f"channels_{user_id}")
+                await internal_cache.invalidate(f"channel_info_{channel_db_id}")
+                await internal_cache.invalidate(f"start_data_{user_id}")
+                await internal_cache.invalidate(f"user_{user_id}_True")
+                await internal_cache.invalidate(f"user_{user_id}_False")
+
+                if CACHE_AVAILABLE:
+                    await invalidate_user_cache(user_id)
+                    await channels_cache.invalidate(user_id)
+                    try:
+                        await posts_cache.invalidate(channel_db_id)
+                    except Exception:
+                        pass
+
+                return True
         except Exception as e:
             logger.error(f"❌ Error in delete_channel: {e}", exc_info=True)
             return False
@@ -626,14 +711,14 @@ class ChannelsPostsMixin:
                             )
                         total += inserted
 
-                    # ─── 7) إبطال الكاش — نفس الأصلي + إضافة آمنة ───
+                    # ─── 7) إبطال الكاش ───
                     if total > 0:
                         await internal_cache.invalidate(f"user_{user_id}")
                         await internal_cache.invalidate(f"channel_info_{channel_db_id}")
+                        await internal_cache.invalidate(f"start_data_{user_id}")
                         if CACHE_AVAILABLE:
                             await invalidate_user_cache(user_id)
                             await posts_cache.invalidate(channel_db_id)
-                            # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
                             await channels_cache.invalidate(user_id)
                     return total
         except Exception as e:
@@ -746,10 +831,10 @@ class ChannelsPostsMixin:
         if result:
             await internal_cache.invalidate(f"user_{user_id}")
             await internal_cache.invalidate(f"channel_info_{channel_db_id}")
+            await internal_cache.invalidate(f"start_data_{user_id}")
             if CACHE_AVAILABLE:
                 await invalidate_user_cache(user_id)
                 await posts_cache.invalidate(channel_db_id)
-                # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
                 await channels_cache.invalidate(user_id)
         return result
 
@@ -796,13 +881,13 @@ class ChannelsPostsMixin:
                     default=0,
                 )
 
-                # إبطال الكاش — نفس الأصلي + إضافة آمنة
+                # إبطال الكاش
                 await internal_cache.invalidate(f"user_{user_id}")
                 await internal_cache.invalidate(f"channel_info_{channel_db_id}")
+                await internal_cache.invalidate(f"start_data_{user_id}")
                 if CACHE_AVAILABLE:
                     await invalidate_user_cache(user_id)
                     await posts_cache.invalidate(channel_db_id)
-                    # ✅ v7.5.20: إضافة channels_cache (positional — آمن)
                     await channels_cache.invalidate(user_id)
 
                 logger.info(
