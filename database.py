@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.18 — MV-ACTIVE-SUBS-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.19 — SLOW-QUERIES-ALIAS-FIX)
 ================================================================================
+🆕 v7.7.19 (SLOW-QUERIES-ALIAS-FIX):
+  ✅ get_slow_queries = get_slow_queries_report (alias)
+     → يحل AttributeError في handlers_callback.py v9.4.x
+       عند الضغط على زر "🐌 استعلامات بطيئة"
+  ✅ _get_caller_info: inspect.stack(context=0) بدل inspect.stack()
+     → توفير 30–100ms لكل استعلام بطيء (لا يقرأ source code)
+  ✅ _get_caller_info: skip_frames: int = 0 (افتراضي متوافق مع المُستدعي)
+  ✅ _ensure_materialized_views_postgres: تحديث _mv_last_refresh_mono
+     بعد التعبئة الأولى (يمنع refresh مزدوج عند الإقلاع)
+
 🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX):
   ✅ _ensure_materialized_views_postgres() : إنشاء mv_active_user_limits
   ✅ _maybe_refresh_mv() : تحديث MV بدعم cooldown 5 دقائق
@@ -1911,12 +1921,12 @@ class Database(
             raise
 
     # =================================================================
-    # ✅ v7.7.17: استخراج مصدر الاستعلام من الـstack
+    # ✅ v7.7.19: استخراج مصدر الاستعلام من الـstack
     # =================================================================
 
-    def _get_caller_info(self, skip_frames: int = 2) -> Dict[str, Any]:
+    def _get_caller_info(self, skip_frames: int = 0) -> Dict[str, Any]:
         """
-        ✅ v7.7.17: استخراج معلومات المستدعي من الـstack trace مع
+        ✅ v7.7.19: استخراج معلومات المستدعي من الـstack trace مع
         فلترة صارمة لـ asyncio / stdlib / site-packages.
 
         Returns:
@@ -1928,9 +1938,13 @@ class Database(
             }
 
         skip_frames: عدد الإطارات الخارجية التي يتم تخطيها من البداية.
+
+        🆕 v7.7.19: inspect.stack(context=0) — لا يقرأ source code
+        → توفير 30–100ms لكل استعلام بطيء
         """
         try:
-            stack = inspect.stack()
+            # ✅ v7.7.19: context=0 يمنع قراءة source code لكل إطار
+            stack = inspect.stack(context=0)
             result: Dict[str, Any] = {
                 'file': '?',
                 'line': 0,
@@ -1994,6 +2008,9 @@ class Database(
         except Exception as e:
             logger.warning(f"⚠️ get_slow_queries_report: {e}")
             return []
+
+    # ✅ v7.7.19: alias متوافق مع handlers_callback v9.4.x
+    get_slow_queries = get_slow_queries_report
 
     async def clear_slow_queries_log(self) -> int:
         """✅ v7.7.17: مسح سجل الاستعلامات البطيئة."""
@@ -2092,6 +2109,9 @@ class Database(
         يُستدعى مرة واحدة في bootstrap.
 
         يعيد True إذا كان MV متاحاً للاستخدام.
+
+        🆕 v7.7.19: بعد التعبئة الأولى، نضبط _mv_last_refresh_mono
+        لمنع refresh مزدوج عند الإقلاع.
         """
         if not USE_POSTGRES:
             self._mv_available = False
@@ -2147,6 +2167,9 @@ class Database(
                         "mv_active_user_limits"
                     )
                     logger.info("✅ mv_active_user_limits مُعبّأ")
+                    # ✅ v7.7.19: علّم أننا حدّثناها للتو
+                    # (يمنع _maybe_refresh_mv من التحديث الفوري)
+                    self._mv_last_refresh_mono = time.monotonic()
                 except Exception as rf_e:
                     logger.debug(f"⚠️ تعبئة MV: {rf_e}")
 
