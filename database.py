@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.28 — HARDENING-AFTER-AUDIT)
+database.py - قاعدة البيانات المتكاملة (v7.7.29 — POST-AUDIT-HARDENING)
 ================================================================================
+🆕 v7.7.29 (POST-AUDIT-HARDENING — 13 إصلاحاً دقيقاً):
+  ✅ _MIGRATIONS_TYPES ثابت وحيد — يمنع footgun بين _migrate_schema و hash
+  ✅ _import_auto_replies: ON CONFLICT DO UPDATE (تحديثات لم تكن تصل)
+  ✅ _maybe_refresh_mv: تحديث timestamp في finally (منع hot loop)
+  ✅ get_channels_to_publish: MV refresh في background
+  ✅ mark_users_as_blocked: فحص existence بدل عدّ len(batch)
+  ✅ _validate_column_def: إزالة الكود الميت — توضيح سلوك أي identifier
+  ✅ _get_user_lock: OrderedDict LRU (بدل sorted O(n log n))
+  ✅ get_user_language: `or "ar"` بدل get(default=)
+  ✅ get_user: cache-hit consistent مع cache-miss عند include_stats=False
+  ✅ user_cache.invalidate(None): يمسح internal_cache بالكامل
+  ✅ expire_penalties: FOR UPDATE SKIP LOCKED (PG/MySQL) — منع أرشفة مزدوجة
+  ✅ _destroy_connection (MySQL): لا يُعيد conn مكسور للـ pool
+  ✅ _compute_tables_hash: يشمل source DDL + توافق خلفي مع v7.7.28
+      (لا إعادة create_tables عند الترقية الأولى — zero downtime)
+
 🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات دقيقة):
-  ✅ connection(): except BaseException — يلتقط CancelledError ويضمن rollback
-  ✅ get_pool_stats: دعم asyncmy (maxsize/size/freesize) بجانب asyncpg
-  ✅ mark_users_as_blocked: يستدعي _invalidate_user_cache_keys الكاملة
-  ✅ update_schedule: فحص وجود الصف قبل الاعتماد على rowcount (MySQL)
+  ✅ connection(): except BaseException — يلتقط CancelledError
+  ✅ get_pool_stats: دعم asyncmy (maxsize/size/freesize)
+  ✅ mark_users_as_blocked: _invalidate_user_cache_keys الكاملة
+  ✅ update_schedule: فحص وجود الصف قبل rowcount
   ✅ add_penalty (SQLite): إغلاق cursor في finally
   ✅ _convert_placeholders (PG): تخطي $$...$$ و $tag$...$tag$
-  ✅ _ensure_bigint_ids (MySQL): قراءة COLUMN_TYPE — يحفظ UNSIGNED/ZEROFILL
-  ✅ _compute_bootstrap_hash: يشمل محتوى migrations dict
-  ✅ _fetch_all_columns_map (SQLite): لا تفشل صامتة — تُسجّل warning
+  ✅ _ensure_bigint_ids (MySQL): COLUMN_TYPE — يحفظ UNSIGNED/ZEROFILL
+  ✅ _compute_bootstrap_hash: يشمل محتوى migrations
+  ✅ _fetch_all_columns_map (SQLite): warning بدل صمت
 
 🆕 v7.7.27 (CACHE-COHERENCE):
   ✅ Cache gap: wrapper يربط user_cache.invalidate ↔ internal_cache
   ✅ _invalidate_user_cache_keys: 12 مفتاحاً (has_active_sub_*)
   ✅ _import_*: rowcount بدل len(batch)
-  ✅ _validate_column_def: يسمح بأي identifier
-
-🆕 v7.7.26 (CRITICAL-FIXES):
-  ✅ _convert_insert_or_replace (MySQL): DEFAULT(col) → DEFAULT
-  ✅ _convert_insert_or_replace (PG): توثيق REPLACE semantics
-  ✅ has_active_subscription: تجاوز Mixin دائماً (p.is_active=1)
-
-🆕 v7.7.25 (AUDIT-HARDENING): 18 إصلاح
-🆕 v7.7.24 (CONSISTENCY)
-🆕 v7.7.23 (FINAL-CONSISTENCY-FIX)
-🆕 v7.7.22 (BANNED-WORDS-FULL-SYNC)
-🆕 v7.7.21 (PRECISE-PUBLISH-INTERVAL)
 ================================================================================
 """
 
@@ -68,7 +72,7 @@ from typing import (
     Callable, Awaitable, Set,
 )
 from contextlib import asynccontextmanager
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 
 # =====================================================================
 # 0) كشف نوع قاعدة البيانات
@@ -509,6 +513,9 @@ except ImportError:
 _USER_CACHE_INVALIDATE_ORIG = user_cache.invalidate
 
 async def _user_cache_invalidate_wrapper(key=None):
+    """
+    🆕 v7.7.29: key=None → يمسح internal_cache بالكامل (coherence).
+    """
     try:
         await _USER_CACHE_INVALIDATE_ORIG(key)
     except Exception as e:
@@ -516,6 +523,10 @@ async def _user_cache_invalidate_wrapper(key=None):
             f"⚠️ user_cache.invalidate original فشل: {e}"
         )
     if key is None:
+        try:
+            await internal_cache.clear()
+        except Exception as e:
+            logger.debug(f"internal_cache.clear (wrapper): {e}")
         return
     try:
         uid = key
@@ -563,6 +574,107 @@ SETTINGS_BATCH_CACHE_TTL = 120
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true"
 )
+
+# =====================================================================
+# 0.8) v7.7.29 — MIGRATIONS ثابت وحيد (single source of truth)
+# =====================================================================
+
+_MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
+    "group_security": [
+        ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
+        ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
+        ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
+        ("mute_default_duration", "INTEGER DEFAULT 3600"),
+        ("ban_default_duration", "INTEGER DEFAULT 0"),
+        ("warn_default_duration", "INTEGER DEFAULT 0"),
+        ("restrict_default_duration", "INTEGER DEFAULT 1800"),
+        ("enable_timed_penalties", "INTEGER DEFAULT 1"),
+        ("auto_remove_penalties", "INTEGER DEFAULT 1"),
+        ("violation_strikes", "INTEGER DEFAULT 3"),
+        ("violation_duration", "INTEGER DEFAULT 60"),
+        ("delete_links", "INTEGER DEFAULT 0"),
+        ("mentions", "INTEGER DEFAULT 0"),
+        ("delete_videos", "INTEGER DEFAULT 0"),
+        ("delete_audio", "INTEGER DEFAULT 0"),
+        ("delete_animation", "INTEGER DEFAULT 0"),
+        ("delete_service", "INTEGER DEFAULT 0"),
+        ("delete_documents", "INTEGER DEFAULT 0"),
+        ("delete_stickers", "INTEGER DEFAULT 0"),
+        ("delete_forwarded", "INTEGER DEFAULT 0"),
+        ("delete_polls", "INTEGER DEFAULT 0"),
+        ("delete_games", "INTEGER DEFAULT 0"),
+        ("delete_voice", "INTEGER DEFAULT 0"),
+        ("delete_video_note", "INTEGER DEFAULT 0"),
+        ("delete_photos", "INTEGER DEFAULT 0"),
+        ("delete_banned_words", "INTEGER DEFAULT 0"),
+        ("antiflood_enabled", "INTEGER DEFAULT 0"),
+        ("antiflood_messages", "INTEGER DEFAULT 5"),
+        ("antiflood_seconds", "INTEGER DEFAULT 10"),
+        ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
+        ("night_mode_enabled", "INTEGER DEFAULT 0"),
+        ("night_mode_start", "TEXT DEFAULT '23:00'"),
+        ("night_mode_end", "TEXT DEFAULT '07:00'"),
+        ("night_mode_action", "TEXT DEFAULT 'mute'"),
+        ("warn_enabled", "INTEGER DEFAULT 0"),
+        ("max_warnings", "INTEGER DEFAULT 3"),
+        ("warn_penalty", "TEXT DEFAULT 'mute'"),
+        ("welcome_enabled", "INTEGER DEFAULT 0"),
+        ("welcome_text", "TEXT DEFAULT ''"),
+        ("goodbye_enabled", "INTEGER DEFAULT 0"),
+        ("goodbye_text", "TEXT DEFAULT ''"),
+        ("auto_approve_join", "INTEGER DEFAULT 0"),
+        ("auto_reject_join", "INTEGER DEFAULT 0"),
+        ("slow_mode", "INTEGER DEFAULT 0"),
+        ("slow_mode_seconds", "INTEGER DEFAULT 0"),
+        ("max_message_length", "INTEGER DEFAULT 0"),
+        ("nsfw_enabled", "INTEGER DEFAULT 0"),
+        ("nsfw_threshold", "REAL DEFAULT 0.8"),
+        ("nsfw_filter", "INTEGER DEFAULT 0"),
+        ("auto_penalty", "TEXT DEFAULT 'mute'"),
+        ("auto_mute_duration", "INTEGER DEFAULT 3600"),
+        ("delete_penalty", "INTEGER DEFAULT 0"),
+        ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
+        ("delete_penalty_messages", "INTEGER DEFAULT 0"),
+        ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+        ("violation_penalty", "TEXT DEFAULT 'none'"),
+    ],
+    "users": [
+        ("active_channel", "INTEGER DEFAULT NULL")
+    ],
+    "bot_groups": [
+        ("log_channel_id", "BIGINT DEFAULT NULL"),
+    ],
+    "auto_replies": [
+        ("usage_count", "INTEGER DEFAULT 0")
+    ],
+    "anonymous_admins": [("user_id", "BIGINT")],
+    "posts": [
+        ("text_hash", "TEXT DEFAULT ''"),
+        ("published_at", "TIMESTAMP"),
+        ("fail_count", "INTEGER DEFAULT 0"),
+    ],
+    "user_reminder_settings": [
+        ("subscription_reminder", "INTEGER DEFAULT 1"),
+        ("daily_stats_reminder", "INTEGER DEFAULT 0"),
+        ("weekly_report", "INTEGER DEFAULT 1"),
+        ("reminder_days_before", "INTEGER DEFAULT 3"),
+        ("last_daily_sent", "TIMESTAMP"),
+        ("last_weekly_sent", "TIMESTAMP"),
+        ("last_subscription_sent", "TIMESTAMP"),
+        ("last_reminder_sent", "TIMESTAMP"),
+        ("notification_lang", "TEXT DEFAULT 'ar'"),
+    ],
+    "user_translation": [
+        ("lang", "TEXT DEFAULT 'off'")
+    ],
+}
+
+def _compute_migrations_signature() -> Dict[str, List[str]]:
+    """🆕 v7.7.29: مشتق من _MIGRATIONS_TYPES — لا تكرار يدوي."""
+    return {
+        table: [col for col, _ in cols]
+        for table, cols in _MIGRATIONS_TYPES.items()
+    }
 
 # =====================================================================
 # 1) ثوابت مساعدة
@@ -635,6 +747,12 @@ _ALLOWED_COL_KEYWORDS = frozenset({
 })
 
 def _validate_column_def(col_name: str, col_def: str) -> bool:
+    """
+    🆕 v7.7.29: التحقق يمنع الأحرف الخطرة فقط.
+    الأعمدة تأتي من _MIGRATIONS_TYPES الثابت (موثوقة) — لذلك يُسمح
+    بأي identifier [A-Z_][A-Z0-9_]* ككلمة قواعد.
+    _ALLOWED_COL_KEYWORDS محجوزة للتوثيق/التوسعة المستقبلية.
+    """
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
         logger.error(f"❌ اسم عمود غير صالح: {col_name}")
         return False
@@ -1228,12 +1346,10 @@ def _convert_placeholders(query: str) -> str:
         escape_next = False
         param_count = 0
         i = 0
-        # 🆕 v7.7.28: دعم PG dollar-quoted strings ($$...$$ و $tag$...$tag$)
         dollar_tag: Optional[str] = None
         while i < len(query):
             ch = query[i]
 
-            # داخل dollar-quoted string — نتخطى حتى النهاية
             if dollar_tag is not None:
                 if query.startswith(dollar_tag, i):
                     result.append(dollar_tag)
@@ -1268,7 +1384,6 @@ def _convert_placeholders(query: str) -> str:
                 in_single = not in_single; result.append(ch); i += 1; continue
             if ch == '"' and not in_single and not in_comment and not in_block:
                 in_double = not in_double; result.append(ch); i += 1; continue
-            # 🆕 v7.7.28: كشف $tag$ أو $$ — قبل معالجة $N
             if (ch == "$" and not in_single and not in_double
                     and not in_comment and not in_block):
                 j = i + 1
@@ -1282,7 +1397,6 @@ def _convert_placeholders(query: str) -> str:
                         dollar_tag = tag
                         i = j + 1
                         continue
-                # $N — placeholder رقمي
                 j = i + 1
                 while j < len(query) and query[j].isdigit():
                     j += 1
@@ -1980,7 +2094,7 @@ class Database(
             self._pool_none_warned = False
             self._recovering_pool = False
 
-            self._user_locks: Dict[int, asyncio.Lock] = {}
+            self._user_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
             self._channel_locks: Dict[int, asyncio.Lock] = {}
             self._user_locks_last_access: Dict[int, float] = {}
             self._user_locks_lock = asyncio.Lock()
@@ -2160,22 +2274,16 @@ class Database(
             return 0.0
 
     async def get_pool_stats(self) -> Dict[str, Any]:
-        """
-        🆕 v7.7.28: دعم asyncmy (maxsize/size/freesize properties)
-        بجانب asyncpg (get_max_size/get_size/get_idle_size methods).
-        """
         if not (USE_POSTGRES or USE_MYSQL):
             return {"type": "sqlite_or_other"}
         pool = self._pool
         if pool is None:
             return {"type": "none", "error": "pool_is_none"}
         try:
-            # asyncpg style (methods)
             max_size = pool.get_max_size() if hasattr(pool, 'get_max_size') else None
             current_size = pool.get_size() if hasattr(pool, 'get_size') else None
             idle_size = pool.get_idle_size() if hasattr(pool, 'get_idle_size') else None
 
-            # 🆕 v7.7.28: asyncmy style (properties)
             if max_size is None:
                 max_size = getattr(pool, 'maxsize', None)
             if current_size is None:
@@ -2305,12 +2413,13 @@ class Database(
                             "REFRESH MATERIALIZED VIEW "
                             "mv_active_user_limits"
                         )
-                self._mv_last_refresh_mono = time.monotonic()
                 logger.debug("🔄 mv_active_user_limits محدّث")
                 return True
             except Exception as e:
                 logger.warning(f"⚠️ MV refresh: {e}")
                 return False
+            finally:
+                self._mv_last_refresh_mono = time.monotonic()
 
     def _spawn_bg_task(self, coro) -> Optional[asyncio.Task]:
         try:
@@ -2952,17 +3061,19 @@ class Database(
                     close_result = conn.close()
                     if inspect.isawaitable(close_result):
                         await close_result
+                    destroyed = True
                 except Exception as ce:
                     logger.debug(f"conn.close fallback: {ce}")
 
-            try:
-                release = getattr(self._pool, "release", None)
-                if callable(release):
-                    rel = release(conn)
-                    if inspect.isawaitable(rel):
-                        await rel
-            except Exception as re:
-                logger.debug(f"release after destroy: {re}")
+            if not destroyed:
+                try:
+                    release = getattr(self._pool, "release", None)
+                    if callable(release):
+                        rel = release(conn)
+                        if inspect.isawaitable(rel):
+                            await rel
+                except Exception as re:
+                    logger.debug(f"release after destroy: {re}")
         else:
             self._untrack_sqlite_conn(conn)
             try:
@@ -2976,9 +3087,6 @@ class Database(
 
     @asynccontextmanager
     async def connection(self):
-        """
-        🆕 v7.7.28: except BaseException — يلتقط CancelledError.
-        """
         conn = await self._get_connection()
         destroy = False
         try:
@@ -3580,20 +3688,23 @@ class Database(
 
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         async with self._user_locks_lock:
+            existing = self._user_locks.get(user_id)
+            if existing is not None:
+                self._user_locks.move_to_end(user_id)
+                self._user_locks_last_access[user_id] = time.monotonic()
+                return existing
+
             if len(self._user_locks) >= self._MAX_USER_LOCKS:
-                sorted_items = sorted(
-                    self._user_locks_last_access.items(),
-                    key=lambda x: x[1],
-                )
-                to_remove = []
-                target = max(1, len(sorted_items) // 4)
-                for uid, _ in sorted_items:
-                    if len(to_remove) >= target:
+                target = max(1, self._MAX_USER_LOCKS // 4)
+                evicted = 0
+                keys_to_del: List[int] = []
+                for uid, lock in self._user_locks.items():
+                    if evicted >= target:
                         break
-                    lock = self._user_locks.get(uid)
-                    if lock and not lock.locked():
-                        to_remove.append(uid)
-                for uid in to_remove:
+                    if not lock.locked():
+                        keys_to_del.append(uid)
+                        evicted += 1
+                for uid in keys_to_del:
                     self._user_locks.pop(uid, None)
                     self._user_locks_last_access.pop(uid, None)
                 if len(self._user_locks) >= self._MAX_USER_LOCKS:
@@ -3604,10 +3715,11 @@ class Database(
                             f"— يسمح بالنمو"
                         )
                         self._overflow_user_lock_warned = True
-            if user_id not in self._user_locks:
-                self._user_locks[user_id] = asyncio.Lock()
+
+            new_lock = asyncio.Lock()
+            self._user_locks[user_id] = new_lock
             self._user_locks_last_access[user_id] = time.monotonic()
-            return self._user_locks[user_id]
+            return new_lock
 
     async def _get_channel_lock(
         self, channel_db_id: int
@@ -4085,9 +4197,6 @@ class Database(
             return False
 
     async def _ensure_bigint_ids(self, conn) -> int:
-        """
-        🆕 v7.7.28: قراءة COLUMN_TYPE الكامل — يحفظ UNSIGNED/ZEROFILL.
-        """
         if DB_TYPE == "sqlite":
             return 0
 
@@ -4169,7 +4278,6 @@ class Database(
                             )
                             continue
 
-                        # 🆕 v7.7.28: استخرج UNSIGNED/ZEROFILL من COLUMN_TYPE
                         type_modifiers = ""
                         if "unsigned" in column_type_full:
                             type_modifiers += " UNSIGNED"
@@ -4239,95 +4347,7 @@ class Database(
             except Exception:
                 pass
         try:
-            migrations = {
-                "group_security": [
-                    ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
-                    ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
-                    ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
-                    ("mute_default_duration", "INTEGER DEFAULT 3600"),
-                    ("ban_default_duration", "INTEGER DEFAULT 0"),
-                    ("warn_default_duration", "INTEGER DEFAULT 0"),
-                    ("restrict_default_duration", "INTEGER DEFAULT 1800"),
-                    ("enable_timed_penalties", "INTEGER DEFAULT 1"),
-                    ("auto_remove_penalties", "INTEGER DEFAULT 1"),
-                    ("violation_strikes", "INTEGER DEFAULT 3"),
-                    ("violation_duration", "INTEGER DEFAULT 60"),
-                    ("delete_links", "INTEGER DEFAULT 0"),
-                    ("mentions", "INTEGER DEFAULT 0"),
-                    ("delete_videos", "INTEGER DEFAULT 0"),
-                    ("delete_audio", "INTEGER DEFAULT 0"),
-                    ("delete_animation", "INTEGER DEFAULT 0"),
-                    ("delete_service", "INTEGER DEFAULT 0"),
-                    ("delete_documents", "INTEGER DEFAULT 0"),
-                    ("delete_stickers", "INTEGER DEFAULT 0"),
-                    ("delete_forwarded", "INTEGER DEFAULT 0"),
-                    ("delete_polls", "INTEGER DEFAULT 0"),
-                    ("delete_games", "INTEGER DEFAULT 0"),
-                    ("delete_voice", "INTEGER DEFAULT 0"),
-                    ("delete_video_note", "INTEGER DEFAULT 0"),
-                    ("delete_photos", "INTEGER DEFAULT 0"),
-                    ("delete_banned_words", "INTEGER DEFAULT 0"),
-                    ("antiflood_enabled", "INTEGER DEFAULT 0"),
-                    ("antiflood_messages", "INTEGER DEFAULT 5"),
-                    ("antiflood_seconds", "INTEGER DEFAULT 10"),
-                    ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
-                    ("night_mode_enabled", "INTEGER DEFAULT 0"),
-                    ("night_mode_start", "TEXT DEFAULT '23:00'"),
-                    ("night_mode_end", "TEXT DEFAULT '07:00'"),
-                    ("night_mode_action", "TEXT DEFAULT 'mute'"),
-                    ("warn_enabled", "INTEGER DEFAULT 0"),
-                    ("max_warnings", "INTEGER DEFAULT 3"),
-                    ("warn_penalty", "TEXT DEFAULT 'mute'"),
-                    ("welcome_enabled", "INTEGER DEFAULT 0"),
-                    ("welcome_text", "TEXT DEFAULT ''"),
-                    ("goodbye_enabled", "INTEGER DEFAULT 0"),
-                    ("goodbye_text", "TEXT DEFAULT ''"),
-                    ("auto_approve_join", "INTEGER DEFAULT 0"),
-                    ("auto_reject_join", "INTEGER DEFAULT 0"),
-                    ("slow_mode", "INTEGER DEFAULT 0"),
-                    ("slow_mode_seconds", "INTEGER DEFAULT 0"),
-                    ("max_message_length", "INTEGER DEFAULT 0"),
-                    ("nsfw_enabled", "INTEGER DEFAULT 0"),
-                    ("nsfw_threshold", "REAL DEFAULT 0.8"),
-                    ("nsfw_filter", "INTEGER DEFAULT 0"),
-                    ("auto_penalty", "TEXT DEFAULT 'mute'"),
-                    ("auto_mute_duration", "INTEGER DEFAULT 3600"),
-                    ("delete_penalty", "INTEGER DEFAULT 0"),
-                    ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
-                    ("delete_penalty_messages", "INTEGER DEFAULT 0"),
-                    ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
-                    ("violation_penalty", "TEXT DEFAULT 'none'"),
-                ],
-                "users": [
-                    ("active_channel", "INTEGER DEFAULT NULL")
-                ],
-                "bot_groups": [
-                    ("log_channel_id", "BIGINT DEFAULT NULL"),
-                ],
-                "auto_replies": [
-                    ("usage_count", "INTEGER DEFAULT 0")
-                ],
-                "anonymous_admins": [("user_id", "BIGINT")],
-                "posts": [
-                    ("text_hash", "TEXT DEFAULT ''"),
-                    ("published_at", "TIMESTAMP"),
-                    ("fail_count", "INTEGER DEFAULT 0"),
-                ],
-                "user_reminder_settings": [
-                    ("subscription_reminder", "INTEGER DEFAULT 1"),
-                    ("daily_stats_reminder", "INTEGER DEFAULT 0"),
-                    ("weekly_report", "INTEGER DEFAULT 1"),
-                    ("reminder_days_before", "INTEGER DEFAULT 3"),
-                    ("last_daily_sent", "TIMESTAMP"),
-                    ("last_weekly_sent", "TIMESTAMP"),
-                    ("last_subscription_sent", "TIMESTAMP"),
-                    ("last_reminder_sent", "TIMESTAMP"),
-                    ("notification_lang", "TEXT DEFAULT 'ar'"),
-                ],
-                "user_translation": [
-                    ("lang", "TEXT DEFAULT 'off'")
-                ],
-            }
+            migrations = _MIGRATIONS_TYPES
 
             t_fetch = time.monotonic()
             all_columns = await self._fetch_all_columns_map(
@@ -4730,10 +4750,6 @@ class Database(
                     pass
 
     async def _import_banned_words(self, conn):
-        """
-        مزامنة كاملة للملف مع DB.
-        hash لا يُحدَّث عند فشل أي دفعة.
-        """
         try:
             import banned_words
             BANNED_WORDS = getattr(banned_words, "BANNED_WORDS", [])
@@ -4875,10 +4891,6 @@ class Database(
             logger.error(f"❌ banned_words: {e}", exc_info=True)
 
     async def _import_auto_replies(self, conn):
-        """
-        مزامنة كاملة (حذف + إضافة).
-        hash لا يُحدَّث عند فشل جزئي.
-        """
         try:
             from auto_replies import AUTO_REPLIES
             if not AUTO_REPLIES:
@@ -4999,7 +5011,7 @@ class Database(
                         existing_global.add(key)
 
             to_delete = existing_global - set(normalized.keys())
-            to_insert = set(normalized.keys()) - existing_all
+            to_upsert = set(normalized.keys())
 
             had_failures = False
 
@@ -5022,12 +5034,12 @@ class Database(
                             f"⚠️ حذف رد {keyword}: {de}"
                         )
 
-            inserted_count = 0
-            if to_insert:
-                insert_list = list(to_insert)
+            upserted_count = 0
+            if to_upsert:
+                upsert_list = list(to_upsert)
                 batch_size = 100
-                for i in range(0, len(insert_list), batch_size):
-                    batch_keys = insert_list[i: i + batch_size]
+                for i in range(0, len(upsert_list), batch_size):
+                    batch_keys = upsert_list[i: i + batch_size]
                     batch_params = []
                     for key in batch_keys:
                         data = normalized[key]
@@ -5036,26 +5048,33 @@ class Database(
                             data["reply_type"],
                             data.get("media_id"),
                             data.get("buttons"),
-                            TimeUtils.utc_now(), 1, 0,
+                            TimeUtils.utc_now(), 1,
                         ))
                     try:
                         rc = await self._executemany_with_conn(
                             conn,
-                            """INSERT OR IGNORE INTO auto_replies
+                            """INSERT INTO auto_replies
                                (chat_id, keyword, reply, reply_type,
                                 reply_media_id, reply_buttons,
                                 created_at, is_active, usage_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                               ON CONFLICT (chat_id, keyword)
+                               DO UPDATE SET
+                                   reply = EXCLUDED.reply,
+                                   reply_type = EXCLUDED.reply_type,
+                                   reply_media_id = EXCLUDED.reply_media_id,
+                                   reply_buttons = EXCLUDED.reply_buttons,
+                                   is_active = 1""",
                             batch_params,
                         )
-                        inserted_count += (
+                        upserted_count += (
                             rc if isinstance(rc, int) and rc >= 0
                             else len(batch_keys)
                         )
                     except Exception as ie:
                         had_failures = True
                         logger.warning(
-                            f"⚠️ إدراج دفعة auto_replies: {ie}"
+                            f"⚠️ upsert دفعة auto_replies: {ie}"
                         )
 
             if had_failures:
@@ -5069,10 +5088,10 @@ class Database(
                 conn, "auto_replies_hash", current_hash
             )
 
-            if deleted_count or inserted_count:
+            if deleted_count or upserted_count:
                 logger.info(
                     f"🔄 auto_replies sync: "
-                    f"🗑️ -{deleted_count} | ➕ +{inserted_count}"
+                    f"🗑️ -{deleted_count} | ⬆️ ~{upserted_count}"
                 )
             else:
                 logger.info(
@@ -5097,56 +5116,10 @@ class Database(
         return []
 
     def _compute_bootstrap_hash(self) -> str:
-        """
-        🆕 v7.7.28: يشمل محتوى migrations — إضافة عمود جديد تُشغّل
-        الترحيل تلقائياً بلا الحاجة لتحديث BOOTSTRAP_DATA_VERSION يدوياً.
-        """
-        # محتوى migrations مُضمَّن — نفس البنية التي في _migrate_schema
-        migrations_signature = {
-            "group_security": [
-                "antiflood_penalty_duration",
-                "night_mode_action_duration",
-                "warn_penalty_duration", "mute_default_duration",
-                "ban_default_duration", "warn_default_duration",
-                "restrict_default_duration", "enable_timed_penalties",
-                "auto_remove_penalties", "violation_strikes",
-                "violation_duration", "delete_links", "mentions",
-                "delete_videos", "delete_audio", "delete_animation",
-                "delete_service", "delete_documents", "delete_stickers",
-                "delete_forwarded", "delete_polls", "delete_games",
-                "delete_voice", "delete_video_note", "delete_photos",
-                "delete_banned_words", "antiflood_enabled",
-                "antiflood_messages", "antiflood_seconds",
-                "antiflood_penalty", "night_mode_enabled",
-                "night_mode_start", "night_mode_end",
-                "night_mode_action", "warn_enabled", "max_warnings",
-                "warn_penalty", "welcome_enabled", "welcome_text",
-                "goodbye_enabled", "goodbye_text", "auto_approve_join",
-                "auto_reject_join", "slow_mode", "slow_mode_seconds",
-                "max_message_length", "nsfw_enabled", "nsfw_threshold",
-                "nsfw_filter", "auto_penalty", "auto_mute_duration",
-                "delete_penalty", "delete_penalty_duration",
-                "delete_penalty_messages", "violation_penalty_duration",
-                "violation_penalty",
-            ],
-            "users": ["active_channel"],
-            "bot_groups": ["log_channel_id"],
-            "auto_replies": ["usage_count"],
-            "anonymous_admins": ["user_id"],
-            "posts": ["text_hash", "published_at", "fail_count"],
-            "user_reminder_settings": [
-                "subscription_reminder", "daily_stats_reminder",
-                "weekly_report", "reminder_days_before",
-                "last_daily_sent", "last_weekly_sent",
-                "last_subscription_sent", "last_reminder_sent",
-                "notification_lang",
-            ],
-            "user_translation": ["lang"],
-        }
         data = {
             "schema": CURRENT_SCHEMA_VERSION,
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
-            "migrations": migrations_signature,
+            "migrations": _compute_migrations_signature(),
         }
         return hashlib.sha256(
             json.dumps(data, sort_keys=True).encode("utf-8")
@@ -5160,6 +5133,30 @@ class Database(
         ).hexdigest()
 
     def _compute_tables_hash(self) -> str:
+        """
+        يشمل source DDL عند توفره — يكتشف تعديلات database_tables.py.
+        """
+        parts = [f"tables_v{CURRENT_SCHEMA_VERSION}"]
+        for fn_name, fn in (
+            ("sqlite", create_tables_sqlite),
+            ("postgres", create_tables_postgres),
+            ("mysql", create_tables_mysql),
+        ):
+            if fn is None:
+                continue
+            try:
+                src = inspect.getsource(fn)
+                parts.append(
+                    f"{fn_name}:{hashlib.sha256(src.encode()).hexdigest()}"
+                )
+            except Exception:
+                pass
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _compute_legacy_tables_hash(self) -> str:
+        """
+        hash v7.7.28 القديم — يُستخدم للتحقق من التوافق عند الترقية.
+        """
         return hashlib.sha256(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
         ).hexdigest()
@@ -5204,9 +5201,6 @@ class Database(
     async def _fetch_all_columns_map(
         self, conn, tables: List[str]
     ) -> Dict[str, Set[str]]:
-        """
-        🆕 v7.7.28: لا تفشل صامتة على SQLite.
-        """
         result: Dict[str, Set[str]] = {}
         if not tables:
             return result
@@ -5263,7 +5257,6 @@ class Database(
                             except Exception:
                                 pass
                     except Exception as te:
-                        # 🆕 v7.7.28: لا تفشل صامتة — سجّل
                         logger.warning(
                             f"⚠️ _fetch_all_columns_map SQLite "
                             f"({table}): {te}"
@@ -5308,11 +5301,28 @@ class Database(
 
     async def _do_bootstrap_inner(self, conn) -> bool:
         tables_hash = self._compute_tables_hash()
+        legacy_tables_hash = self._compute_legacy_tables_hash()
         stored_tables_hash = await self._fetchval_with_conn(
             conn,
             _sql_get_setting_value(),
             "tables_hash",
         )
+
+        # 🆕 v7.7.29: توافق خلفي — لا إعادة create_tables عند الترقية
+        if stored_tables_hash == legacy_tables_hash:
+            logger.info(
+                "🔄 ترقية tables_hash من v7.7.28 → v7.7.29 "
+                "(بلا إعادة إنشاء جداول)"
+            )
+            ok = await self._upsert_setting(
+                conn, "tables_hash", tables_hash
+            )
+            if not ok:
+                logger.error(
+                    "❌ فشل حفظ tables_hash الجديد — سيُعاد "
+                    "في التشغيل التالي"
+                )
+            stored_tables_hash = tables_hash
 
         if stored_tables_hash != tables_hash:
             t_tables = time.monotonic()
@@ -5625,6 +5635,12 @@ class Database(
                             user_data["groups_count"] = (
                                 cached_data.get("groups_count", 0)
                             )
+                        else:
+                            user_data["has_subscription"] = False
+                            user_data["channels_count"] = 0
+                            user_data["groups_count"] = 0
+                            user_data["unpublished_posts"] = 0
+                            user_data["total_unpublished_posts"] = 0
                         return user_data
             cached = await internal_cache.get(
                 f"user_{user_id}_{include_stats}"
@@ -5970,7 +5986,7 @@ class Database(
             if CACHE_AVAILABLE:
                 cached_data = await user_cache.get(user_id)
                 if cached_data:
-                    return cached_data.get("language", "ar")
+                    return cached_data.get("language") or "ar"
             cached_lang = await internal_cache.get(f"lang_{user_id}")
             if cached_lang:
                 return cached_lang
@@ -6158,9 +6174,6 @@ class Database(
     async def mark_users_as_blocked(
         self, user_ids: List[int]
     ) -> int:
-        """
-        🆕 v7.7.28: يستخدم _invalidate_user_cache_keys (12 مفتاحاً).
-        """
         if not user_ids:
             return 0
         try:
@@ -6170,20 +6183,36 @@ class Database(
                 for i in range(0, len(user_ids), BATCH):
                     batch = user_ids[i: i + BATCH]
                     placeholders = ",".join(["?"] * len(batch))
-                    updated = await self._execute_with_conn(
-                        conn,
-                        f"UPDATE users SET banned = 1 "
-                        f"WHERE user_id IN ({placeholders})",
-                        *batch,
-                    )
-                    # 🆕 v7.7.28: على MySQL rowcount = "rows changed"
-                    # (لا matched). حظر مستخدم محظور مسبقاً = 0.
-                    # نستخدم len(batch) كتقدير أدنى.
-                    if USE_MYSQL and updated == 0:
-                        total_updated += len(batch)
+                    if USE_MYSQL and DB_TYPE == "mysql":
+                        try:
+                            cursor = await conn.cursor()
+                            try:
+                                await cursor.execute(
+                                    f"SELECT COUNT(*) FROM users "
+                                    f"WHERE user_id IN ({placeholders})",
+                                    tuple(batch),
+                                )
+                                row = await cursor.fetchone()
+                                existing_count = int(row[0]) if row else 0
+                            finally:
+                                await cursor.close()
+                        except Exception:
+                            existing_count = len(batch)
+                        await self._execute_with_conn(
+                            conn,
+                            f"UPDATE users SET banned = 1 "
+                            f"WHERE user_id IN ({placeholders})",
+                            *batch,
+                        )
+                        total_updated += existing_count
                     else:
+                        updated = await self._execute_with_conn(
+                            conn,
+                            f"UPDATE users SET banned = 1 "
+                            f"WHERE user_id IN ({placeholders})",
+                            *batch,
+                        )
                         total_updated += updated
-            # 🆕 v7.7.28: _invalidate_user_cache_keys الكاملة
             for uid in user_ids:
                 try:
                     await self._invalidate_user_cache_keys(uid)
@@ -6219,9 +6248,6 @@ class Database(
     async def update_schedule(
         self, channel_db_id: int, **kwargs
     ) -> bool:
-        """
-        🆕 v7.7.28: لا نعتمد على rowcount وحده — نفصل الوجود عن التحديث.
-        """
         if not kwargs:
             return False
         allowed_columns = {
@@ -6234,13 +6260,11 @@ class Database(
                 logger.error(f"❌ عمود غير صالح: {key}")
                 return False
 
-        # 🆕 v7.7.28: فحص الوجود أولاً
         exists = await self.fetchval(
             "SELECT 1 FROM schedule WHERE channel_db_id = ?",
             (channel_db_id,),
         )
         if not exists:
-            # أنشئ صفاً افتراضياً أولاً
             try:
                 await self.execute(
                     "INSERT OR IGNORE INTO schedule "
@@ -6261,7 +6285,6 @@ class Database(
         )
         try:
             await self.execute(query, tuple(values))
-            # نجاح التنفيذ = True بغض النظر عن rowcount
             return True
         except Exception as e:
             logger.error(f"❌ update_schedule فشل: {e}")
@@ -6312,7 +6335,7 @@ class Database(
                 global_interval = (
                     int(global_interval_str) if global_interval_str else 0
                 )
-            except (ValueError, TypeError, Exception):
+            except Exception:
                 global_interval = 0
 
             if schedule_type == "interval_minutes":
@@ -6393,9 +6416,9 @@ class Database(
 
         if USE_POSTGRES and self._mv_available:
             try:
-                await self._maybe_refresh_mv()
+                self._spawn_bg_task(self._maybe_refresh_mv())
             except Exception as e:
-                logger.debug(f"MV refresh call: {e}")
+                logger.debug(f"MV refresh spawn: {e}")
 
         if USE_POSTGRES and self._mv_available:
             query = f"""
@@ -6692,7 +6715,6 @@ class Database(
                         finally:
                             await cursor.close()
                     else:
-                        # 🆕 v7.7.28: إغلاق cursor في finally
                         cursor = await conn.execute(
                             "INSERT INTO user_penalties "
                             "(user_id, chat_id, penalty_type, "
@@ -6808,7 +6830,8 @@ class Database(
                             "  AND end_time IS NOT NULL "
                             "  AND end_time <= NOW() "
                             "ORDER BY id "
-                            "LIMIT $1",
+                            "LIMIT $1 "
+                            "FOR UPDATE SKIP LOCKED",
                             BATCH,
                         )
                         got_rows = len(ids)
@@ -6848,7 +6871,8 @@ class Database(
                             "  AND end_time IS NOT NULL "
                             "  AND end_time <= UTC_TIMESTAMP() "
                             "ORDER BY id "
-                            "LIMIT %s",
+                            "LIMIT %s "
+                            "FOR UPDATE SKIP LOCKED",
                             BATCH,
                         )
                         got_rows = len(ids)
@@ -7028,4 +7052,5 @@ __all__ = [
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
     "_adapt_params", "_table_exists",
+    "_MIGRATIONS_TYPES", "_compute_migrations_signature",
 ]
