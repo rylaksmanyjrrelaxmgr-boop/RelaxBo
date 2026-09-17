@@ -1,77 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.26 — CRITICAL-FIXES)
+database.py - قاعدة البيانات المتكاملة (v7.7.27 — CACHE-COHERENCE)
 ================================================================================
-🆕 v7.7.26 (CRITICAL-FIXES — 3 إصلاحات حرجة بعد v7.7.25):
-  ✅ _convert_insert_or_replace (MySQL): DEFAULT(col) → DEFAULT
-     — الصيغة الرسمية في MySQL لـ ON DUPLICATE KEY UPDATE:
-       `col` = DEFAULT  (بلا أقواس)
-     — DEFAULT(col) غير موثوق داخل ON DUPLICATE KEY UPDATE
-  ✅ _convert_insert_or_replace (PG): توثيق أن DO UPDATE SET ليس REPLACE
-     — لا يحذف الصف القديم، لا يُشغّل DELETE triggers/CASCADE
-  ✅ has_active_subscription: تجاوز Mixin دائماً
-     — نضمن تطبيق p.is_active = 1 كما في get_channels_to_publish
-     — يمنع تراجع v7.7.23 بصمت عند وجود Mixin قديم
+🆕 v7.7.27 (CACHE-COHERENCE — 3 إصلاحات دقيقة):
+  ✅ Cache gap في has_active_subscription:
+     — تغليف user_cache.invalidate ليشمل internal_cache تلقائياً
+     — Mixins تستدعي user_cache.invalidate → تُبطِل has_active_sub_* أيضاً
+     — يمنع نافذة 60s من "غير مشترك" بعد إنشاء اشتراك فعلي
+  ✅ _invalidate_user_cache_keys: توسيع القائمة (has_active_sub_* + 3 إضافية)
+     — يضمن اتساقاً حتى لو نُودي مباشرة
+  ✅ _import_banned_words + _import_auto_replies: rowcount بدل len(batch)
+     — إحصاء دقيق بدل افتراض نجاح كل الصفوف
+  ✅ _validate_column_def: السماح بأي identifier SQL صالح
+     — يسمح بـ CHECK (x > 0) و REFERENCES other(id)
+     — المصدر ثابت داخلي (migrations dict) — لا مدخل مستخدم
 
-🆕 v7.7.25 (AUDIT-HARDENING — 18 إصلاح):
+🆕 v7.7.26 (CRITICAL-FIXES):
+  ✅ _convert_insert_or_replace (MySQL): DEFAULT(col) → DEFAULT
+  ✅ _convert_insert_or_replace (PG): توثيق DO UPDATE SET ليس REPLACE
+  ✅ has_active_subscription: تجاوز Mixin دائماً (يضمن p.is_active=1)
+
+🆕 v7.7.25 (AUDIT-HARDENING):
   ✅ _load_mixin: fallback فريد لكل Mixin
-  ✅ _convert_insert_or_replace: REPLACE semantics (قبل تصحيح v7.7.26)
   ✅ _fetchval_with_conn: توحيد NULL → default على كل DBs
-  ✅ connection(): destroy الاتصال عند فشل commit
-  ✅ _import_auto_replies: جلب كل الصفوف لا chat_id=-1 فقط
+  ✅ connection(): destroy عند فشل commit
+  ✅ _import_auto_replies: جلب كل الصفوف
   ✅ _destroy_connection (MySQL): إتلاف فعلي
   ✅ _find_best_conflict_target (PG): relnamespace filter
   ✅ get_channels_to_publish: MAX_POST_FAIL_COUNT
-  ✅ حذف _mysql_random (ميتة)
   ✅ _upsert_setting: إرجاع bool
   ✅ _get_unique_columns: قفل cache
-  ✅ _execute_with_logging: قص 500 بدل 200
+  ✅ _execute_with_logging: قص 500
   ✅ get_active_penalties: LIMIT افتراضي
-  ✅ __all__: إزالة private الميتة
   ✅ _init_default_data: WHERE NOT EXISTS (ذرّي)
   ✅ cache_cleanup_task: واجهة عامة
-  ✅ _execute_with_conn: docstring rowcount MySQL
 
 🆕 v7.7.24 (CONSISTENCY):
-  ✅ _get_caller_info: SLOW_QUERY_FULL_STACK env
-  ✅ _maybe_refresh_mv: _mv_last_refresh_mono بعد النجاح فقط
-  ✅ _spawn_bg_task: إغلاق coroutine عند الفشل
+  ✅ SLOW_QUERY_FULL_STACK env
+  ✅ _mv_last_refresh_mono بعد النجاح
+  ✅ _spawn_bg_task: إغلاق coroutine
   ✅ get_schedule: transaction
-  ✅ _ensure_bigint_ids MySQL: EXTRA (AUTO_INCREMENT)
-  ✅ _find_mixin_method: كشف آمن
+  ✅ _ensure_bigint_ids MySQL: EXTRA
   ✅ hash لا يُحدَّث عند فشل جزئي
-  ✅ ثوابت مسماة (GLOBAL_CHAT_ID, MAX_POST_FAIL_COUNT, ...)
+  ✅ ثوابت مسماة
 
 🆕 v7.7.23 (FINAL-CONSISTENCY-FIX):
-  ✅ plan.is_active في 5 مواضع (MV + CTEs + has_active_subscription)
+  ✅ plan.is_active في 5 مواضع
   ✅ _import_auto_replies: hash خارج if
-  ✅ _ensure_bigint_ids MySQL: NOT NULL / DEFAULT / COMMENT
-  ✅ _destroy_connection MySQL: إزالة release المزدوج
-  ✅ CHECKLIST في رأس الملف
+  ✅ _ensure_bigint_ids MySQL: NOT NULL/DEFAULT/COMMENT
+  ✅ _destroy_connection MySQL
+  ✅ CHECKLIST في الرأس
 
-🆕 v7.7.22 (BANNED-WORDS-FULL-SYNC):
-  ✅ _import_banned_words: مزامنة كاملة
-
-🆕 v7.7.21 (PRECISE-PUBLISH-INTERVAL):
-  ✅ update_next_publish: تعويض 30s من polling
-
-🆕 v7.7.20 (PUBLISH-INTERVAL-FIX):
-  ✅ قراءة min_publish_interval من settings
-
-🆕 v7.7.19 (SLOW-QUERIES-ALIAS-FIX):
-  ✅ get_slow_queries alias
-  ✅ _get_caller_info: inspect.stack(context=0)
-
-🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX):
-  ✅ _ensure_materialized_views_postgres()
-  ✅ _maybe_refresh_mv()
-
-🆕 v7.7.17 (SLOW-QUERY-CALLER-FIX):
-🆕 v7.7.16 (SLOW-QUERY-CALLER):
-🆕 v7.7.15 (ANALYTICS-MIXIN)
-🆕 v7.7.14 (FIX-DB-SIZE-STATS)
-🆕 v7.7.13 (FIX-RESTORE-COMPUTE-TEXT-HASH)
+🆕 v7.7.22 (BANNED-WORDS-FULL-SYNC)
+🆕 v7.7.21 (PRECISE-PUBLISH-INTERVAL)
+🆕 v7.7.20 (PUBLISH-INTERVAL-FIX)
+🆕 v7.7.19 (SLOW-QUERIES-ALIAS-FIX)
+🆕 v7.7.18 (MV-ACTIVE-SUBS-FIX)
 ================================================================================
 """
 
@@ -81,6 +66,7 @@ database.py - قاعدة البيانات المتكاملة (v7.7.26 — CRITIC
 # [1] التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
 # [2] التغطية عبر DBs: SQLite / MySQL / PostgreSQL — بما فيها MV/CTE.
 # [3] hash/cache: _upsert_setting خارج كل if — وإلا حلقات لا نهائية.
+#     و: كل تغيير في DB يستدعي إبطال الكاش المناسب.
 # [4] Escape chars في SQL: استخدم '!' — موحّد عبر MySQL/PG/SQLite.
 # [5] القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف
 #     كاملاً (بما فيه EXTRA/AUTO_INCREMENT).
@@ -551,6 +537,53 @@ except ImportError:
     logger.warning("⚠️ cache.py غير موجود — كاش داخلي")
 
 # =====================================================================
+# 0.6.1) v7.7.27 — ربط user_cache بـ internal_cache (Cross-cache invalidation)
+# =====================================================================
+# السبب: الـ Mixins (في database_*.py) تستدعي `user_cache.invalidate(user_id)`
+# مباشرة. بينما has_active_subscription تُخزّن النتيجة في internal_cache.
+# بدون ربط، يستمر المستخدم في رؤية "غير مشترك" حتى انتهاء USER_CACHE_TTL
+# (60s) بعد إنشاء اشتراك فعلي — تناقض بصري حقيقي.
+#
+# الحل: تغليف user_cache.invalidate ليشمل إبطال مفاتيح internal_cache
+# المتعلقة بالمستخدم. شفاف للمستدعين — لا حاجة لتعديل أي Mixin.
+# =====================================================================
+
+_USER_CACHE_INVALIDATE_ORIG = user_cache.invalidate
+
+async def _user_cache_invalidate_wrapper(key=None):
+    """
+    يوحّد إبطال user_cache و internal_cache للمستخدم.
+
+    عند key=None: إبطال كامل للـ user_cache فقط (سلوك أصلي).
+    عند key=user_id: إبطال user_cache + كل مفاتيح internal_cache
+                     المتعلقة بـ user_id (including has_active_sub_*).
+    """
+    try:
+        await _USER_CACHE_INVALIDATE_ORIG(key)
+    except Exception as e:
+        logger.debug(f"user_cache.invalidate original: {e}")
+    if key is None:
+        return
+    try:
+        uid = key
+        for k in (
+            f"user_{uid}", f"user_{uid}_True", f"user_{uid}_False",
+            f"lang_{uid}", f"start_data_{uid}",
+            f"user_settings_batch_{uid}",
+            f"auto_publish_{uid}", f"auto_recycle_{uid}",
+            f"has_active_sub_{uid}",
+            f"has_active_subscription_{uid}",
+            f"subscription_active_{uid}",
+            f"subscription_{uid}",
+        ):
+            await internal_cache.invalidate(k)
+    except Exception as e:
+        logger.debug(f"internal_cache invalidate (wrapper): {e}")
+
+user_cache.invalidate = _user_cache_invalidate_wrapper
+logger.info("✅ v7.7.27: user_cache.invalidate ↔ internal_cache مرتبطان")
+
+# =====================================================================
 # 0.7) ثوابت
 # =====================================================================
 
@@ -676,6 +709,14 @@ def _validate_column_def(col_name: str, col_def: str) -> bool:
     words = re.findall(r"[A-Z_]+", cleaned)
     for word in words:
         if word in _ALLOWED_COLUMN_TYPES or word in _ALLOWED_COL_KEYWORDS:
+            continue
+        # 🆕 v7.7.27: اسمح بأي identifier صالح (CHECK/REFERENCES وأسماء)
+        # المصدر ثابت داخلي (migrations dict + BIGINT_COLUMNS) — لا مدخل مستخدم.
+        # هذا يفتح الباب نظرياً لـ injection في col_def، لكن:
+        #   1) لا مدخل مستخدم لهذه الدالة
+        #   2) الحماية الأساسية (منع ; و -- و /*) ما زالت فعالة
+        # المقايضة: قبول CHECK (x > 0) و REFERENCES other(id)
+        if re.match(r"^[A-Z_][A-Z0-9_]*$", word):
             continue
         logger.error(f"❌ كلمة غير مسموحة: {word}")
         return False
@@ -4749,6 +4790,7 @@ class Database(
         """
         مزامنة كاملة للملف مع DB.
         hash لا يُحدَّث عند فشل أي دفعة.
+        🆕 v7.7.27: عدّ دقيق عبر rowcount بدل len(batch).
         """
         try:
             import banned_words
@@ -4816,14 +4858,18 @@ class Database(
                     batch = delete_list[i: i + batch_size]
                     placeholders = ",".join(["?"] * len(batch))
                     try:
-                        await self._execute_with_conn(
+                        # 🆕 v7.7.27: rowcount بدل len(batch)
+                        rc = await self._execute_with_conn(
                             conn,
                             f"DELETE FROM banned_words "
                             f"WHERE chat_id = ? "
                             f"AND word IN ({placeholders})",
                             GLOBAL_CHAT_ID, *batch,
                         )
-                        deleted_count += len(batch)
+                        deleted_count += (
+                            rc if isinstance(rc, int) and rc >= 0
+                            else len(batch)
+                        )
                     except Exception as de:
                         had_failures = True
                         logger.warning(
@@ -4841,14 +4887,18 @@ class Database(
                         for w in batch_words
                     ]
                     try:
-                        await self._executemany_with_conn(
+                        # 🆕 v7.7.27: rowcount بدل len(batch)
+                        rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO banned_words
                                (word, chat_id, added_by, added_at)
                                VALUES (?, ?, ?, ?)""",
                             batch_params,
                         )
-                        inserted_count += len(batch_words)
+                        inserted_count += (
+                            rc if isinstance(rc, int) and rc >= 0
+                            else len(batch_words)
+                        )
                     except Exception as ie:
                         had_failures = True
                         logger.warning(
@@ -4889,6 +4939,7 @@ class Database(
         مزامنة كاملة (حذف + إضافة).
         hash لا يُحدَّث عند فشل جزئي.
         جلب كل الصفوف لا chat_id=-1 فقط.
+        🆕 v7.7.27: عدّ دقيق عبر rowcount بدل len(batch).
         """
         try:
             from auto_replies import AUTO_REPLIES
@@ -5021,13 +5072,16 @@ class Database(
             if to_delete:
                 for chat_id, keyword in to_delete:
                     try:
-                        await self._execute_with_conn(
+                        # 🆕 v7.7.27: rowcount
+                        rc = await self._execute_with_conn(
                             conn,
                             "DELETE FROM auto_replies "
                             "WHERE chat_id = ? AND keyword = ?",
                             chat_id, keyword,
                         )
-                        deleted_count += 1
+                        deleted_count += (
+                            rc if isinstance(rc, int) and rc >= 0 else 1
+                        )
                     except Exception as de:
                         had_failures = True
                         logger.warning(
@@ -5051,7 +5105,8 @@ class Database(
                             TimeUtils.utc_now(), 1, 0,
                         ))
                     try:
-                        await self._executemany_with_conn(
+                        # 🆕 v7.7.27: rowcount بدل len(batch_keys)
+                        rc = await self._executemany_with_conn(
                             conn,
                             """INSERT OR IGNORE INTO auto_replies
                                (chat_id, keyword, reply, reply_type,
@@ -5060,7 +5115,10 @@ class Database(
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             batch_params,
                         )
-                        inserted_count += len(batch_keys)
+                        inserted_count += (
+                            rc if isinstance(rc, int) and rc >= 0
+                            else len(batch_keys)
+                        )
                     except Exception as ie:
                         had_failures = True
                         logger.warning(
@@ -5238,11 +5296,11 @@ class Database(
 
     async def has_active_subscription(self, user_id: int) -> bool:
         """
-        ✅ v7.7.26: تجاوز Mixin دائماً — نضمن تطبيق p.is_active = 1
+        v7.7.26: تجاوز Mixin دائماً — نضمن تطبيق p.is_active = 1
         كما في get_channels_to_publish.
 
-        السبب: Mixin قد يكون قديماً بلا فلتر is_active، مما يسبب
-        تناقضاً (has_active=True بينما channels لا تُنشر).
+        v7.7.27: الكاش يُبطَل تلقائياً عبر user_cache.invalidate
+        (wrapper في أعلى الملف) — لا حاجة لتعديل أي Mixin.
         """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
@@ -5263,22 +5321,10 @@ class Database(
         return result
 
     async def invalidate_subscription_cache(self, user_id: int):
-        for key in (
-            f"has_active_sub_{user_id}",
-            f"has_active_subscription_{user_id}",
-            f"subscription_active_{user_id}",
-            f"subscription_{user_id}",
-            f"start_data_{user_id}",
-        ):
-            try:
-                await internal_cache.invalidate(key)
-            except Exception:
-                pass
-        if CACHE_AVAILABLE:
-            try:
-                await invalidate_user_cache(user_id)
-            except Exception:
-                pass
+        """
+        v7.7.27: تستدعي _invalidate_user_cache_keys (الموحّدة).
+        """
+        await self._invalidate_user_cache_keys(user_id)
 
     async def _do_bootstrap_inner(self, conn) -> bool:
         tables_hash = self._compute_tables_hash()
@@ -5738,6 +5784,13 @@ class Database(
             return None
 
     async def _invalidate_user_cache_keys(self, user_id: int) -> None:
+        """
+        v7.7.27: موحّد — يشمل مفاتيح has_active_sub_* والاشتراكات.
+
+        هذه الطريقة هي المُدخل الوحيد الموحّد لإبطال كاش المستخدم.
+        wrapper `user_cache.invalidate` يُبطِل نفس المفاتيح تلقائياً،
+        لكن نُبقيها هنا للأمان المزدوج.
+        """
         for k in (
             f"user_{user_id}",
             f"user_{user_id}_True",
@@ -5747,6 +5800,11 @@ class Database(
             f"user_settings_batch_{user_id}",
             f"auto_publish_{user_id}",
             f"auto_recycle_{user_id}",
+            # 🆕 v7.7.27: مفاتيح الاشتراك — لإغلاق cache gap
+            f"has_active_sub_{user_id}",
+            f"has_active_subscription_{user_id}",
+            f"subscription_active_{user_id}",
+            f"subscription_{user_id}",
         ):
             await internal_cache.invalidate(k)
         if CACHE_AVAILABLE:
