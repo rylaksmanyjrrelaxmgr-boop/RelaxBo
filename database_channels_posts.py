@@ -6,15 +6,14 @@ database_channels_posts.py - دوال القنوات والمنشورات (Mixin
 ================================================================================
 يُستخدم مع Database عبر الوراثة المتعددة (Mixin).
 
-🆕 v7.5.21 (تحديد القناة التالية تلقائياً — مطابق لسلوك v7.5.20):
+🆕 v7.5.21 (تحديد القناة التالية تلقائياً عند حذف النشطة):
     ✅ delete_channel: عند حذف القناة النشطة:
-       - يبحث عن أقدم قناة غير محظورة (ORDER BY id ASC) — نفس fallback الأصلي
+       - يبحث عن أحدث قناة غير محظورة
        - يحفظها كـ active_channel في DB (بدل NULL)
        - يُبطل start_data_{user_id} أيضاً
-    ✅ النتيجة النهائية للمستخدم: نفس سلوك v7.5.20 بالحرف
-       (القناة الأقدم تصبح النشطة)
-    ✅ + تحسين: حفظ في DB بدل fallback كل مرة (أداء أفضل)
-    ✅ + تحسين: إبطال أشمل للكاش
+    ✅ النتيجة: القناة الثانية تصبح نشطة تلقائياً وتُحفظ دائماً
+       (بدل fallback يُعيد الاستعلام كل مرة)
+    ✅ تحسين رسالة log عند التحويل التلقائي
 
 📌 v7.5.20 (نفس السلوك الأصلي + إصلاحات آمنة):
     ✅ get_channel_by_id: نفس السلوك (channel_id فقط) — بلا تغيير
@@ -431,18 +430,17 @@ class ChannelsPostsMixin:
         """
         حذف قناة + تحديد القناة التالية تلقائياً إن كانت النشطة.
 
-        🆕 v7.5.21 (مطابق لسلوك v7.5.20):
+        🆕 v7.5.21:
         - إذا كانت القناة المحذوفة هي النشطة:
-          1) ابحث عن **أقدم** قناة غير محظورة (ORDER BY id ASC)
-             ← نفس ترتيب fallback في get_active_channel
+          1) ابحث عن أحدث قناة غير محظورة
           2) احفظها كـ active_channel في DB (بدل NULL)
           3) أبلغ بالمستخدم (log)
         - إذا لم تكن النشطة: لا تغيير في active_channel
 
         المزايا مقارنة بـ v7.5.20:
-        - نفس النتيجة النهائية (القناة الأقدم)
-        - لكن محفوظة في DB بدل fallback كل مرة (أداء أفضل)
-        - إبطال أشمل للكاش (start_data_*, user_*_True/False)
+        - لا fallback متكرر في get_active_channel (أداء أفضل)
+        - users.active_channel محفوظ دائماً (اتساق DB)
+        - المستخدم يرى القناة التالية نشطة فوراً
         """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, channels_cache, posts_cache
@@ -473,13 +471,12 @@ class ChannelsPostsMixin:
 
                 # ─── 3) حدّث active_channel ───
                 if was_active:
-                    # 🆕 v7.5.21: ابحث عن أقدم قناة غير محظورة
-                    # ORDER BY id ASC ← يطابق fallback الأصلي في get_active_channel
+                    # 🆕 v7.5.21: ابحث عن أحدث قناة غير محظورة
                     next_row = await self._fetchone_with_conn(
                         conn,
                         "SELECT id, channel_name FROM user_channels "
                         "WHERE user_id = ? AND banned = 0 "
-                        "ORDER BY id ASC LIMIT 1",
+                        "ORDER BY created_at DESC LIMIT 1",
                         user_id,
                     )
                     new_active_id = next_row["id"] if next_row else None
