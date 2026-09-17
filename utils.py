@@ -2,26 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.8.6 - Subs-Dedup + Locks-Cleanup)
+utils.py - الأدوات المساعدة للبوت (v7.9.1 - Deadlock-Free + Behavior-Preserved)
 =================================================================================
+🔴 v7.9.1 (تحسين):
+    ✅ get_reply_from_file: قائمة أنماط مُسبَق تصريفها (بدل pattern واحد)
+       — يحفظ السلوك الأصلي 100% (ترتيب dict) مع الحفاظ على السرعة
+       — لا فرق سلوكي حتى مع مفاتيح متداخلة
+
+🔴 v7.9.0 (إصلاحات حرجة):
+    ✅ TranslationManager: تحميل خارج القفل (يمنع deadlock)
+    ✅ KeyboardFactory: تحميل خارج القفل (نفس السبب)
+    ✅ _publish_single_channel: فصل sleep عن الـ semaphore
+    ✅ SmartCache.get_or_set: try/finally + هوية القفل
+    ✅ invalidate_banned_words_cache_async: variant آمن ضد race
+    ✅ import_auto_replies: قراءة الملف عبر asyncio.to_thread
+    ✅ get_reply_from_file: precompiled patterns (O(n) بلا compile overhead)
+
 🚀 v7.8.6 (إصلاحات أداء حرجة):
     ✅ auto_publish: حذف batch subs check المكرر
-       → get_channels_to_publish يضمن الاشتراك النشط أصلاً
-       → التوفير: ~2.14s لكل دورة نشر
     ✅ _banned_words_locks: cleanup تلقائي عند تجاوز 1000 قفل
-       → يمنع memory leak على المدى الطويل
     ✅ _get_global_words_cached: قفل موحّد لمنع thundering herd
-       → 1000 مجموعة لا تُطلق 1000 استعلام متزامن
     ✅ _GLOBAL_WORDS_TTL: 120 → 1800 (30 دقيقة)
-       → 15x أقل ضربات DB للكلمات العامة
 
-🔍 v7.8.5 (مراقبة Pool + تنبيه تلقائي):
-    ✅ BackgroundTasks.monitor_pool: يسجّل حالة Pool كل 60 ثانية
-    ✅ BackgroundTasks.monitor_pool_alert: تنبيه للمالك عند ≥ 85%
-
-🕐 v7.8.4 (توحيد التوقيت على UTC — القاعدة الذهبية):
-    ✅ BackgroundTasks._do_backup: استخدام utc_now() بدل mecca_now()
-
+🔍 v7.8.5 (مراقبة Pool + تنبيه تلقائي)
+🕐 v7.8.4 (توحيد التوقيت على UTC)
 🧠 v7.8.3 (حماية مزدوجة للكلمات المحظورة)
 🧠 v7.8.2 (دمج سجل قناة المجموعات)
 🧠 v7.8.1 (حماية من thundering herd + batch subscriptions)
@@ -71,6 +75,7 @@ logger = logging.getLogger(__name__)
 class SmartCache:
     """
     🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
+    🔴 v7.9.0: إصلاح تسرّب الأقفال عند فشل loader (try/finally + هوية).
     """
     __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
@@ -109,17 +114,21 @@ class SmartCache:
                 self._stampede_locks[key] = lock
 
         async with lock:
-            value = await self.get(key)
-            if value is not None:
-                return value
+            # ✅ v7.9.0: try/finally يضمن تحرير القفل حتى لو فشل loader
+            try:
+                value = await self.get(key)
+                if value is not None:
+                    return value
 
-            loaded = await loader()
-            if loaded is not None:
-                await self.set(key, loaded, ttl)
-
-            async with self._lock:
-                self._stampede_locks.pop(key, None)
-            return loaded
+                loaded = await loader()
+                if loaded is not None:
+                    await self.set(key, loaded, ttl)
+                return loaded
+            finally:
+                # ✅ v7.9.0: احذف فقط إن كان القفل لا يزال هو نفسه
+                async with self._lock:
+                    if self._stampede_locks.get(key) is lock:
+                        self._stampede_locks.pop(key, None)
 
     async def set(self, key: str, value, ttl: int = None):
         effective_ttl = ttl if ttl is not None else self._ttl_default
@@ -359,6 +368,7 @@ _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
 # 6. الترجمات — Preload + Warmup
+# 🔴 v7.9.0: تحميل خارج القفل (يمنع deadlock)
 # =====================================================================
 
 class TranslationManager:
@@ -371,29 +381,36 @@ class TranslationManager:
     def _load_translation_cached(cls, lang: str) -> Dict:
         if lang == 'off':
             lang = cls._default_lang
-        if lang in cls._translations:
-            return cls._translations[lang]
 
+        # ✅ v7.9.0: check تحت القفل ثم تحرير
         with cls._load_lock:
-            if lang in cls._translations:
-                return cls._translations[lang]
+            cached = cls._translations.get(lang)
+        if cached is not None:
+            return cached
 
-            file_path = Path(cls._locales_dir) / f"{lang}.json"
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    cls._translations[lang] = json.load(f)
-                    return cls._translations[lang]
-            except FileNotFoundError:
-                if lang != cls._default_lang:
-                    return cls._load_translation_cached(cls._default_lang)
-                cls._translations[lang] = {}
-                return {}
-            except Exception as e:
-                logger.error(f"❌ فشل قراءة ملف الترجمة {lang}: {e}")
-                if lang != cls._default_lang:
-                    return cls._load_translation_cached(cls._default_lang)
-                cls._translations[lang] = {}
-                return {}
+        # ✅ v7.9.0: التحميل خارج القفل — idempotent وآمن تحت التزامن
+        file_path = Path(cls._locales_dir) / f"{lang}.json"
+        loaded: Optional[Dict] = None
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except FileNotFoundError:
+            if lang != cls._default_lang:
+                return cls._load_translation_cached(cls._default_lang)
+            loaded = {}
+        except Exception as e:
+            logger.error(f"❌ فشل قراءة ملف الترجمة {lang}: {e}")
+            if lang != cls._default_lang:
+                return cls._load_translation_cached(cls._default_lang)
+            loaded = {}
+
+        # ✅ v7.9.0: double-check — قد يكون خيط آخر حمّله في الأثناء
+        with cls._load_lock:
+            existing = cls._translations.get(lang)
+            if existing is not None:
+                return existing
+            cls._translations[lang] = loaded
+            return loaded
 
     @classmethod
     def load_translation(cls, lang: str) -> Dict:
@@ -707,6 +724,7 @@ class CB:
 
 # =====================================================================
 # 9. مصنع الكيبوردات — Preload
+# 🔴 v7.9.0: تحميل خارج القفل (يمنع deadlock)
 # =====================================================================
 
 class KeyboardFactory:
@@ -917,42 +935,46 @@ class KeyboardFactory:
     def _load_config_for_lang(cls, lang: str) -> Dict:
         if lang == 'off':
             lang = cls._default_lang
-        if lang in cls._configs:
-            return cls._configs[lang]
 
+        # ✅ v7.9.0: check تحت القفل ثم تحرير
         with cls._load_lock:
-            if lang in cls._configs:
-                return cls._configs[lang]
+            cached = cls._configs.get(lang)
+        if cached is not None:
+            return cached
 
-            file_path = cls._config_path_template.format(lang=lang)
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    cls._configs[lang] = config
-                    logger.info(
-                        f"✅ تم تحميل buttons_config_{lang}.json: "
-                        f"{len(config.get('texts', {}))} مفتاح"
-                    )
-                    return config
-            except FileNotFoundError:
-                if lang != cls._default_lang:
-                    logger.warning(
-                        f"⚠️ buttons_config_{lang}.json غير موجود، الافتراضية"
-                    )
-                    return cls._load_config_for_lang(cls._default_lang)
-                logger.warning(
-                    "⚠️ buttons_config_ar.json غير موجود، استخدام افتراضية"
+        # ✅ v7.9.0: التحميل خارج القفل — idempotent وآمن تحت التزامن
+        file_path = cls._config_path_template.format(lang=lang)
+        loaded: Optional[Dict] = None
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                logger.info(
+                    f"✅ تم تحميل buttons_config_{lang}.json: "
+                    f"{len(loaded.get('texts', {}))} مفتاح"
                 )
-                default_config = {"texts": cls._default_texts, "menus": {}}
-                cls._configs[cls._default_lang] = default_config
-                return default_config
-            except Exception as e:
-                logger.error(f"❌ خطأ في قراءة buttons_config_{lang}.json: {e}")
-                if lang != cls._default_lang:
-                    return cls._load_config_for_lang(cls._default_lang)
-                default_config = {"texts": cls._default_texts, "menus": {}}
-                cls._configs[cls._default_lang] = default_config
-                return default_config
+        except FileNotFoundError:
+            if lang != cls._default_lang:
+                logger.warning(
+                    f"⚠️ buttons_config_{lang}.json غير موجود، الافتراضية"
+                )
+                return cls._load_config_for_lang(cls._default_lang)
+            logger.warning(
+                "⚠️ buttons_config_ar.json غير موجود، استخدام افتراضية"
+            )
+            loaded = {"texts": cls._default_texts, "menus": {}}
+        except Exception as e:
+            logger.error(f"❌ خطأ في قراءة buttons_config_{lang}.json: {e}")
+            if lang != cls._default_lang:
+                return cls._load_config_for_lang(cls._default_lang)
+            loaded = {"texts": cls._default_texts, "menus": {}}
+
+        # ✅ v7.9.0: double-check — قد يكون خيط آخر حمّله في الأثناء
+        with cls._load_lock:
+            existing = cls._configs.get(lang)
+            if existing is not None:
+                return existing
+            cls._configs[lang] = loaded
+            return loaded
 
     @classmethod
     def load_config(cls):
@@ -1395,23 +1417,23 @@ class KeyboardFactory:
         )
 
 # =====================================================================
-# 10. كاش الكلمات المحظورة — Global batching + Resilient Fallback
+# 10. كاش الكلمات المحظورة
 # ✅ v7.8.6: cleanup locks + قفل موحّد للكلمات العامة + TTL أطول
+# 🔴 v7.9.0: variant async آمن ضد race مع _get_global_words_cached
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
 _banned_words_cache_time: Dict[int, float] = {}
 _banned_words_locks: Dict[int, asyncio.Lock] = {}
 _banned_words_locks_guard = asyncio.Lock()
-_BANNED_WORDS_LOCKS_MAX = 1000           # ✅ v7.8.6: عتبة cleanup
+_BANNED_WORDS_LOCKS_MAX = 1000
 _BANNED_WORDS_CACHE_TTL = getattr(CONFIG, 'BANNED_WORDS_CACHE_TTL', 60)
 _ENABLE_BANNED_WORDS_CACHE = getattr(CONFIG, 'ENABLE_BANNED_WORDS_CACHE', True)
 
-# ✅ v7.8.6: قفل موحّد للكلمات العامة — يمنع thundering herd
 _global_words_cache: List[str] = []
 _global_words_loaded_at: float = 0.0
 _global_words_lock: asyncio.Lock = asyncio.Lock()
-_GLOBAL_WORDS_TTL = 1800                 # ✅ v7.8.6: 120 → 1800 (30 دقيقة)
+_GLOBAL_WORDS_TTL = 1800
 
 
 def _normalize_word(word: Any) -> Optional[str]:
@@ -1422,22 +1444,16 @@ def _normalize_word(word: Any) -> Optional[str]:
 
 
 async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
-    """
-    ✅ v7.8.6: يرجع قفل chat_id مع cleanup تلقائي عند تجاوز العتبة.
-    """
     async with _banned_words_locks_guard:
         existing = _banned_words_locks.get(chat_id)
         if existing is not None:
             return existing
 
-        # Cleanup قبل الإنشاء إذا تجاوزنا العتبة
         if len(_banned_words_locks) >= _BANNED_WORDS_LOCKS_MAX:
-            # احذف الأقفال غير المستخدمة (غير مقفلة حالياً)
             to_remove = [
                 cid for cid, lk in _banned_words_locks.items()
                 if cid != chat_id and not lk.locked()
             ]
-            # احذف 25% على الأكثر
             target = max(1, _BANNED_WORDS_LOCKS_MAX // 4)
             for cid in to_remove[:target]:
                 _banned_words_locks.pop(cid, None)
@@ -1454,12 +1470,6 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
 
 
 async def _get_global_words_cached() -> List[str]:
-    """
-    ✅ v7.8.6: قفل موحّد يمنع 1000 مجموعة من إطلاق 1000 استعلام متزامن.
-
-    عند انتهاء TTL، أول مجموعة تدخل القفل تجلب من DB،
-    والبقية تنتظر ثم تجد الكاش محدثاً → استعلام واحد فقط.
-    """
     global _global_words_cache, _global_words_loaded_at
 
     now = time.time()
@@ -1467,7 +1477,6 @@ async def _get_global_words_cached() -> List[str]:
         return _global_words_cache
 
     async with _global_words_lock:
-        # Double-check بعد اكتساب القفل
         now = time.time()
         if _global_words_cache and now - _global_words_loaded_at < _GLOBAL_WORDS_TTL:
             return _global_words_cache
@@ -1479,8 +1488,10 @@ async def _get_global_words_cached() -> List[str]:
                 n = _normalize_word(w)
                 if n is not None:
                     normalized.add(n)
-            _global_words_cache = list(normalized)
+            # ✅ v7.9.0: ترتيب مهم — الوقت أولاً ثم القائمة
+            # (يمنع نافذة "قائمة فارغة + وقت حديث" عند التنظيف المتزامن)
             _global_words_loaded_at = now
+            _global_words_cache = list(normalized)
             return _global_words_cache
         except Exception as e:
             logger.error(f"❌ فشل جلب الكلمات العامة: {e}")
@@ -1533,18 +1544,7 @@ async def get_banned_words_cached(chat_id: int) -> List[str]:
             return _banned_words_cache.get(chat_id, [])
 
 
-def invalidate_banned_words_cache(chat_id: int = None) -> None:
-    global _global_words_cache, _global_words_loaded_at
-
-    if chat_id is None or chat_id == -1:
-        _banned_words_cache.clear()
-        _banned_words_cache_time.clear()
-        _global_words_cache = []
-        _global_words_loaded_at = 0.0
-    else:
-        _banned_words_cache.pop(chat_id, None)
-        _banned_words_cache_time.pop(chat_id, None)
-
+def _clear_db_banned_words_cache(chat_id: int = None) -> None:
     try:
         if hasattr(DB, '_banned_words_cache') and DB._banned_words_cache is not None:
             if chat_id is None or chat_id == -1:
@@ -1561,6 +1561,54 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
                     DB._banned_words_cache_time.pop(chat_id, None)
     except Exception as e:
         logger.debug(f"invalidate DB banned_words cache: {e}")
+
+
+def invalidate_banned_words_cache(chat_id: int = None) -> None:
+    """
+    Synchronous version — acceptable for most uses.
+    For strict race-free behavior in async contexts, prefer
+    invalidate_banned_words_cache_async().
+    """
+    global _global_words_cache, _global_words_loaded_at
+
+    if chat_id is None or chat_id == -1:
+        _banned_words_cache.clear()
+        _banned_words_cache_time.clear()
+        _global_words_cache = []
+        _global_words_loaded_at = 0.0
+    else:
+        _banned_words_cache.pop(chat_id, None)
+        _banned_words_cache_time.pop(chat_id, None)
+
+    _clear_db_banned_words_cache(chat_id)
+
+
+async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
+    """
+    ✅ v7.9.0: قفل موحّد يمنع race مع _get_global_words_cached.
+
+    المشكلة بدون القفل:
+      - coroutine A داخل _get_global_words_cached يكتب loaded_at=now ثم cache=[...]
+      - بينهما يُشغَّل invalidate_banned_words_cache (sync)
+      - يُصفّر cache و loaded_at
+      - ثم A يكمل: loaded_at=now (لا يعرف أنه صُفّر)
+      - النتيجة: قائمة فارغة + وقت حديث → كاش فارغ لمدة 30 دقيقة
+
+    الحل: أخذ _global_words_lock أثناء التنظيف.
+    """
+    global _global_words_cache, _global_words_loaded_at
+
+    if chat_id is None or chat_id == -1:
+        async with _global_words_lock:
+            _banned_words_cache.clear()
+            _banned_words_cache_time.clear()
+            _global_words_cache = []
+            _global_words_loaded_at = 0.0
+    else:
+        _banned_words_cache.pop(chat_id, None)
+        _banned_words_cache_time.pop(chat_id, None)
+
+    _clear_db_banned_words_cache(chat_id)
 
 
 async def get_min_publish_interval() -> int:
@@ -2098,10 +2146,15 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
                               overwrite: bool = False) -> int:
+    """
+    🔴 v7.9.0: قراءة الملف عبر asyncio.to_thread لتفادي تجميد الحلقة.
+    """
     try:
         if isinstance(file_path_or_data, str):
-            with open(file_path_or_data, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            def _read_sync():
+                with open(file_path_or_data, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            data = await asyncio.to_thread(_read_sync)
         else:
             data = file_path_or_data
         if not isinstance(data, list):
@@ -2151,6 +2204,7 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
 
 # =====================================================================
 # 16. الردود من ملف
+# 🔴 v7.9.1: قائمة أنماط مُسبَق تصريفها (سلوك الأصلي 100% + سرعة)
 # =====================================================================
 
 def load_replies_from_file() -> dict:
@@ -2179,7 +2233,45 @@ else:
     logger.info("ℹ️ لا توجد ردود محملة من ملف replies.py")
 
 
+# ✅ v7.9.1: قائمة (مفتاح, pattern) — تُحافظ على ترتيب dict الأصلي
+# - لا ترتيب عشوائي: نتبع ترتيب _REPLIES_FROM_FILE
+# - لا compile overhead: الأنماط مُجمَّعة مرة واحدة
+# - نفس نتائج الأصل بالحرف، بما في ذلك المفاتيح المتداخلة
+_COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
+
+
+def _build_compiled_replies_pattern() -> None:
+    """يبني قائمة (مفتاح, pattern) — يُستدعى عند التحميل وعند reload."""
+    global _COMPILED_REPLIES_LIST
+    if not _REPLIES_FROM_FILE:
+        _COMPILED_REPLIES_LIST = []
+        return
+    result: List[Tuple[str, re.Pattern]] = []
+    for k, v in _REPLIES_FROM_FILE.items():
+        if not (isinstance(k, str) and k and isinstance(v, list) and v):
+            continue
+        try:
+            compiled = re.compile(rf'\b{re.escape(k)}\b')
+        except re.error as e:
+            logger.warning(f"⚠️ فشل تصريف النمط للمفتاح '{k}': {e}")
+            continue
+        result.append((k, compiled))
+    _COMPILED_REPLIES_LIST = result
+
+
+_build_compiled_replies_pattern()
+
+
 def get_reply_from_file(keyword: str) -> Optional[str]:
+    """
+    🔴 v7.9.1: يستخدم قائمة أنماط مُسبَق تصريفها.
+
+    السلوك مطابق للأصلي 100%:
+     1) فحص أسطر keyword المباشرة
+     2) فحص كلمات كل سطر
+     3) فحص المفاتيح بـ \\bkey\\b بترتيب dict الأصلي
+        (قائمة أنماط بترتيب الإدراج — لا اختلاف عن النسخة الأصلية)
+    """
     if not _REPLIES_FROM_FILE or not keyword:
         return None
     keyword = keyword.lower().strip()
@@ -2196,23 +2288,28 @@ def get_reply_from_file(keyword: str) -> Optional[str]:
             if word in _REPLIES_FROM_FILE:
                 replies = _REPLIES_FROM_FILE[word]
                 return random.choice(replies) if replies else None
-    for key, replies in _REPLIES_FROM_FILE.items():
-        if not isinstance(replies, list) or not replies:
-            continue
-        if re.search(rf'\b{re.escape(key)}\b', keyword):
-            return random.choice(replies)
+
+    # ✅ v7.9.1: بحث بترتيب dict الأصلي — مطابق تماماً للسلوك السابق
+    for key, pattern in _COMPILED_REPLIES_LIST:
+        if pattern.search(keyword):
+            replies = _REPLIES_FROM_FILE.get(key)
+            if isinstance(replies, list) and replies:
+                return random.choice(replies)
     return None
 
 
 def reload_replies_from_file() -> dict:
     global _REPLIES_FROM_FILE
     _REPLIES_FROM_FILE = load_replies_from_file()
+    # ✅ v7.9.1: أعد بناء القائمة بعد reload
+    _build_compiled_replies_pattern()
     if _REPLIES_FROM_FILE:
         logger.info(f"✅ تم إعادة تحميل ملف الردود: {len(_REPLIES_FROM_FILE)} رد")
     return _REPLIES_FROM_FILE
 
 # =====================================================================
 # 17. المهام الخلفية — Adaptive + Batch + Pool Monitor
+# 🔴 v7.9.0: فصل sleep عن semaphore في auto_publish
 # =====================================================================
 
 class BackgroundTasks:
@@ -2221,6 +2318,7 @@ class BackgroundTasks:
     🕐 v7.8.4: _do_backup يستخدم utc_now().
     🔍 v7.8.5: monitor_pool + monitor_pool_alert.
     🚀 v7.8.6: auto_publish يحذف batch subs المكرر.
+    🔴 v7.9.0: sleep خارج semaphore — يمنع احتجازها حتى 60 دقيقة.
     """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
@@ -2447,8 +2545,12 @@ class BackgroundTasks:
         return None, False
 
     @staticmethod
-    async def _publish_single_channel(bot, ch, sleep_seconds, published_count,
-                                       has_sub: bool = None):
+    async def _publish_single_channel(bot, ch, published_count,
+                                       has_sub: bool = None) -> bool:
+        """
+        🔴 v7.9.0: ينشر منشوراً واحداً ويعيد True عند النجاح.
+        لا ينام — النوم مسؤولية المُستدعي خارج الـ semaphore.
+        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -2459,37 +2561,33 @@ class BackgroundTasks:
                 )
             if not has_sub:
                 logger.info(f"⏭️ تخطي القناة {ch.get('id')} لانتهاء الاشتراك")
-                return
+                return False
             raw_result = await DB.get_next_post(ch['id'])
             post, recycled = BackgroundTasks._unwrap_get_next_post(raw_result)
             if not post:
-                return
+                return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
                 await DB.mark_post_published(post['id'])
                 await DB.update_last_publish(ch['id'])
                 await DB.update_next_publish(ch['id'])
-                logger.info(
-                    f"✅ قناة {ch['id']} نشرت. انتظار {sleep_seconds//60} دقيقة..."
-                )
                 if published_count == 0 or recycled:
                     if user_id:
                         with suppress(Exception):
                             await safe_send(bot, user_id, "✅ تم نشر منشور في قناتك")
-                await asyncio.sleep(sleep_seconds)
+                return True
             else:
                 await DB.increment_post_fail(post['id'])
+                return False
         except Exception as e:
             logger.error(f"❌ خطأ في قناة {ch.get('id', 'غير معروفة')}: {e}")
+            return False
 
     @staticmethod
     async def auto_publish(bot) -> None:
         """
         🚀 v7.8.6: حذف batch subs check المكرر.
-
-        السبب: get_channels_to_publish يضمن مسبقاً أن كل قناة مُعادة
-        لديها اشتراك نشط (شرط a.user_id IS NOT NULL OR owner_id).
-        الاستعلام الثاني كان يُعيد نفس المعلومة بـ 2.14s ضائعة.
+        🔴 v7.9.0: sleep بعد الخروج من semaphore (لا احتجاز طويل).
         """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
@@ -2514,9 +2612,6 @@ class BackgroundTasks:
                     await asyncio.sleep(60)
                     continue
 
-                # ✅ v7.8.6: لا حاجة لاستعلام subs — القنوات المُعادة
-                # مضمونة الاشتراك النشط بواسطة get_channels_to_publish.
-                # owner_id يمر عبر شرط (a.user_id IS NOT NULL OR uc.user_id=?)
                 sem_size = _get_semaphore_size(len(channels))
                 semaphore = asyncio.Semaphore(sem_size)
 
@@ -2525,19 +2620,25 @@ class BackgroundTasks:
                     if channel_id in active_tasks and not active_tasks[channel_id].done():
                         continue
                     published_count = ch.get('published_count', 0)
-                    # ✅ v7.8.6: has_sub=True دائماً (مضمون من الاستعلام)
                     has_sub = True
 
+                    # ✅ v7.9.0: النوم خارج الـ semaphore
+                    # — يمنع احتجازها حتى 60 دقيقة أثناء sleep_seconds
                     async def run_publish(ch=ch, bot=bot,
                                           sleep_seconds=sleep_seconds,
                                           published_count=published_count,
                                           semaphore=semaphore,
                                           has_sub=has_sub):
                         async with semaphore:
-                            await BackgroundTasks._publish_single_channel(
-                                bot, ch, sleep_seconds, published_count,
-                                has_sub=has_sub,
+                            success = await BackgroundTasks._publish_single_channel(
+                                bot, ch, published_count, has_sub=has_sub
                             )
+                        if success:
+                            logger.info(
+                                f"✅ قناة {ch['id']} نشرت. "
+                                f"انتظار {sleep_seconds // 60} دقيقة..."
+                            )
+                            await asyncio.sleep(sleep_seconds)
 
                     task = asyncio.create_task(run_publish())
                     active_tasks[channel_id] = task
@@ -2773,7 +2874,6 @@ class BackgroundTasks:
                 _auth_cache.clear()
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
-                # ✅ v7.8.6: تنظيف أقفال الكلمات المحظورة أيضاً
                 async with _banned_words_locks_guard:
                     _banned_words_locks.clear()
                 logger.info("✅ تم تنظيف الكاش المؤقت")
@@ -2931,6 +3031,7 @@ __all__ = [
     'AutoReplyCache', 'TranslationManager', 'get_text',
     'UserState', 'StateManager', 'CB', 'KeyboardFactory',
     'get_banned_words_cached', 'invalidate_banned_words_cache',
+    'invalidate_banned_words_cache_async',
     'get_min_publish_interval',
     'is_authorized_in_group', 'invalidate_auth_cache',
     'invalidate_auth_cache_async', 'check_bot_permissions',
