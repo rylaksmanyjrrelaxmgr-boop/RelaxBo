@@ -1,4 +1,6 @@
 {
+  "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>Пользователь:</b> {user_name}\n👥 <b>Группы:</b> {groups_count}\n📡 <b>Активный канал:</b> {active_channel}\n📥 <b>Неопубликованные посты:</b> {unpublished_posts}\n📤 <b>Автопубликация:</b> {auto_publish}\n♻️ <b>Автопереработка:</b> {auto_recycle}\n💎 <b>Подписка:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>Выберите из меню:</b>",
+
   "welcome": "🌿 <b>Добро пожаловать в Relax Manager</b>\nВыберите ваш язык",
   "main_title": "🌿 <b>{0}</b>\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: <code>{1}</code>\n👥 Мои группы: {2}\n💎 Подписка: {3}\n📡 Активный канал: {4}\n📝 Неопубликованные посты: {5}\n⚙️ Автопубликация: {6}",
   "no_channels": "Нет каналов",
