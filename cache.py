@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-cache.py - نظام الكاش المتقدم للبوت (v7.6.0)
+cache.py - نظام الكاش المتقدم للبوت (v7.6.1)
 ================================================================================
+🆕 v7.6.1 (إصلاح تسريب stampede locks):
+    ✅ TTLCache.get_or_set: try/finally يضمن تحرير _stampede_locks
+       حتى عند فشل loader (كان يتراكم → memory leak)
+    ✅ get_cache_stats: يشمل _stampede_locks في الإحصائيات (توافق مع health_snapshot)
+    ✅ توثيق: has() لا يحسب hits/misses (مقصود)
+
 🚀 v7.6.0 (تحسينات أداء وحماية من الانهيار):
     ✅ TTLCache: TTL jitter (±10%) — منع thundering herd
     ✅ TTLCache.get_or_set(): حماية من cache stampede
@@ -19,16 +25,6 @@ cache.py - نظام الكاش المتقدم للبوت (v7.6.0)
     ✅ UserDataCache: retry ذكي للـwaiter
     ✅ clear_all_caches: يستخدم invalidate*() العامة
     ✅ TTLCache.get_all: يفلتر العناصر المنتهية
-
-🆕 v7.5.20 (تنظيف API عام + منع تحميل مزدوج):
-    ✅ TTLCache.size() / keys_count()
-    ✅ get_cache_stats / get_detailed_stats — تستخدم API العام
-    ✅ UserDataCache.get_or_load — منع إعادة التحميل
-
-🆕 v7.5.19:
-    ✅ TTLCache.delete_by_prefix() / reset_stats()
-    ✅ AuthCache.invalidate يستخدم delete_by_prefix
-    ✅ cache_key: يدعم None/datetime/bytes
 
 ⚠️ تحذير مهم:
     هذا الملف يعرّف auth_cache مع TTL=10s.
@@ -86,6 +82,10 @@ class TTLCache:
     - تنظيف تلقائي عند الإضافة
     - آمن للاستخدام المتزامن مع أقفال
     - إحصائيات دقيقة
+
+    ملاحظات:
+    - has() لا يحسب hits/misses (مقصود — للتحقق السريع فقط)
+    - set() يُطبّق jitter تلقائياً
     """
 
     __slots__ = (
@@ -157,6 +157,7 @@ class TTLCache:
         التحقق من وجود مفتاح صالح دون جلب القيمة.
 
         ✅ v7.6.0: يُحدّث _expired عند الحذف (كان يُفوّت الإحصاء).
+        ملاحظة: لا يحسب hits/misses — للتحقق السريع فقط.
         """
         async with self._lock:
             item = self._cache.get(key)
@@ -193,7 +194,7 @@ class TTLCache:
                 self._cache.move_to_end(key)
             self._cleanup_locked()
 
-    # ─── get_or_set (Stapeede protection) ───────────────────────────
+    # ─── get_or_set (Stampede protection) ───────────────────────────
 
     async def get_or_set(
         self,
@@ -206,6 +207,9 @@ class TTLCache:
 
         إذا كان المفتاح موجوداً → يُرجعه.
         إذا لم يكن → يستدعي loader مرة واحدة فقط (حتى مع N متزامنة).
+
+        ✅ v7.6.1: try/finally يضمن تحرير _stampede_locks
+        حتى عند فشل loader (كان يتراكم → memory leak).
 
         مثال:
             data = await cache.get_or_set(
@@ -227,21 +231,23 @@ class TTLCache:
                 self._stampede_locks[key] = lock
 
         async with lock:
-            # إعادة الفحص — ربما تم التعبئة أثناء انتظار القفل
-            value = await self.get(key)
-            if value is not None:
-                return value
+            # ✅ v7.6.1: try/finally لضمان تنظيف القفل
+            try:
+                # إعادة الفحص — ربما تم التعبئة أثناء انتظار القفل
+                value = await self.get(key)
+                if value is not None:
+                    return value
 
-            # استدعاء loader
-            loaded = await loader()
-            if loaded is not None:
-                await self.set(key, loaded, ttl)
+                # استدعاء loader
+                loaded = await loader()
+                if loaded is not None:
+                    await self.set(key, loaded, ttl)
 
-            # تنظيف القفل
-            async with self._lock:
-                self._stampede_locks.pop(key, None)
-
-            return loaded
+                return loaded
+            finally:
+                # ✅ v7.6.1: يُنفَّذ دائماً — نجاح أو فشل أو إلغاء
+                async with self._lock:
+                    self._stampede_locks.pop(key, None)
 
     # ─── delete ─────────────────────────────────────────────────────
 
@@ -914,7 +920,11 @@ async def cache_cleanup_task():
 # =====================================================================
 
 async def get_cache_stats() -> Dict:
-    """جلب إحصائيات الكاش (للمطورين) — يستخدم API عام."""
+    """
+    جلب إحصائيات الكاش (للمطورين) — يستخدم API عام.
+
+    ✅ v7.6.1: يشمل _stampede_locks في الإحصائيات (توافق مع health_snapshot).
+    """
     (sec_size, ar_size, bot_size,
      bw_size,
      auth_size, admin_size,
@@ -935,6 +945,22 @@ async def get_cache_stats() -> Dict:
         user_cache.cache.size(),
         posts_cache.cache.size(),
         posts_cache.next_post.size(),
+    )
+
+    # ✅ v7.6.1: جمع _stampede_locks
+    total_stampede_locks = 0
+    try:
+        for cache_obj in _ALL_CACHES:
+            s = await cache_obj.get_stats()
+            total_stampede_locks += s.get('stampede_locks', 0)
+    except Exception:
+        pass
+
+    total = (
+        sec_size + ar_size + bot_size + bw_size +
+        auth_size + admin_size + ch_size + cinfo_size +
+        gr_size + ginfo_size + user_size +
+        posts_size + next_size
     )
 
     return {
@@ -961,12 +987,8 @@ async def get_cache_stats() -> Dict:
             'posts': posts_size,
             'next_post': next_size,
         },
-        'total': (
-            sec_size + ar_size + bot_size + bw_size +
-            auth_size + admin_size + ch_size + cinfo_size +
-            gr_size + ginfo_size + user_size +
-            posts_size + next_size
-        ),
+        'total': total,
+        'active_stampede_locks': total_stampede_locks,
     }
 
 
