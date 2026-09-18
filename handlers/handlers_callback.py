@@ -2,50 +2,33 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.12)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.13)
 =====================================================================
+✅ v9.4.13 — إصلاحات عرض:
+  - _show_main_menu_inline: تمرير auto_publish و auto_recycle
+    (كانا فارغين في القائمة الرئيسية عبر كل اللغات)
+  - _show_main_menu_inline: تحويل **bold** → <b>bold</b> تلقائياً
+    (كانت العلامات تظهر حرفياً لأن safe_edit يستخدم HTML)
+  - _render_translation_menu: عرض حالة الترجمة الحالية + تمييز
+    اللغة المختارة بـ ✅ + إخفاء زر الإيقاف عند التعطيل
+
 ✅ v9.4.12 — عرض مقياسي النجاح والإنجاز في "نسبة نجاح القنوات":
   - _handle_analytics → channels_rate: يميّز بين
       🎯 نسبة النجاح   = published / (published + failed)
       📈 نسبة الإنجاز  = published / total
-  - ترتيب القنوات بـ (success_rate, completion_rate) لضمان ظهور
-    القنوات ذات المشاكل الحقيقية أولاً.
-  - يتوافق مع database_analytics.py v1.0.1 (attempted, pending,
-    completion_rate حقول جديدة).
-  - توافق خلفي: إن لم تكن الحقول الجديدة موجودة (نسخة قديمة من
-    database_analytics.py)، يعود تلقائياً للحساب من الحقول القديمة.
+  - يتوافق مع database_analytics.py v1.0.1
 
 ✅ v9.4.11 — إصلاحات ما بعد التدقيق:
-  - _handle_contests: RANDOM() → جلب المعرّفات + random.choice
-  - _invalidate_after_channel_change: يُبطل posts_cache الآن
-  - _invalidate_after_channel_change: أزلنا مفاتيح الاشتراك
+  - _handle_contests: RANDOM() → random.choice
+  - _invalidate_after_channel_change: posts_cache.invalidate
   - _publish_task: الإبطال قبل safe_send
   - ACTIVE_TASKS: Set[asyncio.Task] بدل WeakSet
   - _set_sec_chat(): مُزامن sec_chat + security_chat_id
-  - _render_translation_menu: TranslationManager.get_available_languages
-  - _handle_buy_subscription: fallback بالاستعلام عن duration_days
+  - _render_translation_menu: TranslationManager
+  - _handle_buy_subscription: fallback duration_days
   - _show_main_menu_inline: try/except حول get_or_load
 
-✅ v9.4.10 — إبطال كاش شامل بعد حذف/تعديل القنوات والمجموعات:
-  - _invalidate_after_channel_change(): دالة موحّدة لإبطال
-    start_data_{user_id}, user_{user_id}*, channels_{user_id},
-    channel_info_{ch_db_id}, user_cache[user_id].
-  - _handle_channel_delete: إبطال بعد delete_channel ناجح
-  - _handle_channel_select: إبطال بعد set_active_channel
-  - _handle_post_delete: إبطال بعد delete_post
-  - POST_REC: إبطال بعد reset_posts
-  - POST_CLEAR: إبطال بعد مسح الكل
-  - _handle_group_delete: إبطال بعد delete_group
-  - يحل: تأخير 60 ثانية في الواجهة الرئيسية بعد أي تغيير
-
-✅ v9.4.9 — تمييز -1 (اشتراك أطول) عن 0 (فشل حقيقي) في trial
-✅ v9.4.8 — تصحيح تفعيل التجربة: _coerce_int + try/finally
-✅ v9.4.7 — إبطال كاش الاشتراك في trial
-✅ v9.4.6 — توحيد المعاملات في تفعيل/تعطيل الأمان
-✅ v9.4.5 — fire-and-forget admin_log
-✅ v9.4.4 — عرض مصدر الاستعلامات البطيئة
-✅ v9.4.3 — إصلاح مسار التحليلات
-✅ v9.4.2..v9.0.0 — كل الإصلاحات السابقة
+✅ v9.4.10..v9.0.0 — كل الإصلاحات السابقة
 =====================================================================
 """
 
@@ -55,6 +38,7 @@ import json
 import time
 import shutil
 import os
+import re
 import html as _html
 import weakref
 import random
@@ -72,7 +56,6 @@ from telegram.error import BadRequest, RetryAfter, Forbidden
 from config import CONFIG, PATHS
 from database import DB, TimeUtils, internal_cache
 
-# ✅ v9.4.2: دالة الألوان الديناميكية
 try:
     from database_analytics import color_emoji
 except ImportError:
@@ -86,7 +69,6 @@ except ImportError:
             return "🟢" if v <= low else ("🟡" if v <= high else "🔴")
         return "🟢" if v >= high else ("🟡" if v >= low else "🔴")
 
-# ─── utils ────────────────────────────────────────────────────────────
 try:
     from utils import (
         safe_send, is_authorized_in_group,
@@ -178,18 +160,18 @@ SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 LOG_CHANNEL_MENU_CACHE_TTL = 30
 
-# ✅ v9.4.12: حدود نسبة النجاح لتلوين الإيموجي
 SUCCESS_RATE_GOOD_THRESHOLD = 70
 SUCCESS_RATE_WARN_THRESHOLD = 30
 DEFAULT_SUCCESS_RATE = 100.0
+
+# ✅ v9.4.13: نمط تحويل **bold** → <b>bold</b>
+_BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
     _PRIMARY_OWNER_ID = None
 
-# ✅ v9.4.11: Set عادي بدل WeakSet —
-# asyncio.create_task يحتفظ بـ weak refs فقط، مما يعرّض المهام للـ GC.
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
@@ -256,6 +238,17 @@ def _safe_str(value, default='?') -> str:
     return s if s.strip() else default
 
 
+def _md_to_html(text: str) -> str:
+    """
+    ✅ v9.4.13: تحويل **bold** → <b>bold</b>.
+    يُستخدم لأن safe_edit يُستدعى بـ parse_mode='HTML'
+    بينما القوالب في locales/*.json قد تستخدم Markdown.
+    """
+    if not text or '**' not in text:
+        return text
+    return _BOLD_MD_PATTERN.sub(r"<b>\1</b>", text)
+
+
 def _get_group_log():
     if not _GROUP_LOG_MODULE_AVAILABLE or _group_log_module is None:
         return None
@@ -276,7 +269,6 @@ async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
 def _set_sec_chat(context, chat_id: int) -> None:
     """
     ✅ v9.4.11: مُزامن sec_chat و security_chat_id.
-    قبل: كانا منفصلين — _resolve_sec_chat_id يفشل إذا استُخدم مفتاح واحد فقط.
     """
     try:
         context.user_data['sec_chat'] = chat_id
@@ -564,10 +556,6 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
                 del _sec_auth_cache[k]
 
 
-# =====================================================================
-# ✅ v9.4.11: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات/المجموعات
-# =====================================================================
-
 async def _invalidate_after_channel_change(
     user_id: int,
     channel_db_id: Optional[int] = None,
@@ -575,21 +563,6 @@ async def _invalidate_after_channel_change(
 ) -> None:
     """
     ✅ v9.4.11: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
-
-    يحل مشكلة: الواجهة الرئيسية تُظهر بيانات قديمة لمدة 60 ثانية
-    (TTL start_data_{user_id}) بعد إضافة/حذف/تعديل قناة أو منشور.
-
-    يبطّل:
-      - start_data_{user_id}         (تُقرأ في _show_main_menu_inline)
-      - user_{user_id}*              (كاشات داخليّة في database.py)
-      - channels_{user_id}           (قائمة القنوات)
-      - channel_info_{channel_db_id} (إن مُرِّر)
-      - posts_cache[channel_db_id]   (إن مُرِّر — قائمة المنشورات)
-      - user_cache[user_id]          (كاش cache.py)
-
-    ✅ v9.4.11: لم يعد يُبطل مفاتيح الاشتراك (has_active_sub_*,
-    subscription_*) — لأنها لا تتأثر بتغيير القنوات/المنشورات.
-    تُدار عبر DB.invalidate_subscription_cache منفصلاً.
     """
     keys = [
         f"start_data_{user_id}",
@@ -611,7 +584,6 @@ async def _invalidate_after_channel_change(
     except Exception as e:
         logger.debug(f"user_cache invalidate: {e}")
 
-    # ✅ v9.4.11: إبطال posts_cache للقناة (كان منسيّاً في الموحّد)
     if invalidate_posts and channel_db_id is not None:
         try:
             await posts_cache.invalidate(channel_db_id)
@@ -619,24 +591,14 @@ async def _invalidate_after_channel_change(
             logger.debug(f"posts_cache invalidate({channel_db_id}): {e}")
 
 
-# =====================================================================
-# ✅ v9.4.12: مساعد لتنسيق نسبة نجاح قناة واحدة
-# =====================================================================
-
 def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     """
     ✅ v9.4.12: يُنسّق سطر قناة واحدة بعرض مقياسَي النجاح والإنجاز.
-
-    - نسبة النجاح   = published / (published + failed)
-    - نسبة الإنجاز  = published / total
-
-    توافق خلفي: يعمل مع كل من database_analytics.py v1.0.0 و v1.0.1.
     """
     published = _coerce_int(ch.get('published'), 0)
     failed = _coerce_int(ch.get('failed'), 0)
     total = _coerce_int(ch.get('total'), 0)
 
-    # ✅ الحقول الجديدة (v1.0.1)
     attempted = _coerce_int(ch.get('attempted'), published + failed)
     pending = _coerce_int(ch.get('pending'), max(0, total - attempted))
     success_rate = _coerce_float(
@@ -659,7 +621,6 @@ def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
         f"({published}/{attempted})  "
         f"❌ {failed}\n"
     )
-    # نعرض سطر الإنجاز فقط إن كان هناك شيء لم يُنجَز بعد
     if pending > 0:
         line += (
             f"   📈 إنجاز: {completion_rate}% "
@@ -796,7 +757,6 @@ class CallbackHandlers:
                 await CommandHandlers.help_command(update, context)
                 return
 
-            # ✅ v9.4.9: تمييز -1 (اشتراك أطول) عن 0 (فشل حقيقي)
             if base_data == CB.TRIAL:
                 if await DB.has_used_trial(user_id):
                     await safe_edit(
@@ -815,7 +775,6 @@ class CallbackHandlers:
                         await DB.activate_trial(user_id), 0
                     )
                 finally:
-                    # ✅ FIX: إبطال كاش الاشتراك دائماً حتى عند الفشل الجزئي
                     try:
                         await DB.invalidate_subscription_cache(user_id)
                     except Exception as e:
@@ -962,8 +921,9 @@ class CallbackHandlers:
                 await safe_edit(query, "📅 أرسل عدد الأيام (1-30):", bot=context.bot)
                 return
 
+            # ✅ v9.4.13: تمرير user_id لعرض حالة الترجمة
             if base_data == CB.TRANSLATION:
-                await CallbackHandlers._render_translation_menu(query, context, lang)
+                await CallbackHandlers._render_translation_menu(query, context, user_id, lang)
                 return
 
             if base_data == CB.TRANS_OFF:
@@ -1034,7 +994,6 @@ class CallbackHandlers:
                 active = await DB.get_active_channel(user_id)
                 if active:
                     count = await DB.reset_posts(user_id, active)
-                    # ✅ v9.4.11: الموحّد يُبطل posts_cache الآن
                     await _invalidate_after_channel_change(user_id, active)
                     context.user_data['post_page'] = 0
                     await safe_send(context.bot, user_id, f"♻️ تم إعادة تدوير {count} منشور")
@@ -1047,7 +1006,6 @@ class CallbackHandlers:
                 active = await DB.get_active_channel(user_id)
                 if active:
                     await DB.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
-                    # ✅ v9.4.11: الموحّد يُبطل posts_cache الآن
                     await _invalidate_after_channel_change(user_id, active)
                     context.user_data['post_page'] = 0
                     await safe_send(context.bot, user_id, "🧹 تم مسح جميع المنشورات")
@@ -1096,9 +1054,6 @@ class CallbackHandlers:
                 await CallbackHandlers._handle_security(update, context, query, user_id, lang)
                 return
 
-            # ═══════════════════════════════════════════════════════
-            # ✅ v9.4.3: معالجات التحليلات — قبل admin_ العام!
-            # ═══════════════════════════════════════════════════════
             if data == "admin_analytics":
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query, "❌ غير مصرح", bot=context.bot)
@@ -1283,6 +1238,7 @@ class CallbackHandlers:
 
     # =================================================================
     # القائمة الرئيسية
+    # ✅ v9.4.13: تمرير auto_publish/auto_recycle + تحويل ** → <b>
     # =================================================================
 
     @staticmethod
@@ -1295,7 +1251,6 @@ class CallbackHandlers:
                 pass
 
             if not user_data:
-                # ✅ v9.4.11: try/except حول get_or_load (كان مكشوفاً)
                 try:
                     if hasattr(user_cache, 'get_or_load'):
                         user_data = await user_cache.get_or_load(user_id, DB)
@@ -1316,6 +1271,12 @@ class CallbackHandlers:
             unpublished_posts = user_data.get('unpublished_posts', 0)
             groups_count = user_data.get('groups_count', 0)
             has_sub = bool(user_data.get('has_subscription', False))
+
+            # ✅ v9.4.13: استخراج auto_publish / auto_recycle
+            auto_publish = bool(user_data.get('auto_publish', True))
+            auto_recycle = bool(user_data.get('auto_recycle', True))
+            auto_publish_text = "✅" if auto_publish else "❌"
+            auto_recycle_text = "✅" if auto_recycle else "❌"
 
             ch_display = await _trans('no_active_channel', lang, "لا توجد قنوات")
             if channel_info and isinstance(channel_info, dict):
@@ -1342,6 +1303,7 @@ class CallbackHandlers:
                     new_rows.append([InlineKeyboardButton(admin_text, callback_data=CB.ADMIN)])
                     kb = InlineKeyboardMarkup(new_rows)
 
+            # ✅ v9.4.13: تمرير auto_publish و auto_recycle
             title = await get_text(
                 lang, 'main_menu',
                 user_name=f"<code>{user_id}</code>",
@@ -1349,7 +1311,13 @@ class CallbackHandlers:
                 active_channel=ch_display,
                 unpublished_posts=unpublished_posts,
                 subscription_status=sub_text,
+                auto_publish=auto_publish_text,
+                auto_recycle=auto_recycle_text,
             )
+
+            # ✅ v9.4.13: تحويل **bold** → <b>bold</b> (يعمل لكل اللغات)
+            title = _md_to_html(title)
+
             await safe_edit(query, title, reply_markup=kb, parse_mode='HTML', bot=context.bot)
             return True
         except Exception as e:
@@ -1882,35 +1850,81 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_handle_reminder_toggle: {e}", exc_info=True)
 
+    # =================================================================
+    # ✅ v9.4.13: قائمة الترجمة مع عرض الحالة + تمييز اللغة الحالية
+    # =================================================================
+
     @staticmethod
-    async def _render_translation_menu(query, context, lang):
+    async def _render_translation_menu(query, context, user_id, lang):
         """
-        ✅ v9.4.11: يستخدم TranslationManager.get_available_languages()
-        بدل قائمة مكتوبة يدوياً — تُظهر أي لغة مُضافة في utils.py.
+        ✅ v9.4.13: عرض حالة الترجمة الحالية + تمييز اللغة المختارة بـ ✅
+        + إخفاء زر الإيقاف عند التعطيل.
         """
+        try:
+            current_lang = await DB.get_user_language(user_id) or 'ar'
+        except Exception:
+            current_lang = 'ar'
+
         try:
             langs = TranslationManager.get_available_languages() or {}
         except Exception as e:
             logger.warning(f"get_available_languages: {e}")
             langs = {
-                "ar": "العربية", "en": "English", "fr": "Français",
-                "tr": "Türkçe", "zh": "中文", "ru": "Русский",
+                "ar": "العربية 🇸🇦", "en": "English 🇬🇧",
+                "fr": "Français 🇫🇷", "tr": "Türkçe 🇹🇷",
+                "zh": "中文 🇨🇳", "ru": "Русский 🇷🇺",
             }
+
+        is_off = (current_lang == 'off')
+
+        if is_off:
+            state_line = "❌ <b>الترجمة معطلة حالياً</b>"
+            hint_line = "💡 اختر لغة من الأسفل لتفعيل الترجمة"
+        else:
+            current_name = langs.get(current_lang, current_lang)
+            state_line = f"✅ <b>الترجمة مفعلة</b> → {_html.escape(str(current_name))}"
+            hint_line = "💡 اختر لغة أخرى للتبديل، أو أوقف الترجمة"
+
+        text = (
+            "🌐 <b>إعدادات الترجمة</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{state_line}\n"
+            f"<i>{hint_line}</i>\n\n"
+            "اختر اللغة:"
+        )
 
         rows: list = []
         current_row: list = []
         for code, name in langs.items():
-            current_row.append((name, code))
+            label = f"✅ {name}" if (code == current_lang and not is_off) else name
+            current_row.append((label, code))
             if len(current_row) == 2:
                 rows.append(current_row)
                 current_row = []
         if current_row:
             rows.append(current_row)
 
-        kb = [[InlineKeyboardButton(t, callback_data=f"lang_{c}") for t, c in row] for row in rows]
-        kb.append([InlineKeyboardButton("❌ إيقاف الترجمة", callback_data=CB.TRANS_OFF)])
-        kb.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)])
-        await safe_edit(query, "🌐 اختر اللغة:", reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+        kb = [
+            [InlineKeyboardButton(t, callback_data=f"lang_{c}") for t, c in row]
+            for row in rows
+        ]
+
+        if not is_off:
+            kb.append([
+                InlineKeyboardButton(
+                    "❌ إيقاف الترجمة",
+                    callback_data=CB.TRANS_OFF,
+                )
+            ])
+
+        kb.append([
+            InlineKeyboardButton("🔙 رجوع", callback_data=CB.BACK)
+        ])
+
+        await safe_edit(
+            query, text, reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot,
+        )
 
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
@@ -1953,8 +1967,6 @@ class CallbackHandlers:
             return
         plan = await DB.get_plan_by_name(plan_name)
         plan_d = _row_to_dict(plan)
-        # ✅ v9.4.11: fallback — ابحث بـ duration_days إذا لم يوجد بالاسم
-        # (يحمي من تغيير أسماء الخطط في DB)
         if not plan_d:
             try:
                 fallback = await DB.fetchone(
@@ -2047,7 +2059,6 @@ class CallbackHandlers:
         except Exception:
             pass
         if await DB.delete_group(chat_id):
-            # ✅ v9.4.11: إبطال كاش بعد حذف المجموعة
             await _invalidate_after_channel_change(user_id)
             await safe_edit(query, "✅ تم حذف المجموعة", bot=context.bot)
         else:
@@ -2065,7 +2076,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
             return
 
-        # ✅ v9.4.11: مُزامنة sec_chat + security_chat_id
         _set_sec_chat(context, chat_id)
 
         await CallbackHandlers._render_security_two_phase(
@@ -2080,7 +2090,6 @@ class CallbackHandlers:
             await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
             return
         if await DB.set_active_channel(user_id, ch_id):
-            # ✅ v9.4.11: إبطال كاش بعد تغيير القناة النشطة
             await _invalidate_after_channel_change(user_id, ch_id)
             await safe_edit(query, "✅ تم تحديد القناة!", bot=context.bot)
         else:
@@ -2095,7 +2104,6 @@ class CallbackHandlers:
             return
         if await DB.delete_channel(user_id, ch_id):
             context.user_data['channel_page'] = 0
-            # ✅ v9.4.11: إبطال كاش + posts_cache بعد حذف القناة
             await _invalidate_after_channel_change(user_id, ch_id)
             await CallbackHandlers._show_channel_list(update, context, query, user_id, lang)
         else:
@@ -2187,7 +2195,6 @@ class CallbackHandlers:
             try:
                 async with _publish_semaphore:
                     result = await CallbackHandlers._publish_single(bot, active, ch_id, post)
-                # ✅ v9.4.11: الإبطال قبل safe_send — يمنع واجهة قديمة
                 if result:
                     try:
                         await _invalidate_after_channel_change(user_id, active)
@@ -2218,7 +2225,6 @@ class CallbackHandlers:
             return
         active = await DB.get_active_channel(user_id)
         if active and await DB.delete_post(user_id, post_id, active):
-            # ✅ v9.4.11: الموحّد يُبطل posts_cache الآن
             await _invalidate_after_channel_change(user_id, active)
             await CallbackHandlers._show_post_list(update, context, query, user_id, lang)
         else:
@@ -2475,7 +2481,6 @@ class CallbackHandlers:
                 summary += f" | ⚠️ فقد {lost_count}"
             await safe_send(bot, user_id, summary)
 
-            # ✅ v9.4.11: إبطال موحّد بلا posts_cache (لا نعرف أي قناة بالتحديد)
             try:
                 await _invalidate_after_channel_change(
                     user_id, channel_db_id=None, invalidate_posts=False
@@ -2721,7 +2726,6 @@ class CallbackHandlers:
                 )
                 values = activate_values if is_activate else deactivate_values
 
-                # ✅ v9.4.6: توحيد المعاملات — settings + admin_log في معاملة واحدة
                 action_name = (
                     f"{'activate' if is_activate else 'deactivate'}"
                     f"_all_security"
@@ -4245,7 +4249,6 @@ class CallbackHandlers:
                 stats = await DB.get_publish_stats()
                 total_ch = stats['total_channels']
                 avg_posts = stats['avg_posts_per_channel']
-                # ✅ v9.4.12: success_rate هي نسبة النجاح الحقيقية
                 rate = stats.get('success_rate', DEFAULT_SUCCESS_RATE)
                 completion = stats.get('completion_rate', 0)
                 rate_color = color_emoji(
@@ -4295,9 +4298,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═══════════════════════════════════════════════════════
-            # ✅ v9.4.12: عرض مقياسَي النجاح والإنجاز
-            # ═══════════════════════════════════════════════════════
             if action == "channels_rate":
                 rows = await DB.get_top_channels(20)
                 if not rows:
@@ -4318,7 +4318,6 @@ class CallbackHandlers:
                 text += "🎯 <b>نجاح</b> = published / (published + failed)\n"
                 text += "📈 <b>إنجاز</b> = published / total\n\n"
 
-                # ترتيب: الأقل نجاحاً أولاً، ثم الأقل إنجازاً
                 def _sort_key(ch):
                     sr = _coerce_float(
                         ch.get('success_rate'), DEFAULT_SUCCESS_RATE
@@ -4428,9 +4427,6 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ═══════════════════════════════════════════════════════
-            # ✅ v9.4.4: عرض مصدر الاستعلامات البطيئة
-            # ═══════════════════════════════════════════════════════
             if action == "slow":
                 rows = await DB.get_slow_queries(20)
                 if not rows:
@@ -5050,8 +5046,6 @@ class CallbackHandlers:
                 if cid <= 0:
                     await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
                     return
-                # ✅ v9.4.11: جلب المعرّفات + random.choice بدل RANDOM()
-                # (RANDOM() غير موجودة على MySQL — كان يفشل كلياً هناك)
                 participants = await DB.fetchall(
                     "SELECT user_id FROM contest_participants WHERE contest_id=?",
                     (cid,))
@@ -5147,5 +5141,6 @@ __all__ = [
     "_invalidate_after_channel_change",
     "_set_sec_chat",
     "_format_channel_rate_line",
+    "_md_to_html",
     "ACTIVE_TASKS",
 ]
