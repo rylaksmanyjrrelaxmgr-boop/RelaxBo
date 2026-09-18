@@ -1,5 +1,5 @@
 {
-  "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>Пользователь:</b> {user_name}\n👥 <b>Группы:</b> {groups_count}\n📡 <b>Активный канал:</b> {active_channel}\n📥 <b>Неопубликовано:</b> {unpublished_posts}\n📤 <b>Автопубликация:</b> {auto_publish}\n♻️ <b>Автопереработка:</b> {auto_recycle}\n💎 <b>Подписка:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>Выберите из меню:</b>",
+  "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>Пользователь:</b> {user_name}\n👥 <b>Группы:</b> {groups_count}\n📡 <b>Активный канал:</b> {active_channel}\n📥 <b>Неопубликовано:</b> {unpublished_posts}\n📤 <b>Автопубликация:</b> {auto_publish}\n♻️ <b>Автопереработка:</b> {auto_recycle}\n💎 <b>Подписка:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>Выберите из меню:</b>",
   "help_text": "📚 <b>Меню помощи</b>\n\n🏠 /start - Главное меню\n💳 /subscribe - Подписаться\n🎁 /trial - Бесплатный пробный период\n📞 /support - Поддержка",
 
   "trial_used": "❌ Вы уже использовали бесплатный пробный период",
