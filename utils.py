@@ -2,25 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.3 - Post-Audit Hardening)
+utils.py - الأدوات المساعدة للبوت (v7.9.4 - Path Fix)
 =================================================================================
-🔴 v7.9.3 (إضافة سجلّ تحميل ملفات الترجمة):
-    ✅ TranslationManager._load_translation_cached: سجل عند النجاح
+🔴 v7.9.4 (إصلاح مسار ملفات الأزرار):
+    ✅ KeyboardFactory: إعادة مسار buttons_config_*.json إلى الجذر
+       (بجانب utils.py) — كان v7.9.3 يبحث عنها خطأً في locales/
+       → أدى إلى اختفاء كل الأزرار
+
+    📂 البنية الصحيحة:
+       project/
+       ├── utils.py
+       ├── buttons_config_ar.json     ← الأزرار (الجذر)
+       ├── buttons_config_en.json     ← الأزرار (الجذر)
+       └── locales/
+           ├── ar.json                ← النصوص
+           └── en.json                ← النصوص
+
+🔴 v7.9.3 (سجلّ تحميل ملفات الترجمة):
+    ✅ TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
        - "✅ تم تحميل ملف الترجمة {lang}.json: N مفتاح"
        - "⚠️ ملف الترجمة {lang}.json غير موجود — fallback"
        - "❌ فشل قراءة ملف الترجمة {lang}: ..."
-       - تمكّن المطوّر من رؤية أي ملف تُحمَّل فعلياً
-       - تحل مشكلة: المستخدم لا يعرف إن كان en.json حُمِّل
 
 🔴 v7.9.2 (إصلاحات ما بعد التدقيق):
     ✅ _read_pool_stats: دعم asyncmy (maxsize/size/freesize)
-    ✅ _get_global_words_cached: loaded_at>0 بدل قائمة غير فارغة
+    ✅ _get_global_words_cached: loaded_at>0
     ✅ _send_media: تمرير parse_mode للـ captions
     ✅ safe_send: BadRequest fallback يمرّر parse_mode=None
     ✅ safe_parse_iso: توحيد naive/aware
     ✅ SmartCache: time.monotonic() بدل time.time()
     ✅ _publish_single_channel: has_sub=None يُحسب من DB
-    ✅ BackgroundTasks: تحسين توثيق
 
 🔴 v7.9.1 (تحسين):
     ✅ get_reply_from_file: قائمة أنماط مُسبَق تصريفها
@@ -83,7 +94,7 @@ class SmartCache:
     """
     🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
     🔴 v7.9.0: إصلاح تسرّب الأقفال عند فشل loader (try/finally + هوية).
-    🔴 v7.9.2: time.monotonic() بدل time.time() — محصّن ضد قفزات NTP.
+    🔴 v7.9.2: time.monotonic() بدل time.time().
     """
     __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
@@ -173,9 +184,6 @@ _security_stats_cache = SmartCache(ttl=5, max_size=500)
 # =====================================================================
 
 class TimeUtils:
-    """
-    🕐 القاعدة الذهبية: خزّن UTC، اعرض بتوقيت المستخدم.
-    """
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -206,9 +214,6 @@ class TimeUtils:
 
     @staticmethod
     def safe_parse_iso(date_str: Optional[str]) -> Optional[datetime]:
-        """
-        🕐 v7.9.2: توحيد naive/aware — كل المخرجات naive UTC.
-        """
         if not date_str:
             return None
         if isinstance(date_str, datetime):
@@ -381,8 +386,9 @@ _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
 # 6. الترجمات — Preload + Warmup + سجل كامل
-# 🔴 v7.9.0: تحميل خارج القفل (يمنع deadlock)
+# 🔴 v7.9.0: تحميل خارج القفل
 # 🔴 v7.9.3: سجل عند كل تحميل/فشل/خطأ
+# 📂 المسار: locales/{lang}.json (نسبة إلى utils.py)
 # =====================================================================
 
 class TranslationManager:
@@ -395,33 +401,27 @@ class TranslationManager:
     def _load_translation_cached(cls, lang: str) -> Dict:
         """
         🔴 v7.9.3: يُسجّل رسالة عند كل تحميل/فشل/خطأ.
-        - ✅ نجاح → "تم تحميل ملف الترجمة {lang}.json: N مفتاح"
-        - ⚠️ مفقود → "ملف الترجمة {lang}.json غير موجود — fallback"
-        - ❌ خطأ → "فشل قراءة ملف الترجمة {lang}: ..."
+        📂 المسار: locales/{lang}.json
         """
         if lang == 'off':
             lang = cls._default_lang
 
-        # ✅ v7.9.0: check تحت القفل ثم تحرير
         with cls._load_lock:
             cached = cls._translations.get(lang)
         if cached is not None:
             return cached
 
-        # ✅ v7.9.0: التحميل خارج القفل — idempotent وآمن تحت التزامن
         file_path = Path(cls._locales_dir) / f"{lang}.json"
         loaded: Optional[Dict] = None
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
 
-            # ✅ v7.9.3: سجل النجاح — يُظهر عدد المفاتيح
             logger.info(
                 f"✅ تم تحميل ملف الترجمة {lang}.json: "
                 f"{len(loaded)} مفتاح"
             )
         except FileNotFoundError:
-            # ✅ v7.9.3: سجل الفشل — يُظهر الملف المفقود
             logger.warning(
                 f"⚠️ ملف الترجمة {lang}.json غير موجود — "
                 f"fallback إلى {cls._default_lang}"
@@ -430,7 +430,6 @@ class TranslationManager:
                 return cls._load_translation_cached(cls._default_lang)
             loaded = {}
         except json.JSONDecodeError as e:
-            # ✅ v7.9.3: خطأ JSON
             logger.error(
                 f"❌ خطأ JSON في ملف الترجمة {lang}.json: {e}"
             )
@@ -443,7 +442,6 @@ class TranslationManager:
                 return cls._load_translation_cached(cls._default_lang)
             loaded = {}
 
-        # ✅ v7.9.0: double-check — قد يكون خيط آخر حمّله في الأثناء
         with cls._load_lock:
             existing = cls._translations.get(lang)
             if existing is not None:
@@ -763,13 +761,15 @@ class CB:
 
 # =====================================================================
 # 9. مصنع الكيبوردات — Preload
-# 🔴 v7.9.0: تحميل خارج القفل (يمنع deadlock)
+# 🔴 v7.9.0: تحميل خارج القفل
+# ✅ v7.9.4: المسار أُعيد إلى الجذر (بجانب utils.py)
 # =====================================================================
 
 class KeyboardFactory:
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
-    _config_path_template: str = str(Path(__file__).resolve().parent / "locales" / "buttons_config_{lang}.json")
+    # ✅ v7.9.4: المسار الأصلي — الملفات في الجذر بجانب utils.py
+    _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
     _load_lock = threading.Lock()
 
     _NO_CHAT_ID_BUTTONS = {
@@ -972,6 +972,10 @@ class KeyboardFactory:
 
     @classmethod
     def _load_config_for_lang(cls, lang: str) -> Dict:
+        """
+        🔴 v7.9.3: يُسجّل رسالة عند كل تحميل/فشل/خطأ.
+        ✅ v7.9.4: المسار: buttons_config_{lang}.json (بجانب utils.py)
+        """
         if lang == 'off':
             lang = cls._default_lang
 
@@ -1459,9 +1463,6 @@ class KeyboardFactory:
 
 # =====================================================================
 # 10. كاش الكلمات المحظورة
-# ✅ v7.8.6: cleanup locks + قفل موحّد للكلمات العامة + TTL أطول
-# 🔴 v7.9.0: variant async آمن ضد race مع _get_global_words_cached
-# 🔴 v7.9.2: loaded_at>0 بدل قائمة غير فارغة
 # =====================================================================
 
 _banned_words_cache: Dict[int, List[str]] = {}
@@ -1512,9 +1513,6 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
 
 
 async def _get_global_words_cached() -> List[str]:
-    """
-    🔴 v7.9.2: يعتمد على _global_words_loaded_at>0.
-    """
     global _global_words_cache, _global_words_loaded_at
 
     now = time.time()
@@ -1607,11 +1605,6 @@ def _clear_db_banned_words_cache(chat_id: int = None) -> None:
 
 
 def invalidate_banned_words_cache(chat_id: int = None) -> None:
-    """
-    Synchronous version — acceptable for most uses.
-    For strict race-free behavior in async contexts, prefer
-    invalidate_banned_words_cache_async().
-    """
     global _global_words_cache, _global_words_loaded_at
 
     if chat_id is None or chat_id == -1:
@@ -1627,9 +1620,6 @@ def invalidate_banned_words_cache(chat_id: int = None) -> None:
 
 
 async def invalidate_banned_words_cache_async(chat_id: int = None) -> None:
-    """
-    ✅ v7.9.0: قفل موحّد يمنع race مع _get_global_words_cached.
-    """
     global _global_words_cache, _global_words_loaded_at
 
     if chat_id is None or chat_id == -1:
@@ -1769,14 +1759,10 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
 
 # =====================================================================
 # 12. إرسال آمن — Exponential backoff
-# 🔴 v7.9.2: تمرير parse_mode للـ captions
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
                       caption=None, reply_markup=None, parse_mode=None, **kwargs):
-    """
-    ✅ v7.9.2: parse_mode يُمرَّر للوسائط التي تحمل caption
-    """
     if media_type == 'photo':
         return await bot.send_photo(chat_id, media_file_id, caption=caption,
                                     reply_markup=reply_markup,
@@ -2199,9 +2185,6 @@ async def export_auto_replies(chat_id: int, file_path: str = None) -> int:
 async def import_auto_replies(chat_id: int,
                               file_path_or_data: Union[str, List[Dict]],
                               overwrite: bool = False) -> int:
-    """
-    🔴 v7.9.0: قراءة الملف عبر asyncio.to_thread لتفادي تجميد الحلقة.
-    """
     try:
         if isinstance(file_path_or_data, str):
             def _read_sync():
@@ -2257,7 +2240,6 @@ async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
 
 # =====================================================================
 # 16. الردود من ملف
-# 🔴 v7.9.1: قائمة أنماط مُسبَق تصريفها
 # =====================================================================
 
 def load_replies_from_file() -> dict:
@@ -2290,7 +2272,6 @@ _COMPILED_REPLIES_LIST: List[Tuple[str, re.Pattern]] = []
 
 
 def _build_compiled_replies_pattern() -> None:
-    """يبني قائمة (مفتاح, pattern) — يُستدعى عند التحميل وعند reload."""
     global _COMPILED_REPLIES_LIST
     if not _REPLIES_FROM_FILE:
         _COMPILED_REPLIES_LIST = []
@@ -2312,9 +2293,6 @@ _build_compiled_replies_pattern()
 
 
 def get_reply_from_file(keyword: str) -> Optional[str]:
-    """
-    🔴 v7.9.1: يستخدم قائمة أنماط مُسبَق تصريفها.
-    """
     if not _REPLIES_FROM_FILE or not keyword:
         return None
     keyword = keyword.lower().strip()
@@ -2353,13 +2331,6 @@ def reload_replies_from_file() -> dict:
 # =====================================================================
 
 class BackgroundTasks:
-    """
-    🧠 v7.8.1: كاش المشرفين بتكيّف TTL + batch subscriptions.
-    🔍 v7.8.5: monitor_pool + monitor_pool_alert.
-    🚀 v7.8.6: auto_publish يحذف batch subs المكرر.
-    🔴 v7.9.0: sleep خارج semaphore.
-    🔴 v7.9.2: _read_pool_stats asyncmy + has_sub محسوب.
-    """
     _group_admins_cache: Dict[int, Tuple[float, List[int]]] = {}
     _group_admins_access_count: Dict[int, int] = {}
     _BASE_TTL = 600
@@ -2384,10 +2355,6 @@ class BackgroundTasks:
 
     @staticmethod
     def _read_pool_stats() -> Optional[Dict[str, Any]]:
-        """
-        ✅ v7.9.2: يدعم asyncmy (maxsize/size/freesize) بجانب
-        asyncpg (get_max_size/get_size/get_idle_size).
-        """
         try:
             if not (getattr(DB, 'USE_POSTGRES', False) or getattr(DB, 'USE_MYSQL', False)):
                 return None
@@ -2589,9 +2556,6 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
-        """
-        🔴 v7.9.2: has_sub=None → يُحسب من DB.
-        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -2626,11 +2590,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def auto_publish(bot) -> None:
-        """
-        🚀 v7.8.6: حذف batch subs check المكرر.
-        🔴 v7.9.0: sleep بعد الخروج من semaphore.
-        🔴 v7.9.2: has_sub=None (يُحسب داخل _publish_single_channel).
-        """
         await asyncio.sleep(10)
         max_channels = getattr(CONFIG, 'MAX_CHANNELS_PER_CYCLE', 20)
         min_interval_minutes = await get_min_publish_interval()
