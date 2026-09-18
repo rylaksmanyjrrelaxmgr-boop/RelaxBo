@@ -2,31 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.11)
+handlers_message.py - معالجات الرسائل (v7.7.12)
 =====================================================================
+🆕 v7.7.12 (توحيد الإبطال + إصلاحات):
+    ✅ _invalidate_after_channel_change: توحيد كامل مع v9.4.11
+       - إزالة مفاتيح الاشتراك (over-eager)
+       - إضافة posts_cache.invalidate(channel_db_id)
+       - معامل invalidate_posts جديد
+    ✅ import internal_cache أعلى الملف (بدل داخل الدالة)
+    ✅ _process_auto_reply: MEDIA_REPLY_TYPES ثابت class-level
+    ✅ _handle_support_message: رد فشل عند ticket_number == None
+    ✅ _handle_broadcast_input: تدفّق عبر iter_all_users (ذاكرة أقل)
+
 🆕 v7.7.11 (إصلاح تأخير 60 ثانية بعد إضافة قناة/منشور):
-    ✅ _invalidate_after_channel_change(): إبطال شامل لكاش
-       start_data_{user_id} و user_{user_id} و channels_{user_id}
-       بعد أي تغيير في القنوات/المنشورات.
-    ✅ _handle_channel_input: استدعاء الإبطال بعد add_channel ناجح
-       → الواجهة الرئيسية تعكس القناة الجديدة فوراً (بدل 60ث).
-    ✅ _handle_adding_posts: استدعاء الإبطال بعد add_posts ناجح
-       → عدد المنشورات يتحدّث فوراً في القائمة الرئيسية.
+    ✅ _invalidate_after_channel_change
+    ✅ _handle_channel_input: إبطال بعد add_channel ناجح
+    ✅ _handle_adding_posts: إبطال بعد add_posts ناجح
 
 🆕 v7.7.10 (إصلاح تحذير حذف الرسائل):
-    ✅ _delete_and_warn: تجاهل BadRequest "Message to delete not found"
-       و "message can't be deleted" بصمت (logger.debug)
-       بدل إظهار WARNING مزعج
+    ✅ _safe_delete_message: تجاهل BadRequest الطبيعي بصمت
 
 📌 v7.7.9 (إصلاح تعارض WAIT_LOG_CH):
     ✅ handle_private: ترك WAIT_LOG_CH لـ group_log handler
-       عند وجود log_group_id في context.user_data
 
 📌 v7.7.8 (إصلاحات حرجة):
-    ✅ _do_db_restore: try/finally يضمن reconnect دائماً
-    ✅ _do_db_restore: إبطال كل الكاشات بعد الاستعادة
+    ✅ _do_db_restore: try/finally يضمن reconnect
+    ✅ _do_db_restore: إبطال كل الكاشات
     ✅ _process_auto_reply: فحص media_id قبل الإرسال
-    ✅ _sec_auth_cache: LRU size limit (لا memory leak)
+    ✅ _sec_auth_cache: LRU size limit
     ✅ GroupRateLimiterManager: تنظيف تلقائي كل ساعة
 =====================================================================
 """
@@ -49,7 +52,7 @@ from telegram.ext import ContextTypes
 from telegram.error import BadRequest, TimedOut
 
 from config import CONFIG, PATHS
-from database import DB, TimeUtils
+from database import DB, TimeUtils, internal_cache
 from utils import (
     TextUtils, safe_send, is_authorized_in_group,
     check_bot_permissions, invalidate_auth_cache, apply_penalty,
@@ -61,7 +64,7 @@ from utils import (
     fetch_json_from_url, import_auto_replies,
     ban_user_by_id, unban_user_by_id,
 )
-from cache import settings_cache, banned_words_cache, auth_cache
+from cache import settings_cache, banned_words_cache, auth_cache, posts_cache
 
 try:
     from replies import analyze_sentiment
@@ -88,13 +91,19 @@ MAX_SEC_AUTH_CACHE_SIZE = 5000
 SEC_AUTH_CACHE_TTL = 300
 CACHE_CLEANUP_INTERVAL = 3600
 
-# ✅ v7.7.10: أنماط رسائل الحذف الطبيعية (تُتجاهل بصمت)
+# ✅ v7.7.10: أنماط رسائل الحذف الطبيعية
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
     "message can't be deleted",
     "message identifier is not specified",
     "message is not found",
 )
+
+# ✅ v7.7.12: ثابت class-level (بدل إعادة تعريف في كل استدعاء)
+_MEDIA_REPLY_TYPES = frozenset({
+    'photo', 'video', 'document', 'audio',
+    'animation', 'voice', 'sticker', 'video_note',
+})
 
 # =====================================================================
 # كاش الصلاحيات مع حد أقصى
@@ -177,14 +186,17 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 
 # =====================================================================
-# ✅ v7.7.11: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات
+# ✅ v7.7.12: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات
+#            مُطابِق لـ handlers_callback.py v9.4.11
 # =====================================================================
 
 async def _invalidate_after_channel_change(
-    user_id: int, channel_db_id: Optional[int] = None
+    user_id: int,
+    channel_db_id: Optional[int] = None,
+    invalidate_posts: bool = True,
 ) -> None:
     """
-    ✅ v7.7.11: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
+    ✅ v7.7.12: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
 
     يحل مشكلة: الواجهة الرئيسية تُظهر بيانات قديمة لمدة 60 ثانية
     (TTL start_data_{user_id}) بعد إضافة/حذف قناة أو منشور.
@@ -193,38 +205,40 @@ async def _invalidate_after_channel_change(
       - start_data_{user_id}         (تُقرأ في _show_main_menu_inline)
       - user_{user_id}*              (كاشات داخليّة في database.py)
       - channels_{user_id}           (قائمة القنوات)
-      - has_active_sub*              (يعتمد على وجود قناة/اشتراك)
       - channel_info_{channel_db_id} (إن مُرِّر)
+      - posts_cache[channel_db_id]   (إن مُرِّر — قائمة المنشورات)
       - user_cache[user_id]          (كاش cache.py)
+
+    ✅ v7.7.12: لم يعد يُبطل مفاتيح الاشتراك (has_active_sub_*,
+    subscription_*) — لأنها لا تتأثر بتغيير القنوات/المنشورات.
     """
-    try:
-        from database import internal_cache
-        keys = [
-            f"start_data_{user_id}",
-            f"user_{user_id}",
-            f"user_{user_id}_True",
-            f"user_{user_id}_False",
-            f"channels_{user_id}",
-            f"has_active_sub_{user_id}",
-            f"has_active_subscription_{user_id}",
-            f"subscription_active_{user_id}",
-            f"subscription_{user_id}",
-        ]
-        if channel_db_id is not None:
-            keys.append(f"channel_info_{channel_db_id}")
-        for k in keys:
-            try:
-                await internal_cache.invalidate(k)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.debug(f"internal_cache invalidate: {e}")
+    keys = [
+        f"start_data_{user_id}",
+        f"user_{user_id}",
+        f"user_{user_id}_True",
+        f"user_{user_id}_False",
+        f"channels_{user_id}",
+    ]
+    if channel_db_id is not None:
+        keys.append(f"channel_info_{channel_db_id}")
+    for k in keys:
+        try:
+            await internal_cache.invalidate(k)
+        except Exception:
+            pass
 
     try:
         from cache import invalidate_user_cache
         await invalidate_user_cache(user_id)
     except Exception as e:
         logger.debug(f"user_cache invalidate: {e}")
+
+    # ✅ v7.7.12: إبطال posts_cache للقناة (كان منسيّاً في v7.7.11)
+    if invalidate_posts and channel_db_id is not None:
+        try:
+            await posts_cache.invalidate(channel_db_id)
+        except Exception as e:
+            logger.debug(f"posts_cache invalidate({channel_db_id}): {e}")
 
 
 # =====================================================================
@@ -1088,10 +1102,8 @@ class MessageHandlers:
                 reply_type = reply.get('reply_type', 'text') or 'text'
                 media_id = reply.get('reply_media_id')
 
-                media_types = {'photo', 'video', 'document', 'audio',
-                               'animation', 'voice', 'sticker', 'video_note'}
-
-                if reply_type in media_types:
+                # ✅ v7.7.12: ثابت class-level (بدل إعادة تعريف)
+                if reply_type in _MEDIA_REPLY_TYPES:
                     if not media_id:
                         logger.warning(
                             f"⚠️ auto_reply type={reply_type} without media_id "
@@ -1214,7 +1226,7 @@ class MessageHandlers:
             ch_db_id = await DB.add_channel(user_id, channel_id, channel_name)
 
             if ch_db_id:
-                # ✅ v7.7.11: إبطال الكاش — وإلا الواجهة تُظهر القناة بعد 60ث
+                # ✅ v7.7.12: إبطال كامل — يمنع تأخير 60ث في الواجهة
                 await _invalidate_after_channel_change(user_id, ch_db_id)
 
                 msg = await _trans('channel_added', lang, f"✅ تمت إضافة القناة: {escape(channel_name)}")
@@ -1313,7 +1325,7 @@ class MessageHandlers:
             return
 
         if count > 0:
-            # ✅ v7.7.11: إبطال الكاش ليعكس عدد المنشورات الجديد فوراً
+            # ✅ v7.7.12: إبطال شامل (يشمل posts_cache الآن)
             await _invalidate_after_channel_change(user_id, channel_db_id)
 
             msg = await _trans('post_added', lang, "✅ تمت إضافة المنشور")
@@ -1335,9 +1347,24 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         content = (update.effective_message.text or "")[:MAX_SUPPORT_MESSAGE_LENGTH]
         username = update.effective_user.username or ""
-        ticket_number = await DB.create_ticket(user_id, username, content)
+
+        # ✅ v7.7.12: رد فشل واضح إذا كان ticket_number == None
+        try:
+            ticket_number = await DB.create_ticket(user_id, username, content)
+        except Exception as e:
+            logger.error(f"❌ create_ticket failed: {e}", exc_info=True)
+            ticket_number = None
+
         StateManager.clear(user_id)
-        msg = await _trans('ticket_received', lang, f"✅ تم استلام رسالتك!\n🎫 رقم التذكرة: {ticket_number}")
+
+        if not ticket_number:
+            msg = await _trans('ticket_failed', lang,
+                               "❌ تعذر إنشاء التذكرة. حاول لاحقاً أو تواصل مع المطور.")
+            await safe_send(context.bot, user_id, msg)
+            return
+
+        msg = await _trans('ticket_received', lang,
+                           f"✅ تم استلام رسالتك!\n🎫 رقم التذكرة: {ticket_number}")
         await safe_send(context.bot, user_id, msg)
 
     # =================================================================
@@ -1359,38 +1386,73 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
+        # ✅ v7.7.12: تدفّق عبر iter_all_users لتقليل الذاكرة (كان يجلب 100k دفعة)
+        sent_count = 0
+        failed_count = 0
+        skipped_count = 0
+        processed = 0
+
         try:
-            users = await DB.get_all_users(limit=MAX_ADMIN_BROADCAST_TARGETS)
+            iterator = None
+            if hasattr(DB, 'iter_all_users'):
+                iterator = DB.iter_all_users(batch_size=500)
+            else:
+                users = await DB.get_all_users(limit=MAX_ADMIN_BROADCAST_TARGETS)
+                iterator = iter(users)
+
+            if hasattr(iterator, '__aiter__'):
+                async for user in iterator:
+                    if processed >= MAX_ADMIN_BROADCAST_TARGETS:
+                        break
+                    processed += 1
+                    if not isinstance(user, dict):
+                        skipped_count += 1
+                        continue
+                    target_id = user.get('user_id')
+                    banned = user.get('banned', 0)
+                    if not target_id or banned:
+                        skipped_count += 1
+                        continue
+                    try:
+                        result = await safe_send(context.bot, target_id, content)
+                        if result is not None:
+                            sent_count += 1
+                        else:
+                            failed_count += 1
+                        await asyncio.sleep(BROADCAST_DELAY_SECONDS)
+                    except Exception as e:
+                        failed_count += 1
+                        logger.warning(f"فشل البث إلى {target_id}: {e}")
+            else:
+                for user in iterator:
+                    if processed >= MAX_ADMIN_BROADCAST_TARGETS:
+                        break
+                    processed += 1
+                    if not isinstance(user, dict):
+                        skipped_count += 1
+                        continue
+                    target_id = user.get('user_id')
+                    banned = user.get('banned', 0)
+                    if not target_id or banned:
+                        skipped_count += 1
+                        continue
+                    try:
+                        result = await safe_send(context.bot, target_id, content)
+                        if result is not None:
+                            sent_count += 1
+                        else:
+                            failed_count += 1
+                        await asyncio.sleep(BROADCAST_DELAY_SECONDS)
+                    except Exception as e:
+                        failed_count += 1
+                        logger.warning(f"فشل البث إلى {target_id}: {e}")
+
         except Exception as e:
-            logger.error(f"فشل جلب المستخدمين: {e}")
+            logger.error(f"فشل البث: {e}", exc_info=True)
             msg = await _trans('broadcast_failed', lang, "❌ فشل جلب المستخدمين")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
-
-        sent_count = 0
-        failed_count = 0
-        skipped_count = 0
-
-        for user in users:
-            if not isinstance(user, dict):
-                skipped_count += 1
-                continue
-            target_id = user.get('user_id')
-            banned = user.get('banned', 0)
-            if not target_id or banned:
-                skipped_count += 1
-                continue
-            try:
-                result = await safe_send(context.bot, target_id, content)
-                if result is not None:
-                    sent_count += 1
-                else:
-                    failed_count += 1
-                await asyncio.sleep(BROADCAST_DELAY_SECONDS)
-            except Exception as e:
-                failed_count += 1
-                logger.warning(f"فشل البث إلى {target_id}: {e}")
 
         msg = await _trans('broadcast_success', lang,
                            f"✅ تم البث إلى {sent_count} مستخدم\n❌ فشل: {failed_count}\n⏭️ تم تخطي: {skipped_count}")
