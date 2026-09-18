@@ -2,23 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.11)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.12)
 =====================================================================
+✅ v9.4.12 — عرض مقياسي النجاح والإنجاز في "نسبة نجاح القنوات":
+  - _handle_analytics → channels_rate: يميّز بين
+      🎯 نسبة النجاح   = published / (published + failed)
+      📈 نسبة الإنجاز  = published / total
+  - ترتيب القنوات بـ (success_rate, completion_rate) لضمان ظهور
+    القنوات ذات المشاكل الحقيقية أولاً.
+  - يتوافق مع database_analytics.py v1.0.1 (attempted, pending,
+    completion_rate حقول جديدة).
+  - توافق خلفي: إن لم تكن الحقول الجديدة موجودة (نسخة قديمة من
+    database_analytics.py)، يعود تلقائياً للحساب من الحقول القديمة.
+
 ✅ v9.4.11 — إصلاحات ما بعد التدقيق:
   - _handle_contests: RANDOM() → جلب المعرّفات + random.choice
-    (RANDOM() غير موجودة على MySQL — كان اختيار الفائز يفشل كلياً)
-  - _invalidate_after_channel_change: يُبطل posts_cache الآن —
-    كان _handle_post_delete/_handle_channel_delete لا يُبطلانها
+  - _invalidate_after_channel_change: يُبطل posts_cache الآن
   - _invalidate_after_channel_change: أزلنا مفاتيح الاشتراك
-    (has_active_sub_*, subscription_*) — over-eager
-  - _invalidate_after_channel_change: جديد invalidate_posts flag
-  - _publish_task: الإبطال قبل safe_send (يمنع نافذة واجهة قديمة)
-  - ACTIVE_TASKS: Set[asyncio.Task] بدل WeakSet —
-    asyncio يحتفظ بـ weak refs فقط للمهام، خطر GC
+  - _publish_task: الإبطال قبل safe_send
+  - ACTIVE_TASKS: Set[asyncio.Task] بدل WeakSet
   - _set_sec_chat(): مُزامن sec_chat + security_chat_id
-    (كانا منفصلين → _resolve_sec_chat_id يعود None أحياناً)
-  - _render_translation_menu: يستخدم TranslationManager.get_available_languages
-    بدل قائمة مكتوبة يدوياً (17 لغة)
+  - _render_translation_menu: TranslationManager.get_available_languages
   - _handle_buy_subscription: fallback بالاستعلام عن duration_days
   - _show_main_menu_inline: try/except حول get_or_load
 
@@ -174,6 +178,11 @@ SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 LOG_CHANNEL_MENU_CACHE_TTL = 30
 
+# ✅ v9.4.12: حدود نسبة النجاح لتلوين الإيموجي
+SUCCESS_RATE_GOOD_THRESHOLD = 70
+SUCCESS_RATE_WARN_THRESHOLD = 30
+DEFAULT_SUCCESS_RATE = 100.0
+
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
 except (TypeError, ValueError, AttributeError):
@@ -181,7 +190,6 @@ except (TypeError, ValueError, AttributeError):
 
 # ✅ v9.4.11: Set عادي بدل WeakSet —
 # asyncio.create_task يحتفظ بـ weak refs فقط، مما يعرّض المهام للـ GC.
-# نُبقي مرجعاً قوياً ونزيله عند الاكتمال عبر add_done_callback.
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 
@@ -230,6 +238,13 @@ def _row_to_dict(row) -> Optional[Dict[str, Any]]:
 def _coerce_int(value, default=0) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default=0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -602,6 +617,57 @@ async def _invalidate_after_channel_change(
             await posts_cache.invalidate(channel_db_id)
         except Exception as e:
             logger.debug(f"posts_cache invalidate({channel_db_id}): {e}")
+
+
+# =====================================================================
+# ✅ v9.4.12: مساعد لتنسيق نسبة نجاح قناة واحدة
+# =====================================================================
+
+def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
+    """
+    ✅ v9.4.12: يُنسّق سطر قناة واحدة بعرض مقياسَي النجاح والإنجاز.
+
+    - نسبة النجاح   = published / (published + failed)
+    - نسبة الإنجاز  = published / total
+
+    توافق خلفي: يعمل مع كل من database_analytics.py v1.0.0 و v1.0.1.
+    """
+    published = _coerce_int(ch.get('published'), 0)
+    failed = _coerce_int(ch.get('failed'), 0)
+    total = _coerce_int(ch.get('total'), 0)
+
+    # ✅ الحقول الجديدة (v1.0.1)
+    attempted = _coerce_int(ch.get('attempted'), published + failed)
+    pending = _coerce_int(ch.get('pending'), max(0, total - attempted))
+    success_rate = _coerce_float(
+        ch.get('success_rate'), DEFAULT_SUCCESS_RATE
+    )
+    completion_rate = _coerce_float(
+        ch.get('completion_rate'),
+        (published / total * 100) if total > 0 else 0.0,
+    )
+
+    color = color_emoji(
+        success_rate,
+        (SUCCESS_RATE_WARN_THRESHOLD, SUCCESS_RATE_GOOD_THRESHOLD),
+    )
+    name = _html.escape(str(ch.get('name') or '?')[:25])
+
+    line = f"{color} <b>{name}</b>\n"
+    line += (
+        f"   🎯 نجاح: <b>{success_rate}%</b> "
+        f"({published}/{attempted})  "
+        f"❌ {failed}\n"
+    )
+    # نعرض سطر الإنجاز فقط إن كان هناك شيء لم يُنجَز بعد
+    if pending > 0:
+        line += (
+            f"   📈 إنجاز: {completion_rate}% "
+            f"({published}/{total})  "
+            f"⏳ {pending}\n"
+        )
+    line += "\n"
+    return line
 
 
 # =====================================================================
@@ -4155,13 +4221,17 @@ class CallbackHandlers:
                 text = "🏆 <b>أفضل 10 قنوات</b>\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 for i, ch in enumerate(rows[:10], 1):
-                    rate = ch['success_rate']
-                    color = color_emoji(rate, (30, 70))
+                    rate = ch.get('success_rate', 100)
+                    color = color_emoji(
+                        rate,
+                        (SUCCESS_RATE_WARN_THRESHOLD,
+                         SUCCESS_RATE_GOOD_THRESHOLD)
+                    )
                     name = _html.escape(str(ch['name'])[:25])
                     text += (
                         f"{i}. {color} <b>{name}</b>\n"
                         f"   📝 {ch['total']} | ✅ {ch['published']} "
-                        f"| ❌ {ch['failed']} | {rate}%\n\n"
+                        f"| ❌ {ch['failed']} | 🎯 {rate}%\n\n"
                     )
 
                 kb = InlineKeyboardMarkup([[
@@ -4175,8 +4245,19 @@ class CallbackHandlers:
                 stats = await DB.get_publish_stats()
                 total_ch = stats['total_channels']
                 avg_posts = stats['avg_posts_per_channel']
-                rate = stats['success_rate']
-                rate_color = color_emoji(rate, (30, 70))
+                # ✅ v9.4.12: success_rate هي نسبة النجاح الحقيقية
+                rate = stats.get('success_rate', DEFAULT_SUCCESS_RATE)
+                completion = stats.get('completion_rate', 0)
+                rate_color = color_emoji(
+                    rate,
+                    (SUCCESS_RATE_WARN_THRESHOLD,
+                     SUCCESS_RATE_GOOD_THRESHOLD)
+                )
+                completion_color = color_emoji(
+                    completion,
+                    (SUCCESS_RATE_WARN_THRESHOLD,
+                     SUCCESS_RATE_GOOD_THRESHOLD)
+                )
 
                 if avg_posts >= 20:
                     avg_color = "🟢"
@@ -4185,18 +4266,26 @@ class CallbackHandlers:
                 else:
                     avg_color = "🔴"
 
+                attempted = stats.get('attempted', stats['published'] + stats['failed'])
+                pending = stats.get('pending', max(0, stats['total_posts'] - attempted))
+
                 text = (
-                    "📊 <b>متوسط النشر + نسبة النجاح</b>\n"
+                    "📊 <b>متوسط النشر + النجاح</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"📡 <b>القنوات النشطة:</b> {total_ch}\n"
                     f"📝 <b>إجمالي المنشورات:</b> {stats['total_posts']}\n"
                     f"✅ <b>المنشورة:</b> {stats['published']}\n"
-                    f"❌ <b>الفاشلة:</b> {stats['failed']}\n\n"
+                    f"❌ <b>الفاشلة:</b> {stats['failed']}\n"
+                    f"⏳ <b>بالانتظار:</b> {pending}\n\n"
                     f"{avg_color} <b>متوسط المنشورات/قناة:</b> "
                     f"{avg_posts}\n"
                     f"{avg_color} <b>متوسط المنشور/قناة:</b> "
                     f"{stats['avg_published_per_channel']}\n\n"
-                    f"{rate_color} <b>نسبة النجاح العامة:</b> {rate}%\n"
+                    f"{rate_color} <b>نسبة النجاح:</b> {rate}% "
+                    f"({stats['published']}/{attempted})\n"
+                    f"{completion_color} <b>نسبة الإنجاز:</b> "
+                    f"{completion}% "
+                    f"({stats['published']}/{stats['total_posts']})\n"
                 )
 
                 kb = InlineKeyboardMarkup([[
@@ -4206,6 +4295,9 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
+            # ═══════════════════════════════════════════════════════
+            # ✅ v9.4.12: عرض مقياسَي النجاح والإنجاز
+            # ═══════════════════════════════════════════════════════
             if action == "channels_rate":
                 rows = await DB.get_top_channels(20)
                 if not rows:
@@ -4222,24 +4314,31 @@ class CallbackHandlers:
                     return
 
                 text = "🎯 <b>نسبة نجاح القنوات</b>\n"
-                text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                text += "━━━━━━━━━━━━━━━━━━━━━━\n"
+                text += "🎯 <b>نجاح</b> = published / (published + failed)\n"
+                text += "📈 <b>إنجاز</b> = published / total\n\n"
 
-                sorted_rows = sorted(rows, key=lambda x: x['success_rate'])
-                for ch in sorted_rows[:10]:
-                    rate = ch['success_rate']
-                    color = color_emoji(rate, (30, 70))
-                    name = _html.escape(str(ch['name'])[:25])
-                    text += (
-                        f"{color} <b>{name}</b>\n"
-                        f"   ✅ {ch['published']}/{ch['total']} "
-                        f"({rate}%) — ❌ {ch['failed']}\n\n"
+                # ترتيب: الأقل نجاحاً أولاً، ثم الأقل إنجازاً
+                def _sort_key(ch):
+                    sr = _coerce_float(
+                        ch.get('success_rate'), DEFAULT_SUCCESS_RATE
                     )
+                    cr = _coerce_float(ch.get('completion_rate'), 0.0)
+                    return (sr, cr)
+
+                sorted_rows = sorted(rows, key=_sort_key)
+
+                for ch in sorted_rows[:10]:
+                    text += _format_channel_rate_line(ch)
 
                 text += "💡 <i>الأقل نجاحاً أولاً — لتصحيح المشاكل</i>\n"
 
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 رجوع", callback_data="admin_analytics")
-                ]])
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تحديث",
+                                          callback_data="analytics_channels_rate")],
+                    [InlineKeyboardButton("🔙 رجوع",
+                                          callback_data="admin_analytics")],
+                ])
                 await safe_edit(query, text, reply_markup=kb,
                                 parse_mode='HTML', bot=context.bot)
                 return
@@ -4493,7 +4592,8 @@ class CallbackHandlers:
             ws1[f'B{i}'] = r['count']
 
         ws2 = wb.create_sheet("أفضل القنوات")
-        headers = ["#", "الاسم", "إجمالي", "منشورة", "فاشلة", "نسبة النجاح %"]
+        headers = ["#", "الاسم", "إجمالي", "منشورة", "فاشلة",
+                   "نسبة النجاح %", "نسبة الإنجاز %"]
         for i, h in enumerate(headers, 1):
             c = ws2.cell(row=1, column=i, value=h)
             c.font = header_font
@@ -4506,7 +4606,8 @@ class CallbackHandlers:
             ws2.cell(row=i, column=3, value=ch['total'])
             ws2.cell(row=i, column=4, value=ch['published'])
             ws2.cell(row=i, column=5, value=ch['failed'])
-            ws2.cell(row=i, column=6, value=ch['success_rate'])
+            ws2.cell(row=i, column=6, value=ch.get('success_rate', 100))
+            ws2.cell(row=i, column=7, value=ch.get('completion_rate', 0))
 
         ws3 = wb.create_sheet("الاشتراكات")
         ws3['A1'] = "الشهر"
@@ -4537,7 +4638,8 @@ class CallbackHandlers:
             ("حجم DB (KB)", stats.get('db_size_kb', 0)),
             ("", ""),
             ("متوسط المنشورات/قناة", pub_stats['avg_posts_per_channel']),
-            ("نسبة النجاح العامة", f"{pub_stats['success_rate']}%"),
+            ("نسبة النجاح العامة", f"{pub_stats.get('success_rate', 100)}%"),
+            ("نسبة الإنجاز العامة", f"{pub_stats.get('completion_rate', 0)}%"),
             ("", ""),
             ("Pool متاح", pool.get('available', False)),
         ]
@@ -5044,5 +5146,6 @@ __all__ = [
     "_invalidate_sec_auth_cache",
     "_invalidate_after_channel_change",
     "_set_sec_chat",
+    "_format_channel_rate_line",
     "ACTIVE_TASKS",
 ]
