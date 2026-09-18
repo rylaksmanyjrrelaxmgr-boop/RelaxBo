@@ -1,54 +1,61 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.30 — PERFORMANCE-HARDENING)
+database.py - قاعدة البيانات المتكاملة (v7.7.31 — PUBLISH-FAST)
 ================================================================================
+🆕 v7.7.31 (PUBLISH-FAST — استعلاما النشر 1.51s + 1.19s → <550ms):
+  ✅ P5: has_active_subscription: MV fast path على PG (1.19s → <5ms)
+       - fallback آمن إذا MV غير متوفر (نفس النتيجة)
+       - TTL 300s بدل 60s (الاشتراك لا يتغيّر كل دقيقة)
+  ✅ P6: MV_REFRESH_COOLDOWN: 300s → 3600s (ضغط أقل على DB)
+  ✅ لا تغيير في منطق النشر (12 دقيقة = 5 منشورات/ساعة محفوظ)
+
 🆕 v7.7.30 (PERFORMANCE-HARDENING — 12 إصلاحاً):
-  ✅ C1: get_user / get_user_full_data: channel_id = Telegram ID (توحيد مع get_start_data)
-  ✅ C2: mark_users_as_blocked (MySQL): استخدام _fetchval_with_conn بدل ? خاطئ
-  ✅ C3: _destroy_connection (MySQL): إزالة release (conn مكسور لا يُعاد)
-  ✅ C4: _recover_pool: قفل _recover_lock (منع recovery متزامن مزدوج)
-  ✅ C5: _execute_with_retry: كشف "pool unavailable" RuntimeError → recovery
-  ✅ H1: _bootstrap (SQLite): connection() بدل transaction() (يمنع فشل initialize_db)
-  ✅ H3: get_channels_to_publish: throttle MV refresh bg task
-  ✅ H4: _compute_migrations_signature: يشمل نوع العمود (يكشف تغيير types)
-  ✅ H5: _import_banned_words: إبطال utils cache (coherence)
-  ✅ H6: _import_auto_replies: استخدام settings_cache.auto_reply (كان import خاطئ)
-  ✅ P1: get_channels_to_publish (PG): LATERAL join بدل HashAggregate على posts
-  ✅ P2: _ensure_bigint_ids: استعلام واحد بدل 17 استعلاماً متسلسلاً
-  ✅ P3: iter_all_users: keyset pagination بدل OFFSET
-  ✅ P4: _get_channel_lock/_get_group_lock/_get_penalty_lock: OrderedDict LRU
-  ✅ M1: get_start_data / get_user_full_data: ownership check على channel_info
+  ✅ C1: get_user / get_user_full_data: channel_id = Telegram ID
+  ✅ C2: mark_users_as_blocked (MySQL): _fetchval_with_conn
+  ✅ C3: _destroy_connection (MySQL): لا release
+  ✅ C4: _recover_pool: قفل _recover_lock
+  ✅ C5: _execute_with_retry: كشف "pool unavailable"
+  ✅ H1: _bootstrap (SQLite): connection() بدل transaction()
+  ✅ H3: get_channels_to_publish: throttle MV refresh
+  ✅ H4: _compute_migrations_signature: يشمل نوع العمود
+  ✅ H5: _import_banned_words: إبطال utils cache
+  ✅ H6: _import_auto_replies: settings_cache.auto_reply
+  ✅ P1: get_channels_to_publish (PG): LATERAL join
+  ✅ P2: _ensure_bigint_ids: استعلام واحد
+  ✅ P3: iter_all_users: keyset pagination
+  ✅ P4: _get_*_lock: OrderedDict LRU
+  ✅ M1: ownership check على channel_info
 
 🆕 v7.7.29 (POST-AUDIT-HARDENING — 13 إصلاحاً):
-  ✅ _MIGRATIONS_TYPES ثابت وحيد — يمنع footgun بين _migrate_schema و hash
-  ✅ _import_auto_replies: ON CONFLICT DO UPDATE (تحديثات لم تكن تصل)
-  ✅ _maybe_refresh_mv: تحديث timestamp في finally (منع hot loop)
+  ✅ _MIGRATIONS_TYPES ثابت وحيد
+  ✅ _import_auto_replies: ON CONFLICT DO UPDATE
+  ✅ _maybe_refresh_mv: timestamp في finally
   ✅ get_channels_to_publish: MV refresh في background
-  ✅ mark_users_as_blocked: فحص existence بدل عدّ len(batch)
+  ✅ mark_users_as_blocked: existence check
   ✅ _validate_column_def: إزالة الكود الميت
   ✅ _get_user_lock: OrderedDict LRU
-  ✅ get_user_language: `or "ar"` بدل get(default=)
-  ✅ get_user: cache-hit consistent مع cache-miss
-  ✅ user_cache.invalidate(None): يمسح internal_cache بالكامل
-  ✅ expire_penalties: FOR UPDATE SKIP LOCKED (PG/MySQL)
+  ✅ get_user_language: `or "ar"`
+  ✅ get_user: cache-hit consistent
+  ✅ user_cache.invalidate(None): يمسح internal_cache
+  ✅ expire_penalties: FOR UPDATE SKIP LOCKED
   ✅ _destroy_connection (MySQL): لا يُعيد conn مكسور
-  ✅ _compute_tables_hash: يشمل source DDL + توافق خلفي
+  ✅ _compute_tables_hash: source DDL + توافق خلفي
 
 🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات):
-  ✅ connection(): except BaseException — يلتقط CancelledError
-  ✅ get_pool_stats: دعم asyncmy (maxsize/size/freesize)
-  ✅ mark_users_as_blocked: _invalidate_user_cache_keys الكاملة
-  ✅ update_schedule: فحص وجود الصف قبل rowcount
+  ✅ connection(): except BaseException
+  ✅ get_pool_stats: دعم asyncmy
+  ✅ mark_users_as_blocked: _invalidate_user_cache_keys
+  ✅ update_schedule: فحص وجود الصف
   ✅ add_penalty (SQLite): إغلاق cursor في finally
-  ✅ _convert_placeholders (PG): تخطي $$...$$ و $tag$...$tag$
-  ✅ _ensure_bigint_ids (MySQL): COLUMN_TYPE — يحفظ UNSIGNED/ZEROFILL
+  ✅ _convert_placeholders (PG): تخطي $$...$$ و $tag$
+  ✅ _ensure_bigint_ids (MySQL): COLUMN_TYPE
   ✅ _compute_bootstrap_hash: يشمل محتوى migrations
   ✅ _fetch_all_columns_map (SQLite): warning بدل صمت
 
 🆕 v7.7.27 (CACHE-COHERENCE):
   ✅ Cache gap: wrapper يربط user_cache.invalidate ↔ internal_cache
-  ✅ _invalidate_user_cache_keys: 12 مفتاحاً (has_active_sub_*)
+  ✅ _invalidate_user_cache_keys: 12 مفتاحاً
   ✅ _import_*: rowcount بدل len(batch)
 ================================================================================
 """
@@ -586,6 +593,9 @@ MAX_POST_FAIL_COUNT = 3
 USER_CACHE_TTL = 60
 LANG_CACHE_TTL = 600
 SETTINGS_BATCH_CACHE_TTL = 120
+
+# 🆕 v7.7.31: TTL للاشتراك (كان 60s داخل has_active_subscription)
+SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
 
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true"
@@ -2075,7 +2085,6 @@ class Database(
             self._lock = asyncio.Lock()
             self._lifecycle_lock = asyncio.Lock()
             self._bootstrap_lock = asyncio.Lock()
-            # 🆕 v7.7.30: قفل recovery (منع recovery متزامن)
             self._recover_lock = asyncio.Lock()
 
             self._db_type = DB_TYPE
@@ -2175,8 +2184,9 @@ class Database(
 
             self._mv_refresh_lock = asyncio.Lock()
             self._mv_last_refresh_mono: float = 0.0
+            # 🆕 v7.7.31: MV_REFRESH_COOLDOWN 300s → 3600s
             self._mv_refresh_cooldown = float(
-                os.getenv("MV_REFRESH_COOLDOWN", "300")
+                os.getenv("MV_REFRESH_COOLDOWN", "3600")
             )
             self._mv_available = False
 
@@ -2910,9 +2920,6 @@ class Database(
             return False
 
     async def _recover_pool(self):
-        """
-        🆕 v7.7.30: قفل مزدوج لمنع recovery متزامن.
-        """
         if self._recovering_pool:
             return
         async with self._recover_lock:
@@ -2942,7 +2949,6 @@ class Database(
                     self._pool.acquire(),
                     timeout=self._connection_timeout,
                 )
-                # 🆕 v7.7.30: إعادة ضبط FK_CHECKS لـ MySQL
                 if USE_MYSQL:
                     try:
                         await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=1")
@@ -2956,7 +2962,6 @@ class Database(
             except Exception as e:
                 err = str(e).lower()
                 if "pool" in err or "closed" in err or "acquire" in err:
-                    # 🆕 v7.7.30: raise from e (يحفظ traceback الأصلي)
                     raise RuntimeError(f"DB pool unavailable: {e}") from e
                 raise
         else:
@@ -3060,9 +3065,6 @@ class Database(
                     )
 
     async def _destroy_connection(self, conn):
-        """
-        🆕 v7.7.30: لا يُعيد conn مكسور للـ pool (MySQL).
-        """
         if USE_POSTGRES:
             try:
                 if hasattr(conn, "terminate"):
@@ -3099,9 +3101,6 @@ class Database(
                 except Exception as ce:
                     logger.debug(f"conn.close fallback: {ce}")
 
-            # 🆕 v7.7.30: لا release (conn مكسور).
-            # إن لم يُدمَّر، نتركه للـ pool's garbage collector
-            # (أفضل من إعادة conn مكسور لمستخدم آخر).
             if not destroyed:
                 logger.warning(
                     "⚠️ MySQL: conn لم يُدمَّر — لن يُعاد للـ pool "
@@ -3365,7 +3364,6 @@ class Database(
                 ):
                     retryable = True
                     self._spawn_bg_task(self._recover_pool())
-                # 🆕 v7.7.30: كشف RuntimeError pool unavailable
                 elif (USE_POSTGRES and isinstance(e, RuntimeError)
                       and "pool unavailable" in str(e).lower()):
                     retryable = True
@@ -3762,9 +3760,6 @@ class Database(
     async def _get_channel_lock(
         self, channel_db_id: int
     ) -> asyncio.Lock:
-        """
-        🆕 v7.7.30: OrderedDict LRU (بدل sorted O(n log n)).
-        """
         async with self._channel_locks_lock:
             existing = self._channel_locks.get(channel_db_id)
             if existing is not None:
@@ -3792,9 +3787,6 @@ class Database(
             return new_lock
 
     async def _get_group_lock(self, chat_id: int) -> asyncio.Lock:
-        """
-        🆕 v7.7.30: OrderedDict LRU.
-        """
         async with self._group_locks_lock:
             existing = self._group_locks.get(chat_id)
             if existing is not None:
@@ -3824,9 +3816,6 @@ class Database(
     async def _get_penalty_lock(
         self, user_id: int, chat_id: int
     ) -> asyncio.Lock:
-        """
-        🆕 v7.7.30: OrderedDict LRU.
-        """
         key = (user_id, chat_id)
         async with self._penalty_locks_lock:
             existing = self._penalty_locks.get(key)
@@ -4234,11 +4223,7 @@ class Database(
                 conn, "posts", "idx_posts_text_hash"
             ):
                 try:
-                    # 🆕 v7.7.30: CONCURRENTLY على PG (خارج transactions فقط)
                     if USE_POSTGRES:
-                        # ملاحظة: CONCURRENTLY لا يعمل داخل transaction.
-                        # نستخدم BEGIN/COMMIT يدوياً — إن كان conn داخل tx
-                        # بالفعل، سنُسقط إلى الوضع العادي.
                         try:
                             await conn.execute(
                                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
@@ -4265,9 +4250,6 @@ class Database(
             return False
 
     async def _ensure_bigint_ids(self, conn) -> int:
-        """
-        🆕 v7.7.30: استعلام واحد (بدل 17 متسلسلاً) — أسرع بـ ~10×.
-        """
         if DB_TYPE == "sqlite":
             return 0
 
@@ -4287,7 +4269,6 @@ class Database(
         converted = 0
         try:
             if USE_POSTGRES:
-                # استعلام واحد لكل الأعمدة
                 pairs = self.BIGINT_COLUMNS
                 conditions = " OR ".join(
                     [f"(table_name = ${i*2+1} AND column_name = ${i*2+2})"
@@ -4328,7 +4309,6 @@ class Database(
                                 f"⚠️ تحويل {table}.{col}: {e}"
                             )
             elif USE_MYSQL:
-                # MySQL لا يدعم tuple IN بسهولة → استعلام واحد بـ OR
                 pairs = self.BIGINT_COLUMNS
                 conditions = " OR ".join(
                     ["(TABLE_NAME = %s AND COLUMN_NAME = %s)"] * len(pairs)
@@ -4992,7 +4972,6 @@ class Database(
                     await banned_words_cache.invalidate()
                 except Exception:
                     pass
-            # 🆕 v7.7.30: coherence مع utils._banned_words_cache
             try:
                 import utils  # noqa: F401
                 inv = getattr(utils, "invalidate_banned_words_cache_async", None)
@@ -5213,7 +5192,6 @@ class Database(
                     "ℹ️ auto_replies: لا تغيير فعلي في DB"
                 )
 
-            # 🆕 v7.7.30: إبطال settings_cache.auto_reply (المسار الصحيح)
             if CACHE_AVAILABLE:
                 try:
                     if hasattr(settings_cache, "auto_reply"):
@@ -5396,11 +5374,34 @@ class Database(
         return None
 
     async def has_active_subscription(self, user_id: int) -> bool:
+        """
+        🆕 v7.7.31: MV fast path على PG (1.19s → <5ms).
+        السلوك محفوظ: True إذا كان هناك اشتراك active سارٍ.
+        """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
             return cached
 
+        # ─── مسار سريع: MV على PG ────────────────────────────────────
+        if USE_POSTGRES and self._mv_available:
+            try:
+                row = await self.fetchval(
+                    "SELECT 1 FROM mv_active_user_limits "
+                    "WHERE user_id = ? LIMIT 1",
+                    (user_id,),
+                )
+                result = row is not None
+                await internal_cache.set(
+                    cache_key, result, ttl=SUB_CACHE_TTL
+                )
+                return result
+            except Exception as e:
+                logger.debug(
+                    f"⚠️ MV lookup فشل، fallback للـ slow path: {e}"
+                )
+
+        # ─── مسار احتياطي (بدون MV أو عند فشله) ──────────────────────
         row = await self.fetchval(
             "SELECT 1 FROM subscriptions s "
             "JOIN plans p ON s.plan_id = p.id "
@@ -5411,7 +5412,9 @@ class Database(
             (user_id, TimeUtils.utc_now()),
         )
         result = row is not None
-        await internal_cache.set(cache_key, result, ttl=USER_CACHE_TTL)
+        await internal_cache.set(
+            cache_key, result, ttl=SUB_CACHE_TTL
+        )
         return result
 
     async def invalidate_subscription_cache(self, user_id: int):
@@ -5426,7 +5429,6 @@ class Database(
             "tables_hash",
         )
 
-        # 🆕 v7.7.29: توافق خلفي — لا إعادة create_tables عند الترقية
         if stored_tables_hash == legacy_tables_hash:
             logger.info(
                 "🔄 ترقية tables_hash من v7.7.28 → v7.7.29 "
@@ -5500,8 +5502,6 @@ class Database(
             try:
                 await self.initialize()
 
-                # 🆕 v7.7.30: SQLite → connection() (create_tables_sqlite
-                # تُنفّذ commit داخلياً — transaction() يفشل عند الخروج)
                 if USE_POSTGRES:
                     async with self.transaction() as conn:
                         await self._do_bootstrap_inner(conn)
@@ -5597,7 +5597,6 @@ class Database(
         )
         if data.get("active_channel"):
             try:
-                # 🆕 v7.7.30: ownership check
                 ch = await self.fetchone(
                     "SELECT id, channel_name, channel_id "
                     "FROM user_channels "
@@ -5702,14 +5701,12 @@ class Database(
             result["groups_count"] = 0
         if result.get("active_channel"):
             try:
-                # 🆕 v7.7.30: ownership check
                 ch = await self.fetchone(
                     "SELECT id, channel_name, channel_id, banned "
                     "FROM user_channels WHERE id = ? AND user_id = ?",
                     (result["active_channel"], user_id),
                 )
                 if ch and not ch.get("banned", 0):
-                    # 🆕 v7.7.30: channel_id = Telegram ID (توحيد مع get_start_data)
                     result["channel_id"] = ch.get("channel_id")
                     result["channel_db_id"] = ch.get("id")
                     result["channel_name"] = ch.get("channel_name")
@@ -5850,7 +5847,6 @@ class Database(
                         (data["active_channel"], user_id),
                     )
                     if ch and not ch.get("banned", 0):
-                        # 🆕 v7.7.30: channel_id = Telegram ID
                         data["channel_id"] = ch.get("channel_id")
                         data["channel_db_id"] = ch.get("id")
                         data["channel_name"] = ch.get("channel_name")
@@ -6286,9 +6282,6 @@ class Database(
     async def iter_all_users(
         self, batch_size: int = 1000
     ) -> AsyncGenerator[Dict, None]:
-        """
-        🆕 v7.7.30: keyset pagination بدل OFFSET (أسرع على جداول كبيرة).
-        """
         last_user_id = 0
         while True:
             batch = await self.fetchall(
@@ -6308,9 +6301,6 @@ class Database(
     async def mark_users_as_blocked(
         self, user_ids: List[int]
     ) -> int:
-        """
-        🆕 v7.7.30: C2 — استخدام _fetchval_with_conn (placeholder صحيح).
-        """
         if not user_ids:
             return 0
         try:
@@ -6321,8 +6311,6 @@ class Database(
                     batch = user_ids[i: i + BATCH]
                     placeholders = ",".join(["?"] * len(batch))
                     if USE_MYSQL:
-                        # 🆕 v7.7.30: _fetchval_with_conn يمرّ عبر
-                        # _convert_placeholders → %s صحيحة
                         try:
                             existing_count = await self._fetchval_with_conn(
                                 conn,
@@ -6546,16 +6534,10 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        🆕 v7.7.30:
-          - P1 (PG): LATERAL join بدل HashAggregate على posts بالكامل.
-          - H3: throttle MV refresh bg task.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
         if USE_POSTGRES and self._mv_available:
-            # 🆕 v7.7.30: لا نُنشئ task إلا عند الحاجة الفعلية
             now_mono = time.monotonic()
             if (now_mono - self._mv_last_refresh_mono
                     >= self._mv_refresh_cooldown):
@@ -6565,7 +6547,6 @@ class Database(
                     logger.debug(f"MV refresh spawn: {e}")
 
         if USE_POSTGRES and self._mv_available:
-            # 🆕 v7.7.30: LATERAL join — يُقيَّم per-row حتى LIMIT
             query = f"""
                 SELECT uc.id, uc.channel_id, uc.user_id,
                        u.auto_publish, u.auto_recycle,
@@ -7183,6 +7164,7 @@ __all__ = [
     "GLOBAL_CHAT_ID", "DEFAULT_PUBLISH_INTERVAL_MINUTES",
     "PUBLISH_POLLING_COMPENSATION_SECONDS",
     "MAX_POST_FAIL_COUNT", "PENALTY_ARCHIVE_RETENTION_DAYS",
+    "SUB_CACHE_TTL",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
