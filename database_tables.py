@@ -2,38 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.14)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.15)
 ================================================================================
+🚀 v7.6.15 (SLOW-QUERY-FIX — idx_posts_next_post):
+  ✅ idx_posts_channel_unpub_fresh_created: created_at → id
+      • الاستعلام في _publish_single_channel: ORDER BY id ASC
+      • الفهرس السابق: posts(channel_db_id, created_at) WHERE ...
+      • PG كان يعمل Sort بعد الفلترة → 1.05s
+      • بعد التعديل: id ضمن الفهرس → Index Scan مباشر
+      • المتوقع: 1.05s → < 20ms
+
 🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB):
-  ✅ +3 فهارس متقدمة:
-      • idx_posts_channel_unpub_fresh_created
-          partial: WHERE published=0 AND (fail_count IS NULL OR fail_count < 3)
-      • idx_bot_groups_banned_cover
-          covering: INCLUDE (chat_id, chat_name, username)
-      • idx_penalties_active_id
-          partial: WHERE status='active' AND end_time IS NOT NULL
-  ✅ _adapt_cols_for_db(cols, db_type):
-      • PG    : يعيد التعريف كما هو (WHERE + INCLUDE مدعومان)
-      • SQLite: يحذف INCLUDE ويُبقي WHERE (partial index مدعوم)
-      • MySQL : يحذف WHERE و INCLUDE → composite index بديل
-  ✅ MYSQL_SKIP_INDEXES: تجاوز فهارس تصبح غير مفيدة بعد التكييف
-  ✅ _parse_expected_columns يدعم "table(cols) WHERE..." و "table(cols) INCLUDE ..."
-  ✅ _ensure_index_definitions_match_* : يتجاهل الفهارس المتقدمة
-  ✅ CURRENT_SCHEMA_VERSION: 12 → 13 (يفرض إعادة بناء)
+  ✅ +3 فهارس متقدمة: partial/covering indexes
+  ✅ _adapt_cols_for_db: تكييف WHERE/INCLUDE حسب DB
+  ✅ CURRENT_SCHEMA_VERSION: 12 → 13
   ✅ EXPECTED_INDEX_COUNT: 72 → 75
-  ✅ يحل: SELECT posts (8.11s)، SELECT DISTINCT bot_groups (3.79s)،
-          SELECT id FROM user_penalties (1.48s)
 
-🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE):
-  ✅ _ensure_all_indexes_exist_{postgres,sqlite,mysql} : فحص جماعي كامل
-  ✅ _quick_analyze_{postgres,mysql} : ANALYZE رخيص في كل bootstrap
-  ✅ _run_maintenance_postgres : VACUUM (ANALYZE, SKIP_LOCKED) + delay
-  ✅ fast-path يستدعي _ensure_all_indexes ثم _quick_analyze
-
-🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX):
-  ✅ _run_maintenance_* : VACUUM ANALYZE تلقائي كل 24 ساعة
-  ✅ +2 فهارس: idx_posts_channel_pub_at, idx_auto_replies_active_keyword
-
+🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
+🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX)
 🚀 v7.6.11 (MISSING-TABLES-MIGRATION)
 🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS)
 🚀 v7.6.9  (SLOW-QUERY-INDEX-FIX)
@@ -51,8 +37,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.14: 12 → 13 (إجبار rebuild + تفعيل الفهارس المتقدمة)
-CURRENT_SCHEMA_VERSION = 13
+# ✅ v7.6.15: 13 → 14 (يفرض rebuild بعد تعديل idx_posts_channel_unpub_fresh_created)
+CURRENT_SCHEMA_VERSION = 14
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -82,7 +68,7 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.14: 72 → 75
+# ✅ v7.6.15: يبقى 75 (لم نضف فهرساً — فقط عدّلنا تعريف قائم)
 EXPECTED_INDEX_COUNT = 75
 
 # ✅ v7.6.14: فهارس تُتخطى على MySQL بعد التكييف (تصبح مكررة مع PK)
@@ -108,7 +94,8 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (7) — ✅ v7.6.14: +idx_posts_channel_unpub_fresh_created ═══
+    # ═══ POSTS (7) — ✅ v7.6.15: idx_posts_channel_unpub_fresh_created
+    #                يستخدم id بدل created_at (يطابق ORDER BY id ASC)
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel", "posts(channel_db_id)"),
     ("posts", "idx_posts_published", "posts(published)"),
@@ -118,11 +105,12 @@ COMMON_INDEXES = [
      "posts(channel_db_id, published, fail_count, created_at)"),
     ("posts", "idx_posts_channel_pub_at",
      "posts(channel_db_id, published, published_at)"),
+    # ✅ v7.6.15: created_at → id (يطابق get_next_post)
     ("posts", "idx_posts_channel_unpub_fresh_created",
-     "posts(channel_db_id, created_at) WHERE published = 0 "
+     "posts(channel_db_id, id) WHERE published = 0 "
      "AND (fail_count IS NULL OR fail_count < 3)"),
 
-    # ═══ BOT_GROUPS (4) — ✅ v7.6.14: +idx_bot_groups_banned_cover ═══
+    # ═══ BOT_GROUPS (4) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
     ("bot_groups", "idx_bot_groups_log_channel",
@@ -220,7 +208,7 @@ COMMON_INDEXES = [
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    # ═══ USER_PENALTIES (6) — ✅ v7.6.14: +idx_penalties_active_id ═══
+    # ═══ USER_PENALTIES (6) ═══
     ("user_penalties", "idx_penalties_user",
      "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat",
@@ -469,15 +457,6 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
     • PostgreSQL: يعيد التعريف كما هو (WHERE + INCLUDE مدعومان)
     • SQLite    : يحذف INCLUDE ويُبقي WHERE (partial index مدعوم)
     • MySQL     : يحذف WHERE و INCLUDE → composite index بديل
-
-    أمثلة:
-      PG     : "posts(a, b) WHERE x=0"
-      SQLite : "posts(a, b) WHERE x=0"
-      MySQL  : "posts(a, b)"
-
-      PG     : "bot_groups(banned) INCLUDE (x, y)"
-      SQLite : "bot_groups(banned, x, y)"
-      MySQL  : "bot_groups(banned, x, y)"
     """
     if not cols:
         return cols
@@ -524,6 +503,14 @@ def _get_expected_cols_for_index(
     return ""
 
 
+def _is_advanced_index(cols: str) -> bool:
+    """✅ v7.6.14: هل التعريف يحتوي WHERE أو INCLUDE؟"""
+    if not cols:
+        return False
+    s = cols.upper()
+    return " WHERE " in s or " INCLUDE " in s
+
+
 # =====================================================================
 # ✅ v7.6.13: فحص جماعي لكل الفهارس المطلوبة (رخيص)
 # =====================================================================
@@ -531,7 +518,6 @@ def _get_expected_cols_for_index(
 async def _ensure_all_indexes_exist_postgres(conn, logger):
     """
     ✅ v7.6.13: فحص جماعي واحد لكل COMMON_INDEXES في fast-path.
-    يمنع فقدان أي فهرس غير حرج.
     """
     try:
         all_names = [n for _, n, _ in COMMON_INDEXES]
@@ -1364,7 +1350,6 @@ async def _verify_critical_indexes_mysql(conn, logger):
         )
         existing_names = {idx for _, idx in existing_pairs}
         missing = CRITICAL_INDEX_NAMES - existing_names
-        # ✅ v7.6.14: تجاهل الفهارس المُتخطّاة على MySQL
         missing = {n for n in missing if n not in MYSQL_SKIP_INDEXES}
         if not missing:
             return 0
@@ -1480,14 +1465,6 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 # ✅ v7.6.14: يتجاهل الفهارس المتقدمة (WHERE/INCLUDE)
 # =====================================================================
 
-def _is_advanced_index(cols: str) -> bool:
-    """✅ v7.6.14: هل التعريف يحتوي WHERE أو INCLUDE؟"""
-    if not cols:
-        return False
-    s = cols.upper()
-    return " WHERE " in s or " INCLUDE " in s
-
-
 async def _ensure_index_definitions_match_postgres(conn, logger):
     checked = 0
     dropped = 0
@@ -1502,7 +1479,6 @@ async def _ensure_index_definitions_match_postgres(conn, logger):
         for _table, idx_name, cols in COMMON_INDEXES:
             if not _is_valid_index_name(idx_name):
                 continue
-            # ✅ v7.6.14: تجاهل الفهارس المتقدمة
             if _is_advanced_index(cols):
                 checked += 1
                 continue
@@ -1567,7 +1543,6 @@ async def _ensure_index_definitions_match_sqlite(conn, logger):
         for _table, idx_name, cols in COMMON_INDEXES:
             if not _is_valid_index_name(idx_name):
                 continue
-            # ✅ v7.6.14: تجاهل INCLUDE (SQLite يحوّلها)
             if " INCLUDE " in cols.upper():
                 checked += 1
                 continue
@@ -1633,7 +1608,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                     continue
                 if not _is_valid_index_name(idx_name):
                     continue
-                # ✅ v7.6.14: تجاهل الفهارس المُتخطّاة
                 if idx_name in MYSQL_SKIP_INDEXES:
                     continue
                 if idx_name not in by_key:
@@ -1643,7 +1617,6 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
                 actual_cols = _normalize_columns_mysql(
                     ",".join(c for _, c in sorted_cols)
                 )
-                # ✅ v7.6.14: كيّف الأعمدة لـ MySQL قبل المقارنة
                 adapted_cols = _adapt_cols_for_db(cols, "mysql")
                 expected_cols = _normalize_columns_mysql(
                     _parse_expected_columns(adapted_cols)
@@ -1766,7 +1739,6 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
 
 # =====================================================================
 # إنشاء الفهارس
-# ✅ v7.6.14: _create_indexes_generic يقبل db_type للتكييف
 # =====================================================================
 
 async def _create_indexes_generic(
@@ -1852,7 +1824,6 @@ async def _create_indexes_mysql(conn, logger):
     skipped = 0
     failed = 0
     for table, idx_name, cols in COMMON_INDEXES:
-        # ✅ v7.6.14: تجاهل الفهارس المُتخطّاة
         if idx_name in MYSQL_SKIP_INDEXES:
             skipped += 1
             continue
@@ -2502,7 +2473,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "advanced-indexes"),
+             "slow-query-fix-idx-posts"),
         )
         await conn.commit()
     except Exception as e:
@@ -2522,6 +2493,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
+        await _ensure_index_definitions_match_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
@@ -3131,7 +3103,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "advanced-indexes",
+            "slow-query-fix-idx-posts",
         )
     except Exception as e:
         if logger:
@@ -3150,6 +3122,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
     if current >= CURRENT_SCHEMA_VERSION:
         await _verify_critical_indexes_mysql(conn, logger)
         await _ensure_all_indexes_exist_mysql(conn, logger)
+        await _ensure_index_definitions_match_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
@@ -3769,7 +3742,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "advanced-indexes",
+                    "slow-query-fix-idx-posts",
                 ),
             )
         except Exception as e:
