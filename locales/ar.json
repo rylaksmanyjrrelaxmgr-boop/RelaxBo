@@ -1,16 +1,19 @@
 {
-  "main_menu": "🌿 **Relax Manager**\n\n👤 المستخدم: {user_name}\n👥 المجموعات: {groups_count}\n📡 القناة النشطة: {active_channel}\n📥 منشورات غير منشورة: {unpublished_posts}\n📤 النشر التلقائي: {auto_publish}\n♻️ إعادة التدوير: {auto_recycle}\n💎 الاشتراك: {subscription_status}\n\nاختر من القائمة:",
-  "help_text": "📚 **قائمة المساعدة**\n\n🏠 /start - القائمة الرئيسية\n💳 /subscribe - اشتراك\n🎁 /trial - تجربة مجانية\n📞 /support - الدعم",
+  "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>المستخدم:</b> {user_name}\n👥 <b>المجموعات:</b> {groups_count}\n📡 <b>القناة النشطة:</b> {active_channel}\n📥 <b>منشورات غير منشورة:</b> {unpublished_posts}\n📤 <b>النشر التلقائي:</b> {auto_publish}\n♻️ <b>إعادة التدوير:</b> {auto_recycle}\n💎 <b>الاشتراك:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>اختر من القائمة:</b>",
+  "help_text": "📚 <b>قائمة المساعدة</b>\n\n🏠 /start - القائمة الرئيسية\n💳 /subscribe - اشتراك\n🎁 /trial - تجربة مجانية\n📞 /support - الدعم",
+
   "trial_used": "❌ لقد استخدمت التجربة المجانية بالفعل",
   "trial_activated": "🎉 تم تفعيل التجربة المجانية بنجاح!",
   "trial_failed": "❌ فشل تفعيل التجربة",
-  "plan_selector": "💎 **اختر باقتك:**",
-  "send_support_message": "📞 **الدعم**\n\n📝 أرسل رسالتك وسنرد عليك قريبًا:",
-  "developer_info": "👨‍💻 **معلومات المطور**\n\n👤 الاسم: {developer_name}\n📞 التواصل: {developer_contact}",
+  "plan_selector": "💎 <b>اختر باقتك:</b>",
+
+  "send_support_message": "📞 <b>الدعم</b>\n\n📝 أرسل رسالتك وسنرد عليك قريبًا:",
+  "developer_info": "👨‍💻 <b>معلومات المطور</b>\n\n👤 الاسم: {developer_name}\n📞 التواصل: {developer_contact}",
   "unauthorized": "⛔ غير مصرح لك.",
   "reminder_subscription_expires": "⚠️ اشتراكك سينتهي قريبًا!\n\n📅 المتبقي: {days_left} يوم",
   "mood_service_unavailable": "❌ خدمة تحليل المشاعر غير متاحة حاليًا",
   "unexpected_error": "❌ خطأ غير متوقع، حاول مرة أخرى",
+
   "subscription_required": "❌ <b>تحتاج اشتراك نشط لإضافة قناة!</b>\n\n📌 استخدم /subscribe\n🎁 أو /trial",
   "channel_not_found": "❌ القناة غير موجودة!",
   "bot_not_admin": "❌ البوت ليس أدمن في القناة!",
@@ -25,6 +28,7 @@
   "post_added": "✅ تمت إضافة المنشور",
   "post_add_failed": "❌ لم تتم إضافة المنشور.\n• منشور مكرر.\n• أو تجاوز الحد الأقصى للمنشورات غير المنشورة.",
   "ticket_received": "✅ تم استلام الرسالة!\n🎫 رقم التذكرة: {ticket_number}",
+
   "broadcast_success": "✅ تم الإرسال إلى {sent_count} مستخدم",
   "update_sent": "✅ تم إرسال التحديث",
   "send_failed": "❌ فشل الإرسال",
@@ -52,7 +56,7 @@
   "grant_success": "✅ تم المنح",
   "invalid_format": "❌ صيغة غير صحيحة",
   "grant_failed": "❌ فشل",
-  "usage_format": "❌ الاستخدام: /grant_free <id> <days>",
+  "usage_format": "❌ الاستخدام: /grant_free &lt;id&gt; &lt;days&gt;",
   "channel_not_specified": "❌ لم يتم تحديد القناة",
   "invalid_number": "❌ رقم غير صالح",
   "invalid_time_format": "❌ صيغة الوقت غير صحيحة (مثال: {time})",
@@ -71,6 +75,9 @@
   "send_db": "❌ أرسل ملف قاعدة البيانات (.db)",
   "db_extension": "❌ يجب أن يكون الملف .db",
   "restore_success": "✅ تمت الاستعادة بنجاح!\nأعد تشغيل البوت لتفعيل التغييرات.",
+  "restore_success_restart": "✅ تمت الاستعادة بنجاح! أعد تشغيل البوت لتفعيل التغييرات.",
+  "restore_select": "📂 اختر نسخة احتياطية للاستعادة:",
+
   "subscription_active": "✅ نشط",
   "subscription_inactive": "❌ غير نشط",
   "mood_analysis": "🎭 تحليل المشاعر",
@@ -81,6 +88,7 @@
   "mood_words": "📊 الكلمات",
   "send_mood_text": "📝 أرسل النص الذي تريد تحليله:",
   "mood_unavailable": "❌ خدمة تحليل المشاعر غير متاحة حاليًا",
+
   "no_posts": "📭 لا توجد منشورات",
   "your_posts": "📋 منشوراتك:",
   "your_channels": "📡 قنواتك:",
@@ -93,6 +101,7 @@
   "auto_recycle_status": "♻️ إعادة التدوير",
   "enabled": "مفعل",
   "disabled": "معطل",
+
   "admin_panel": "👑 لوحة الأدمن",
   "admin_panel_btn": "👑 لوحة الأدمن",
   "open_admin_panel": "👑 لوحة الأدمن\n\nاضغط الزر بالأسفل:",
@@ -105,8 +114,11 @@
   "send_admin_id_remove": "🗑️ أرسل معرف الأدمن:",
   "backup_start": "⏳ جارٍ النسخ الاحتياطي...",
   "backup_done": "✅ تم النسخ الاحتياطي",
+  "backup_failed": "❌ فشل النسخ الاحتياطي",
   "no_backups": "📭 لا توجد نسخ احتياطية",
+  "no_backups_available": "📭 لا توجد نسخ احتياطية",
   "available_backups": "النسخ الاحتياطية المتاحة:",
+
   "group_panel": "📋 لوحة المجموعة",
   "group_locked": "🔒 مقفلة",
   "group_unlocked": "🔓 مفتوحة",
@@ -121,9 +133,15 @@
   "penalty_type_select": "🚫 اختر نوع العقوبة:",
   "penalty_duration_select": "⏱️ اختر مدة {type}:",
   "violation_settings": "🚨 إعدادات المخالفات:",
+  "violation_settings_btn": "🚨 إعدادات المخالفات:",
+  "antiflood_settings_btn": "🌊 إعدادات الفيضان:",
+  "auto_reply_settings_btn": "🤖 إعدادات الردود التلقائية:",
   "penalty_set_success": "✅ تم تعيين العقوبة: {penalty_type}",
+  "penalty_set_type": "✅ تم تعيين العقوبة: {type}",
   "duration_set_success": "✅ تم تعيين المدة: {duration} ثانية",
+  "duration_set": "✅ تم تعيين المدة: {duration} ثانية",
   "no_penalty": "🚫 بدون عقوبة",
+
   "auto_reply_menu": "🤖 إعدادات الردود التلقائية",
   "auto_reply_toggle": "🔘 تفعيل/تعطيل",
   "auto_reply_admins": "👤 للمشرفين فقط",
@@ -135,9 +153,11 @@
   "replies_list": "📋 الردود",
   "replies_stats": "📊 إحصائيات الردود",
   "no_replies": "📭 لا توجد ردود",
+
   "no_rewards": "📭 لا توجد مكافآت متاحة",
   "referral_claimed": "✅ تم صرف {days} يوم!",
   "referrals_list": "📋 المستخدمون المُحالون",
+
   "admin_users": "👥 المستخدمون",
   "admin_banned": "⛔ المحظورون",
   "admin_unban_all": "✅ فك حظر الكل",
@@ -149,32 +169,38 @@
   "admin_update_channel": "📢 قناة التحديثات",
   "admin_log_channel": "📋 قناة السجلات",
   "admin_force_sub": "🔒 الاشتراك الإجباري",
+
   "no_contests": "📭 لا توجد مسابقات نشطة",
   "contest_select": "🏆 اختر المسابقة:",
   "send_contest_answer": "📝 أرسل إجابتك:",
   "contest_won": "🎉 مبروك! فزت بالمسابقة!",
+  "participants": "المشاركون",
+  "join_contest": "✍️ انضم",
+  "active_contests": "المسابقات النشطة",
+
   "no_gift_plans": "📭 لا توجد خطط هدايا",
   "gift_plans_text": "💎 اختر خطة هدية:",
   "invoice_sent": "✅ تم إرسال الفاتورة",
   "invoice_failed": "❌ فشل إرسال الفاتورة",
   "plan_not_found": "❌ الباقة غير موجودة",
   "no_invoices": "📭 لا توجد فواتير",
+
   "referral_title": "🔗 نظام الإحالات",
   "referral_link_label": "📎 رابطك:",
   "referral_referred": "👥 المُحالون:",
   "referral_available": "🎁 الأيام المتاحة:",
   "days_suffix": "يوم",
+
   "reminder_title": "⏰ التذكيرات",
   "rem_sub_label": "🔔 الاشتراك",
   "rem_daily_label": "📊 يومي",
   "rem_weekly_label": "📈 أسبوعي",
+
   "current_language": "الحالية",
   "choose_language": "🌐 اختر اللغة:",
   "translation_off": "❌ إيقاف الترجمة",
   "translation_disabled": "✅ تم إيقاف الترجمة",
-  "participants": "المشاركون",
-  "join_contest": "✍️ انضم",
-  "active_contests": "المسابقات النشطة",
+
   "channel_stats": "📊 الإحصائيات",
   "post_list": "📋 منشوراتي",
   "group_list": "👥 مجموعاتي",
@@ -187,16 +213,13 @@
   "publish_failed": "❌ فشل النشر",
   "posts_cleared": "✅ تم مسح جميع المنشورات",
   "posts_recycled": "♻️ {count} منشور!",
+
   "invalid_data": "❌ بيانات غير صالحة",
   "wait_moment": "⚠️ انتظر لحظة",
   "not_available": "⚠️ غير متوفر",
   "unknown_action": "⚠️ إجراء غير معروف",
   "not_authorized": "❌ غير مصرح",
   "cache_refreshed": "🔄 تم تحديث الكاش",
-  "restore_select": "📂 اختر نسخة احتياطية للاستعادة:",
-  "restore_success_restart": "✅ تمت الاستعادة بنجاح! أعد تشغيل البوت لتفعيل التغييرات.",
-  "backup_failed": "❌ فشل النسخ الاحتياطي",
-  "no_backups_available": "📭 لا توجد نسخ احتياطية",
 
   "warn_penalty_set_type": "✅ تم تعيين عقوبة التحذير: {type}",
   "invalid_penalty_type": "❌ نوع عقوبة غير صالح",
@@ -207,6 +230,7 @@
   "penalty_duration": "⏱️ مدة العقوبة",
   "manage_warnings": "⚠️ إدارة التحذيرات:",
   "choose_warn_penalty": "⚖️ اختر عقوبة تجاوز التحذيرات:",
+
   "ban": "🚫 حظر",
   "mute": "🔇 كتم",
   "kick": "👢 طرد",
@@ -221,6 +245,7 @@
   "choose_duration": "⏱️ اختر مدة {type}:",
   "kick_no_duration": "✅ عقوبة الطرد لا تحتاج مدة",
   "no_permission": "❌ لا صلاحية",
+
   "send_max_length": "📏 أرسل الحد الأقصى لطول الرسالة:",
   "send_penalty_minutes": "⏱️ أرسل مدة العقوبة بالدقائق:",
   "send_violation_strikes": "📊 أرسل عدد المخالفات قبل العقوبة:",
@@ -232,10 +257,10 @@
   "send_slow_mode_seconds": "⏱️ أرسل مدة الوضع البطيء بالثواني:",
   "send_welcome_text": "📝 أرسل نص الترحيب:",
   "send_goodbye_text": "📝 أرسل نص الوداع:",
+
   "antiflood_penalty_set": "✅ تم تعيين عقوبة الفيضان: {type}",
   "night_action_set": "✅ تم تعيين إجراء الوضع الليلي: {type}",
-  "penalty_set_type": "✅ تم تعيين العقوبة: {type}",
-  "duration_set": "✅ تم تعيين المدة: {duration} ثانية",
+
   "add_word": "➕ إضافة كلمة",
   "words_list": "📋 القائمة",
   "delete_word": "🗑️ حذف كلمة",
@@ -243,6 +268,7 @@
   "disable_delete": "❌ تعطيل الحذف",
   "manage_banned_words": "🚫 إدارة الكلمات المحظورة:",
   "choose_penalty_type": "🚫 اختر نوع العقوبة:",
+
   "strikes_count": "عدد الضربات",
   "duration": "المدة",
   "messages_count": "عدد الرسائل",
@@ -253,9 +279,6 @@
   "action_type": "نوع الإجراء",
   "action_duration": "⏱️ مدة الإجراء",
   "night_mode_settings": "🌙 إعدادات الوضع الليلي:",
-  "violation_settings_btn": "🚨 إعدادات المخالفات:",
-  "antiflood_settings_btn": "🌊 إعدادات الفيضان:",
-  "auto_reply_settings_btn": "🤖 إعدادات الردود التلقائية:",
   "night_mode": "الوضع الليلي",
   "antiflood": "الفيضان"
 }
