@@ -1,4 +1,6 @@
 {
+  "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>Kullanıcı:</b> {user_name}\n👥 <b>Gruplar:</b> {groups_count}\n📡 <b>Aktif Kanal:</b> {active_channel}\n📥 <b>Yayınlanmamış Gönderiler:</b> {unpublished_posts}\n📤 <b>Otomatik Yayın:</b> {auto_publish}\n♻️ <b>Otomatik Geri Dönüşüm:</b> {auto_recycle}\n💎 <b>Abonelik:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>Menüden seçin:</b>",
+
   "welcome": "🌿 <b>Relax Manager'a Hoş Geldiniz</b>\nDilinizi seçin",
   "main_title": "🌿 <b>{0}</b>\n━━━━━━━━━━━━━━━━━━━━━━\n👤 Kimlik: <code>{1}</code>\n👥 Gruplarım: {2}\n💎 Abonelik: {3}\n📡 Aktif Kanal: {4}\n📝 Yayınlanmamış Gönderiler: {5}\n⚙️ Otomatik Yayın: {6}",
   "no_channels": "Kanal yok",
