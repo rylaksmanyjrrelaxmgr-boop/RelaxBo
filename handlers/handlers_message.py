@@ -2,18 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.8.0)
+handlers_message.py - معالجات الرسائل (v7.8.1)
 =====================================================================
+🆕 v7.8.1 (إصلاح خطأ clear_lang_cache):
+    ✅ clear_lang_cache() — مُصدَّرة في __all__ بشكل صحيح
+    ✅ يعمل الآن استيرادها من handlers_callback
+
 🆕 v7.8.0 (ترجمة حقيقية من ملف JSON):
     ✅ TranslationManager: من utils.py (الموجود أصلاً)
-    ✅ _trans(): يقرأ من ملف الترجمات مع fallback
+    ✅ _trans(): يقرأ من TranslationManager مع fallback
     ✅ _detect_and_translate(): ترجمة رسائل المستخدمين
     ✅ handle_group: كتلة ترجمة تلقائية قبل الردود
     ✅ handle_private: كتلة ترجمة تلقائية للرسائل الحرة
-    ✅ clear_lang_cache: يمسح كل كاشات الترجمة
 
 🆕 v7.7.12 (توحيد الإبطال + إصلاحات):
-    ✅ _invalidate_after_channel_change: توحيد كامل مع v9.4.11
+    ✅ _invalidate_after_channel_change: توحيد كامل
     ✅ import internal_cache أعلى الملف
     ✅ _process_auto_reply: MEDIA_REPLY_TYPES ثابت class-level
     ✅ _handle_support_message: رد فشل عند ticket_number == None
@@ -59,7 +62,7 @@ from utils import (
     reload_replies_from_file, _increment_usage_async,
     fetch_json_from_url, import_auto_replies,
     ban_user_by_id, unban_user_by_id,
-    TranslationManager,   # ✅ v7.8.0: من utils.py مباشرة
+    TranslationManager,
 )
 from cache import settings_cache, banned_words_cache, auth_cache, posts_cache
 
@@ -280,7 +283,7 @@ class GroupRateLimiterManager:
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
     """
-    ✅ v7.8.0: يقرأ من TranslationManager (utils.py) مباشرة.
+    ✅ v7.8.0: يقرأ من TranslationManager مباشرة.
     """
     try:
         text = TranslationManager.get_text(lang, key)
@@ -334,9 +337,14 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
     return 'ar'
 
 
+# =====================================================================
+# ✅ v7.8.1: مسح كاش اللغة (الدالة المفقودة!)
+# =====================================================================
+
 def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    ✅ v7.8.0: يمسح كل كاشات الترجمة واللغة.
+    ✅ v7.8.1: يمسح كل كاشات الترجمة واللغة.
+    يُستدعى من handlers_callback عند تغيير اللغة.
     """
     try:
         context.user_data.pop('lang', None)
@@ -387,7 +395,6 @@ async def _detect_and_translate(
 ) -> Optional[str]:
     """
     ✅ v7.8.0: يترجم نص المستخدم إلى لغته المفضّلة.
-    يستخدم TranslationManager الموجود في utils.py.
     """
     if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
         return None
@@ -658,7 +665,8 @@ class MessageHandlers:
 
             if state == UserState.WAIT_MOOD:
                 if analyze_sentiment is None:
-                    msg = await _trans('mood_service_unavailable', lang, "❌ خدمة تحليل المشاعر غير متاحة حالياً")
+                    msg = await _trans('mood_service_unavailable', lang,
+                                       "❌ خدمة تحليل المشاعر غير متاحة حالياً")
                     await safe_send(context.bot, user_id, msg)
                     StateManager.clear(user_id)
                     return
@@ -688,7 +696,9 @@ class MessageHandlers:
                     if user_text and not user_text.startswith('/'):
                         translated = TranslationManager.translate(user_text, lang)
                         if translated and translated != user_text:
-                            label = TranslationManager.get_text(lang, "translation_label") or "🌐 <b>Translation:</b>"
+                            label = TranslationManager.get_text(
+                                lang, "translation_label"
+                            ) or "🌐 <b>Translation:</b>"
                             await safe_send(
                                 context.bot, user_id,
                                 f"{label}\n{escape(translated)}",
@@ -710,7 +720,8 @@ class MessageHandlers:
         except Exception as e:
             logger.exception("خطأ غير متوقع في معالجة الرسالة الخاصة")
             try:
-                msg = await _trans('unexpected_error', lang, "❌ حدث خطأ غير متوقع، حاول مرة أخرى")
+                msg = await _trans('unexpected_error', lang,
+                                   "❌ حدث خطأ غير متوقع، حاول مرة أخرى")
                 await safe_send(context.bot, update.effective_user.id, msg)
             except Exception:
                 pass
@@ -1018,16 +1029,20 @@ class MessageHandlers:
                 text_lower = full_text.lower()
                 for word in banned_words:
                     if word in text_lower:
-                        await MessageHandlers._delete_and_warn(update, context, chat_id, user_id, "banned_word", settings)
+                        await MessageHandlers._delete_and_warn(
+                            update, context, chat_id, user_id,
+                            "banned_word", settings)
                         return
 
         max_len = settings.get('max_message_length', 0)
         if max_len > 0 and len(full_text) > max_len:
-            await MessageHandlers._delete_and_warn(update, context, chat_id, user_id, "max_len", settings)
+            await MessageHandlers._delete_and_warn(
+                update, context, chat_id, user_id, "max_len", settings)
             return
 
         if getattr(message, 'forward_origin', None) and settings.get('delete_forwarded'):
-            await MessageHandlers._delete_and_warn(update, context, chat_id, user_id, "forwarded", settings)
+            await MessageHandlers._delete_and_warn(
+                update, context, chat_id, user_id, "forwarded", settings)
             return
 
         media_checks = [
@@ -1042,10 +1057,11 @@ class MessageHandlers:
         ]
         for media, setting_key, violation_type in media_checks:
             if media and settings.get(setting_key):
-                await MessageHandlers._delete_and_warn(update, context, chat_id, user_id, violation_type, settings)
+                await MessageHandlers._delete_and_warn(
+                    update, context, chat_id, user_id, violation_type, settings)
                 return
 
-        # ✅ v7.8.0: ترجمة تلقائية للرسائل النصية (قبل الردود التلقائية)
+        # ✅ v7.8.0: ترجمة تلقائية للرسائل النصية
         if msg_text:
             try:
                 translated = await _detect_and_translate(
@@ -1154,19 +1170,23 @@ class MessageHandlers:
             user_name = escape(update.effective_user.first_name or "مستخدم")
             warn_title = await _trans('violation_warning_title', lang, "⚠️ <b>تنبيه</b>")
             count_label = await _trans('violation_count_label', lang, "📊 عدد المخالفات")
-            delete_notice = await _trans('violation_delete_notice', lang, "⏳ سيتم حذف هذه الرسالة خلال 10 ثوانٍ")
+            delete_notice = await _trans('violation_delete_notice', lang,
+                                         "⏳ سيتم حذف هذه الرسالة خلال 10 ثوانٍ")
 
             message_text = (
                 f"{warn_title}\n{violation_message}\n"
                 f"👤 {user_name}\n{count_label}: {violation_count}\n{delete_notice}"
             )
             sent_msg = await context.bot.send_message(chat_id, message_text, parse_mode='HTML')
-            asyncio.create_task(_delete_after_delay(context.bot, chat_id, sent_msg.message_id, 10))
+            asyncio.create_task(
+                _delete_after_delay(context.bot, chat_id, sent_msg.message_id, 10)
+            )
         except Exception as e:
             logger.warning(f"تعذر إرسال تنبيه المخالفة: {e}")
 
         if penalty_type:
-            max_strikes = (settings.get('violation_strikes') or settings.get('max_warnings') or 3)
+            max_strikes = (settings.get('violation_strikes')
+                           or settings.get('max_warnings') or 3)
             if violation_count >= max_strikes:
                 success, msg = await apply_violation_penalty(
                     update, context, chat_id, user_id,
@@ -1191,7 +1211,10 @@ class MessageHandlers:
             if ars.get('ignore_bots', True) and update.effective_user.is_bot:
                 return False
             if ars.get('only_admins', False):
-                if not await is_authorized_in_group(context.bot, chat_id, user_id or update.effective_user.id):
+                if not await is_authorized_in_group(
+                    context.bot, chat_id,
+                    user_id or update.effective_user.id
+                ):
                     return False
 
             reply = await DB.get_auto_reply(text, chat_id)
@@ -1294,13 +1317,15 @@ class MessageHandlers:
                     return
             except BadRequest as e:
                 logger.warning(f"تعذر التحقق من صلاحيات البوت: {e}")
-                msg = await _trans('verify_failed', lang, "❌ تعذر التحقق من صلاحيات البوت، تأكد أنه مشرف في القناة.")
+                msg = await _trans('verify_failed', lang,
+                                   "❌ تعذر التحقق من صلاحيات البوت، تأكد أنه مشرف في القناة.")
                 await safe_send(context.bot, user_id, msg)
                 StateManager.clear(user_id)
                 return
             except Exception as e:
                 logger.error(f"خطأ غير متوقع: {e}")
-                msg = await _trans('verify_error', lang, "❌ تعذر التحقق من صلاحيات البوت، حاول لاحقاً.")
+                msg = await _trans('verify_error', lang,
+                                   "❌ تعذر التحقق من صلاحيات البوت، حاول لاحقاً.")
                 await safe_send(context.bot, user_id, msg)
                 StateManager.clear(user_id)
                 return
@@ -1309,13 +1334,15 @@ class MessageHandlers:
                 try:
                     user_member = await context.bot.get_chat_member(channel_id, user_id)
                     if user_member.status not in ['creator', 'administrator']:
-                        msg = await _trans('must_be_admin', lang, "❌ يجب أن تكون مشرفًا في القناة لإضافتها!")
+                        msg = await _trans('must_be_admin', lang,
+                                           "❌ يجب أن تكون مشرفًا في القناة لإضافتها!")
                         await safe_send(context.bot, user_id, msg)
                         StateManager.clear(user_id)
                         return
                 except Exception as e:
                     logger.warning(f"تعذر التحقق من صلاحيات المستخدم: {e}")
-                    msg = await _trans('user_verify_failed', lang, "❌ تعذر التحقق من صلاحياتك في القناة.")
+                    msg = await _trans('user_verify_failed', lang,
+                                       "❌ تعذر التحقق من صلاحياتك في القناة.")
                     await safe_send(context.bot, user_id, msg)
                     StateManager.clear(user_id)
                     return
@@ -1325,10 +1352,12 @@ class MessageHandlers:
             if ch_db_id:
                 await _invalidate_after_channel_change(user_id, ch_db_id)
 
-                msg = await _trans('channel_added', lang, f"✅ تمت إضافة القناة: {escape(channel_name)}")
+                msg = await _trans('channel_added', lang,
+                                   f"✅ تمت إضافة القناة: {escape(channel_name)}")
                 await safe_send(context.bot, user_id, msg)
             else:
-                msg = await _trans('channel_add_failed', lang, "❌ فشل إضافة القناة (قد يكون الحد الأقصى للقنوات قد تم الوصول إليه)")
+                msg = await _trans('channel_add_failed', lang,
+                                   "❌ فشل إضافة القناة (قد يكون الحد الأقصى للقنوات قد تم الوصول إليه)")
                 await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.exception("خطأ غير متوقع في إضافة القناة")
@@ -1611,17 +1640,20 @@ class MessageHandlers:
                 try:
                     bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
                     if bot_member.status not in ['administrator', 'creator']:
-                        msg = await _trans('bot_not_admin_force', lang, "❌ البوت ليس مشرفًا في هذه القناة")
+                        msg = await _trans('bot_not_admin_force', lang,
+                                           "❌ البوت ليس مشرفًا في هذه القناة")
                         await safe_send(context.bot, user_id, msg)
                         StateManager.clear(user_id)
                         return
                 except Exception:
-                    msg = await _trans('bot_not_in_force_channel', lang, "❌ البوت غير موجود في القناة")
+                    msg = await _trans('bot_not_in_force_channel', lang,
+                                       "❌ البوت غير موجود في القناة")
                     await safe_send(context.bot, user_id, msg)
                     StateManager.clear(user_id)
                     return
                 await DB.set_setting('force_subscribe_channel', str(chat_id))
-                msg = await _trans('force_enabled', lang, f"✅ تم تعيين الاشتراك الإجباري: {escape(chat.title or text)}")
+                msg = await _trans('force_enabled', lang,
+                                   f"✅ تم تعيين الاشتراك الإجباري: {escape(chat.title or text)}")
                 await safe_send(context.bot, user_id, msg)
             except Exception as e:
                 logger.warning(f"تعذر تعيين قناة الاشتراك: {e}")
@@ -1660,7 +1692,8 @@ class MessageHandlers:
                 raise ValueError
             user_exists = await DB.fetchval("SELECT 1 FROM users WHERE user_id = ?", (admin_id,))
             if not user_exists:
-                msg = await _trans('user_not_found', lang, "⚠️ هذا المستخدم غير مسجّل في البوت بعد.")
+                msg = await _trans('user_not_found', lang,
+                                   "⚠️ هذا المستخدم غير مسجّل في البوت بعد.")
                 await safe_send(context.bot, user_id, msg)
             success = await DB.add_admin(admin_id, user_id)
             if success:
@@ -1780,7 +1813,8 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
         chat_id = context.user_data.get('auto_chat', -1)
-        await MessageHandlers._save_auto_reply_from_message(update, context, user_id, lang, chat_id, keyword)
+        await MessageHandlers._save_auto_reply_from_message(
+            update, context, user_id, lang, chat_id, keyword)
         StateManager.clear(user_id)
 
     @staticmethod
@@ -1806,7 +1840,8 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
-        await MessageHandlers._save_auto_reply_from_message(update, context, user_id, lang, chat_id, keyword)
+        await MessageHandlers._save_auto_reply_from_message(
+            update, context, user_id, lang, chat_id, keyword)
         StateManager.clear(user_id)
 
     @staticmethod
@@ -1833,9 +1868,11 @@ class MessageHandlers:
         success, duplicate = await DB.add_banned_word(word, -1, user_id)
         if success:
             invalidate_banned_words_cache(-1)
-            await safe_send(context.bot, user_id, f"✅ تمت إضافة الكلمة المحظورة: {escape(word)}")
+            await safe_send(context.bot, user_id,
+                            f"✅ تمت إضافة الكلمة المحظورة: {escape(word)}")
         elif duplicate:
-            await safe_send(context.bot, user_id, "❌ الكلمة موجودة بالفعل في القائمة العامة")
+            await safe_send(context.bot, user_id,
+                            "❌ الكلمة موجودة بالفعل في القائمة العامة")
         else:
             await safe_send(context.bot, user_id, "❌ تعذرت الإضافة")
         StateManager.clear(user_id)
@@ -1865,11 +1902,14 @@ class MessageHandlers:
         success, duplicate = await DB.add_banned_word(word, chat_id, user_id)
         if success:
             invalidate_banned_words_cache(chat_id)
-            await safe_send(context.bot, user_id, f"✅ تمت إضافة الكلمة المحظورة: {escape(word)}")
+            await safe_send(context.bot, user_id,
+                            f"✅ تمت إضافة الكلمة المحظورة: {escape(word)}")
         elif duplicate:
-            await safe_send(context.bot, user_id, "❌ الكلمة موجودة بالفعل في قائمة المجموعة")
+            await safe_send(context.bot, user_id,
+                            "❌ الكلمة موجودة بالفعل في قائمة المجموعة")
         else:
-            await safe_send(context.bot, user_id, "❌ تعذرت الإضافة، حاول مجددًا")
+            await safe_send(context.bot, user_id,
+                            "❌ تعذرت الإضافة، حاول مجددًا")
         StateManager.clear(user_id)
 
     @staticmethod
@@ -1917,7 +1957,8 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         context.user_data['contest_prize'] = update.effective_message.text or ""
         StateManager.set(user_id, UserState.WAIT_CONTEST_DATE)
-        msg = await _trans('send_date_prompt', lang, "📅 أرسل التاريخ (YYYY-MM-DD HH:MM):")
+        msg = await _trans('send_date_prompt', lang,
+                           "📅 أرسل التاريخ (YYYY-MM-DD HH:MM):")
         await safe_send(context.bot, user_id, msg)
 
     @staticmethod
@@ -1972,7 +2013,8 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
         if doc.file_size and doc.file_size > MAX_IMPORT_FILE_SIZE:
-            msg = await _trans('file_too_large', lang, f"❌ حجم الملف كبير جدًا (الحد: {MAX_IMPORT_FILE_SIZE // 1024} KB)")
+            msg = await _trans('file_too_large', lang,
+                               f"❌ حجم الملف كبير جدًا (الحد: {MAX_IMPORT_FILE_SIZE // 1024} KB)")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
@@ -2009,7 +2051,9 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
                 StateManager.clear(user_id)
                 return
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as tmp:
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.json', delete=False, encoding='utf-8'
+            ) as tmp:
                 json.dump(data, tmp, ensure_ascii=False)
                 tmp_path = tmp.name
             count = await import_auto_replies(-1, tmp_path)
@@ -2056,7 +2100,8 @@ class MessageHandlers:
                 msg = await _trans('grant_failed', lang, "❌ فشل")
                 await safe_send(context.bot, user_id, msg)
         else:
-            msg = await _trans('usage_format', lang, "❌ الصيغة: /grant_free <id> <days>")
+            msg = await _trans('usage_format', lang,
+                               "❌ الصيغة: /grant_free <id> <days>")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
@@ -2077,7 +2122,8 @@ class MessageHandlers:
         try:
             minutes = int(update.effective_message.text or "0")
             if minutes > 0:
-                await DB.update_schedule(ch_id, interval_minutes=minutes, schedule_type='interval_minutes')
+                await DB.update_schedule(ch_id, interval_minutes=minutes,
+                                         schedule_type='interval_minutes')
                 await safe_send(context.bot, user_id, f"✅ {minutes} دقيقة")
             else:
                 await safe_send(context.bot, user_id, "❌ يجب أن يكون الرقم موجبًا")
@@ -2099,7 +2145,8 @@ class MessageHandlers:
         try:
             hours = int(update.effective_message.text or "0")
             if hours > 0:
-                await DB.update_schedule(ch_id, interval_hours=hours, schedule_type='interval_hours')
+                await DB.update_schedule(ch_id, interval_hours=hours,
+                                         schedule_type='interval_hours')
                 await safe_send(context.bot, user_id, f"✅ {hours} ساعة")
             else:
                 await safe_send(context.bot, user_id, "❌ يجب أن يكون الرقم موجبًا")
@@ -2121,7 +2168,8 @@ class MessageHandlers:
         try:
             days = int(update.effective_message.text or "0")
             if days > 0:
-                await DB.update_schedule(ch_id, interval_days=days, schedule_type='interval_days')
+                await DB.update_schedule(ch_id, interval_days=days,
+                                         schedule_type='interval_days')
                 await safe_send(context.bot, user_id, f"✅ {days} يوم")
             else:
                 await safe_send(context.bot, user_id, "❌ يجب أن يكون الرقم موجبًا")
@@ -2142,7 +2190,8 @@ class MessageHandlers:
             return
         time_val = (update.effective_message.text or "").strip()
         if not re.match(r'^\d{1,2}:\d{2}$', time_val):
-            msg = await _trans('invalid_time_format', lang, "❌ تنسيق غير صالح (مثال: 14:30)")
+            msg = await _trans('invalid_time_format', lang,
+                               "❌ تنسيق غير صالح (مثال: 14:30)")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
@@ -2207,7 +2256,8 @@ class MessageHandlers:
             count = int(update.effective_message.text or "3")
             if count <= 0 or count > MAX_VIOLATION_STRIKES:
                 raise ValueError
-            await DB.update_security_settings(chat_id, max_warnings=count, violation_strikes=count)
+            await DB.update_security_settings(chat_id, max_warnings=count,
+                                              violation_strikes=count)
             await invalidate_security_cache(chat_id)
             await safe_send(context.bot, user_id, f"✅ {count}")
         except ValueError:
@@ -2327,7 +2377,8 @@ class MessageHandlers:
             return
         time_val = (update.effective_message.text or "").strip()
         if not re.match(r'^\d{1,2}:\d{2}$', time_val):
-            msg = await _trans('invalid_time_format', lang, "❌ تنسيق غير صالح (مثال: 23:00)")
+            msg = await _trans('invalid_time_format', lang,
+                               "❌ تنسيق غير صالح (مثال: 23:00)")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
@@ -2348,7 +2399,8 @@ class MessageHandlers:
             return
         time_val = (update.effective_message.text or "").strip()
         if not re.match(r'^\d{1,2}:\d{2}$', time_val):
-            msg = await _trans('invalid_time_format', lang, "❌ تنسيق غير صالح (مثال: 06:00)")
+            msg = await _trans('invalid_time_format', lang,
+                               "❌ تنسيق غير صالح (مثال: 06:00)")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
@@ -2387,7 +2439,8 @@ class MessageHandlers:
             duration = int(parts[1]) * 60 if len(parts) > 1 else 0
             if target <= 0 or duration < 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'ban', duration, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'ban', duration, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_format', lang, "❌ صيغة غير صحيحة")
@@ -2424,7 +2477,8 @@ class MessageHandlers:
             duration = int(parts[1]) * 60 if len(parts) > 1 else 60
             if target <= 0 or duration <= 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'mute', duration, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'mute', duration, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_format', lang, "❌ صيغة غير صحيحة")
@@ -2454,7 +2508,8 @@ class MessageHandlers:
             target = int((update.effective_message.text or "").strip())
             if target <= 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'warn', 0, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'warn', 0, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_id', lang, "❌ معرف غير صالح")
@@ -2484,7 +2539,8 @@ class MessageHandlers:
             target = int((update.effective_message.text or "").strip())
             if target <= 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'kick', 0, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'kick', 0, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_id', lang, "❌ معرف غير صالح")
@@ -2521,7 +2577,8 @@ class MessageHandlers:
             duration = int(parts[1]) * 60 if len(parts) > 1 else 1800
             if target <= 0 or duration <= 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'restrict', duration, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'restrict', duration, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_format', lang, "❌ صيغة غير صحيحة")
@@ -2551,7 +2608,8 @@ class MessageHandlers:
             target = int((update.effective_message.text or "").strip())
             if target <= 0:
                 raise ValueError
-            success, msg = await apply_penalty(context.bot, chat_id, target, 'unban', 0, "", user_id)
+            success, msg = await apply_penalty(
+                context.bot, chat_id, target, 'unban', 0, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_id', lang, "❌ معرف غير صالح")
@@ -2579,7 +2637,8 @@ class MessageHandlers:
             return
         if update.effective_message.reply_to_message:
             try:
-                await context.bot.pin_chat_message(chat_id, update.effective_message.reply_to_message.message_id)
+                await context.bot.pin_chat_message(
+                    chat_id, update.effective_message.reply_to_message.message_id)
                 msg = await _trans('pinned_success', lang, "✅ تم التثبيت")
                 await safe_send(context.bot, user_id, msg)
             except Exception as e:
@@ -2599,7 +2658,8 @@ class MessageHandlers:
     async def _handle_penalty_duration_input(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
-        chat_id = (context.user_data.get('adv_chat') or context.user_data.get('sec_chat'))
+        chat_id = (context.user_data.get('adv_chat')
+                   or context.user_data.get('sec_chat'))
         if not chat_id:
             msg = await _trans('group_not_specified', lang, "❌ لم يتم تحديد المجموعة")
             await safe_send(context.bot, user_id, msg)
@@ -2612,7 +2672,8 @@ class MessageHandlers:
             duration_seconds = minutes * 60
             await DB.update_security_settings(chat_id, violation_duration=duration_seconds)
             await invalidate_security_cache(chat_id)
-            await safe_send(context.bot, user_id, f"✅ تم تعيين المدة: {minutes} دقيقة")
+            await safe_send(context.bot, user_id,
+                            f"✅ تم تعيين المدة: {minutes} دقيقة")
         except ValueError:
             msg = await _trans('invalid_number', lang, "❌ رقم غير صالح")
             await safe_send(context.bot, user_id, msg)
@@ -2638,9 +2699,11 @@ class MessageHandlers:
                 raise ValueError
             await DB.update_security_settings(chat_id, violation_strikes=strikes)
             await invalidate_security_cache(chat_id)
-            await safe_send(context.bot, user_id, f"✅ تم تعيين عدد المخالفات: {strikes}")
+            await safe_send(context.bot, user_id,
+                            f"✅ تم تعيين عدد المخالفات: {strikes}")
         except ValueError:
-            msg = await _trans('invalid_number', lang, f"❌ رقم غير صالح (1-{MAX_VIOLATION_STRIKES})")
+            msg = await _trans('invalid_number', lang,
+                               f"❌ رقم غير صالح (1-{MAX_VIOLATION_STRIKES})")
             await safe_send(context.bot, user_id, msg)
         except Exception as e:
             logger.error(f"فشل تعيين عدد المخالفات: {e}")
@@ -2665,7 +2728,8 @@ class MessageHandlers:
             duration_seconds = minutes * 60
             await DB.update_security_settings(chat_id, violation_duration=duration_seconds)
             await invalidate_security_cache(chat_id)
-            await safe_send(context.bot, user_id, f"✅ تم تعيين المدة: {minutes} دقيقة")
+            await safe_send(context.bot, user_id,
+                            f"✅ تم تعيين المدة: {minutes} دقيقة")
         except ValueError:
             msg = await _trans('invalid_number', lang, "❌ رقم غير صالح")
             await safe_send(context.bot, user_id, msg)
@@ -2703,13 +2767,16 @@ class MessageHandlers:
             success, days = bool(result), 0
 
         if success and days > 0:
-            msg = await _trans('gift_redeemed', lang, f"🎁 تم استرداد الهدية!\n📅 المدة: {days} يوم")
+            msg = await _trans('gift_redeemed', lang,
+                               f"🎁 تم استرداد الهدية!\n📅 المدة: {days} يوم")
             await safe_send(context.bot, user_id, msg)
         elif days == -1:
-            msg = await _trans('own_code', lang, "❌ لا يمكنك استخدام كود قمت بإنشائه بنفسك")
+            msg = await _trans('own_code', lang,
+                               "❌ لا يمكنك استخدام كود قمت بإنشائه بنفسك")
             await safe_send(context.bot, user_id, msg)
         else:
-            msg = await _trans('invalid_code', lang, "❌ الكود غير صالح أو مستخدم بالفعل")
+            msg = await _trans('invalid_code', lang,
+                               "❌ الكود غير صالح أو مستخدم بالفعل")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
@@ -2721,12 +2788,14 @@ class MessageHandlers:
     async def _do_db_restore(update, context, user_id: int, lang: str) -> None:
         if await _is_postgres_db():
             msg = await _trans('restore_postgres_unsupported', lang,
-                               "⚠️ الاستعادة غير مدعومة على PostgreSQL.\nاستخدم أدوات pgAdmin يدوياً.")
+                               "⚠️ الاستعادة غير مدعومة على PostgreSQL.\n"
+                               "استخدم أدوات pgAdmin يدوياً.")
             await safe_send(context.bot, user_id, msg)
             return
         if await _is_mysql_db():
             msg = await _trans('restore_mysql_unsupported', lang,
-                               "⚠️ الاستعادة غير مدعومة على MySQL.\nاستخدم mysqldump يدوياً.")
+                               "⚠️ الاستعادة غير مدعومة على MySQL.\n"
+                               "استخدم mysqldump يدوياً.")
             await safe_send(context.bot, user_id, msg)
             return
 
@@ -2740,7 +2809,8 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return
         if doc.file_size and doc.file_size > 100 * 1024 * 1024:
-            msg = await _trans('file_too_large', lang, "❌ حجم الملف كبير جدًا (الحد: 100 MB)")
+            msg = await _trans('file_too_large', lang,
+                               "❌ حجم الملف كبير جدًا (الحد: 100 MB)")
             await safe_send(context.bot, user_id, msg)
             return
 
@@ -2758,7 +2828,8 @@ class MessageHandlers:
             await file.download_to_drive(tmp_path)
 
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            pre_restore = PATHS.BACKUPS / f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
+            pre_restore = PATHS.BACKUPS / \
+                f"pre_restore_{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S')}.db"
             try:
                 shutil.copy2(PATHS.DB, pre_restore)
             except Exception as e:
@@ -2849,7 +2920,8 @@ class MessageHandlers:
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
-            await safe_send(context.bot, user_id, await _trans('unauthorized', lang, "❌ غير مصرح"))
+            await safe_send(context.bot, user_id,
+                            await _trans('unauthorized', lang, "❌ غير مصرح"))
             StateManager.clear(user_id)
             return
         await MessageHandlers._do_db_restore(update, context, user_id, lang)
@@ -2919,10 +2991,11 @@ class MessageHandlers:
             except Exception as e:
                 error_msg = str(e)
                 if ("User_already_participant" in error_msg or
-                    "already participant" in error_msg.lower()):
+                        "already participant" in error_msg.lower()):
                     pass
                 else:
                     logger.warning(f"فشل الموافقة على طلب الانضمام: {e}")
+
 
 # =====================================================================
 # تصدير
@@ -2931,10 +3004,12 @@ class MessageHandlers:
 __all__ = [
     "MessageHandlers",
     "GroupRateLimiterManager",
-    "clear_lang_cache",
+    "clear_lang_cache",              # ✅ v7.8.1: مُصدَّرة الآن
     "_safe_delete_message",
     "_is_delete_ignore_error",
     "_invalidate_after_channel_change",
     "_detect_and_translate",
     "_send_translation_reply",
+    "_trans",
+    "_ensure_lang",
 ]
