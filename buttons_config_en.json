@@ -42,6 +42,7 @@
     "help": "📚 Help",
     "language": "🌐 Language",
     "trial": "🎁 Trial",
+
     "admin_panel_btn": "👑 Admin",
     "admin_analytics": "📊 Analytics",
     "admin_users": "👥 Users",
@@ -97,6 +98,29 @@
     "admin_invoices": "🧾 Invoices",
     "admin_payment_logs": "📊 Payment logs",
     "admin_grant_free": "🎁 Grant free",
+
+    "analytics_title": "📊 <b>Advanced Analytics</b>",
+    "analytics_hint": "Choose the report you want to view:",
+    "growth_30d_btn": "📈 User Growth (30 days)",
+    "top_channels_btn": "🏆 Top 10 Channels",
+    "publish_stats_btn": "📊 Avg Publish + Success",
+    "channels_rate_btn": "🎯 Channels Success Rate",
+    "subscriptions_btn": "💎 Subscription Rate",
+    "pool_live_btn": "🚀 Pool Live",
+    "slow_queries_btn": "🐌 Slow Queries",
+    "export_excel_btn": "📤 Export Excel",
+    "refresh_btn": "🔄 Refresh",
+    "unknown_report": "⚠️ Unknown",
+    "no_data_enough": "📭 Not enough data",
+    "no_data_short": "📭 No data",
+    "no_channels_data": "📭 No channels",
+    "no_slow_queries": "📭 No slow queries (excellent!)",
+    "export_starting": "⏳ Generating file...",
+    "export_success": "✅ Report sent",
+    "export_no_openpyxl": "❌ openpyxl not installed\n<code>pip install openpyxl</code>",
+    "export_failed": "❌ Export failed: {error}",
+    "report_caption": "📊 <b>Comprehensive Analytics Report</b>",
+
     "contest_winners": "🏆 Winners",
     "contests": "🏆 Contests",
     "contest_join": "✍️ Join",
@@ -146,6 +170,7 @@
     "panel_lock": "🔒 Lock group",
     "panel_unlock": "🔓 Unlock group",
     "panel_close": "❌ Close panel",
+
     "sec_links": "🔗 Links",
     "sec_mentions": "👤 Mentions",
     "sec_slow": "🐌 Slow",
@@ -286,6 +311,19 @@
         ["admin_refresh_cache"],
         ["admin_invoices", "admin_payment_logs"],
         ["admin_grant_free"],
+        ["back"]
+      ]
+    },
+    "analytics": {
+      "rows": [
+        ["growth_30d_btn"],
+        ["top_channels_btn"],
+        ["publish_stats_btn"],
+        ["channels_rate_btn"],
+        ["subscriptions_btn"],
+        ["pool_live_btn"],
+        ["slow_queries_btn"],
+        ["export_excel_btn"],
         ["back"]
       ]
     },
