@@ -2,52 +2,33 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.4 - Path Fix)
+utils.py - الأدوات المساعدة للبوت (v7.9.6 - Full i18n)
 =================================================================================
-🔴 v7.9.4 (إصلاح مسار ملفات الأزرار):
-    ✅ KeyboardFactory: إعادة مسار buttons_config_*.json إلى الجذر
-       (بجانب utils.py) — كان v7.9.3 يبحث عنها خطأً في locales/
-       → أدى إلى اختفاء كل الأزرار
+🔴 v7.9.6 (ترجمة كاملة للواجهة):
+    ✅ _COMMON_PHRASES: قاموس ترجمة نصوص المستخدمين
+    ✅ TranslationManager.translate() / detect_arabic() / stats()
+    ✅ _fmt_dur(seconds, lang): يدعم الترجمة
+    ✅ _format_security_text(settings, stats, lang): يدعم الترجمة
+    ✅ _dot(): يستخدم 🔴 بدل ⚫ (متوافق مع كل الإيموجي)
+    ✅ _NO_CHAT_ID_BUTTONS: إضافة أزرار التحليلات
+    ✅ analytics fallback في _get_default_menus
 
-    📂 البنية الصحيحة:
-       project/
-       ├── utils.py
-       ├── buttons_config_ar.json     ← الأزرار (الجذر)
-       ├── buttons_config_en.json     ← الأزرار (الجذر)
-       └── locales/
-           ├── ar.json                ← النصوص
-           └── en.json                ← النصوص
+🔴 v7.9.4 (إصلاح مسار ملفات الأزرار):
+    ✅ KeyboardFactory: مسار buttons_config_{lang}.json في الجذر
 
 🔴 v7.9.3 (سجلّ تحميل ملفات الترجمة):
     ✅ TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
-       - "✅ تم تحميل ملف الترجمة {lang}.json: N مفتاح"
-       - "⚠️ ملف الترجمة {lang}.json غير موجود — fallback"
-       - "❌ فشل قراءة ملف الترجمة {lang}: ..."
 
 🔴 v7.9.2 (إصلاحات ما بعد التدقيق):
-    ✅ _read_pool_stats: دعم asyncmy (maxsize/size/freesize)
+    ✅ _read_pool_stats: دعم asyncmy
     ✅ _get_global_words_cached: loaded_at>0
     ✅ _send_media: تمرير parse_mode للـ captions
-    ✅ safe_send: BadRequest fallback يمرّر parse_mode=None
+    ✅ safe_send: BadRequest fallback
     ✅ safe_parse_iso: توحيد naive/aware
-    ✅ SmartCache: time.monotonic() بدل time.time()
-    ✅ _publish_single_channel: has_sub=None يُحسب من DB
+    ✅ SmartCache: time.monotonic()
 
-🔴 v7.9.1 (تحسين):
-    ✅ get_reply_from_file: قائمة أنماط مُسبَق تصريفها
-
-🔴 v7.9.0 (إصلاحات حرجة):
-    ✅ TranslationManager: تحميل خارج القفل
-    ✅ KeyboardFactory: تحميل خارج القفل
-    ✅ _publish_single_channel: فصل sleep عن الـ semaphore
-    ✅ SmartCache.get_or_set: try/finally + هوية القفل
-    ✅ invalidate_banned_words_cache_async
-    ✅ import_auto_replies: asyncio.to_thread
-
-🚀 v7.8.6: auto_publish batch subs check محذوف
-🚀 v7.8.6: _banned_words_locks cleanup
-🚀 v7.8.6: _get_global_words_cached قفل موحّد
-🚀 v7.8.6: _GLOBAL_WORDS_TTL: 120 → 1800
+🔴 v7.9.1: get_reply_from_file: قائمة أنماط مُسبَق تصريفها
+🔴 v7.9.0: تحميل خارج القفل + إصلاحات حرجة
 =================================================================================
 """
 
@@ -385,9 +366,143 @@ class AutoReplyCache:
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
+# 5.1 ✅ v7.9.6: قاموس ترجمة العبارات الشائعة لنصوص المستخدمين
+# =====================================================================
+
+_COMMON_PHRASES: Dict[str, Dict[str, str]] = {
+    "ar": {
+        "hello": "مرحبا", "hi": "أهلاً", "thanks": "شكراً",
+        "thank you": "شكراً لك", "good morning": "صباح الخير",
+        "good evening": "مساء الخير", "goodbye": "وداعاً",
+        "yes": "نعم", "no": "لا", "please": "من فضلك",
+        "sorry": "آسف", "how are you": "كيف حالك؟",
+        "i love you": "أحبك", "welcome": "أهلاً وسهلاً",
+        "help": "مساعدة", "good night": "تصبح على خير",
+        "see you": "أراك لاحقاً", "ok": "حسناً", "okay": "حسناً",
+        "great": "رائع", "nice": "جميل", "good": "جيد",
+        "bad": "سيء", "what": "ماذا", "why": "لماذا",
+        "who": "من", "where": "أين", "when": "متى",
+        "how": "كيف", "love": "حب", "friend": "صديق",
+        "family": "عائلة",
+    },
+    "en": {
+        "مرحبا": "Hello", "أهلاً": "Hi", "شكراً": "Thanks",
+        "شكرا": "Thanks", "صباح الخير": "Good morning",
+        "مساء الخير": "Good evening", "وداعاً": "Goodbye",
+        "نعم": "Yes", "لا": "No", "من فضلك": "Please",
+        "آسف": "Sorry", "كيف حالك": "How are you?",
+        "كيف حالك؟": "How are you?", "أحبك": "I love you",
+        "أهلاً وسهلاً": "Welcome", "مساعدة": "Help",
+        "تصبح على خير": "Good night", "أراك لاحقاً": "See you",
+        "حسناً": "Okay", "رائع": "Great", "جميل": "Nice",
+        "جيد": "Good", "سيء": "Bad", "ماذا": "What",
+        "لماذا": "Why", "من": "Who", "أين": "Where",
+        "متى": "When", "كيف": "How", "حب": "Love",
+        "صديق": "Friend", "عائلة": "Family",
+    },
+    "fr": {
+        "hello": "Bonjour", "hi": "Salut", "thanks": "Merci",
+        "goodbye": "Au revoir", "yes": "Oui", "no": "Non",
+        "please": "S'il vous plaît", "sorry": "Désolé",
+        "welcome": "Bienvenue", "help": "Aide",
+        "good night": "Bonne nuit", "great": "Génial",
+    },
+    "ru": {
+        "hello": "Привет", "hi": "Привет", "thanks": "Спасибо",
+        "goodbye": "До свидания", "yes": "Да", "no": "Нет",
+        "please": "Пожалуйста", "sorry": "Извините",
+        "welcome": "Добро пожаловать", "help": "Помощь",
+        "good night": "Спокойной ночи", "great": "Отлично",
+    },
+    "tr": {
+        "hello": "Merhaba", "hi": "Selam", "thanks": "Teşekkürler",
+        "goodbye": "Hoşçakal", "yes": "Evet", "no": "Hayır",
+        "please": "Lütfen", "sorry": "Üzgünüm",
+        "welcome": "Hoş geldiniz", "help": "Yardım",
+        "good night": "İyi geceler", "great": "Harika",
+    },
+    "de": {
+        "hello": "Hallo", "hi": "Hallo", "thanks": "Danke",
+        "goodbye": "Tschüss", "yes": "Ja", "no": "Nein",
+        "please": "Bitte", "sorry": "Entschuldigung",
+        "welcome": "Willkommen", "help": "Hilfe",
+    },
+    "es": {
+        "hello": "Hola", "hi": "Hola", "thanks": "Gracias",
+        "goodbye": "Adiós", "yes": "Sí", "no": "No",
+        "please": "Por favor", "sorry": "Lo siento",
+        "welcome": "Bienvenido", "help": "Ayuda",
+    },
+    "it": {
+        "hello": "Ciao", "hi": "Ciao", "thanks": "Grazie",
+        "goodbye": "Arrivederci", "yes": "Sì", "no": "No",
+        "please": "Per favore", "sorry": "Scusa",
+        "welcome": "Benvenuto", "help": "Aiuto",
+    },
+    "zh": {
+        "hello": "你好", "hi": "嗨", "thanks": "谢谢",
+        "goodbye": "再见", "yes": "是", "no": "不",
+        "please": "请", "sorry": "对不起",
+        "welcome": "欢迎", "help": "帮助",
+    },
+    "ja": {
+        "hello": "こんにちは", "hi": "やあ", "thanks": "ありがとう",
+        "goodbye": "さようなら", "yes": "はい", "no": "いいえ",
+        "please": "お願いします", "sorry": "ごめんなさい",
+        "welcome": "ようこそ", "help": "ヘルプ",
+    },
+    "ko": {
+        "hello": "안녕하세요", "hi": "안녕", "thanks": "감사합니다",
+        "goodbye": "안녕히 가세요", "yes": "네", "no": "아니요",
+        "please": "제발", "sorry": "죄송합니다",
+        "welcome": "환영합니다", "help": "도움말",
+    },
+    "fa": {
+        "hello": "سلام", "hi": "درود", "thanks": "ممنون",
+        "goodbye": "خداحافظ", "yes": "بله", "no": "نه",
+        "please": "لطفاً", "sorry": "متأسفم",
+        "welcome": "خوش آمدید", "help": "کمک",
+    },
+    "ur": {
+        "hello": "ہیلو", "hi": "ہائے", "thanks": "شکریہ",
+        "goodbye": "خدا حافظ", "yes": "جی ہاں", "no": "نہیں",
+        "please": "براہ کرم", "sorry": "معذرت",
+        "welcome": "خوش آمدید", "help": "مدد",
+    },
+    "nl": {
+        "hello": "Hallo", "hi": "Hoi", "thanks": "Bedankt",
+        "goodbye": "Tot ziens", "yes": "Ja", "no": "Nee",
+        "please": "Alsjeblieft", "sorry": "Sorry",
+        "welcome": "Welkom", "help": "Help",
+    },
+    "pl": {
+        "hello": "Cześć", "hi": "Cześć", "thanks": "Dziękuję",
+        "goodbye": "Do widzenia", "yes": "Tak", "no": "Nie",
+        "please": "Proszę", "sorry": "Przepraszam",
+        "welcome": "Witamy", "help": "Pomoc",
+    },
+    "hi": {
+        "hello": "नमस्ते", "hi": "हाय", "thanks": "धन्यवाद",
+        "goodbye": "अलविदा", "yes": "हाँ", "no": "नहीं",
+        "please": "कृपया", "sorry": "क्षमा करें",
+        "welcome": "स्वागत है", "help": "मदद",
+    },
+    "pt": {
+        "hello": "Olá", "hi": "Oi", "thanks": "Obrigado",
+        "goodbye": "Adeus", "yes": "Sim", "no": "Não",
+        "please": "Por favor", "sorry": "Desculpa",
+        "welcome": "Bem-vindo", "help": "Ajuda",
+    },
+}
+
+# ✅ v7.9.6: نمط للكشف عن النص العربي
+_ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
+
+# =====================================================================
 # 6. الترجمات — Preload + Warmup + سجل كامل
 # 🔴 v7.9.0: تحميل خارج القفل
 # 🔴 v7.9.3: سجل عند كل تحميل/فشل/خطأ
+# 🔴 v7.9.6: translate() + detect_arabic() + stats()
 # 📂 المسار: locales/{lang}.json (نسبة إلى utils.py)
 # =====================================================================
 
@@ -491,6 +606,78 @@ class TranslationManager:
             "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳"
         }
 
+    # =============================================================
+    # ✅ v7.9.6: الترجمة الفعلية لنصوص المستخدمين
+    # =============================================================
+
+    @classmethod
+    def is_supported(cls, lang: str) -> bool:
+        """فحص إذا كانت اللغة مدعومة."""
+        if not lang or lang == 'off':
+            return False
+        return lang in cls.get_available_languages()
+
+    @classmethod
+    def translate(cls, text: str, target_lang: str) -> Optional[str]:
+        """
+        ✅ v7.9.6: ترجمة نص باستخدام قاموس العبارات الشائعة.
+        - يعيد النص المترجم إذا وُجد
+        - يعيد None إذا لم تكن الترجمة معروفة
+        """
+        if not text or not target_lang:
+            return None
+
+        stripped = text.strip()
+        if not stripped:
+            return None
+
+        # إزالة علامات الترقيم للأطراف
+        normalized = re.sub(r"[!؟?،,.\s]+$", "", stripped).strip().lower()
+        if not normalized:
+            return None
+
+        phrases = _COMMON_PHRASES.get(target_lang, {})
+        if not phrases:
+            return None
+
+        # 1) بحث مباشر بعد التطبيع
+        if normalized in phrases:
+            return phrases[normalized]
+
+        # 2) بحث بحدود كلمات كاملة
+        for src, dst in phrases.items():
+            try:
+                pattern = r"\b" + re.escape(src) + r"\b"
+                if re.search(pattern, stripped, flags=re.IGNORECASE):
+                    return re.sub(
+                        pattern, dst, stripped, count=1,
+                        flags=re.IGNORECASE
+                    )
+            except re.error:
+                continue
+
+        return None
+
+    @classmethod
+    def detect_arabic(cls, text: str) -> bool:
+        """✅ v7.9.6: فحص إذا كان النص عربياً."""
+        if not text:
+            return False
+        return bool(_ARABIC_TEXT_PATTERN.search(text))
+
+    @classmethod
+    def stats(cls) -> Dict[str, Any]:
+        """✅ v7.9.6: إحصائيات المترجم."""
+        return {
+            "available_languages": list(cls.get_available_languages().keys()),
+            "loaded_translations": list(cls._translations.keys()),
+            "common_phrases_count": {
+                lang: len(phrases)
+                for lang, phrases in _COMMON_PHRASES.items()
+            },
+            "default_lang": cls._default_lang,
+        }
+
 
 async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
@@ -563,6 +750,8 @@ class UserState(Enum):
     WAIT_BACKUP_FILE = auto()
     WAIT_BAN_USER_ID = auto()
     WAIT_UNBAN_USER_ID = auto()
+    # ✅ v7.9.6: إضافة WAIT_REM_LANG
+    WAIT_REM_LANG = auto()
 
 
 class StateManager:
@@ -762,13 +951,13 @@ class CB:
 # =====================================================================
 # 9. مصنع الكيبوردات — Preload
 # 🔴 v7.9.0: تحميل خارج القفل
-# ✅ v7.9.4: المسار أُعيد إلى الجذر (بجانب utils.py)
+# ✅ v7.9.4: المسار أُعيد إلى الجذر
+# ✅ v7.9.6: إضافة أزرار التحليلات + analytics fallback
 # =====================================================================
 
 class KeyboardFactory:
     _configs: Dict[str, Dict] = {}
     _default_lang: str = "ar"
-    # ✅ v7.9.4: المسار الأصلي — الملفات في الجذر بجانب utils.py
     _config_path_template: str = str(Path(__file__).resolve().parent / "buttons_config_{lang}.json")
     _load_lock = threading.Lock()
 
@@ -801,6 +990,20 @@ class KeyboardFactory:
         "admin_export_replies", "admin_import_replies", "admin_import_github",
         "admin_refresh_cache", "admin_invoices", "admin_payment_logs",
         "admin_grant_free", "admin_del_contest",
+        # ✅ v7.9.6: أزرار التحليلات (لا تحتاج chat_id)
+        "admin_analytics",
+        "admin_declare_winner_sel",
+        "growth_30d_btn",
+        "top_channels_btn",
+        "publish_stats_btn",
+        "channels_rate_btn",
+        "subscriptions_btn",
+        "pool_live_btn",
+        "slow_queries_btn",
+        "export_excel_btn",
+        "refresh_btn",
+        "gift_plans", "redeem_gift",
+        "rem_lang",
     }
 
     _default_texts = {
@@ -822,10 +1025,11 @@ class KeyboardFactory:
         "log_channel_remove": "🗑️ إزالة قناة السجل",
         "log_channel_current": "الحالية",
         "log_channel_none": "❌ لا توجد قناة سجل",
-        "log_channel_help": "أضف البوت كمشرف في القناة ثم أرسل معرّفها أو أعد توجيه رسالة منها",
+        "log_channel_help": "أضف البوت كمشرف في القناة ثم أرسل معرّفها",
         "log_channel_saved": "✅ تم تعيين قناة السجل",
         "log_channel_removed": "🗑️ تمت إزالة قناة السجل",
-        "log_channel_test": "🧪 رسالة اختبار — قناة السجل تعمل بنجاح!",
+        "log_channel_test": "🧪 رسالة اختبار",
+        "log_channel_change": "🔄 تغيير القناة",
 
         "post_add": "📥 إضافة منشورات",
         "post_pub": "📤 نشر منشور",
@@ -867,7 +1071,7 @@ class KeyboardFactory:
         "sec_voice": "🎤 صوتي",
         "sec_videonote": "🎥 فيديو نوت",
         "sec_banned_words": "🚫 كلمات محظورة",
-        "sec_toggle_banned_words": "✅ تفعيل الحذف / ❌ تعطيل الحذف",
+        "sec_toggle_banned_words": "✅ تفعيل الحذف / ❌ تعطيل",
         "sec_welcome": "🎯 ترحيب",
         "sec_welcome_text": "📝 نص ترحيب",
         "sec_goodbye": "👋 وداع",
@@ -957,6 +1161,7 @@ class KeyboardFactory:
         "rem_daily": "📊 التقرير اليومي",
         "rem_weekly": "📈 التقرير الأسبوعي",
         "rem_days": "📅 عدد الأيام",
+        "rem_lang": "🌐 اللغة",
         "translation": "🌐 الترجمة",
         "trans_off": "❌ إيقاف الترجمة",
         "invoices": "🧾 فواتيري",
@@ -968,14 +1173,22 @@ class KeyboardFactory:
         "buy_sub_30": "🗓️ شهر",
         "buy_sub_90": "🗓️ 3 أشهر",
         "buy_sub_365": "🗓️ سنة",
+
+        # ✅ v7.9.6: أزرار التحليلات
+        "admin_analytics": "📊 التحليلات المتقدمة",
+        "growth_30d_btn": "📈 نمو المستخدمين",
+        "top_channels_btn": "🏆 أفضل 10 قنوات",
+        "publish_stats_btn": "📊 متوسط النشر",
+        "channels_rate_btn": "🎯 نسبة النجاح",
+        "subscriptions_btn": "💎 الاشتراكات",
+        "pool_live_btn": "🚀 Pool مباشر",
+        "slow_queries_btn": "🐌 استعلامات بطيئة",
+        "export_excel_btn": "📤 تصدير Excel",
+        "refresh_btn": "🔄 تحديث",
     }
 
     @classmethod
     def _load_config_for_lang(cls, lang: str) -> Dict:
-        """
-        🔴 v7.9.3: يُسجّل رسالة عند كل تحميل/فشل/خطأ.
-        ✅ v7.9.4: المسار: buttons_config_{lang}.json (بجانب utils.py)
-        """
         if lang == 'off':
             lang = cls._default_lang
 
@@ -1139,6 +1352,7 @@ class KeyboardFactory:
                 ["sec_penalty_durations"],
                 ["sec_adv_act", "sec_act_log"],
                 ["sec_auto_reply_menu"],
+                ["log_channel_btn"],
                 ["sec_antiflood_settings", "sec_night_settings"],
                 ["sec_enable_all", "sec_disable_all"],
                 ["sec_close"],
@@ -1189,7 +1403,21 @@ class KeyboardFactory:
                 ["sec_set_violation_strikes", "sec_set_violation_duration"],
                 ["back"],
             ],
+            # ✅ v7.9.6: fallback للتحليلات
+            "analytics": [
+                ["growth_30d_btn"],
+                ["top_channels_btn"],
+                ["publish_stats_btn"],
+                ["channels_rate_btn"],
+                ["subscriptions_btn"],
+                ["pool_live_btn"],
+                ["slow_queries_btn"],
+                ["export_excel_btn"],
+                ["refresh_btn"],
+                ["back"],
+            ],
             "admin_panel": [
+                ["admin_analytics"],
                 ["admin_users", "admin_banned"], ["admin_unban_all"],
                 ["admin_ban_user", "admin_unban_user"],
                 ["admin_channels", "admin_banned_ch"],
@@ -1240,10 +1468,21 @@ class KeyboardFactory:
 
     @classmethod
     def _dot(cls, enabled: bool) -> str:
-        return "🟢" if enabled else "⚫"
+        """✅ v7.9.6: استخدام 🔴 بدل ⚫ (مدعومة في كل الأجهزة)"""
+        return "🟢" if enabled else "🔴"
 
     @classmethod
-    def _fmt_dur(cls, seconds: int) -> str:
+    def _fmt_dur(cls, seconds: int, lang: str = 'ar') -> str:
+        """✅ v7.9.6: يدعم الترجمة"""
+        def T(key, default):
+            try:
+                text = TranslationManager.get_text(lang, key)
+                if text and text != key:
+                    return text
+            except Exception:
+                pass
+            return default
+
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
@@ -1251,16 +1490,18 @@ class KeyboardFactory:
         if seconds <= 0:
             return "∞"
         if seconds < 60:
-            return f"{seconds}ث"
+            return f"{seconds}{T('unit_seconds', 'ث')}"
         if seconds < 3600:
-            return f"{seconds // 60}د"
+            return f"{seconds // 60}{T('unit_minutes', 'د')}"
         if seconds < 86400:
             h = seconds // 3600
             m = (seconds % 3600) // 60
-            return f"{h}س" if m == 0 else f"{h}س{m}د"
+            uh = T('unit_hours', 'س')
+            um = T('unit_minutes', 'د')
+            return f"{h}{uh}" if m == 0 else f"{h}{uh}{m}{um}"
         if seconds < 2592000:
-            return f"{seconds // 86400}ي"
-        return f"{seconds // 2592000}ش"
+            return f"{seconds // 86400}{T('unit_days', 'ي')}"
+        return f"{seconds // 2592000}{T('unit_months', 'ش')}"
 
     @classmethod
     async def _get_security_stats(cls, chat_id: int) -> dict:
@@ -1357,9 +1598,19 @@ class KeyboardFactory:
         return stats
 
     @classmethod
-    def _format_security_text(cls, settings: dict, stats: dict = None) -> str:
+    def _format_security_text(cls, settings: dict, stats: dict = None, lang: str = 'ar') -> str:
+        """✅ v7.9.6: يدعم الترجمة عبر lang"""
+        def T(key, default):
+            try:
+                text = TranslationManager.get_text(lang, key)
+                if text and text != key:
+                    return text
+            except Exception:
+                pass
+            return default
+
         d = cls._dot
-        f = cls._fmt_dur
+        f = lambda s: cls._fmt_dur(s, lang)  # noqa: E731
 
         links = d(settings.get('delete_links', 0))
         mentions = d(settings.get('mentions', 0))
@@ -1416,49 +1667,104 @@ class KeyboardFactory:
 
             stats_section = (
                 f"\n"
-                f"📊 <b>الإحصائيات</b>\n"
-                f"  🚫 عقوبات {pen}      ⚠️ تحذيرات {warns_c}\n"
-                f"  🚨 مخالفات {viols}      🔒 كلمات {words}\n"
-                f"  💬 ردود {replies}\n"
+                f"{T('security_stats_section', '📊 <b>الإحصائيات</b>')}\n"
+                f"  {T('security_penalties_icon', '🚫')} "
+                f"{T('security_penalties_short', 'عقوبات')} {pen}      "
+                f"{T('security_warns_icon', '⚠️')} "
+                f"{T('security_warns_short', 'تحذيرات')} {warns_c}\n"
+                f"  {T('security_violations_icon', '🚨')} "
+                f"{T('security_violations_short', 'مخالفات')} {viols}      "
+                f"{T('security_words_icon', '🔒')} "
+                f"{T('security_words_short', 'كلمات')} {words}\n"
+                f"  {T('security_replies_icon', '💬')} "
+                f"{T('security_replies_short', 'ردود')} {replies}\n"
                 f"\n"
-                f"📸 <b>حذف اليوم</b>\n"
-                f"  🖼️ صور {photos}      🎬 فيديو {videos}\n"
-                f"  🖼️ ملصق {sticks}      📄 ملف {files_del}\n"
-                f"  🔗 روابط {links_del}\n"
+                f"{T('security_deleted_today_section', '📸 <b>حذف اليوم</b>')}\n"
+                f"  {T('security_photos_icon', '🖼️')} "
+                f"{T('security_photos_short', 'صور')} {photos}      "
+                f"{T('security_videos_icon', '🎬')} "
+                f"{T('security_videos_short', 'فيديو')} {videos}\n"
+                f"  {T('security_stickers_icon', '🖼️')} "
+                f"{T('security_stickers_short', 'ملصق')} {sticks}      "
+                f"{T('security_files_icon', '📄')} "
+                f"{T('security_files_short', 'ملف')} {files_del}\n"
+                f"  {T('security_links_icon', '🔗')} "
+                f"{T('security_links_deleted_short', 'روابط')} {links_del}\n"
             )
 
         return (
-            f"🔐 <b>الأمان</b>\n"
+            f"{T('security_title', '🔐 <b>الأمان</b>')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
-            f"🗑️ <b>الحذف التلقائي</b>\n"
-            f"  🔗 روابط {links}      👤 منشن {mentions}\n"
-            f"  🎬 فيديو {video}      🎤 صوت {audio}\n"
-            f"  🖼️ ملصق {stickers}      📄 ملف {files}\n"
-            f"  🎞️ متحرك {anim}      📨 معاد {fwd}\n"
-            f"  📊 تصويت {polls}      🗑️ خدمة {service}\n"
+            f"{T('security_delete_section', '🗑️ <b>الحذف التلقائي</b>')}\n"
+            f"  {T('sec_links_icon', '🔗')} "
+            f"{T('sec_links_short', 'روابط')} {links}      "
+            f"{T('sec_mentions_icon', '👤')} "
+            f"{T('sec_mentions_short', 'منشن')} {mentions}\n"
+            f"  {T('sec_video_icon', '🎬')} "
+            f"{T('sec_video_short', 'فيديو')} {video}      "
+            f"{T('sec_audio_icon', '🎤')} "
+            f"{T('sec_audio_short', 'صوت')} {audio}\n"
+            f"  {T('sec_sticker_icon', '🖼️')} "
+            f"{T('sec_sticker_short', 'ملصق')} {stickers}      "
+            f"{T('sec_doc_icon', '📄')} "
+            f"{T('sec_doc_short', 'ملف')} {files}\n"
+            f"  {T('sec_anim_icon', '🎞️')} "
+            f"{T('sec_anim_short', 'متحرك')} {anim}      "
+            f"{T('sec_forward_icon', '📨')} "
+            f"{T('sec_forward_short', 'معاد')} {fwd}\n"
+            f"  {T('sec_poll_icon', '📊')} "
+            f"{T('sec_poll_short', 'تصويت')} {polls}      "
+            f"{T('sec_service_icon', '🗑️')} "
+            f"{T('sec_service_short', 'خدمة')} {service}\n"
             f"\n"
-            f"⚙️ <b>الأمان المتقدم</b>\n"
-            f"  🌊 فيضان {flood_on}      ({flood_n}ر / {flood_s}ث)\n"
-            f"  🌙 ليلي {night_on}      ({night_a} ← {night_b})\n"
-            f"  📏 طول {maxlen}      🔞 NSFW {nsfw}\n"
+            f"{T('security_advanced_section', '⚙️ <b>الأمان المتقدم</b>')}\n"
+            f"  {T('sec_flood_icon', '🌊')} "
+            f"{T('sec_flood_short', 'فيضان')} {flood_on}      "
+            f"({flood_n}{T('unit_messages_abbr', 'ر')} / {flood_s}{T('unit_seconds', 'ث')})\n"
+            f"  {T('sec_night_icon', '🌙')} "
+            f"{T('sec_night_short', 'ليلي')} {night_on}      "
+            f"({night_a} ← {night_b})\n"
+            f"  {T('sec_maxlen_icon', '📏')} "
+            f"{T('sec_maxlen_short', 'طول')} {maxlen}      "
+            f"{T('sec_nsfw_icon', '🔞')} NSFW {nsfw}\n"
             f"\n"
-            f"👋 <b>الترحيب</b>\n"
-            f"  🎯 ترحيب {welcome}      👋 وداع {goodbye}\n"
-            f"  ✅ موافق {approve}      ❌ رفض {reject}\n"
+            f"{T('security_welcome_section', '👋 <b>الترحيب</b>')}\n"
+            f"  {T('sec_welcome_icon', '🎯')} "
+            f"{T('sec_welcome_short', 'ترحيب')} {welcome}      "
+            f"{T('sec_goodbye_icon', '👋')} "
+            f"{T('sec_goodbye_short', 'وداع')} {goodbye}\n"
+            f"  {T('sec_approve_icon', '✅')} "
+            f"{T('sec_approve_short', 'موافق')} {approve}      "
+            f"{T('sec_reject_icon', '❌')} "
+            f"{T('sec_reject_short', 'رفض')} {reject}\n"
             f"\n"
-            f"⚠️ <b>التحذيرات</b>\n"
-            f"  ⚠️ مفعل {warn}      حد {warn_max}\n"
-            f"  🚨 مخالفات {viol_s}      مدة {viol_d}\n"
+            f"{T('security_warnings_section', '⚠️ <b>التحذيرات</b>')}\n"
+            f"  {T('sec_warn_icon', '⚠️')} "
+            f"{T('security_enabled_short', 'مفعل')} {warn}      "
+            f"{T('security_limit_short', 'حد')} {warn_max}\n"
+            f"  {T('security_violations_icon', '🚨')} "
+            f"{T('security_violations_short', 'مخالفات')} {viol_s}      "
+            f"{T('security_duration_short', 'مدة')} {viol_d}\n"
             f"\n"
-            f"⏱️ <b>مدد العقوبات</b>\n"
-            f"  🔇 كتم {mute_d}      🚫 حظر {ban_d}\n"
-            f"  🔒 تقييد {restrict_d}      ⚠️ تحذير {warn_pd}\n"
-            f"  🌊 فيضان {flood_pd}      🌙 ليلي {night_pd}\n"
+            f"{T('security_durations_section', '⏱️ <b>مدد العقوبات</b>')}\n"
+            f"  {T('security_mute_icon', '🔇')} "
+            f"{T('security_mute_short', 'كتم')} {mute_d}      "
+            f"{T('security_ban_icon', '🚫')} "
+            f"{T('security_ban_short', 'حظر')} {ban_d}\n"
+            f"  {T('security_restrict_icon', '🔒')} "
+            f"{T('security_restrict_short', 'تقييد')} {restrict_d}      "
+            f"{T('security_warn_icon', '⚠️')} "
+            f"{T('security_warn_short', 'تحذير')} {warn_pd}\n"
+            f"  {T('sec_flood_icon', '🌊')} "
+            f"{T('sec_flood_short', 'فيضان')} {flood_pd}      "
+            f"{T('sec_night_icon', '🌙')} "
+            f"{T('sec_night_short', 'ليلي')} {night_pd}\n"
             f"{stats_section}"
             f"\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>🟢 مفعّل  •  ⚫ معطّل</i>"
+            f"<i>{T('security_enabled_footer', '🟢 مفعّل')}  •  "
+            f"{T('security_disabled_footer', '🔴 معطّل')}</i>"
         )
 
 # =====================================================================
