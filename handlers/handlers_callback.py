@@ -2,31 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - المعالج النهائي الكامل (v9.4.14)
+handlers_callback.py - المعالج النهائي الكامل (v9.4.15)
 =====================================================================
-✅ v9.4.14 — قناة سجل لكل مجموعة (DB-native، بدون group_log):
-  - _get_log_channel_menu_data: DB.get_group_log_channel مباشرة
-  - _show_log_channel_menu: DB مباشرة + زر "تغيير/تعيين"
-  - _handle_log_channel: DB مباشرة + safe_send مع await + validation
-  - حذف أي اعتماد على group_log.py
+✅ v9.4.15 — دمج كامل مع JSON + إصلاحات شاملة:
+  - _ANALYTICS_ALIASES: دعم growth_30d_btn ↔ analytics_user_growth
+  - _show_analytics_menu: JSON-driven عبر KeyboardFactory
+  - handle(): معالج refresh_btn على المستوى الأعلى
+  - _handle_security(): معالج warn_penalty_duration
+  - handle(): معالج rem_lang
+  - دعم كامل لكل أزرار JSON
 
-✅ v9.4.13 — إصلاحات عرض:
-  - _show_main_menu_inline: تمرير auto_publish و auto_recycle
-  - _show_main_menu_inline: تحويل **bold** → <b>bold</b> تلقائياً
-  - _render_translation_menu: عرض حالة الترجمة + تمييز اللغة + إخفاء الإيقاف
-
-✅ v9.4.12 — عرض مقياسي النجاح والإنجاز:
-  - _handle_analytics → channels_rate: نسبة النجاح + نسبة الإنجاز
-
-✅ v9.4.11 — إصلاحات ما بعد التدقيق:
-  - _handle_contests: RANDOM() → random.choice
-  - _invalidate_after_channel_change: posts_cache.invalidate
-  - _publish_task: الإبطال قبل safe_send
-  - ACTIVE_TASKS: Set[asyncio.Task] بدل WeakSet
-  - _set_sec_chat(): مُزامن sec_chat + security_chat_id
-  - _render_translation_menu: TranslationManager
-  - _handle_buy_subscription: fallback duration_days
-  - _show_main_menu_inline: try/except حول get_or_load
+✅ v9.4.14 — قناة سجل لكل مجموعة (DB-native، بدون group_log)
+✅ v9.4.13 — إصلاحات عرض
+✅ v9.4.12 — عرض مقياسي النجاح والإنجاز
+✅ v9.4.11 — إصلاحات ما بعد التدقيق
 =====================================================================
 """
 
@@ -129,6 +118,31 @@ except ImportError:
     from handlers_command import CommandHandlers, _invalidate_force_sub_cache
 
 logger = logging.getLogger(__name__)
+
+# =====================================================================
+# ✅ v9.4.15: خريطة الأسماء البديلة لأزرار التحليلات
+# =====================================================================
+
+_ANALYTICS_ALIASES: Dict[str, str] = {
+    # JSON key → internal action
+    "growth_30d_btn": "user_growth",
+    "top_channels_btn": "top_channels",
+    "publish_stats_btn": "publish_stats",
+    "channels_rate_btn": "channels_rate",
+    "subscriptions_btn": "subscriptions",
+    "pool_live_btn": "pool",
+    "slow_queries_btn": "slow",
+    "export_excel_btn": "export",
+    # reverse: internal → internal (no-op)
+    "user_growth": "user_growth",
+    "top_channels": "top_channels",
+    "publish_stats": "publish_stats",
+    "channels_rate": "channels_rate",
+    "subscriptions": "subscriptions",
+    "pool": "pool",
+    "slow": "slow",
+    "export": "export",
+}
 
 # =====================================================================
 # ثوابت
@@ -265,31 +279,20 @@ def _set_sec_chat(context, chat_id: int) -> None:
 # =====================================================================
 
 async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
-    """
-    ✅ v9.4.14: يعتمد على DB.get_group_log_channel مباشرة.
-    لا اعتماد على group_log.py.
-    """
     cache_key = _log_channel_cache_key(chat_id)
     cached = await internal_cache.get(cache_key)
     if cached is not None:
         return cached
 
-    empty_result = {
-        'current': None, 'effective': None,
-        'share_count': 0, 'share_names': [],
-    }
-
     current = None
     effective = None
 
-    # ─── قناة المجموعة الخاصة ────────────────────────────────────
     try:
         current = await DB.get_group_log_channel(chat_id)
     except Exception as e:
         logger.debug(f"get_group_log_channel({chat_id}): {e}")
         current = None
 
-    # ─── القناة العامة (fallback) ────────────────────────────────
     if not current:
         try:
             effective = await DB.get_log_channel()
@@ -297,7 +300,6 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
             logger.debug(f"get_log_channel: {e}")
             effective = None
 
-    # ─── القنوات المشتركة ────────────────────────────────────────
     share_count = 0
     share_names: List[str] = []
     if current:
@@ -540,7 +542,6 @@ async def _invalidate_after_channel_change(
     channel_db_id: Optional[int] = None,
     invalidate_posts: bool = True,
 ) -> None:
-    """✅ v9.4.11: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات."""
     keys = [
         f"start_data_{user_id}",
         f"user_{user_id}",
@@ -569,7 +570,6 @@ async def _invalidate_after_channel_change(
 
 
 def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
-    """✅ v9.4.12: سطر قناة واحدة بعرض مقياسَي النجاح والإنجاز."""
     published = _coerce_int(ch.get('published'), 0)
     failed = _coerce_int(ch.get('failed'), 0)
     total = _coerce_int(ch.get('total'), 0)
@@ -896,6 +896,22 @@ class CallbackHandlers:
                 await safe_edit(query, "📅 أرسل عدد الأيام (1-30):", bot=context.bot)
                 return
 
+            # ✅ v9.4.15: معالج زر لغة التذكيرات
+            if base_data == "rem_lang":
+                StateManager.set(user_id, UserState.WAIT_REM_LANG)
+                await safe_edit(
+                    query,
+                    "🌐 <b>لغة التذكيرات</b>\n\n"
+                    "أرسل رمز اللغة:\n"
+                    "<code>ar</code> — العربية\n"
+                    "<code>en</code> — English\n"
+                    "<code>fr</code> — Français\n"
+                    "<code>ru</code> — Русский",
+                    parse_mode='HTML',
+                    bot=context.bot,
+                )
+                return
+
             if base_data == CB.TRANSLATION:
                 await CallbackHandlers._render_translation_menu(query, context, user_id, lang)
                 return
@@ -1037,7 +1053,19 @@ class CallbackHandlers:
                 )
                 return
 
-            if data.startswith("analytics_"):
+            # ✅ v9.4.15: معالج زر التحديث (مستوى أعلى)
+            if data == "refresh_btn":
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query, "❌ غير مصرح", bot=context.bot)
+                    return
+                await CallbackHandlers._show_analytics_menu(
+                    query, context, user_id, lang
+                )
+                return
+
+            # ✅ v9.4.15: معالجة كل من analytics_* و *_btn
+            if (data.startswith("analytics_")
+                    or data in _ANALYTICS_ALIASES):
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query, "❌ غير مصرح", bot=context.bot)
                     return
@@ -1245,7 +1273,6 @@ class CallbackHandlers:
             groups_count = user_data.get('groups_count', 0)
             has_sub = bool(user_data.get('has_subscription', False))
 
-            # ✅ v9.4.13: استخراج auto_publish / auto_recycle
             auto_publish = bool(user_data.get('auto_publish', True))
             auto_recycle = bool(user_data.get('auto_recycle', True))
             auto_publish_text = "✅" if auto_publish else "❌"
@@ -1284,7 +1311,6 @@ class CallbackHandlers:
                     )])
                     kb = InlineKeyboardMarkup(new_rows)
 
-            # ✅ v9.4.13: تمرير auto_publish و auto_recycle
             title = await get_text(
                 lang, 'main_menu',
                 user_name=f"<code>{user_id}</code>",
@@ -1296,7 +1322,6 @@ class CallbackHandlers:
                 auto_recycle=auto_recycle_text,
             )
 
-            # ✅ v9.4.13: تحويل **bold** → <b>bold</b>
             title = _md_to_html(title)
 
             await safe_edit(query, title, reply_markup=kb, parse_mode='HTML',
@@ -1555,6 +1580,7 @@ class CallbackHandlers:
                     )
                     return True
 
+            # ✅ v9.4.15: معالج مدة عقوبة التحذير
             if data.startswith("sec_warn_penalty_duration:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -1567,6 +1593,50 @@ class CallbackHandlers:
                 await CallbackHandlers._show_penalty_durations(
                     update, context, query, chat_id, lang, 'warn_penalty'
                 )
+                return True
+
+            if data.startswith("sec_warn_penalty:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
+                    return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
+                    return True
+                await CallbackHandlers._show_warn_penalty_types(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
+            if data.startswith("sec_warn_count:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
+                    return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
+                    return True
+                await CallbackHandlers._show_warn_count_buttons(
+                    update, context, query, chat_id, lang
+                )
+                return True
+
+            if data.startswith("sec_warn_toggle:"):
+                parts = data.split(":")
+                if len(parts) != 2:
+                    await safe_edit(query, "❌ بيانات غير صالحة", bot=context.bot)
+                    return True
+                chat_id = _coerce_int(parts[1])
+                if not await _check_sec_auth(context, user_id, chat_id):
+                    await safe_edit(query, "❌ لا صلاحية", bot=context.bot)
+                    return True
+                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
+                new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
+                await DB.update_security_settings(chat_id, warn_enabled=new_val)
+                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await CallbackHandlers._refresh_security_view(query, context, chat_id, lang)
                 return True
 
             if data.startswith("sec_penalty_"):
@@ -1927,7 +1997,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _render_translation_menu(query, context, user_id, lang):
-        """✅ v9.4.13: عرض حالة الترجمة + تمييز اللغة + إخفاء الإيقاف."""
         try:
             current_lang = await DB.get_user_language(user_id) or 'ar'
         except Exception:
@@ -3064,6 +3133,13 @@ class CallbackHandlers:
                 )
                 return
 
+            # ✅ v9.4.15: معالج warn_penalty_duration
+            if action == "warn_penalty_duration":
+                await CallbackHandlers._show_penalty_durations(
+                    update, context, query, chat_id, lang, 'warn_penalty'
+                )
+                return
+
             if action == "warn_toggle":
                 settings = await CallbackHandlers._get_security_settings_cached(
                     chat_id
@@ -3254,7 +3330,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
-        """✅ v9.4.14: قائمة قناة السجل — DB مباشرة."""
         data = await _get_log_channel_menu_data(chat_id)
 
         current = data.get('current')
@@ -3356,7 +3431,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_log_channel(update, context, query, user_id, lang):
-        """✅ v9.4.14: قناة السجل — DB مباشرة، بدون group_log.py."""
         data = query.data or ""
         parts = data.split(":")
 
@@ -4814,58 +4888,77 @@ class CallbackHandlers:
             await safe_edit(query, "❌ حدث خطأ", bot=context.bot)
 
     # =================================================================
-    # 🎨 التحليلات المتقدمة
+    # 🎨 التحليلات المتقدمة — v9.4.15 JSON-driven
     # =================================================================
 
     @staticmethod
     async def _show_analytics_menu(query, context, user_id, lang):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "📈 نمو المستخدمين (30 يوم)",
-                callback_data="analytics_user_growth"
-            )],
-            [InlineKeyboardButton(
-                "🏆 أفضل 10 قنوات",
-                callback_data="analytics_top_channels"
-            )],
-            [InlineKeyboardButton(
-                "📊 متوسط النشر + النجاح",
-                callback_data="analytics_publish_stats"
-            )],
-            [InlineKeyboardButton(
-                "🎯 نسبة نجاح القنوات",
-                callback_data="analytics_channels_rate"
-            )],
-            [InlineKeyboardButton(
-                "💎 معدل الاشتراكات",
-                callback_data="analytics_subscriptions"
-            )],
-            [InlineKeyboardButton(
-                "🚀 Pool مباشر",
-                callback_data="analytics_pool"
-            )],
-            [InlineKeyboardButton(
-                "🐌 استعلامات بطيئة",
-                callback_data="analytics_slow"
-            )],
-            [InlineKeyboardButton(
-                "📤 تصدير Excel",
-                callback_data="analytics_export"
-            )],
-            [InlineKeyboardButton("🔙 رجوع", callback_data=CB.ADMIN)],
-        ])
-        await safe_edit(
-            query,
+        """✅ v9.4.15: JSON-driven عبر KeyboardFactory مع fallback يدوي."""
+        text = (
             "📊 <b>التحليلات المتقدمة</b>\n\n"
-            "اختر التقرير الذي تريد عرضه:",
-            reply_markup=kb,
-            parse_mode='HTML',
-            bot=context.bot,
+            "اختر التقرير الذي تريد عرضه:"
+        )
+
+        # محاولة استخدام KeyboardFactory أولاً (JSON-driven)
+        kb = None
+        try:
+            kb = KeyboardFactory.build("analytics", lang=lang)
+        except Exception as e:
+            logger.debug(f"KeyboardFactory analytics build failed: {e}")
+
+        # fallback يدوي إذا فشل البناء
+        if kb is None:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📈 نمو المستخدمين (30 يوم)",
+                    callback_data="analytics_user_growth"
+                )],
+                [InlineKeyboardButton(
+                    "🏆 أفضل 10 قنوات",
+                    callback_data="analytics_top_channels"
+                )],
+                [InlineKeyboardButton(
+                    "📊 متوسط النشر + النجاح",
+                    callback_data="analytics_publish_stats"
+                )],
+                [InlineKeyboardButton(
+                    "🎯 نسبة نجاح القنوات",
+                    callback_data="analytics_channels_rate"
+                )],
+                [InlineKeyboardButton(
+                    "💎 معدل الاشتراكات",
+                    callback_data="analytics_subscriptions"
+                )],
+                [InlineKeyboardButton(
+                    "🚀 Pool مباشر",
+                    callback_data="analytics_pool"
+                )],
+                [InlineKeyboardButton(
+                    "🐌 استعلامات بطيئة",
+                    callback_data="analytics_slow"
+                )],
+                [InlineKeyboardButton(
+                    "📤 تصدير Excel",
+                    callback_data="analytics_export"
+                )],
+                [InlineKeyboardButton("🔙 رجوع", callback_data=CB.ADMIN)],
+            ])
+
+        await safe_edit(
+            query, text, reply_markup=kb,
+            parse_mode='HTML', bot=context.bot,
         )
 
     @staticmethod
     async def _handle_analytics(update, context, query, user_id, lang, data):
-        action = data.replace("analytics_", "", 1)
+        """✅ v9.4.15: يدعم analytics_* و *_btn عبر _ANALYTICS_ALIASES."""
+
+        # استخراج الـ action مع دعم الأسماء البديلة
+        if data.startswith("analytics_"):
+            raw_action = data[len("analytics_"):]
+        else:
+            raw_action = data
+        action = _ANALYTICS_ALIASES.get(raw_action, raw_action)
 
         try:
             if action == "user_growth":
@@ -5983,5 +6076,6 @@ __all__ = [
     "_md_to_html",
     "_get_log_channel_menu_data",
     "_invalidate_log_channel_menu_cache",
+    "_ANALYTICS_ALIASES",
     "ACTIVE_TASKS",
 ]
