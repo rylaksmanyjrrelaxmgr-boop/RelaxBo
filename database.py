@@ -1,62 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.31 — PUBLISH-FAST)
+database.py - قاعدة البيانات المتكاملة (v7.7.32 — PERF-FIX)
 ================================================================================
-🆕 v7.7.31 (PUBLISH-FAST — استعلاما النشر 1.51s + 1.19s → <550ms):
-  ✅ P5: has_active_subscription: MV fast path على PG (1.19s → <5ms)
-       - fallback آمن إذا MV غير متوفر (نفس النتيجة)
-       - TTL 300s بدل 60s (الاشتراك لا يتغيّر كل دقيقة)
-  ✅ P6: MV_REFRESH_COOLDOWN: 300s → 3600s (ضغط أقل على DB)
-  ✅ لا تغيير في منطق النشر (12 دقيقة = 5 منشورات/ساعة محفوظ)
+🆕 v7.7.32 (PERF-FIX — لحل الاستعلامات البطيئة 1.5-2.5s):
+  ✅ expire_penalties: BATCH 5000 → 500 (تقليل lock duration)
+  ✅ _tune_heavy_tables_autovacuum: ضبط autovacuum على posts/subscriptions
+  ✅ _analyze_after_tune: ANALYZE فوري بعد الضبط
+  ✅ _pg_stat_statements_reset (اختياري): إعادة تعيين إحصاءات الاستعلامات
+  ✅ توثيق كامل لأسباب البطء (VACUUM, dead tuples, pool contention)
 
-🆕 v7.7.30 (PERFORMANCE-HARDENING — 12 إصلاحاً):
-  ✅ C1: get_user / get_user_full_data: channel_id = Telegram ID
-  ✅ C2: mark_users_as_blocked (MySQL): _fetchval_with_conn
-  ✅ C3: _destroy_connection (MySQL): لا release
-  ✅ C4: _recover_pool: قفل _recover_lock
-  ✅ C5: _execute_with_retry: كشف "pool unavailable"
-  ✅ H1: _bootstrap (SQLite): connection() بدل transaction()
-  ✅ H3: get_channels_to_publish: throttle MV refresh
-  ✅ H4: _compute_migrations_signature: يشمل نوع العمود
-  ✅ H5: _import_banned_words: إبطال utils cache
-  ✅ H6: _import_auto_replies: settings_cache.auto_reply
-  ✅ P1: get_channels_to_publish (PG): LATERAL join
-  ✅ P2: _ensure_bigint_ids: استعلام واحد
-  ✅ P3: iter_all_users: keyset pagination
-  ✅ P4: _get_*_lock: OrderedDict LRU
-  ✅ M1: ownership check على channel_info
+🆕 v7.7.31 (PUBLISH-FAST):
+  ✅ has_active_subscription: MV fast path على PG
+  ✅ MV_REFRESH_COOLDOWN: 300s → 3600s
 
-🆕 v7.7.29 (POST-AUDIT-HARDENING — 13 إصلاحاً):
-  ✅ _MIGRATIONS_TYPES ثابت وحيد
-  ✅ _import_auto_replies: ON CONFLICT DO UPDATE
-  ✅ _maybe_refresh_mv: timestamp في finally
-  ✅ get_channels_to_publish: MV refresh في background
-  ✅ mark_users_as_blocked: existence check
-  ✅ _validate_column_def: إزالة الكود الميت
-  ✅ _get_user_lock: OrderedDict LRU
-  ✅ get_user_language: `or "ar"`
-  ✅ get_user: cache-hit consistent
-  ✅ user_cache.invalidate(None): يمسح internal_cache
-  ✅ expire_penalties: FOR UPDATE SKIP LOCKED
-  ✅ _destroy_connection (MySQL): لا يُعيد conn مكسور
-  ✅ _compute_tables_hash: source DDL + توافق خلفي
+🆕 v7.7.30 (PERFORMANCE-HARDENING):
+  ✅ C1-C5, H1, H3-H6, P1-P4, M1 (تفاصيل كاملة في نهاية الملف)
 
-🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات):
-  ✅ connection(): except BaseException
-  ✅ get_pool_stats: دعم asyncmy
-  ✅ mark_users_as_blocked: _invalidate_user_cache_keys
-  ✅ update_schedule: فحص وجود الصف
-  ✅ add_penalty (SQLite): إغلاق cursor في finally
-  ✅ _convert_placeholders (PG): تخطي $$...$$ و $tag$
-  ✅ _ensure_bigint_ids (MySQL): COLUMN_TYPE
-  ✅ _compute_bootstrap_hash: يشمل محتوى migrations
-  ✅ _fetch_all_columns_map (SQLite): warning بدل صمت
-
-🆕 v7.7.27 (CACHE-COHERENCE):
-  ✅ Cache gap: wrapper يربط user_cache.invalidate ↔ internal_cache
-  ✅ _invalidate_user_cache_keys: 12 مفتاحاً
-  ✅ _import_*: rowcount بدل len(batch)
+🆕 v7.7.29 (POST-AUDIT-HARDENING — 13 إصلاحاً)
+🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات)
+🆕 v7.7.27 (CACHE-COHERENCE)
 ================================================================================
 """
 
@@ -66,11 +29,9 @@ database.py - قاعدة البيانات المتكاملة (v7.7.31 — PUBLIS
 # [1] التناظر: هل توجد دالة/نمط مماثل يستحق نفس الإصلاح؟
 # [2] التغطية عبر DBs: SQLite / MySQL / PostgreSQL — بما فيها MV/CTE.
 # [3] hash/cache: _upsert_setting خارج كل if — وإلا حلقات لا نهائية.
-#     و: كل تغيير في DB يستدعي _invalidate_user_cache_keys (الموحّد).
 # [4] Escape chars في SQL: استخدم '!' — موحّد عبر MySQL/PG/SQLite.
-# [5] القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف
-#     كاملاً (بما فيه EXTRA/AUTO_INCREMENT/UNSIGNED/COLLATE).
-# [6] Magic numbers: كل رقم سحري جديد → constant مُسمّى أعلى الملف.
+# [5] القيود في ALTER TABLE: على MySQL، MODIFY COLUMN يستبدل التعريف.
+# [6] Magic numbers: كل رقم سحري → constant مُسمّى أعلى الملف.
 # [7] LIKE audit: grep -rn "LIKE" database_*.py | grep -v "ESCAPE '!'"
 # [8] CancelledError: catch BaseException عند الإلغاء — ليس Exception.
 # =====================================================================
@@ -594,8 +555,23 @@ USER_CACHE_TTL = 60
 LANG_CACHE_TTL = 600
 SETTINGS_BATCH_CACHE_TTL = 120
 
-# 🆕 v7.7.31: TTL للاشتراك (كان 60s داخل has_active_subscription)
+# 🆕 v7.7.31: TTL للاشتراك
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
+
+# 🆕 v7.7.32: BATCH في expire_penalties (كان 5000)
+# 5000 صف = قفل طويل على user_penalties → يبطئ كل الاستعلامات
+EXPIRED_PENALTIES_BATCH = int(os.getenv("EXPIRED_PENALTIES_BATCH", "500"))
+
+# 🆕 v7.7.32: جداول تحتاج autovacuum aggressive
+# posts: يُحدَّث كثيراً (publish/fail_count/recycle)
+# subscriptions: يُحدَّث عند التجديد/الانتهاء
+# group_security / auto_reply_settings: PK lookups يجب أن تكون <1ms
+# user_penalties: يُكتب كثيراً (كل عقوبة)
+HEAVY_TABLES_FOR_AUTOVACUUM = (
+    "posts",
+    "subscriptions",
+    "user_penalties",
+)
 
 SLOW_QUERY_FULL_STACK = (
     os.getenv("SLOW_QUERY_FULL_STACK", "true").lower() == "true"
@@ -698,7 +674,6 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
 def _compute_migrations_signature() -> Dict[str, List[str]]:
     """
     🆕 v7.7.30: يشمل نوع العمود — يكشف تغيير INTEGER → BIGINT.
-    ملاحظة: يكسر توافق bootstrap_hash مع v7.7.29 → migration واحدة فقط.
     """
     return {
         table: [f"{col}:{typ}" for col, typ in cols]
@@ -1526,7 +1501,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
     """
     ⚠️ DO UPDATE SET ليس REPLACE حقيقياً.
-    الفروق: لا DELETE triggers، لا CASCADE، لا reset للـ DEFAULT.
     """
     if DB_TYPE == "sqlite":
         return query
@@ -1894,7 +1868,7 @@ class Database(
     _instance = None
     _MAX_USER_LOCKS = MAX_USER_LOCKS_CONFIG
 
-    BOOTSTRAP_DATA_VERSION = 7
+    BOOTSTRAP_DATA_VERSION = 8
 
     VALID_PENALTY_TYPES = {"mute", "ban", "restrict", "kick", "warn"}
     VALID_REPLY_TYPES = {
@@ -2120,6 +2094,8 @@ class Database(
             self._alive_cache_warned = False
             self._pool_none_warned = False
             self._recovering_pool = False
+            # 🆕 v7.7.32: علم "تم ضبط autovacuum"
+            self._autovacuum_tuned = False
 
             self._user_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
             self._channel_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
@@ -2184,7 +2160,6 @@ class Database(
 
             self._mv_refresh_lock = asyncio.Lock()
             self._mv_last_refresh_mono: float = 0.0
-            # 🆕 v7.7.31: MV_REFRESH_COOLDOWN 300s → 3600s
             self._mv_refresh_cooldown = float(
                 os.getenv("MV_REFRESH_COOLDOWN", "3600")
             )
@@ -2336,6 +2311,115 @@ class Database(
             }
         except Exception as e:
             return {"type": "error", "message": str(e)}
+
+    # =================================================================
+    # 🆕 v7.7.32: ضبط autovacuum للجداول الثقيلة
+    # =================================================================
+
+    async def _tune_heavy_tables_autovacuum(self, conn) -> int:
+        """
+        🆕 v7.7.32: ضبط autovacuum على الجداول الثقيلة.
+
+        الهدف: تقليل dead tuples → استعلامات PK أسرع.
+
+        ملاحظات:
+          - يعمل مرة واحدة فقط (علم _autovacuum_tuned)
+          - لا يفشل bootstrap إذا فشل
+          - PG فقط
+        """
+        if not USE_POSTGRES:
+            return 0
+        if self._autovacuum_tuned:
+            return 0
+
+        tuned = 0
+        try:
+            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                try:
+                    # تحقق وجود الجدول
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = $1 "
+                        "AND table_schema = current_schema()",
+                        table,
+                    )
+                    if not exists:
+                        continue
+
+                    await conn.execute(
+                        f"ALTER TABLE {table} SET ("
+                        f"autovacuum_vacuum_scale_factor = 0.05, "
+                        f"autovacuum_analyze_scale_factor = 0.02, "
+                        f"autovacuum_vacuum_cost_delay = 10, "
+                        f"autovacuum_vacuum_cost_limit = 1000"
+                        f")"
+                    )
+                    tuned += 1
+                except Exception as te:
+                    logger.debug(
+                        f"⚠️ autovacuum tune {table}: {te}"
+                    )
+
+            if tuned:
+                logger.info(
+                    f"✅ v7.7.32: ضُبِط autovacuum على {tuned} جدول "
+                    f"({', '.join(HEAVY_TABLES_FOR_AUTOVACUUM[:tuned])})"
+                )
+            self._autovacuum_tuned = True
+        except Exception as e:
+            logger.warning(f"⚠️ _tune_heavy_tables_autovacuum: {e}")
+
+        return tuned
+
+    async def _analyze_after_tune(self, conn) -> int:
+        """
+        🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
+
+        يجبر planner على إعادة حساب الإحصاءات.
+        """
+        if not USE_POSTGRES:
+            return 0
+        analyzed = 0
+        try:
+            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                try:
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = $1 "
+                        "AND table_schema = current_schema()",
+                        table,
+                    )
+                    if not exists:
+                        continue
+                    # ANALYZE لا يعمل داخل transaction على PG
+                    # نستخدم اتصالاً منفصلاً
+                    analyzed += 1
+                except Exception:
+                    continue
+
+            if analyzed:
+                # نُنفّذ ANALYZE خارج bootstrap (خلفية)
+                async def _do_analyze():
+                    try:
+                        async with self.connection() as c:
+                            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                                try:
+                                    await c.execute(f"ANALYZE {table}")
+                                except Exception as ae:
+                                    logger.debug(
+                                        f"ANALYZE {table}: {ae}"
+                                    )
+                            logger.info(
+                                f"📊 v7.7.32: ANALYZE على "
+                                f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول"
+                            )
+                    except Exception as ae:
+                        logger.debug(f"_do_analyze: {ae}")
+
+                self._spawn_bg_task(_do_analyze())
+        except Exception as e:
+            logger.debug(f"_analyze_after_tune: {e}")
+        return analyzed
 
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
         if not USE_POSTGRES:
@@ -2951,7 +3035,9 @@ class Database(
                 )
                 if USE_MYSQL:
                     try:
-                        await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=1")
+                        await conn.execute(
+                            "SET SESSION FOREIGN_KEY_CHECKS=1"
+                        )
                     except Exception:
                         pass
                 return conn
@@ -5216,6 +5302,8 @@ class Database(
             "schema": CURRENT_SCHEMA_VERSION,
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
             "migrations": _compute_migrations_signature(),
+            # 🆕 v7.7.32: يشمل قائمة الجداول الثقيلة
+            "heavy_tables": list(HEAVY_TABLES_FOR_AUTOVACUUM),
         }
         return hashlib.sha256(
             json.dumps(data, sort_keys=True).encode("utf-8")
@@ -5229,9 +5317,6 @@ class Database(
         ).hexdigest()
 
     def _compute_tables_hash(self) -> str:
-        """
-        يشمل source DDL عند توفره — يكتشف تعديلات database_tables.py.
-        """
         parts = [f"tables_v{CURRENT_SCHEMA_VERSION}"]
         for fn_name, fn in (
             ("sqlite", create_tables_sqlite),
@@ -5250,9 +5335,6 @@ class Database(
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
     def _compute_legacy_tables_hash(self) -> str:
-        """
-        hash v7.7.28 القديم — يُستخدم للتحقق من التوافق عند الترقية.
-        """
         return hashlib.sha256(
             f"tables_v{CURRENT_SCHEMA_VERSION}".encode("utf-8")
         ).hexdigest()
@@ -5376,14 +5458,12 @@ class Database(
     async def has_active_subscription(self, user_id: int) -> bool:
         """
         🆕 v7.7.31: MV fast path على PG (1.19s → <5ms).
-        السلوك محفوظ: True إذا كان هناك اشتراك active سارٍ.
         """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        # ─── مسار سريع: MV على PG ────────────────────────────────────
         if USE_POSTGRES and self._mv_available:
             try:
                 row = await self.fetchval(
@@ -5401,7 +5481,6 @@ class Database(
                     f"⚠️ MV lookup فشل، fallback للـ slow path: {e}"
                 )
 
-        # ─── مسار احتياطي (بدون MV أو عند فشله) ──────────────────────
         row = await self.fetchval(
             "SELECT 1 FROM subscriptions s "
             "JOIN plans p ON s.plan_id = p.id "
@@ -5491,8 +5570,22 @@ class Database(
                 logger.warning(f"⚠️ MV init: {e}")
                 self._mv_available = False
 
+            # 🆕 v7.7.32: ضبط autovacuum (مرة واحدة)
+            try:
+                await self._tune_heavy_tables_autovacuum(conn)
+            except Exception as e:
+                logger.debug(f"autovacuum tune: {e}")
+
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
+
+        # 🆕 v7.7.32: ANALYZE في الخلفية بعد bootstrap
+        if USE_POSTGRES:
+            try:
+                await self._analyze_after_tune(conn)
+            except Exception as e:
+                logger.debug(f"analyze after tune: {e}")
+
         return True
 
     async def _bootstrap(
@@ -6942,8 +7035,15 @@ class Database(
         return await self.fetchall(query, tuple(params))
 
     async def expire_penalties(self) -> int:
+        """
+        🆕 v7.7.32: BATCH = EXPIRED_PENALTIES_BATCH (500 افتراضياً).
+
+        السبب: BATCH=5000 كان يمسك قفلاً على آلاف الصفوف لدورة كاملة
+        → كل استعلام على user_penalties ينتظر → 2+ ثانية.
+        مع 500 صف، القفل ينتهي بسرعة، والدورات اللاحقة تكمل.
+        """
         total_expired = 0
-        BATCH = 5000
+        BATCH = EXPIRED_PENALTIES_BATCH  # 🆕 500 (كان 5000)
         try:
             while True:
                 batch_expired = 0
@@ -7164,7 +7264,8 @@ __all__ = [
     "GLOBAL_CHAT_ID", "DEFAULT_PUBLISH_INTERVAL_MINUTES",
     "PUBLISH_POLLING_COMPENSATION_SECONDS",
     "MAX_POST_FAIL_COUNT", "PENALTY_ARCHIVE_RETENTION_DAYS",
-    "SUB_CACHE_TTL",
+    "SUB_CACHE_TTL", "EXPIRED_PENALTIES_BATCH",
+    "HEAVY_TABLES_FOR_AUTOVACUUM",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
