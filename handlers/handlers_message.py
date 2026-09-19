@@ -2,35 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.7.12)
+handlers_message.py - معالجات الرسائل (v7.8.0)
 =====================================================================
+🆕 v7.8.0 (ترجمة حقيقية من ملف JSON):
+    ✅ TranslationManager: استيراد من translation_manager.py مباشرة
+    ✅ _trans(): يقرأ من ملف الترجمات مع fallback
+    ✅ _detect_and_translate(): ترجمة رسائل المستخدمين
+    ✅ handle_group: كتلة ترجمة تلقائية قبل الردود
+    ✅ handle_private: كتلة ترجمة تلقائية للرسائل الحرة
+    ✅ clear_lang_cache: يمسح كل كاشات الترجمة
+
 🆕 v7.7.12 (توحيد الإبطال + إصلاحات):
     ✅ _invalidate_after_channel_change: توحيد كامل مع v9.4.11
-       - إزالة مفاتيح الاشتراك (over-eager)
-       - إضافة posts_cache.invalidate(channel_db_id)
-       - معامل invalidate_posts جديد
-    ✅ import internal_cache أعلى الملف (بدل داخل الدالة)
+    ✅ import internal_cache أعلى الملف
     ✅ _process_auto_reply: MEDIA_REPLY_TYPES ثابت class-level
     ✅ _handle_support_message: رد فشل عند ticket_number == None
-    ✅ _handle_broadcast_input: تدفّق عبر iter_all_users (ذاكرة أقل)
+    ✅ _handle_broadcast_input: تدفّق عبر iter_all_users
 
-🆕 v7.7.11 (إصلاح تأخير 60 ثانية بعد إضافة قناة/منشور):
+🆕 v7.7.11 (إصلاح تأخير 60 ثانية):
     ✅ _invalidate_after_channel_change
-    ✅ _handle_channel_input: إبطال بعد add_channel ناجح
-    ✅ _handle_adding_posts: إبطال بعد add_posts ناجح
+    ✅ _handle_channel_input / _handle_adding_posts
 
-🆕 v7.7.10 (إصلاح تحذير حذف الرسائل):
-    ✅ _safe_delete_message: تجاهل BadRequest الطبيعي بصمت
+🆕 v7.7.10 (تحذير حذف الرسائل):
+    ✅ _safe_delete_message
 
-📌 v7.7.9 (إصلاح تعارض WAIT_LOG_CH):
-    ✅ handle_private: ترك WAIT_LOG_CH لـ group_log handler
-
-📌 v7.7.8 (إصلاحات حرجة):
-    ✅ _do_db_restore: try/finally يضمن reconnect
-    ✅ _do_db_restore: إبطال كل الكاشات
-    ✅ _process_auto_reply: فحص media_id قبل الإرسال
-    ✅ _sec_auth_cache: LRU size limit
-    ✅ GroupRateLimiterManager: تنظيف تلقائي كل ساعة
+📌 v7.7.9 (WAIT_LOG_CH) / v7.7.8 (إصلاحات حرجة)
 =====================================================================
 """
 
@@ -57,7 +53,7 @@ from utils import (
     TextUtils, safe_send, is_authorized_in_group,
     check_bot_permissions, invalidate_auth_cache, apply_penalty,
     RATE_LIMITER, METRICS, get_text, StateManager, UserState,
-    KeyboardFactory, TranslationManager, CB, RateLimiter,
+    KeyboardFactory, CB, RateLimiter,
     get_banned_words_cached, invalidate_banned_words_cache,
     _auto_reply_cache, get_reply_from_file, _REPLIES_FROM_FILE,
     reload_replies_from_file, _increment_usage_async,
@@ -65,6 +61,45 @@ from utils import (
     ban_user_by_id, unban_user_by_id,
 )
 from cache import settings_cache, banned_words_cache, auth_cache, posts_cache
+
+# ✅ v7.8.0: استيراد TranslationManager من الوحدة الجديدة
+# (لا يعتمد على utils — يقرأ من locales/translations.json مباشرة)
+try:
+    from translation_manager import TranslationManager
+except ImportError:
+    # fallback: إن لم توجد الوحدة الجديدة، جرّب من utils
+    try:
+        from utils import TranslationManager
+        logging.getLogger(__name__).warning(
+            "⚠️ استُخدم TranslationManager من utils — يُنصح بإنشاء translation_manager.py"
+        )
+    except ImportError:
+        class _NullTranslationManager:
+            @classmethod
+            def get_available_languages(cls):
+                return {}
+            @classmethod
+            def get_text(cls, lang, key, **kwargs):
+                return key
+            @classmethod
+            def translate(cls, text, lang):
+                return None
+            @classmethod
+            def load(cls, *a, **k):
+                return False
+            @classmethod
+            def reload(cls):
+                return False
+            @classmethod
+            def is_supported(cls, lang):
+                return False
+            @classmethod
+            def stats(cls):
+                return {"loaded": False}
+        TranslationManager = _NullTranslationManager
+        logging.getLogger(__name__).error(
+            "❌ TranslationManager غير متاح — الترجمة معطلة!"
+        )
 
 try:
     from replies import analyze_sentiment
@@ -99,11 +134,16 @@ _DELETE_IGNORED_PATTERNS = (
     "message is not found",
 )
 
-# ✅ v7.7.12: ثابت class-level (بدل إعادة تعريف في كل استدعاء)
+# ✅ v7.7.12: ثابت class-level
 _MEDIA_REPLY_TYPES = frozenset({
     'photo', 'video', 'document', 'audio',
     'animation', 'voice', 'sticker', 'video_note',
 })
+
+# ✅ v7.8.0: ثوابت الترجمة
+TRANSLATION_REPLY_DELETE_DELAY = 30
+TRANSLATION_MIN_TEXT_LENGTH = 2
+_ARABIC_CHAR_PATTERN = re.compile(r'[\u0600-\u06FF]')
 
 # =====================================================================
 # كاش الصلاحيات مع حد أقصى
@@ -187,7 +227,6 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 # =====================================================================
 # ✅ v7.7.12: إبطال كاش المستخدم بعد تغيير القنوات/المنشورات
-#            مُطابِق لـ handlers_callback.py v9.4.11
 # =====================================================================
 
 async def _invalidate_after_channel_change(
@@ -197,20 +236,6 @@ async def _invalidate_after_channel_change(
 ) -> None:
     """
     ✅ v7.7.12: إبطال شامل لكاش المستخدم بعد تغيير القنوات/المنشورات.
-
-    يحل مشكلة: الواجهة الرئيسية تُظهر بيانات قديمة لمدة 60 ثانية
-    (TTL start_data_{user_id}) بعد إضافة/حذف قناة أو منشور.
-
-    يبطّل:
-      - start_data_{user_id}         (تُقرأ في _show_main_menu_inline)
-      - user_{user_id}*              (كاشات داخليّة في database.py)
-      - channels_{user_id}           (قائمة القنوات)
-      - channel_info_{channel_db_id} (إن مُرِّر)
-      - posts_cache[channel_db_id]   (إن مُرِّر — قائمة المنشورات)
-      - user_cache[user_id]          (كاش cache.py)
-
-    ✅ v7.7.12: لم يعد يُبطل مفاتيح الاشتراك (has_active_sub_*,
-    subscription_*) — لأنها لا تتأثر بتغيير القنوات/المنشورات.
     """
     keys = [
         f"start_data_{user_id}",
@@ -233,7 +258,6 @@ async def _invalidate_after_channel_change(
     except Exception as e:
         logger.debug(f"user_cache invalidate: {e}")
 
-    # ✅ v7.7.12: إبطال posts_cache للقناة (كان منسيّاً في v7.7.11)
     if invalidate_posts and channel_db_id is not None:
         try:
             await posts_cache.invalidate(channel_db_id)
@@ -302,13 +326,29 @@ class GroupRateLimiterManager:
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
+    """
+    ✅ v7.8.0: يقرأ من TranslationManager مباشرة.
+    - إذا كان النص موجوداً → يعيده
+    - إذا لم يوجد → يعيد default
+    - يحتفظ بالتوافق العكسي مع get_text
+    """
+    try:
+        text = TranslationManager.get_text(lang, key)
+        # get_text يعيد key إذا لم يجد الترجمة
+        if text and text != key:
+            return text
+    except Exception as e:
+        logger.debug(f"_trans({key}, {lang}) via TranslationManager: {e}")
+
+    # fallback: جرّب get_text القديمة (DB-based)
     try:
         text = await get_text(lang, key)
-        if text == key:
-            return default
-        return text
+        if text and text != key:
+            return text
     except Exception:
-        return default
+        pass
+
+    return default or key
 
 
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -347,10 +387,16 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
 
 
 def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    ✅ v7.8.0: يمسح كل كاشات الترجمة واللغة.
+    """
     try:
         context.user_data.pop('lang', None)
-    except Exception:
-        pass
+        context.user_data.pop('translation_cache', None)
+        context.user_data.pop('cached_translations', None)
+        context.user_data.pop('last_translation', None)
+    except Exception as e:
+        logger.debug(f"clear_lang_cache: {e}")
 
 
 async def get_security_settings_cached(chat_id: int) -> dict:
@@ -385,6 +431,87 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 1
     """
     await asyncio.sleep(delay)
     await _safe_delete_message(bot, chat_id, message_id)
+
+
+# =====================================================================
+# ✅ v7.8.0: الترجمة التلقائية لرسائل المستخدمين
+# =====================================================================
+
+async def _detect_and_translate(
+    update, context, chat_id: int, user_id: int, text: str
+) -> Optional[str]:
+    """
+    ✅ v7.8.0: يترجم نص المستخدم إلى لغته المفضّلة.
+    يعيد النص المترجم، أو None إذا:
+      - لا توجد ترجمة
+      - اللغة = off
+      - النص قصير جداً
+      - النص بالفعل بنفس اللغة
+    """
+    if not text or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH:
+        return None
+
+    try:
+        lang = await _ensure_lang(update, context)
+        if not lang or lang == 'off':
+            return None
+
+        # تجاهل الأوامر
+        if text.startswith('/'):
+            return None
+
+        # تجاهل الروابط فقط
+        stripped = text.strip()
+        if stripped.startswith(('http://', 'https://', 'www.')):
+            return None
+
+        # تجاهل النصوص العربية إذا كانت اللغة المطلوبة عربية
+        is_arabic_text = bool(_ARABIC_CHAR_PATTERN.search(text))
+        if lang == 'ar' and is_arabic_text:
+            return None
+        if lang != 'ar' and not is_arabic_text:
+            return None
+
+        # محاولة الترجمة
+        translated = TranslationManager.translate(text, lang)
+        if translated and translated != text:
+            return translated
+    except Exception as e:
+        logger.debug(f"_detect_and_translate: {e}")
+    return None
+
+
+async def _send_translation_reply(
+    bot, chat_id: int, original_message_id: Optional[int],
+    translated: str, lang: str,
+) -> None:
+    """
+    ✅ v7.8.0: يرسل الترجمة كرد منفصل مع حذف تلقائي.
+    """
+    try:
+        label = TranslationManager.get_text(lang, "translation_label") or "🌐 <b>Translation:</b>"
+    except Exception:
+        label = "🌐 <b>Translation:</b>"
+
+    try:
+        kwargs = {
+            "chat_id": chat_id,
+            "text": f"{label}\n{escape(translated)}",
+            "parse_mode": 'HTML',
+        }
+        if original_message_id:
+            kwargs["reply_to_message_id"] = original_message_id
+
+        sent = await bot.send_message(**kwargs)
+
+        # حذف بعد 30 ثانية لتقليل الفوضى
+        asyncio.create_task(
+            _delete_after_delay(
+                bot, chat_id, sent.message_id, TRANSLATION_REPLY_DELETE_DELAY
+            )
+        )
+    except Exception as e:
+        logger.debug(f"_send_translation_reply: {e}")
 
 
 async def apply_violation_penalty(update, context, chat_id: int, user_id: int,
@@ -613,6 +740,26 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, response, parse_mode='HTML')
                 StateManager.clear(user_id)
                 return
+
+            # ✅ v7.8.0: ترجمة تلقائية للرسائل الحرة في الخاص
+            if (state is None or state == UserState.NONE) and lang != 'off':
+                try:
+                    msg_obj = update.effective_message
+                    user_text = ""
+                    if msg_obj:
+                        user_text = msg_obj.text or msg_obj.caption or ""
+
+                    if user_text and not user_text.startswith('/'):
+                        translated = TranslationManager.translate(user_text, lang)
+                        if translated and translated != user_text:
+                            label = TranslationManager.get_text(lang, "translation_label") or "🌐 <b>Translation:</b>"
+                            await safe_send(
+                                context.bot, user_id,
+                                f"{label}\n{escape(translated)}",
+                                parse_mode='HTML',
+                            )
+                except Exception as e:
+                    logger.debug(f"private translation: {e}")
 
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(state)
             if handler_name:
@@ -962,6 +1109,22 @@ class MessageHandlers:
                 await MessageHandlers._delete_and_warn(update, context, chat_id, user_id, violation_type, settings)
                 return
 
+        # ✅ v7.8.0: ترجمة تلقائية للرسائل النصية (قبل الردود التلقائية)
+        if msg_text:
+            try:
+                translated = await _detect_and_translate(
+                    update, context, chat_id, user_id, msg_text
+                )
+                if translated:
+                    lang = await _ensure_lang(update, context)
+                    await _send_translation_reply(
+                        context.bot, chat_id,
+                        message.message_id, translated, lang
+                    )
+            except Exception as e:
+                logger.debug(f"group translation block: {e}")
+
+        # الردود التلقائية
         if msg_text:
             await MessageHandlers._process_auto_reply(update, context, chat_id, msg_text, user_id)
 
@@ -1102,7 +1265,7 @@ class MessageHandlers:
                 reply_type = reply.get('reply_type', 'text') or 'text'
                 media_id = reply.get('reply_media_id')
 
-                # ✅ v7.7.12: ثابت class-level (بدل إعادة تعريف)
+                # ✅ v7.7.12: ثابت class-level
                 if reply_type in _MEDIA_REPLY_TYPES:
                     if not media_id:
                         logger.warning(
@@ -1386,7 +1549,7 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.7.12: تدفّق عبر iter_all_users لتقليل الذاكرة (كان يجلب 100k دفعة)
+        # ✅ v7.7.12: تدفّق عبر iter_all_users لتقليل الذاكرة
         sent_count = 0
         failed_count = 0
         skipped_count = 0
@@ -2842,4 +3005,6 @@ __all__ = [
     "_safe_delete_message",
     "_is_delete_ignore_error",
     "_invalidate_after_channel_change",
+    "_detect_and_translate",
+    "_send_translation_reply",
 ]
