@@ -43,6 +43,7 @@
     "language": "🌐 Language",
     "trial": "🎁 Trial",
     "admin_panel_btn": "👑 Admin",
+    "admin_analytics": "📊 Analytics",
     "admin_users": "👥 Users",
     "admin_banned": "⛔ Banned",
     "admin_unban_all": "🔓 Unban all",
@@ -145,7 +146,6 @@
     "panel_lock": "🔒 Lock group",
     "panel_unlock": "🔓 Unlock group",
     "panel_close": "❌ Close panel",
-
     "sec_links": "🔗 Links",
     "sec_mentions": "👤 Mentions",
     "sec_slow": "🐌 Slow",
@@ -253,6 +253,7 @@
     },
     "admin_panel": {
       "rows": [
+        ["admin_analytics"],
         ["admin_users", "admin_banned"],
         ["admin_unban_all"],
         ["admin_ban_user", "admin_unban_user"],
@@ -308,7 +309,9 @@
         ["sec_doc", "sec_sticker", "sec_service"],
         ["sec_poll", "sec_game", "sec_videonote"],
         ["sec_flood", "sec_slow", "sec_night"],
+        ["sec_slow_mode_seconds"],
         ["sec_welcome", "sec_goodbye"],
+        ["sec_welcome_text", "sec_goodbye_text"],
         ["sec_approve_join", "sec_reject_join"],
         ["sec_banned_words", "sec_nsfw"],
         ["sec_maxlen", "sec_warn"],
