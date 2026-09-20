@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.19)
+handlers_callback.py - معالج الأزرار (v9.4.20)
 =====================================================================
-🆕 v9.4.19 — إصلاحات v9.4.18:
+🆕 v9.4.20 — إصلاح circular import:
+  - _handle_language_change: استخدام sys.modules + fallback يدوي
+    (كان يُظهر: cannot import name 'clear_lang_cache' من handlers_message)
+
+✅ v9.4.19 — إصلاحات v9.4.18:
   - updates_channel_btn: فحص نهائي لصحة URL قبل تمريره لـ Telegram
-    (كان يُرسل روابط غير صالحة → BadRequest صامت → زر معطّل)
   - updates_channel_btn في قائمة `known` لمعالجة parameterized
   - توحيد escape للنصوص
 
@@ -29,6 +32,7 @@ import os
 import re
 import html as _html
 import random
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, Dict, Tuple, Any, Set, List
@@ -306,6 +310,48 @@ def _is_valid_url(url: Optional[str]) -> bool:
     if not _VALID_URL_PATTERN.match(url_stripped):
         return False
     return True
+
+
+# =====================================================================
+# ✅ v9.4.20: clear_lang_cache — محلي لتفادي circular import
+# =====================================================================
+
+def _clear_lang_cache_local(context) -> None:
+    """
+    ✅ v9.4.20: نسخة محلية من clear_lang_cache بدون import.
+
+    تحاول:
+      1. استخدام الدالة الرسمية من handlers_message عبر sys.modules
+         (بدون import statement — لتفادي circular import).
+      2. fallback يدوي: مسح keys مباشرة.
+    """
+    # ─── المستوى 1: sys.modules ───
+    _cleared = False
+    try:
+        _mod = sys.modules.get('handlers_message')
+        if _mod is None:
+            # محاولة عبر prefix آخر (nested package)
+            for _name, _m in list(sys.modules.items()):
+                if _name.endswith('.handlers_message') or _name == 'handlers_message':
+                    _mod = _m
+                    break
+        if _mod is not None:
+            _clc = getattr(_mod, 'clear_lang_cache', None)
+            if _clc is not None:
+                _clc(context)
+                _cleared = True
+    except Exception as e:
+        logger.debug(f"_clear_lang_cache_local sys.modules: {e}")
+
+    # ─── المستوى 2: fallback يدوي ───
+    if not _cleared:
+        try:
+            if context is not None and hasattr(context, 'user_data'):
+                for _k in ('lang', 'translation_cache',
+                           'cached_translations', 'last_translation'):
+                    context.user_data.pop(_k, None)
+        except Exception as e:
+            logger.debug(f"_clear_lang_cache_local fallback: {e}")
 
 
 # =====================================================================
@@ -672,7 +718,7 @@ class CallbackHandlers:
                 CB.CANCEL, CB.CHECK_SUB, CB.TRANS_OFF, CB.REM_TOGGLE_SUB,
                 CB.REM_TOGGLE_DAILY, CB.REM_TOGGLE_WEEKLY, CB.REM_SET_DAYS,
                 CB.ADMIN_LIST_ADMINS, "finish_posts", "gift_plans", "redeem_gift",
-                "updates_channel_btn",  # ✅ v9.4.19
+                "updates_channel_btn",
             ]
             if parts[0] in known:
                 base_data = parts[0]
@@ -2180,6 +2226,7 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
                         parse_mode='HTML', bot=context.bot)
 
+    # ✅ v9.4.20: استخدام _clear_lang_cache_local بدل import مباشر
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
         data = query.data or ""
@@ -2195,15 +2242,8 @@ class CallbackHandlers:
                 context.user_data.pop('lang', None)
             except Exception:
                 pass
-            try:
-                from handlers_message import clear_lang_cache
-                clear_lang_cache(context)
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"clear_lang_cache fallback: {e}")
-                try:
-                    context.user_data.pop('translation_cache', None)
-                except Exception:
-                    pass
+            # ✅ v9.4.20: لا نعتمد على import مباشر (circular import)
+            _clear_lang_cache_local(context)
             ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
             if not ok:
                 await CommandHandlers.start(update, context)
@@ -5853,5 +5893,6 @@ __all__ = [
     "_get_log_channel_menu_data",
     "_invalidate_log_channel_menu_cache",
     "_ANALYTICS_ALIASES",
+    "_clear_lang_cache_local",
     "ACTIVE_TASKS",
 ]
