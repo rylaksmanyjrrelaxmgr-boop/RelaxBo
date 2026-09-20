@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.1 - i18n + Log channel validation)
+handlers_message.py - معالجات الرسائل (v7.9.2 - Bugfixes)
 =====================================================================
+🆕 v7.9.2 (إصلاحات):
+    ✅ handle_private: معالجة رسائل log_group_id بدل إسقاطها صامتاً
+    ✅ handle_log_group_input: دالة جديدة لقناة سجل المجموعات
+    ✅ _handle_update_ch_input: يتحقق من صحة الإدخال قبل الحفظ
+    ✅ _handle_log_ch_input: يستدعي handle_log_group_input عند وجود log_group_id
+    ✅ _handle_penalty_input: استخدام needs_duration فعلياً
+    ✅ _do_db_restore: حذف -wal/-shm/-journal بعد الاستعادة
+
 🆕 v7.9.1:
     ✅ _handle_log_ch_input: يتحقق من صحة الإدخال قبل الحفظ
        - يقبل: معرّف رقمي، @username، username، t.me/...
@@ -25,6 +33,7 @@ import re
 import json
 import shutil
 import tempfile
+from pathlib import Path
 from html import escape
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
@@ -623,8 +632,11 @@ class MessageHandlers:
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
 
+            # ✅ v7.9.2: عند WAIT_LOG_CH مع log_group_id → استدعِ المعالج المخصص
             if state == UserState.WAIT_LOG_CH and context.user_data.get('log_group_id'):
-                return
+                handled = await MessageHandlers.handle_log_group_input(update, context)
+                if handled:
+                    return
 
             lang = await _ensure_lang(update, context)
 
@@ -687,6 +699,112 @@ class MessageHandlers:
                 await safe_send(context.bot, update.effective_user.id, msg)
             except Exception:
                 pass
+
+    # =================================================================
+    # ✅ v7.9.2: معالج قناة سجل المجموعة
+    # =================================================================
+
+    @staticmethod
+    async def handle_log_group_input(update, context) -> bool:
+        """
+        ✅ v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة.
+
+        Returns:
+            True إذا عُولج الإدخال (نجاح أو فشل نهائي)
+            False إذا لم يكن هذا المعالج مسؤولاً
+        """
+        user_id = update.effective_user.id
+        log_group_id = context.user_data.get('log_group_id')
+        if not log_group_id:
+            return False
+
+        lang = await _ensure_lang(update, context)
+
+        if not await _check_admin_in_chat(context, log_group_id, user_id):
+            msg = await _trans('no_permission', lang, "❌")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            context.user_data.pop('log_group_id', None)
+            return True
+
+        text = (update.effective_message.text or "").strip()
+
+        # إزالة قناة السجل
+        if text.lower() in ('none', 'cancel', 'remove', '-'):
+            try:
+                ok = await DB.remove_group_log_channel(log_group_id)
+            except Exception as e:
+                logger.error(f"remove_group_log_channel: {e}", exc_info=True)
+                ok = False
+            msg = (await _trans('log_channel_removed', lang, "🗑️")
+                   if ok else await _trans('delete_failed', lang, "❌"))
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            context.user_data.pop('log_group_id', None)
+            return True
+
+        # تحقق من الصيغة
+        if not _is_valid_channel_ref(text):
+            preview = text[:50] if text else ""
+            logger.warning(
+                f"⚠️ v7.9.2: رفض log_channel_ref غير صالح "
+                f"من {user_id}: {preview!r}"
+            )
+            msg = await _trans(
+                'invalid_channel_ref', lang,
+                "❌ <b>قيمة غير صالحة</b>\n\n"
+                "أرسل:\n"
+                "• معرّف رقمي: <code>-1001234567890</code>\n"
+                "• أو @username\n"
+                "• أو رابط: <code>https://t.me/username</code>\n\n"
+                "أو أرسل <code>none</code> للإزالة."
+            )
+            await safe_send(context.bot, user_id, msg, parse_mode='HTML')
+            # لا نمسح الحالة — اسمح بإعادة المحاولة
+            return True
+
+        # حل القناة إلى int
+        channel_int = None
+        try:
+            if text.lstrip('-').isdigit():
+                channel_int = int(text)
+            else:
+                chat = await context.bot.get_chat(text)
+                channel_int = chat.id
+        except Exception as e:
+            logger.warning(f"resolve log channel {text!r}: {e}")
+            channel_int = None
+
+        if channel_int is None:
+            msg = await _trans('channel_not_found', lang, "❌")
+            await safe_send(context.bot, user_id, msg)
+            return True
+
+        # حفظ
+        try:
+            ok = await DB.set_group_log_channel(log_group_id, channel_int)
+        except Exception as e:
+            logger.error(f"set_group_log_channel: {e}", exc_info=True)
+            ok = False
+
+        if ok:
+            try:
+                await internal_cache.invalidate(f"log_ch_menu_{log_group_id}")
+                await internal_cache.invalidate(f"group_log_{log_group_id}")
+            except Exception:
+                pass
+            msg = _fmt(
+                await _trans('log_channel_saved', lang, "✅ {text}"),
+                text=escape(text)
+            )
+            await safe_send(context.bot, user_id, msg)
+        else:
+            msg = await _trans('save_failed', lang, "❌")
+            await safe_send(context.bot, user_id, msg)
+
+        StateManager.clear(user_id)
+        context.user_data.pop('log_group_id', None)
+        return True
 
     # =================================================================
     # حظر / فك حظر
@@ -1491,19 +1609,71 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
+    # ✅ v7.9.2: تحقق من صحة الإدخال
     @staticmethod
     async def _handle_update_ch_input(update, context):
+        """
+        ✅ v7.9.2: يتحقق من الصحة قبل الحفظ.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
             StateManager.clear(user_id)
             return
+
         text = (update.effective_message.text or "").strip()
-        await DB.set_setting('updates_channel', text)
-        msg = _fmt(await _trans('set_success', lang, "✅ {text}"),
-                   text=escape(text))
-        await safe_send(context.bot, user_id, msg)
-        StateManager.clear(user_id)
+
+        # فارغ أو 'none' = إزالة
+        if not text or text.lower() == 'none':
+            try:
+                ok = await DB.set_setting('updates_channel', '')
+            except Exception as e:
+                logger.error(f"❌ clear updates_channel: {e}", exc_info=True)
+                ok = False
+            if ok:
+                msg = await _trans('log_channel_removed_success', lang, "🗑️")
+            else:
+                msg = await _trans('save_failed', lang, "❌")
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        # ✅ تحقق من الصيغة
+        if not _is_valid_channel_ref(text):
+            preview = text[:50]
+            logger.warning(
+                f"⚠️ v7.9.2: رفض updates_channel غير صالح "
+                f"من {user_id}: {preview!r}"
+            )
+            msg = await _trans(
+                'invalid_channel_ref', lang,
+                "❌ <b>قيمة غير صالحة</b>\n\n"
+                "أرسل:\n"
+                "• معرّف رقمي: <code>-1001234567890</code>\n"
+                "• أو @username\n"
+                "• أو رابط: <code>https://t.me/username</code>\n\n"
+                "أو أرسل <code>none</code> للإزالة."
+            )
+            await safe_send(context.bot, user_id, msg, parse_mode='HTML')
+            # لا نمسح الحالة — اسمح بإعادة المحاولة
+            return
+
+        # حاول الحفظ
+        try:
+            ok = await DB.set_setting('updates_channel', text)
+        except Exception as e:
+            logger.error(f"❌ set updates_channel: {e}", exc_info=True)
+            ok = False
+
+        if ok:
+            msg = _fmt(await _trans('set_success', lang, "✅ {text}"),
+                       text=escape(text))
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+        else:
+            msg = await _trans('save_failed', lang, "❌ فشل الحفظ")
+            await safe_send(context.bot, user_id, msg)
+            # لا نمسح الحالة — اسمح بإعادة المحاولة
 
     @staticmethod
     async def _handle_force_input(update, context):
@@ -1555,7 +1725,7 @@ class MessageHandlers:
 
         - يقبل: معرّف رقمي، @username، username، t.me/...
         - يرفض: أي نص آخر (Heartbeat, تعليقات...)
-        - يترك WAIT_LOG_CH للمجموعة عند وجود log_group_id
+        - يمرّر لـ handle_log_group_input عند وجود log_group_id
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -1563,10 +1733,9 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # إذا كانت القناة لمجموعة معينة → اتركها لـ group_log handler
-        log_group_id = context.user_data.get('log_group_id')
-        if log_group_id:
-            # معالج group_log سيتولى الأمر
+        # ✅ v7.9.2: معالجة قناة سجل لمجموعة
+        if context.user_data.get('log_group_id'):
+            await MessageHandlers.handle_log_group_input(update, context)
             return
 
         text = (update.effective_message.text or "").strip()
@@ -1588,8 +1757,7 @@ class MessageHandlers:
                 "أو أرسل <code>none</code> للإلغاء."
             )
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
-            # ⚠️ لا نمسح الحالة — اسمح للمستخدم بإعادة المحاولة
-            # إذا أرسل 'none' أو 'cancel'
+            # ⚠️ لا نمسح الحالة — اسمح بإعادة المحاولة
             return
 
         # حاول الحفظ
@@ -2397,6 +2565,7 @@ class MessageHandlers:
         await MessageHandlers._handle_penalty_input(
             update, context, 'unban', needs_duration=False)
 
+    # ✅ v7.9.2: استخدام needs_duration
     @staticmethod
     async def _handle_penalty_input(update, context, action, needs_duration):
         user_id = update.effective_user.id
@@ -2421,9 +2590,22 @@ class MessageHandlers:
             return
         try:
             target = int(parts[0])
-            duration = int(parts[1]) * 60 if len(parts) > 1 else 0
-            if target <= 0 or duration < 0:
-                raise ValueError
+            if target <= 0:
+                raise ValueError("target out of range")
+
+            # ✅ v7.9.2: احترام needs_duration
+            duration = 0
+            if needs_duration and len(parts) > 1:
+                try:
+                    duration = int(parts[1]) * 60
+                except (ValueError, TypeError):
+                    msg = await _trans('invalid_number', lang, "❌")
+                    await safe_send(context.bot, user_id, msg)
+                    StateManager.clear(user_id)
+                    return
+            if duration < 0:
+                raise ValueError("negative duration")
+
             success, msg = await apply_penalty(
                 context.bot, chat_id, target, action, duration, "", user_id)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
@@ -2656,7 +2838,17 @@ class MessageHandlers:
                 except Exception as e2:
                     restore_error = e2
 
+            # ✅ v7.9.2: حذف WAL/SHM/journal القديمة
             if success_restore:
+                for suffix in ('-wal', '-shm', '-journal'):
+                    stale = Path(str(PATHS.DB) + suffix)
+                    try:
+                        if stale.exists():
+                            stale.unlink()
+                            logger.info(f"🧹 حُذف {stale.name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل حذف {stale.name}: {e}")
+
                 try:
                     from cache import clear_all_caches
                     await clear_all_caches()
