@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.17 - Full I18N)
+handlers_callback.py - معالج الأزرار (v9.4.18)
 =====================================================================
-🆕 v9.4.17 — ترجمة كاملة:
-  - _trans: يستخدم TranslationManager + fallback
-  - كل النصوص hardcoded → _trans
-  - HTML بدل Markdown
-  - لا تغيير في المنطق
+🆕 v9.4.18 — إضافة زر قناة التحديثات:
+  - _show_updates_channel: يعرض قناة التحديثات برابط قابل للنقر
+  - معالج updates_channel_btn في handle()
+  - يدعم: @username، معرّف رقمي، رابط
+
+✅ v9.4.17 — ترجمة كاملة
+✅ v9.4.16 — إصلاح أزرار التحليلات
 =====================================================================
 """
 
@@ -178,11 +180,10 @@ GROUP_NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6
 
 
 # =====================================================================
-# ✅ v9.4.17: ترجمة موحدة
+# ترجمة موحدة
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
-    """✅ v9.4.17: ترجمة آمنة عبر TranslationManager + fallback"""
     if not key:
         return default or ""
     try:
@@ -203,7 +204,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
 
 
 def _fmt(text: str, **kwargs) -> str:
-    """تنسيق آمن"""
     try:
         return text.format(**kwargs)
     except (KeyError, IndexError):
@@ -981,6 +981,14 @@ class CallbackHandlers:
                     update, context, query, user_id, lang)
                 return
 
+            # ═════════════════════════════════════════════════════════
+            # ✅ v9.4.18: زر قناة التحديثات
+            # ═════════════════════════════════════════════════════════
+            if base_data == "updates_channel_btn":
+                await CallbackHandlers._show_updates_channel(
+                    query, context, user_id, lang)
+                return
+
             if base_data == CB.ADMIN:
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(query,
@@ -1144,8 +1152,109 @@ class CallbackHandlers:
             pass
 
     # ═════════════════════════════════════════════════════════════
-    # دوال الأمان
+    # ✅ v9.4.18: قناة التحديثات
     # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _show_updates_channel(query, context, user_id, lang):
+        """
+        ✅ v9.4.18: عرض قناة التحديثات للمستخدم برابط قابل للنقر.
+        يدعم: @username, رقم صحيح, رابط كامل.
+        """
+        title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
+
+        try:
+            ch = await DB.get_updates_channel()
+        except Exception as e:
+            logger.warning(f"get_updates_channel: {e}")
+            ch = None
+
+        back_text = KeyboardFactory.get_text("back", lang)
+
+        if not ch:
+            text = (f"{title}\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    + await _trans('no_update_channel', lang,
+                                   "📭 لم يتم تعيين قناة تحديثات بعد"))
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(back_text, callback_data=CB.BACK)
+            ]])
+            await safe_edit(query, text, reply_markup=kb,
+                            parse_mode='HTML', bot=context.bot)
+            return
+
+        ch_str = str(ch).strip()
+        url = None
+        display = ch_str
+
+        try:
+            # 1) @username
+            if ch_str.startswith('@'):
+                url = f"https://t.me/{ch_str[1:]}"
+                display = ch_str
+
+            # 2) رقم سالب → محاولة الحصول على رابط
+            elif ch_str.lstrip('-').isdigit():
+                cid = int(ch_str)
+                try:
+                    chat = await context.bot.get_chat(cid)
+                    if getattr(chat, 'username', None):
+                        url = f"https://t.me/{chat.username}"
+                        display = f"@{chat.username}"
+                    elif getattr(chat, 'invite_link', None):
+                        url = chat.invite_link
+                        display = chat.title or ch_str
+                    else:
+                        try:
+                            url = await context.bot.export_chat_invite_link(cid)
+                            display = chat.title or ch_str
+                        except Exception:
+                            url = None
+                except Exception as e:
+                    logger.debug(f"get_chat {cid}: {e}")
+                    url = None
+
+            # 3) رابط كامل
+            elif ch_str.startswith(('https://', 'http://')):
+                url = ch_str
+                display = ch_str
+            elif ch_str.startswith(('t.me/', 'telegram.me/')):
+                url = f"https://{ch_str}"
+                display = url
+            else:
+                # username بدون @
+                url = f"https://t.me/{ch_str}"
+                display = f"@{ch_str}"
+
+        except Exception as e:
+            logger.debug(f"_show_updates_channel build url: {e}")
+
+        # ─── بناء النص ───
+        text = (
+            f"{title}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📌 <b>{_html.escape(display)}</b>"
+        )
+
+        # ─── الأزرار ───
+        rows = []
+        if url:
+            open_text = await _trans('open_channel_btn', lang, "📢 فتح القناة")
+            rows.append([InlineKeyboardButton(open_text, url=url)])
+        else:
+            text += ("\n\n⚠️ " +
+                     await _trans('channel_link_unavailable', lang,
+                                  "لا يمكن إنشاء رابط لهذه القناة"))
+
+        rows.append([InlineKeyboardButton(back_text, callback_data=CB.BACK)])
+
+        kb = InlineKeyboardMarkup(rows)
+        await safe_edit(query, text, reply_markup=kb,
+                        parse_mode='HTML', bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # دوال الأمان
+    # =================================================================
 
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
@@ -3415,8 +3524,8 @@ class CallbackHandlers:
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
-    # دوال عرض الأمان (نصوص الأزرار تُترجم عبر KeyboardFactory)
-    # =================================================================
+    # دوال عرض الأمان
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
