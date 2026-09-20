@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.1)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.2)
 ================================================================================
+🆕 v5.4.2 (DB Diagnostics):
+    ✅ db_diag: /db_diag — تشخيص قاعدة البيانات (للمطور)
+    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE (للمطور)
+    ✅ إضافة الأمرين إلى private_commands + CommandHandler
+
 🔍 v5.4.1 (Analytics check):
     ✅ فحص تحميل AnalyticsMixin بعد logging.basicConfig
     ✅ يسجّل بوضوح: "✅ AnalyticsMixin محمّل" أو "⚠️ مفقود"
@@ -239,6 +244,8 @@ def _verify_command_handlers() -> bool:
         "set_log_ch", "add_admin", "remove_admin",
         "export_replies", "import_replies", "backup", "restore",
         "auto_publish", "auto_recycle", "channels", "posts",
+        # ✅ v5.4.2: أوامر التشخيص
+        "db_diag", "db_vacuum",
         # أوامر المجموعة
         "syncgroup", "security", "panel", "lock", "unlock",
         "ban", "mute", "warn", "kick", "restrict", "unban", "pin",
@@ -779,6 +786,9 @@ async def main():
         ("auto_recycle", "♻️ تبديل التدوير"),
         ("channels", "📡 قنواتي"),
         ("posts", "📋 منشوراتي"),
+        # ✅ v5.4.2: أوامر تشخيص قاعدة البيانات
+        ("db_diag", "🔬 تشخيص قاعدة البيانات"),
+        ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
     ]
 
     group_commands = [
@@ -855,6 +865,10 @@ async def main():
     app.add_handler(CommandHandler("auto_recycle", CommandHandlers.auto_recycle))
     app.add_handler(CommandHandler("channels", CommandHandlers.channels))
     app.add_handler(CommandHandler("posts", CommandHandlers.posts))
+
+    # ✅ v5.4.2: أوامر تشخيص قاعدة البيانات (للمطور)
+    app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
+    app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
     # معالجات الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
