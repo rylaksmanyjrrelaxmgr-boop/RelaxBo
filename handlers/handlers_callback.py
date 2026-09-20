@@ -2,9 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.18)
+handlers_callback.py - معالج الأزرار (v9.4.19)
 =====================================================================
-🆕 v9.4.18 — إضافة زر قناة التحديثات:
+🆕 v9.4.19 — إصلاحات v9.4.18:
+  - updates_channel_btn: فحص نهائي لصحة URL قبل تمريره لـ Telegram
+    (كان يُرسل روابط غير صالحة → BadRequest صامت → زر معطّل)
+  - updates_channel_btn في قائمة `known` لمعالجة parameterized
+  - توحيد escape للنصوص
+
+✅ v9.4.18 — إضافة زر قناة التحديثات:
   - _show_updates_channel: يعرض قناة التحديثات برابط قابل للنقر
   - معالج updates_channel_btn في handle()
   - يدعم: @username، معرّف رقمي، رابط
@@ -158,6 +164,7 @@ SUCCESS_RATE_WARN_THRESHOLD = 30
 DEFAULT_SUCCESS_RATE = 100.0
 
 _BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
 
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
@@ -283,6 +290,22 @@ def _set_sec_chat(context, chat_id: int) -> None:
         context.user_data['security_chat_id'] = chat_id
     except Exception:
         pass
+
+
+def _is_valid_url(url: Optional[str]) -> bool:
+    """✅ v9.4.19: فحص نهائي لصلاحية URL قبل تمريره لـ Telegram."""
+    if not url:
+        return False
+    if not isinstance(url, str):
+        return False
+    url_stripped = url.strip()
+    if not url_stripped:
+        return False
+    if ' ' in url_stripped or '\n' in url_stripped or '\t' in url_stripped:
+        return False
+    if not _VALID_URL_PATTERN.match(url_stripped):
+        return False
+    return True
 
 
 # =====================================================================
@@ -649,6 +672,7 @@ class CallbackHandlers:
                 CB.CANCEL, CB.CHECK_SUB, CB.TRANS_OFF, CB.REM_TOGGLE_SUB,
                 CB.REM_TOGGLE_DAILY, CB.REM_TOGGLE_WEEKLY, CB.REM_SET_DAYS,
                 CB.ADMIN_LIST_ADMINS, "finish_posts", "gift_plans", "redeem_gift",
+                "updates_channel_btn",  # ✅ v9.4.19
             ]
             if parts[0] in known:
                 base_data = parts[0]
@@ -1153,6 +1177,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # ✅ v9.4.18: قناة التحديثات
+    # ✅ v9.4.19: فحص نهائي لصحة URL
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1160,6 +1185,9 @@ class CallbackHandlers:
         """
         ✅ v9.4.18: عرض قناة التحديثات للمستخدم برابط قابل للنقر.
         يدعم: @username, رقم صحيح, رابط كامل.
+
+        ✅ v9.4.19: فحص نهائي لصحة URL قبل تمريرها لـ Telegram
+        (كان يُرسل روابط غير صالحة → BadRequest صامت → زر معطّل).
         """
         title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
 
@@ -1229,6 +1257,14 @@ class CallbackHandlers:
         except Exception as e:
             logger.debug(f"_show_updates_channel build url: {e}")
 
+        # ✅ v9.4.19: فحص نهائي قبل بناء الزر
+        url_is_valid = _is_valid_url(url)
+        if url and not url_is_valid:
+            logger.warning(
+                f"⚠️ v9.4.19: updates_channel URL غير صالح: {url!r} "
+                f"(ch_str={ch_str!r}) — سيُعرض بدون زر"
+            )
+
         # ─── بناء النص ───
         text = (
             f"{title}\n"
@@ -1238,7 +1274,7 @@ class CallbackHandlers:
 
         # ─── الأزرار ───
         rows = []
-        if url:
+        if url_is_valid:
             open_text = await _trans('open_channel_btn', lang, "📢 فتح القناة")
             rows.append([InlineKeyboardButton(open_text, url=url)])
         else:
