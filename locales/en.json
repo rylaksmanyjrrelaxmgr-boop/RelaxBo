@@ -165,6 +165,10 @@
   "invalid_channel": "❌ Invalid channel",
   "invalid_channel_ref": "❌ <b>Invalid value</b>\n\nSend:\n• Numeric ID: <code>-1001234567890</code>\n• Or @username\n• Or link: <code>https://t.me/username</code>\n\nOr send <code>none</code> to cancel.",
   "save_failed": "❌ Save failed. Verify the ID.",
+  "updates_channel_btn": "📢 Updates Channel",
+  "updates_channel_title": "📢 Updates Channel",
+  "open_channel_btn": "📢 Open Channel",
+  "channel_link_unavailable": "⚠️ Cannot generate link for this channel",
 
   "send_reply_prompt": "📝 Send the reply:",
   "empty_keyword": "❌ Keyword is empty",
@@ -252,6 +256,7 @@
   "contest_won": "🎉 Congratulations! You won!",
   "participants": "Participants",
   "join_contest": "✍️ Join",
+  "already_joined": "❌ You already joined this contest",
   "active_contests": "Active contests",
   "no_active_contest": "❌ No contest selected",
   "no_active_contests_admin": "📭 No active contests",
@@ -260,6 +265,7 @@
   "no_winners": "📭 None",
   "no_participants": "❌ No participants",
   "no_participants_full": "❌ No participants",
+  "no_participants_selected": "❌ No participants selected",
   "winner_declared": "✅ Winner: {winner_id}",
   "winner_announced": "✅ Winner: {winner_id}",
   "winner_congrats": "🎉 Congratulations! You won the contest!",
@@ -706,7 +712,7 @@
   "disabled": "Disabled",
   "text": "Text",
 
-  "stats_message": "📊 <b>Statistics</b>\n\n👥 Users: {users}\n📡 Channels: {channels}\n👥 Groups: {groups}\n📝 Posts: {posts}\n✅ Published: {published}\n💎 Active subs: {active_subs}\n🎫 Tickets: {tickets}",
+  "stats_message": "📊 **Statistics**\n\n👥 Users: {users}\n📡 Channels: {channels}\n👥 Groups: {groups}\n📝 Posts: {posts}\n✅ Published: {published}\n💎 Active subs: {active_subs}\n🎫 Tickets: {tickets}",
   "replies_work": "📚 Auto-replies working!",
 
   "security_title": "🔐 <b>Security</b>",
