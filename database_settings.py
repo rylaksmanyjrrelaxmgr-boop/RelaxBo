@@ -1,68 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_settings.py - دوال الإعدادات العامة (v7.7.31)
+database_settings.py - دوال الإعدادات العامة (v7.7.32)
 ================================================================================
-🆕 v7.7.31 (LOG-CHANNEL-FIX):
-    ✅ set_log_channel(channel_id): دالة جديدة — تتحقق من int صريح
-    ✅ remove_log_channel(): دالة جديدة — لإزالة قناة السجل
-    ✅ get_log_channel(): يُعيد int بدل str (توافق مع safe_send)
-    ✅ ensure_settings_unique_constraint(conn=None): يقبل conn للتوحيد
-    ✅ _get_db_type(): @lru_cache — يقرأ env مرة واحدة
-    ✅ توثيق VALUES() كخيار متوافق مع MySQL 5.7+ و 8.0.19+
+🆕 v7.7.32 (LOG-CHANNEL-HARDENING):
+    ✅ _is_valid_channel_ref: يقبل كل الأنواع
+       - معرّف رقمي (قد يكون سالباً)
+       - @username
+       - username (بدون @)
+       - روابط: t.me/x, https://t.me/x, telegram.me/x
+    ✅ set_setting: يرفض القيم غير الصالحة قبل الحفظ
+    ✅ get_log_channel: auto-heal + يقبل رقم/username
+    ✅ set_log_channel: يقبل int أو str
 
-🆕 v7.4.8 (إصلاح MySQL — الكلمات المحجوزة):
-    ✅ _q() — helper يضيف backticks لـ MySQL فقط
-    ✅ إصلاح get_setting: SELECT `value` FROM settings WHERE `key` = ?
-    ✅ إصلاح get_settings_batch: SELECT `key`, `value` ... WHERE `key` IN (...)
-    ✅ إصلاح set_setting (MySQL): backticks كاملة حول key/value
-    ✅ إصلاح _set_setting_fallback: backticks شرطية
-    ✅ PostgreSQL/SQLite بلا تغيير (لا يحتاجان backticks)
+🆕 v7.7.31:
+    ✅ set_log_channel / remove_log_channel
+    ✅ ensure_settings_unique_constraint(conn=None)
+    ✅ _get_db_type: @lru_cache
 
-🆕 v7.4.7 (UNIQUE تلقائي):
-    ✅ ensure_settings_unique_constraint: تُضيف UNIQUE على key إذا لم يكن موجوداً
-    ✅ تُستدعى في initialize_db / pre_initialize بعد إنشاء الجداول
-
-🆕 v7.4.6 (إصلاحات PostgreSQL):
-    ✅ set_setting: يعمل بدون UNIQUE constraint على key
-    ✅ get_settings_batch: PostgreSQL يستخدم $1, $2 بدل ?,?
-    ✅ معالجة القيم الفارغة ("" → None)
-
-🆕 v7.4.5:
-    ✅ كاش للقيم المفقودة (sentinel __MISSING__)
-    ✅ get_settings_batch — استعلام واحد بدل N
-    ✅ get_start_settings — مُحسّن لـ /start (~50ms)
-
-📌 يفترض أن الـ Database يوفّر:
-    - self.fetchval / self.fetchall / self.execute
-    - self._fetchval_with_conn / self._fetchall_with_conn / self._execute_with_conn
-    - self.CACHE_AVAILABLE
-    - self.settings_cache
+🆕 v7.4.8 (MySQL reserved words)
+🆕 v7.4.7 (UNIQUE تلقائي)
+🆕 v7.4.6 (PostgreSQL UPSERT)
+🆕 v7.4.5 (كاش)
 ================================================================================
 """
 
 import logging
 import os
+import re
 from functools import lru_cache
 from typing import Optional, Dict, Any, Iterable
 
 logger = logging.getLogger(__name__)
 
-# ✅ علامة خاصة للقيم غير الموجودة في قاعدة البيانات
 _MISSING_SENTINEL = "__SETTING_MISSING__"
 
 
 # =====================================================================
-# دوال مساعدة للتوافق مع الأنظمة الثلاثة
+# دوال مساعدة
 # =====================================================================
 
 @lru_cache(maxsize=1)
 def _get_db_type() -> str:
-    """
-    🆕 v7.7.31: cached — DATABASE_URL ثابت بعد التحميل.
-
-    يُرجع: "postgres" | "mysql" | "sqlite"
-    """
     url = os.getenv("DATABASE_URL", "").strip().lower()
     if "postgres" in url or "postgresql" in url:
         return "postgres"
@@ -72,15 +51,136 @@ def _get_db_type() -> str:
 
 
 def _q(col: str) -> str:
-    """
-    ✅ v7.4.8: يُرجع اسم العمود مع backticks لـ MySQL فقط.
-
-    السبب: `key` و `value` كلمات محجوزة في MySQL.
-    PostgreSQL/SQLite: لا يحتاجان backticks (كلتاهما non-reserved في PG).
-    """
     if _get_db_type() == "mysql":
         return f"`{col}`"
     return col
+
+
+# =====================================================================
+# 🆕 v7.7.32: تحقق القيم قبل الحفظ
+# =====================================================================
+
+# نمط username في Telegram:
+#   - 5-32 حرف
+#   - a-z, A-Z, 0-9, _
+#   - يبدأ بحرف
+_TG_USERNAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
+
+# البادئات المقبولة لروابط Telegram
+_TG_URL_PREFIXES = (
+    'https://t.me/',
+    'http://t.me/',
+    'https://telegram.me/',
+    'http://telegram.me/',
+    'https://www.t.me/',
+    'http://www.t.me/',
+    't.me/',
+    'telegram.me/',
+    'www.t.me/',
+)
+
+
+def _is_valid_channel_ref(value: str) -> bool:
+    """
+    ✅ v7.7.32: مرجع قناة (سجل / اشتراك إجباري / تحديثات).
+
+    يقبل:
+      - فارغ (تعطيل)
+      - معرّف رقمي (قد يكون سالباً: -1001234567890)
+      - @username
+      - username (بدون @)
+      - https://t.me/username
+      - http://t.me/username
+      - t.me/username
+      - telegram.me/username
+    """
+    if value is None:
+        return True
+    v = str(value).strip()
+    if not v:
+        return True
+
+    # 1) معرّف رقمي (قد يكون سالباً)
+    if v.lstrip('-').isdigit():
+        return True
+
+    # 2) @username
+    if v.startswith('@'):
+        username = v[1:]
+        return bool(_TG_USERNAME_RE.match(username))
+
+    # 3) username بدون @
+    if _TG_USERNAME_RE.match(v):
+        return True
+
+    # 4) روابط Telegram
+    lower = v.lower()
+    for prefix in _TG_URL_PREFIXES:
+        if lower.startswith(prefix):
+            username_part = (
+                v[len(prefix):].split('/')[0].split('?')[0].split('#')[0]
+            )
+            if username_part.startswith('@'):
+                username_part = username_part[1:]
+            # username عادي
+            if _TG_USERNAME_RE.match(username_part):
+                return True
+            # رابط invite: t.me/+abc أو t.me/joinchat/abc
+            if username_part.startswith('+'):
+                return True
+            if username_part.lower() == 'joinchat':
+                return True
+            return False
+
+    return False
+
+
+def _is_valid_log_channel(value: str) -> bool:
+    """قناة السجل: نفس قواعد `_is_valid_channel_ref`."""
+    return _is_valid_channel_ref(value)
+
+
+# خريطة التحقق
+_SETTING_VALIDATORS: Dict[str, tuple] = {
+    "log_channel_id": (
+        _is_valid_log_channel,
+        "معرّف رقمي، @username، username، رابط t.me/... أو فارغ",
+    ),
+    "force_subscribe_channel": (
+        _is_valid_channel_ref,
+        "معرّف رقمي، @username، username، رابط t.me/... أو فارغ",
+    ),
+    "updates_channel": (
+        _is_valid_channel_ref,
+        "معرّف رقمي، @username، username، رابط t.me/... أو فارغ",
+    ),
+}
+
+
+def _validate_setting_value(key: str, value) -> tuple:
+    """
+    ✅ v7.7.32: يتحقق من صحة القيمة قبل الحفظ.
+
+    Returns:
+        (is_valid: bool, reason: str)
+    """
+    if key not in _SETTING_VALIDATORS:
+        return (True, "")
+
+    if value is None:
+        return (True, "")
+
+    try:
+        value_str = str(value)
+    except Exception:
+        return (False, "قيمة غير قابلة للتحويل لنص")
+
+    validator, desc = _SETTING_VALIDATORS[key]
+
+    if not validator(value_str):
+        return (False, f"يجب أن يكون {desc}")
+
+    return (True, "")
 
 
 # =====================================================================
@@ -91,31 +191,18 @@ class SettingsMixin:
     """Mixin يحتوي كل دوال الإعدادات العامة"""
 
     # =====================================================================
-    # 0) ضمان UNIQUE constraint على settings.key
+    # 0) UNIQUE constraint على settings.key
     # =====================================================================
 
     async def ensure_settings_unique_constraint(
         self, conn: Optional[Any] = None
     ) -> bool:
-        """
-        v7.4.7: تُضمن وجود UNIQUE constraint على settings.key.
-
-        🆕 v7.7.31: تقبل conn للتوحيد داخل معاملة موجودة.
-          - عند تمرير conn: تُنفَّذ العمليات على الاتصال مباشرة
-          - عند عدم التمرير: السلوك القديم (فتح connection خاصة)
-
-        - آمنة: تفحص أولاً قبل الإضافة
-        - لا تُكرّر الإضافة إذا كان موجوداً
-        - تُتجاهل في SQLite (PRIMARY KEY كافٍ)
-        """
         db_type = _get_db_type()
 
-        # ✅ SQLite: PRIMARY KEY كافٍ
         if db_type == "sqlite":
             logger.debug("ℹ️ SQLite: PRIMARY KEY على settings.key كافٍ")
             return True
 
-        # ─── helpers تختار المسار حسب توفّر conn ───
         async def _fv(query: str, params: tuple = (), default=None):
             if conn is not None:
                 if params:
@@ -147,7 +234,6 @@ class SettingsMixin:
 
         try:
             if db_type == "postgres":
-                # 1) فحص وجود UNIQUE constraint بأي اسم
                 exists = await _fv(
                     """
                     SELECT EXISTS (
@@ -160,41 +246,33 @@ class SettingsMixin:
                     """,
                     default=False,
                 )
-
                 if exists:
                     logger.debug("✅ UNIQUE على settings موجود مسبقاً")
                     return True
 
-                # 2) فحص وجود constraint بنفس الاسم
                 constraint_exists = await _fv(
                     """
                     SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
+                        SELECT 1 FROM pg_constraint
                         WHERE conname = 'settings_key_unique'
                     )
                     """,
                     default=False,
                 )
-
                 if constraint_exists:
                     logger.debug(
                         "✅ UNIQUE constraint 'settings_key_unique' موجود"
                     )
                     return True
 
-                # 3) أضف constraint
                 await _ex(
                     "ALTER TABLE settings "
                     "ADD CONSTRAINT settings_key_unique UNIQUE (key)"
                 )
-                logger.info(
-                    "✅ أُضيف UNIQUE constraint على settings.key"
-                )
+                logger.info("✅ أُضيف UNIQUE constraint على settings.key")
                 return True
 
             elif db_type == "mysql":
-                # 1) فحص وجود UNIQUE KEY بالاسم
                 rows = await _fa(
                     "SHOW INDEX FROM `settings` "
                     "WHERE Key_name = 'settings_key_unique'"
@@ -205,25 +283,19 @@ class SettingsMixin:
                     )
                     return True
 
-                # 2) فحص أي UNIQUE على `key`
                 rows = await _fa(
                     "SHOW INDEX FROM `settings` "
                     "WHERE Column_name = 'key' AND Non_unique = 0"
                 )
                 if rows:
-                    logger.debug(
-                        "✅ UNIQUE على settings.key موجود مسبقاً"
-                    )
+                    logger.debug("✅ UNIQUE على settings.key موجود مسبقاً")
                     return True
 
-                # 3) أضف UNIQUE KEY
                 await _ex(
                     "ALTER TABLE `settings` "
                     "ADD UNIQUE KEY settings_key_unique (`key`)"
                 )
-                logger.info(
-                    "✅ أُضيف UNIQUE KEY على settings.key"
-                )
+                logger.info("✅ أُضيف UNIQUE KEY على settings.key")
                 return True
 
             return True
@@ -248,14 +320,6 @@ class SettingsMixin:
     async def get_setting(
         self, key: str, default: str = None
     ) -> Optional[str]:
-        """
-        v7.4.5: يجلب إعداداً واحداً مع كاش.
-
-        - إذا كانت القيمة مفقودة، يخزّن sentinel في الكاش
-        - يمنع إعادة الاستعلام عن إعداد غير موجود
-        - ✅ v7.4.8: يستخدم backticks لـ MySQL
-        """
-        # 1) ابحث في الكاش أولاً
         if self.CACHE_AVAILABLE:
             try:
                 cached = await self.settings_cache.get_bot_setting(key)
@@ -268,25 +332,18 @@ class SettingsMixin:
                     f"settings_cache.get_bot_setting failed: {e}"
                 )
 
-        # 2) اقرأ من قاعدة البيانات
         try:
-            # ✅ v7.4.8: استخدام _q() للتوافق مع MySQL
             key_col = _q("key")
             value_col = _q("value")
             query = (
                 f"SELECT {value_col} FROM settings "
                 f"WHERE {key_col} = ?"
             )
-            result = await self.fetchval(
-                query,
-                (key,),
-                default=None,
-            )
+            result = await self.fetchval(query, (key,), default=None)
         except Exception as e:
             logger.error(f"❌ get_setting({key}): {e}")
             return default
 
-        # 3) احفظ في الكاش (حتى القيم المفقودة)
         if self.CACHE_AVAILABLE:
             try:
                 await self.settings_cache.set_bot_setting(
@@ -301,7 +358,7 @@ class SettingsMixin:
         return result if result is not None else default
 
     # =====================================================================
-    # 1.b) جلب عدة إعدادات باستعلام واحد
+    # 1.b) جلب عدة إعدادات
     # =====================================================================
 
     async def get_settings_batch(
@@ -309,13 +366,6 @@ class SettingsMixin:
         keys: Iterable[str],
         defaults: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Optional[str]]:
-        """
-        v7.4.6: استعلام واحد بدل N استعلامات.
-
-        - PostgreSQL: يستخدم $1, $2, ... (لا يحتاج تعديل من database.py)
-        - MySQL/SQLite: يستخدم ?, ?, ... (يُحوّل تلقائياً)
-        - ✅ v7.4.8: backticks لـ MySQL
-        """
         keys_list = list(keys)
         if not keys_list:
             return {}
@@ -324,7 +374,6 @@ class SettingsMixin:
         result: Dict[str, Optional[str]] = {}
         missing_keys = []
 
-        # 1) اقرأ من الكاش
         if self.CACHE_AVAILABLE:
             for k in keys_list:
                 try:
@@ -344,7 +393,6 @@ class SettingsMixin:
         if not missing_keys:
             return result
 
-        # 2) استعلام واحد لكل المفاتيح الناقصة
         try:
             db_type = _get_db_type()
             if db_type == "postgres":
@@ -352,10 +400,8 @@ class SettingsMixin:
                     [f"${i+1}" for i in range(len(missing_keys))]
                 )
             else:
-                # SQLite/MySQL: ? يُحوّل تلقائياً في database.py
                 placeholders = ",".join(["?"] * len(missing_keys))
 
-            # ✅ v7.4.8: استخدام backticks لـ MySQL
             key_col = _q("key")
             value_col = _q("value")
 
@@ -365,7 +411,6 @@ class SettingsMixin:
             )
             rows = await self.fetchall(query, tuple(missing_keys))
 
-            # ✅ v7.4.8: المفاتيح في النتيجة هي key/value بدون backticks
             found = (
                 {row["key"]: row["value"] for row in rows}
                 if rows else {}
@@ -374,7 +419,6 @@ class SettingsMixin:
             logger.error(f"❌ get_settings_batch: {e}")
             found = {}
 
-        # 3) املأ النتائج + احفظ في الكاش
         for k in missing_keys:
             val = found.get(k)
             result[k] = val if val is not None else defaults.get(k)
@@ -389,31 +433,34 @@ class SettingsMixin:
         return result
 
     # =====================================================================
-    # 2) حفظ/تحديث إعداد
+    # 2) ✅ v7.7.32: حفظ إعداد مع تحقق مسبق
     # =====================================================================
 
     async def set_setting(self, key: str, value: str) -> bool:
         """
-        v7.4.6: يعمل بدون UNIQUE constraint على key.
+        ✅ v7.7.32: يتحقق من صحة القيمة أولاً.
 
-        الاستراتيجية:
-        1. جرّب UPSERT (سريع إذا UNIQUE موجود)
-        2. إذا فشل، استخدم UPDATE + INSERT (آمن دائماً)
-
-        PostgreSQL: ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-        MySQL:      ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)
-                    (يدعم MySQL 5.7+ و 8.0.19+ — `NEW.value` في 8.0.20+
-                     deprecated VALUES() لكن لا يزال يعمل)
-        SQLite:     INSERT OR REPLACE
+        يمنع حفظ قيم غير صالحة في:
+          - log_channel_id
+          - force_subscribe_channel
+          - updates_channel
         """
+        # 🆕 v7.7.32: تحقق مسبق
+        is_valid, reason = _validate_setting_value(key, value)
+        if not is_valid:
+            preview = str(value)[:60] if value else ""
+            logger.warning(
+                f"⚠️ v7.7.32: رفض set_setting({key}) — {reason} "
+                f"| القيمة: {preview!r}"
+            )
+            return False
+
         db_type = _get_db_type()
 
         try:
-            # ✅ v7.4.8: استخدام backticks لـ MySQL
             key_col = _q("key")
             value_col = _q("value")
 
-            # ✅ المحاولة 1: UPSERT الأصلي
             if db_type == "postgres":
                 query = (
                     f"INSERT INTO settings ({key_col}, {value_col}) "
@@ -440,9 +487,7 @@ class SettingsMixin:
                 )
                 result = await self.execute(query, (key, value))
 
-            # ✅ إذا نجح UPSERT، نُكمل
             if result is not None and result > 0:
-                # إبطال الكاش
                 if self.CACHE_AVAILABLE:
                     try:
                         await self.settings_cache.invalidate_bot_settings(
@@ -454,14 +499,12 @@ class SettingsMixin:
                         )
                 return True
 
-            # ✅ المحاولة 2: fallback (UPDATE + INSERT)
             logger.debug(
                 f"⚠️ set_setting({key}): UPSERT returned {result} — fallback"
             )
             return await self._set_setting_fallback(key, value)
 
         except Exception as e:
-            # ✅ إذا فشل UPSERT (مثلاً: no unique constraint)، نُجرّب fallback
             err_msg = str(e).lower()
             if any(kw in err_msg for kw in (
                 "no unique", "there is no unique", "conflict",
@@ -472,27 +515,21 @@ class SettingsMixin:
                 )
                 return await self._set_setting_fallback(key, value)
 
-            # خطأ آخر — نسجّله
             logger.error(f"❌ set_setting({key}): {e}", exc_info=True)
             return False
 
     async def _set_setting_fallback(self, key: str, value: str) -> bool:
-        """
-        v7.4.6: fallback آمن — UPDATE ثم INSERT.
-        ✅ v7.4.8: يستخدم backticks لـ MySQL.
-        """
+        """fallback آمن — UPDATE ثم INSERT."""
         try:
             key_col = _q("key")
             value_col = _q("value")
 
-            # جرّب UPDATE
             updated = await self.execute(
                 f"UPDATE settings SET {value_col} = ? "
                 f"WHERE {key_col} = ?",
                 (value, key),
             )
 
-            # إذا لم يوجد الصف، أدرِج
             if not updated:
                 await self.execute(
                     f"INSERT INTO settings ({key_col}, {value_col}) "
@@ -500,7 +537,6 @@ class SettingsMixin:
                     (key, value),
                 )
 
-            # إبطال الكاش
             if self.CACHE_AVAILABLE:
                 try:
                     await self.settings_cache.invalidate_bot_settings(key)
@@ -523,7 +559,6 @@ class SettingsMixin:
     # =====================================================================
 
     async def get_force_subscribe_channel(self) -> Optional[str]:
-        """جلب قناة الاشتراك الإجباري."""
         value = await self.get_setting("force_subscribe_channel")
         if value is None or value == "":
             return None
@@ -534,62 +569,98 @@ class SettingsMixin:
     # =====================================================================
 
     async def get_updates_channel(self) -> Optional[str]:
-        """جلب معرف قناة التحديثات."""
         value = await self.get_setting("updates_channel")
         if value is None or value == "":
             return None
         return value
 
     # =====================================================================
-    # 5) قناة السجلات — v7.7.31 (كامل)
+    # 5) ✅ v7.7.32: قناة السجلات (auto-heal + يقبل كل الأنواع)
     # =====================================================================
 
-    async def get_log_channel(self) -> Optional[int]:
+    async def get_log_channel(self):
         """
-        🆕 v7.7.31: يُعيد int (كان str).
+        ✅ v7.7.32: يُعيد:
+          - int للقيم الرقمية
+          - str لـ @username / username / رابط
+          - None إذا فارغ
 
-        - يعمل مع safe_send(chat_id: int) بدون تغيير.
-        - القيم غير الرقمية تُتجاهَل مع تحذير.
-        - قناة السجل محفوظة في settings.log_channel_id كنص رقمي.
+        - إذا كانت القيمة غير صالحة تماماً (نص عشوائي):
+          auto-heal → يمسحها ويُعيد None
         """
         value = await self.get_setting("log_channel_id")
         if value is None or value == "":
             return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"⚠️ log_channel_id غير رقمي: {value!r} — تجاهل"
-            )
+
+        value_str = str(value).strip()
+        if not value_str:
             return None
 
-    async def set_log_channel(self, channel_id: int) -> bool:
-        """
-        🆕 v7.7.31: تعيين قناة السجل مع التحقق من النوع.
+        # 1) رقمي → int
+        if value_str.lstrip('-').isdigit():
+            try:
+                return int(value_str)
+            except (TypeError, ValueError):
+                pass
 
-        ملاحظة:
-          - التحقق من أن البوت admin في القناة مسؤولية الـ handler.
-          - هذه الدالة تتحقق فقط من أن channel_id رقمي.
-        """
+        # 2) @username / username / رابط → str
+        if _is_valid_channel_ref(value_str):
+            return value_str
+
+        # 3) غير صالح → auto-heal
+        preview = value_str[:60]
+        logger.warning(
+            f"⚠️ v7.7.32: log_channel_id غير صالح — auto-heal "
+            f"| القيمة: {preview!r}"
+        )
         try:
-            cid = int(channel_id)
-        except (TypeError, ValueError):
-            logger.error(
-                f"❌ set_log_channel: channel_id غير صالح: {channel_id!r}"
+            key_col = _q("key")
+            value_col = _q("value")
+            await self.execute(
+                f"UPDATE settings SET {value_col} = '' "
+                f"WHERE {key_col} = 'log_channel_id'"
             )
-            return False
-        return await self.set_setting("log_channel_id", str(cid))
+            if self.CACHE_AVAILABLE:
+                try:
+                    await self.settings_cache.invalidate_bot_settings(
+                        "log_channel_id"
+                    )
+                except Exception:
+                    pass
+            logger.info(
+                "✅ v7.7.32: تم مسح log_channel_id غير الصالح تلقائياً"
+            )
+        except Exception as heal_err:
+            logger.debug(f"auto-heal فشل: {heal_err}")
+
+        return None
+
+    async def set_log_channel(self, channel_id) -> bool:
+        """
+        ✅ v7.7.32: يقبل int أو str.
+
+        - int: -1001234567890
+        - str: @username، username، https://t.me/username
+        - None أو '': إزالة
+        """
+        if channel_id is None:
+            return await self.remove_log_channel()
+
+        value = str(channel_id).strip()
+        if not value:
+            return await self.remove_log_channel()
+
+        return await self.set_setting("log_channel_id", value)
 
     async def remove_log_channel(self) -> bool:
-        """🆕 v7.7.31: إزالة قناة السجل (يُعيدها لـ None)."""
+        """✅ إزالة قناة السجل."""
         return await self.set_setting("log_channel_id", "")
 
     # =====================================================================
-    # 6) فترة النشر (بالدقائق)
+    # 6) فترة النشر
     # =====================================================================
 
     async def get_publish_interval(self) -> int:
-        """جلب فترة النشر بالدقائق (افتراضي: 12)."""
         value = await self.get_setting("publish_interval", "12")
         try:
             return max(1, int(value))
@@ -597,25 +668,20 @@ class SettingsMixin:
             return 12
 
     # =====================================================================
-    # 7) تفعيل النسخ الاحتياطي التلقائي
+    # 7) النسخ الاحتياطي التلقائي
     # =====================================================================
 
     async def get_auto_backup(self) -> bool:
-        """هل النسخ الاحتياطي التلقائي مُفعّل؟"""
         value = await self.get_setting("auto_backup", "1")
         if value is None:
             return True
         return str(value).lower() in ("1", "true", "yes", "on")
 
     # =====================================================================
-    # 8) إعدادات /start محسّنة (استعلام واحد)
+    # 8) إعدادات /start
     # =====================================================================
 
     async def get_start_settings(self) -> Dict[str, Any]:
-        """
-        v7.4.6: يجلب كل إعدادات /start باستعلام واحد.
-        بدل 4+ استعلامات متتالية → 1 استعلام فقط.
-        """
         keys = [
             "force_subscribe_channel",
             "updates_channel",
