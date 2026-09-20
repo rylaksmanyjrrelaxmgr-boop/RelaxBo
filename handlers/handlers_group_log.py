@@ -1,7 +1,13 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.5.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.0)
 =====================================================================
+v1.6.0 (Full input support):
+    ✅ يقبل @username و t.me/username و https://t.me/...
+    ✅ يستخدم _is_valid_channel_ref من database_settings (مع fallback)
+    ✅ يحلّ @username/رابط إلى chat_id عبر bot.get_chat
+    ✅ يكشف رابط دعوة (t.me/+abc) — يرفضه برسالة واضحة (لا يمكن حلّه)
+
 v1.5.0 (cache invalidation):
     ✅ إبطال كاش قائمة قناة السجل بعد set_private ناجح
     ✅ توافق كامل مع handlers_callback.py v9.4.0
@@ -33,6 +39,7 @@ v1.1.0:
 """
 
 import logging
+import re
 from html import escape as _html_escape
 from typing import Optional, Tuple
 
@@ -61,7 +68,88 @@ except ImportError:
     _internal_cache = None
     _INTERNAL_CACHE_AVAILABLE = False
 
+# ✅ v1.6.0: استيراد أداة التحقق + Regex لـ Telegram
+try:
+    from database_settings import _is_valid_channel_ref
+except ImportError:
+    _is_valid_channel_ref = None
+
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# ✅ v1.6.0: Regex للمساعدة في استخراج username من المدخلات
+# =====================================================================
+
+_TG_USERNAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
+
+# نمط لاستخراج username من رابط t.me/xxx
+_TME_LINK_RE = re.compile(
+    r'^(?:https?://)?(?:www\.)?'
+    r'(?:t\.me|telegram\.me)/'
+    r'(?:\+)?([A-Za-z][A-Za-z0-9_]{3,31})'
+    r'(?:[/?#].*)?$',
+    re.IGNORECASE,
+)
+
+# رابط دعوة (invite link) — لا يمكن حلّه إلى chat_id بدون join
+_TME_INVITE_RE = re.compile(
+    r'^(?:https?://)?(?:www\.)?'
+    r'(?:t\.me|telegram\.me)/'
+    r'(?:\+|joinchat/)',
+    re.IGNORECASE,
+)
+
+
+def _normalize_channel_input(text: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    ✅ v1.6.0: يُحلّل المدخل النصي ويُعيد:
+      - (chat_id_int, None) إذا كان رقماً
+      - (None, username) إذا كان @username أو username
+      - (None, None) إذا كان رابط invite أو غير صالح
+
+    القيم المرجعة:
+      (int, None)  → جاهز للاستخدام مباشرة
+      (None, str)  → يحتاج bot.get_chat() للحل
+      (None, None) → مرفوض
+    """
+    if not text:
+        return None, None
+
+    v = text.strip()
+    if not v:
+        return None, None
+
+    # 1) معرّف رقمي (قد يكون سالباً)
+    if v.lstrip('-').isdigit():
+        try:
+            return int(v), None
+        except (ValueError, TypeError):
+            return None, None
+
+    # 2) رابط دعوة (invite) — مرفوض
+    if _TME_INVITE_RE.match(v):
+        return None, None
+
+    # 3) @username
+    if v.startswith('@'):
+        username = v[1:]
+        if _TG_USERNAME_RE.match(username):
+            return None, username
+        return None, None
+
+    # 4) username مباشر
+    if _TG_USERNAME_RE.match(v):
+        return None, v
+
+    # 5) رابط t.me/username
+    m = _TME_LINK_RE.match(v)
+    if m:
+        username = m.group(1)
+        if _TG_USERNAME_RE.match(username):
+            return None, username
+
+    return None, None
 
 
 # =====================================================================
@@ -195,7 +283,7 @@ async def receive_log_channel(
 
     # ─── الإلغاء ───
     text = (msg.text or "").strip()
-    if text.lower() in ("إلغاء", "الغاء", "cancel", "/cancel"):
+    if text.lower() in ("إلغاء", "الغاء", "cancel", "/cancel", "none"):
         StateManager.clear(user.id)
         context.user_data.pop("log_group_id", None)
         context.user_data.pop("awaiting_log_channel_for", None)
@@ -242,27 +330,65 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── استخراج chat_id ───
-    # ✅ v1.4.0: استخدام الدالة المساعدة المتوافقة
+    # ─── ✅ v1.6.0: استخراج/حلّ chat_id ───
     chat_id: Optional[int] = None
     title: str = ""
 
+    # 1) من رسالة معاد توجيهها (الأولوية القصوى)
     forwarded_id, forwarded_title = _extract_forward_channel(msg)
     if forwarded_id is not None:
         chat_id = forwarded_id
         title = forwarded_title
-    elif text and text.lstrip("-").isdigit():
-        try:
-            chat_id = int(text)
-        except (ValueError, TypeError):
-            chat_id = None
 
+    # 2) من النص (رقم / @username / username / t.me link)
+    if chat_id is None and text:
+        parsed_id, parsed_username = _normalize_channel_input(text)
+
+        if parsed_id is not None:
+            # رقم مباشر
+            chat_id = parsed_id
+        elif parsed_username is not None:
+            # @username أو username أو رابط — نحاول حلّه
+            try:
+                chat_obj = await context.bot.get_chat(f"@{parsed_username}")
+                if chat_obj is not None:
+                    chat_id = getattr(chat_obj, "id", None)
+                    title = (
+                        getattr(chat_obj, "title", "")
+                        or f"@{parsed_username}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ تعذّر حلّ @{parsed_username}: {e}"
+                )
+                try:
+                    await msg.reply_text(
+                        f"❌ لم أتمكن من الوصول إلى "
+                        f"<code>@{_safe_html(parsed_username)}</code>\n\n"
+                        f"تأكد أن:\n"
+                        f"• القناة <b>عامة</b> (لها username)\n"
+                        f"• البوت عضو فيها\n"
+                        f"• البوت مشرف فيها\n\n"
+                        f"أو أرسل <b>المعرّف الرقمي</b> "
+                        f"(مثل <code>-1001234567890</code>)",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
+    # 3) إذا لم نجد أياً من ذلك
     if not chat_id:
         try:
             await msg.reply_text(
-                "❌ أرسل معرّفاً رقمياً صحيحاً "
-                "(مثل <code>-1001234567890</code>)\n"
-                "أو <b>أعد توجيه رسالة</b> من القناة إلى هنا.\n\n"
+                "❌ <b>لم أتعرف على قناة</b>\n\n"
+                "أرسل أحد التالي:\n"
+                "• معرّف رقمي: <code>-1001234567890</code>\n"
+                "• <code>@username</code>\n"
+                "• <code>username</code>\n"
+                "• رابط: <code>https://t.me/username</code>\n"
+                "• أو <b>أعد توجيه رسالة</b> من القناة\n\n"
+                "⚠️ روابط الدعوة (<code>t.me/+abc</code>) غير مدعومة.\n"
                 "للإلغاء: أرسل <b>إلغاء</b>.",
                 parse_mode="HTML",
             )
@@ -330,15 +456,16 @@ async def receive_log_channel(
     except Exception:
         pass
 
-    # ─── محاولة استخراج عنوان القناة ───
-    try:
-        chat_obj = await context.bot.get_chat(chat_id)
-        if chat_obj and chat_obj.title:
-            title = chat_obj.title
-        elif chat_obj and chat_obj.username:
-            title = f"@{chat_obj.username}"
-    except Exception:
-        pass
+    # ─── محاولة استخراج عنوان القناة (إن لم نكن نملكه) ───
+    if not title:
+        try:
+            chat_obj = await context.bot.get_chat(chat_id)
+            if chat_obj and chat_obj.title:
+                title = chat_obj.title
+            elif chat_obj and chat_obj.username:
+                title = f"@{chat_obj.username}"
+        except Exception:
+            pass
 
     # ─── الحفظ في قاعدة البيانات ───
     try:
