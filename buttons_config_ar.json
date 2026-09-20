@@ -16,6 +16,8 @@
     "security_button": "🛡️ أمان {name}",
     "groups": "👥 مجموعاتي",
 
+    "updates_channel_btn": "📢 قناة التحديثات",
+
     "log_channel_btn": "📢 قناة السجل",
     "log_channel_set": "🔗 تعيين قناة السجل",
     "log_channel_remove": "🗑️ إزالة القناة",
@@ -377,6 +379,7 @@
         ["support", "developer"],
         ["help", "language"],
         ["trial", "contests"],
+        ["updates_channel_btn"],
         ["settings"]
       ]
     },
