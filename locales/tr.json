@@ -269,7 +269,8 @@
   "reply_to_pin": "❌ Sabitlemek için bir mesajı yanıtlayın",
   "bot_no_pin_perm": "❌ Botun mesaj sabitleme izni yok.",
 
-  "send_code": "❌ Kodu gönderin",
+  "send_code": "📝 Kodu gönderin: /redeem_gift <kod>",
+  "send_code_empty": "❌ Kod alınamadı, lütfen metin olarak yeniden gönderin",
   "gift_redeemed": "🎁 Hediye kullanıldı! Süre: {days} gün",
   "own_code": "❌ Kendi oluşturduğunuz kodu kullanamazsınız",
   "invalid_code": "❌ Geçersiz veya kullanılmış kod",
