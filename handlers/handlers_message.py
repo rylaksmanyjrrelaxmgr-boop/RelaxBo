@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.2 - Bugfixes)
+handlers_message.py - معالجات الرسائل (v7.9.3 - Bugfixes)
 =====================================================================
+🆕 v7.9.3 (إصلاح):
+    ✅ _handle_redeem_gift_input: send_code_empty بدل send_code
+       (send_code الآن prompt: "📝 أرسل الكود: /redeem_gift <الكود>")
+
 🆕 v7.9.2 (إصلاحات):
     ✅ handle_private: معالجة رسائل log_group_id بدل إسقاطها صامتاً
     ✅ handle_log_group_input: دالة جديدة لقناة سجل المجموعات
@@ -2734,13 +2738,15 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
+    # ✅ v7.9.3: send_code_empty بدل send_code
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         code = (update.effective_message.text or "").strip()[:MAX_GIFT_CODE_LENGTH]
         if not code:
-            msg = await _trans('send_code', lang, "❌")
+            # ✅ v7.9.3: مفتاح مختلف — لأن send_code الآن prompt كامل
+            msg = await _trans('send_code_empty', lang, "❌ أرسل الكود")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
