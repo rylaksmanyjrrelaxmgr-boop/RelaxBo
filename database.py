@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.32 — PERF-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.33 — DELETE_PENALTY_FIX)
 ================================================================================
+🆕 v7.7.33 (DELETE_PENALTY_TYPE_FIX):
+  ✅ _MIGRATIONS_TYPES: delete_penalty → TEXT DEFAULT 'none'
+     (كان INTEGER، والكود يستخدم قيم نصية: 'none'/'mute'/'ban'/...)
+  ✅ _migrate_delete_penalty_type: ترحيل تلقائي للقواعد الموجودة
+     - PostgreSQL: ALTER COLUMN INTEGER → TEXT (مع USING)
+     - MySQL: MODIFY COLUMN NUMBER → VARCHAR(20)
+     - SQLite: type affinity — لا حاجة لتغيير
+  ✅ _analyze_after_tune: تبسيط (لا فحص وجود مكرر)
+  ✅ _execute_with_conn PG: rowcount بدون regex
+     (rsplit بدلاً من re.search)
+
 🆕 v7.7.32 (PERF-FIX — لحل الاستعلامات البطيئة 1.5-2.5s):
   ✅ expire_penalties: BATCH 5000 → 500 (تقليل lock duration)
   ✅ _tune_heavy_tables_autovacuum: ضبط autovacuum على posts/subscriptions
@@ -634,7 +645,9 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
         ("nsfw_filter", "INTEGER DEFAULT 0"),
         ("auto_penalty", "TEXT DEFAULT 'mute'"),
         ("auto_mute_duration", "INTEGER DEFAULT 3600"),
-        ("delete_penalty", "INTEGER DEFAULT 0"),
+        # ✅ v7.7.33: delete_penalty → TEXT (كان INTEGER)
+        # السبب: الكود يستخدم قيم نصية 'none'/'mute'/'ban'/'kick'/'restrict'/'warn'
+        ("delete_penalty", "TEXT DEFAULT 'none'"),
         ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
         ("delete_penalty_messages", "INTEGER DEFAULT 0"),
         ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
@@ -2094,7 +2107,6 @@ class Database(
             self._alive_cache_warned = False
             self._pool_none_warned = False
             self._recovering_pool = False
-            # 🆕 v7.7.32: علم "تم ضبط autovacuum"
             self._autovacuum_tuned = False
 
             self._user_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
@@ -2336,7 +2348,6 @@ class Database(
         try:
             for table in HEAVY_TABLES_FOR_AUTOVACUUM:
                 try:
-                    # تحقق وجود الجدول
                     exists = await conn.fetchval(
                         "SELECT 1 FROM information_schema.tables "
                         "WHERE table_name = $1 "
@@ -2374,52 +2385,45 @@ class Database(
     async def _analyze_after_tune(self, conn) -> int:
         """
         🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
+        🆕 v7.7.33: تبسيط — لا فحص وجود مكرر (كان يُكرّر الاستعلامات).
 
         يجبر planner على إعادة حساب الإحصاءات.
+        PostgreSQL يقبل `ANALYZE t1, t2, t3` في أمر واحد.
         """
         if not USE_POSTGRES:
             return 0
-        analyzed = 0
-        try:
-            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
-                try:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = $1 "
-                        "AND table_schema = current_schema()",
-                        table,
-                    )
-                    if not exists:
-                        continue
-                    # ANALYZE لا يعمل داخل transaction على PG
-                    # نستخدم اتصالاً منفصلاً
-                    analyzed += 1
-                except Exception:
-                    continue
 
-            if analyzed:
-                # نُنفّذ ANALYZE خارج bootstrap (خلفية)
-                async def _do_analyze():
+        async def _do_analyze():
+            try:
+                async with self.connection() as c:
+                    tables_csv = ", ".join(HEAVY_TABLES_FOR_AUTOVACUUM)
                     try:
-                        async with self.connection() as c:
-                            for table in HEAVY_TABLES_FOR_AUTOVACUUM:
-                                try:
-                                    await c.execute(f"ANALYZE {table}")
-                                except Exception as ae:
-                                    logger.debug(
-                                        f"ANALYZE {table}: {ae}"
-                                    )
-                            logger.info(
-                                f"📊 v7.7.32: ANALYZE على "
-                                f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول"
-                            )
-                    except Exception as ae:
-                        logger.debug(f"_do_analyze: {ae}")
+                        await c.execute(f"ANALYZE {tables_csv}")
+                        logger.info(
+                            f"📊 v7.7.33: ANALYZE على "
+                            f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول "
+                            f"في أمر واحد"
+                        )
+                    except Exception as bulk_e:
+                        logger.debug(
+                            f"bulk ANALYZE فشل، fallback فردي: {bulk_e}"
+                        )
+                        for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                            try:
+                                await c.execute(f"ANALYZE {table}")
+                            except Exception as ae:
+                                logger.debug(
+                                    f"ANALYZE {table}: {ae}"
+                                )
+                        logger.info(
+                            f"📊 v7.7.33: ANALYZE فردي على "
+                            f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول"
+                        )
+            except Exception as ae:
+                logger.debug(f"_do_analyze: {ae}")
 
-                self._spawn_bg_task(_do_analyze())
-        except Exception as e:
-            logger.debug(f"_analyze_after_tune: {e}")
-        return analyzed
+        self._spawn_bg_task(_do_analyze())
+        return len(HEAVY_TABLES_FOR_AUTOVACUUM)
 
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
         if not USE_POSTGRES:
@@ -3501,12 +3505,14 @@ class Database(
             )
             if not result:
                 return 0
-            m = re.search(
-                r"\b(?:INSERT|UPDATE|DELETE)\b.*?\s(\d+)\s*$",
-                result, re.IGNORECASE | re.DOTALL,
-            )
-            if m:
-                return int(m.group(1))
+            # ✅ v7.7.33: rowcount بدون regex (أسرع وأوضح)
+            # asyncpg يُرجع: "INSERT 0 5" | "UPDATE 3" | "DELETE 2"
+            parts = result.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(parts[-1])
+                except (ValueError, TypeError):
+                    pass
             return 0
         elif USE_MYSQL:
             cursor = await conn.cursor()
@@ -4279,6 +4285,123 @@ class Database(
         except Exception:
             return False
 
+    # =================================================================
+    # 🆕 v7.7.33: ترحيل نوع delete_penalty (INTEGER → TEXT)
+    # =================================================================
+
+    async def _migrate_delete_penalty_type(self, conn) -> bool:
+        """
+        🆕 v7.7.33: ترحيل delete_penalty من INTEGER إلى TEXT.
+
+        السبب: الكود يستخدم قيم نصية:
+          - 'none', 'mute', 'ban', 'kick', 'restrict', 'warn'
+        بينما كان العمود INTEGER → asyncpg يرفض النص.
+
+        - SQLite: type affinity يسمح بالمزج — لا حاجة لتغيير.
+        - PostgreSQL: ALTER COLUMN TYPE TEXT (مع USING).
+        - MySQL: MODIFY COLUMN VARCHAR(20) (مع UPDATE أولاً).
+        """
+        if DB_TYPE == "sqlite":
+            return True
+
+        try:
+            if USE_POSTGRES:
+                # فحص نوع العمود الحالي
+                row = await conn.fetchrow(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = 'group_security' "
+                    "AND column_name = 'delete_penalty' "
+                    "AND table_schema = current_schema()"
+                )
+                if not row:
+                    # العمود غير موجود — لا حاجة
+                    return False
+                current_type = (row["data_type"] or "").lower()
+                if current_type in ("text", "character varying", "varchar"):
+                    return True  # بالفعل TEXT
+
+                if current_type != "integer":
+                    logger.debug(
+                        f"ℹ️ delete_penalty نوعه: {current_type} — "
+                        f"لا تغيير"
+                    )
+                    return False
+
+                # تحويل INTEGER → TEXT مع USING
+                try:
+                    await conn.execute(
+                        "ALTER TABLE group_security "
+                        "ALTER COLUMN delete_penalty TYPE TEXT "
+                        "USING CASE "
+                        "  WHEN delete_penalty = 0 THEN 'none' "
+                        "  WHEN delete_penalty IS NULL THEN 'none' "
+                        "  ELSE 'mute' "
+                        "END"
+                    )
+                    logger.info(
+                        "🔧 v7.7.33: delete_penalty "
+                        "INTEGER → TEXT (PostgreSQL)"
+                    )
+                    return True
+                except Exception as alter_e:
+                    logger.warning(
+                        f"⚠️ ALTER delete_penalty فشل: {alter_e}"
+                    )
+                    return False
+
+            elif USE_MYSQL:
+                cursor = await conn.cursor()
+                try:
+                    await cursor.execute(
+                        "SELECT DATA_TYPE, COLUMN_TYPE "
+                        "FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = DATABASE() "
+                        "AND TABLE_NAME = 'group_security' "
+                        "AND COLUMN_NAME = 'delete_penalty'"
+                    )
+                    row = await cursor.fetchone()
+                    if not row:
+                        return False
+                    data_type = (row[0] or "").lower()
+                    column_type = (row[1] or "").lower()
+                    if data_type in ("varchar", "text", "char"):
+                        return True  # بالفعل نصي
+
+                    # تحويل القيم الرقمية → نصية أولاً
+                    await cursor.execute(
+                        "UPDATE group_security SET delete_penalty = "
+                        "  CASE "
+                        "    WHEN delete_penalty = 0 OR "
+                        "         delete_penalty IS NULL THEN 'none' "
+                        "    ELSE 'mute' "
+                        "  END"
+                    )
+                    # ثم تغيير النوع
+                    await cursor.execute(
+                        "ALTER TABLE group_security "
+                        "MODIFY COLUMN delete_penalty "
+                        "VARCHAR(20) DEFAULT 'none'"
+                    )
+                    logger.info(
+                        "🔧 v7.7.33: delete_penalty "
+                        "NUMERIC → VARCHAR(20) (MySQL)"
+                    )
+                    return True
+                finally:
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.warning(
+                f"⚠️ _migrate_delete_penalty_type: {e}",
+                exc_info=True,
+            )
+            return False
+
+        return False
+
     async def _ensure_text_hash_column(self, conn) -> bool:
         try:
             if not await _table_exists(conn, "posts"):
@@ -4556,6 +4679,14 @@ class Database(
 
             await self._ensure_text_hash_column(conn)
             await self._ensure_bigint_ids(conn)
+
+            # ✅ v7.7.33: ترحيل نوع delete_penalty
+            try:
+                await self._migrate_delete_penalty_type(conn)
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ _migrate_delete_penalty_type: {e}"
+                )
 
             self._group_security_columns_cache = None
             _UNIQUE_CACHE.clear()
@@ -5302,7 +5433,6 @@ class Database(
             "schema": CURRENT_SCHEMA_VERSION,
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
             "migrations": _compute_migrations_signature(),
-            # 🆕 v7.7.32: يشمل قائمة الجداول الثقيلة
             "heavy_tables": list(HEAVY_TABLES_FOR_AUTOVACUUM),
         }
         return hashlib.sha256(
@@ -5570,7 +5700,6 @@ class Database(
                 logger.warning(f"⚠️ MV init: {e}")
                 self._mv_available = False
 
-            # 🆕 v7.7.32: ضبط autovacuum (مرة واحدة)
             try:
                 await self._tune_heavy_tables_autovacuum(conn)
             except Exception as e:
@@ -5579,7 +5708,6 @@ class Database(
         await self._import_banned_words(conn)
         await self._import_auto_replies(conn)
 
-        # 🆕 v7.7.32: ANALYZE في الخلفية بعد bootstrap
         if USE_POSTGRES:
             try:
                 await self._analyze_after_tune(conn)
@@ -7043,7 +7171,7 @@ class Database(
         مع 500 صف، القفل ينتهي بسرعة، والدورات اللاحقة تكمل.
         """
         total_expired = 0
-        BATCH = EXPIRED_PENALTIES_BATCH  # 🆕 500 (كان 5000)
+        BATCH = EXPIRED_PENALTIES_BATCH
         try:
             while True:
                 batch_expired = 0
