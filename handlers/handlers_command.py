@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.24
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.25
 ===================================================================================
+🆕 v7.5.25 (DB-DIAGNOSTICS):
+    ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
+    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
+    ✅ كلاهما للمطور فقط
+    ✅ يستخدمان db_diagnostics.py (ملف منفصل)
+
 🆕 v7.5.24 (RENDER-READY):
     ✅ _trans: fallback آمن لكل المفاتيح
     ✅ HTML بدل Markdown في كل الرسائل
@@ -544,7 +550,7 @@ class CommandHandlers:
         home_label = await _trans('main', lang, "🏠 القائمة الرئيسية")
 
         text = (
-            f"👨💻 <b>{title}</b>\n"
+            f"👨‍💻 <b>{title}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
             f"👤 <b>{name_label}:</b> {escape(str(dev_name))}\n"
             f"📞 <b>{contact_label}:</b> {escape(str(dev_contact))}\n"
@@ -1731,6 +1737,107 @@ class CommandHandlers:
                 update, context,
                 await _trans('invalid_code', lang, "❌ كود غير صالح"),
                 parse_mode=None,
+            )
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.25: أوامر تشخيص قاعدة البيانات (للمطور فقط)
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.5.25: /db_diag — تشخيص قاعدة البيانات.
+
+        يشغّل استعلامات PostgreSQL لجمع:
+          - Dead tuples (سبب البطء الرئيسي)
+          - أحجام الجداول
+          - الفهارس الحرجة
+          - إعدادات autovacuum
+
+        للمطور فقط.
+        """
+        user_id = update.effective_user.id
+        if not CONFIG.is_developer(user_id):
+            return
+
+        await _safe_edit_or_send(
+            update, context,
+            "⏳ <b>جاري التشخيص...</b>\n\n"
+            "<i>قد يستغرق 5-10 ثواني</i>",
+            parse_mode='HTML',
+        )
+
+        try:
+            from db_diagnostics import diagnose_db
+            result = await diagnose_db()
+
+            # إرسال مباشر (طويل — قد يحتاج تقسيم)
+            if len(result) > 4000:
+                parts = [result[i:i+4000] for i in range(0, len(result), 4000)]
+                for i, part in enumerate(parts, 1):
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"<i>({i}/{len(parts)})</i>\n{part}",
+                        parse_mode='HTML'
+                    )
+                    await asyncio.sleep(0.3)
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id, text=result,
+                    parse_mode='HTML'
+                )
+        except ImportError:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ ملف <code>db_diagnostics.py</code> غير موجود في المشروع",
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"db_diag: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ فشل التشخيص: <code>{escape(str(e)[:200])}</code>",
+                parse_mode='HTML'
+            )
+
+    @staticmethod
+    async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.5.25: /db_vacuum — تنظيف VACUUM ANALYZE للجداول الحرجة.
+
+        آمن: لا يقفل الجداول (ليس VACUUM FULL).
+        للمطور فقط.
+        """
+        user_id = update.effective_user.id
+        if not CONFIG.is_developer(user_id):
+            return
+
+        await _safe_edit_or_send(
+            update, context,
+            "⏳ <b>جاري تنظيف قاعدة البيانات...</b>\n\n"
+            "<i>قد يستغرق 30-60 ثانية. البوت سيبقى مستجيباً.</i>",
+            parse_mode='HTML',
+        )
+
+        try:
+            from db_diagnostics import vacuum_analyze_tables
+            result = await vacuum_analyze_tables()
+            await context.bot.send_message(
+                chat_id=user_id, text=result,
+                parse_mode='HTML'
+            )
+        except ImportError:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ ملف <code>db_diagnostics.py</code> غير موجود",
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"db_vacuum: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ فشل التنظيف: <code>{escape(str(e)[:200])}</code>",
+                parse_mode='HTML'
             )
 
 
