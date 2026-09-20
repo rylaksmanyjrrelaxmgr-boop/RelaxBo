@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.0 - Full i18n)
+handlers_message.py - معالجات الرسائل (v7.9.1 - i18n + Log channel validation)
 =====================================================================
-🆕 v7.9.0 (Full i18n):
+🆕 v7.9.1:
+    ✅ _handle_log_ch_input: يتحقق من صحة الإدخال قبل الحفظ
+       - يقبل: معرّف رقمي، @username، username، t.me/...
+       - يرفض: أي نص آخر (Heartbeat, تعليقات، إلخ)
+       - يترك WAIT_LOG_CH لمجموعة عند وجود log_group_id
+
+🆕 v7.9.0:
     ✅ _trans: يستخدم TranslationManager + fallback
-    ✅ كل النصوص hardcoded → _trans
-    ✅ HTML بدل Markdown في الرسائل الجديدة
-    ✅ لا تغيير في المنطق
-    ✅ clear_lang_cache مُصدَّرة بشكل صحيح
+    ✅ clear_lang_cache مُصدَّرة
+    ✅ HTML بدل Markdown
 =====================================================================
 """
 
@@ -53,6 +57,48 @@ except ImportError:
     analyze_sentiment = None
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# ✅ v7.9.1: استيراد أداة التحقق من database_settings
+# =====================================================================
+
+try:
+    from database_settings import _is_valid_channel_ref
+except ImportError:
+    # Fallback: نسخة محلية إذا لم تُحمَّل
+    _TG_USERNAME_RE_FALLBACK = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
+
+    def _is_valid_channel_ref(value) -> bool:
+        if value is None:
+            return True
+        v = str(value).strip()
+        if not v:
+            return True
+        if v.lstrip('-').isdigit():
+            return True
+        if v.startswith('@'):
+            return bool(_TG_USERNAME_RE_FALLBACK.match(v[1:]))
+        if _TG_USERNAME_RE_FALLBACK.match(v):
+            return True
+        lower = v.lower()
+        for prefix in (
+            'https://t.me/', 'http://t.me/',
+            'https://telegram.me/', 'http://telegram.me/',
+            't.me/', 'telegram.me/',
+        ):
+            if lower.startswith(prefix):
+                username = v[len(prefix):].split('/')[0].split('?')[0]
+                if username.startswith('@'):
+                    username = username[1:]
+                if _TG_USERNAME_RE_FALLBACK.match(username):
+                    return True
+                if username.startswith('+'):
+                    return True
+                if username.lower() == 'joinchat':
+                    return True
+                return False
+        return False
 
 
 # =====================================================================
@@ -608,7 +654,6 @@ class MessageHandlers:
                 StateManager.clear(user_id)
                 return
 
-            # ترجمة تلقائية
             if (state is None or state == UserState.NONE) and lang != 'off':
                 try:
                     msg_obj = update.effective_message
@@ -1499,17 +1544,79 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
+    # =================================================================
+    # ✅ v7.9.1: log channel input مع تحقق
+    # =================================================================
+
     @staticmethod
     async def _handle_log_ch_input(update, context):
+        """
+        ✅ v7.9.1: يتحقق من صحة الإدخال قبل الحفظ.
+
+        - يقبل: معرّف رقمي، @username، username، t.me/...
+        - يرفض: أي نص آخر (Heartbeat, تعليقات...)
+        - يترك WAIT_LOG_CH للمجموعة عند وجود log_group_id
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
             StateManager.clear(user_id)
             return
+
+        # إذا كانت القناة لمجموعة معينة → اتركها لـ group_log handler
+        log_group_id = context.user_data.get('log_group_id')
+        if log_group_id:
+            # معالج group_log سيتولى الأمر
+            return
+
         text = (update.effective_message.text or "").strip()
-        await DB.set_setting('log_channel_id', text)
-        msg = _fmt(await _trans('set_success', lang, "✅ {text}"),
-                   text=escape(text))
+
+        # ✅ v7.9.1: تحقق من صحة المدخل
+        if not _is_valid_channel_ref(text):
+            preview = text[:50] if text else ""
+            logger.warning(
+                f"⚠️ v7.9.1: رفض log_channel_id غير صالح "
+                f"من المستخدم {user_id} | القيمة: {preview!r}"
+            )
+            msg = await _trans(
+                'invalid_channel_ref', lang,
+                "❌ <b>قيمة غير صالحة</b>\n\n"
+                "أرسل:\n"
+                "• معرّف رقمي مثل: <code>-1001234567890</code>\n"
+                "• أو @username\n"
+                "• أو رابط: <code>https://t.me/username</code>\n\n"
+                "أو أرسل <code>none</code> للإلغاء."
+            )
+            await safe_send(context.bot, user_id, msg, parse_mode='HTML')
+            # ⚠️ لا نمسح الحالة — اسمح للمستخدم بإعادة المحاولة
+            # إذا أرسل 'none' أو 'cancel'
+            return
+
+        # حاول الحفظ
+        try:
+            ok = await DB.set_setting('log_channel_id', text)
+        except Exception as e:
+            logger.error(f"❌ set log_channel failed: {e}", exc_info=True)
+            ok = False
+
+        if not ok:
+            msg = await _trans(
+                'save_failed', lang,
+                "❌ فشل الحفظ. تأكد من صحة المعرّف."
+            )
+            await safe_send(context.bot, user_id, msg)
+            StateManager.clear(user_id)
+            return
+
+        # نجح الحفظ
+        if text:
+            msg = _fmt(await _trans('set_success', lang, "✅ {text}"),
+                       text=escape(text))
+        else:
+            msg = await _trans(
+                'log_channel_removed_success', lang,
+                "🗑️ تمت إزالة قناة السجل"
+            )
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
