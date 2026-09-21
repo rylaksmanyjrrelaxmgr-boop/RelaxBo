@@ -2,22 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.20)
+handlers_callback.py - معالج الأزرار (v9.4.21)
 =====================================================================
-🆕 v9.4.20 — إصلاح circular import:
-  - _handle_language_change: استخدام sys.modules + fallback يدوي
-    (كان يُظهر: cannot import name 'clear_lang_cache' من handlers_message)
+🆕 v9.4.21 — إصلاح أزرار الردود التلقائية:
+  - toggle/admins: استخدام int بدل bool
+  - PG يرفض bool في عمود INTEGER → كان يفشل صامتاً
+  - إضافة عرض الحالة على الأزرار (✅/❌)
 
-✅ v9.4.19 — إصلاحات v9.4.18:
-  - updates_channel_btn: فحص نهائي لصحة URL قبل تمريره لـ Telegram
-  - updates_channel_btn في قائمة `known` لمعالجة parameterized
-  - توحيد escape للنصوص
+✅ v9.4.20 — إصلاح circular import:
+  - _handle_language_change: sys.modules + fallback يدوي
 
-✅ v9.4.18 — إضافة زر قناة التحديثات:
-  - _show_updates_channel: يعرض قناة التحديثات برابط قابل للنقر
-  - معالج updates_channel_btn في handle()
-  - يدعم: @username، معرّف رقمي، رابط
-
+✅ v9.4.19 — updates_channel_btn: فحص URL نهائي
+✅ v9.4.18 — إضافة زر قناة التحديثات
 ✅ v9.4.17 — ترجمة كاملة
 ✅ v9.4.16 — إصلاح أزرار التحليلات
 =====================================================================
@@ -317,20 +313,11 @@ def _is_valid_url(url: Optional[str]) -> bool:
 # =====================================================================
 
 def _clear_lang_cache_local(context) -> None:
-    """
-    ✅ v9.4.20: نسخة محلية من clear_lang_cache بدون import.
-
-    تحاول:
-      1. استخدام الدالة الرسمية من handlers_message عبر sys.modules
-         (بدون import statement — لتفادي circular import).
-      2. fallback يدوي: مسح keys مباشرة.
-    """
-    # ─── المستوى 1: sys.modules ───
+    """✅ v9.4.20: نسخة محلية من clear_lang_cache بدون import."""
     _cleared = False
     try:
         _mod = sys.modules.get('handlers_message')
         if _mod is None:
-            # محاولة عبر prefix آخر (nested package)
             for _name, _m in list(sys.modules.items()):
                 if _name.endswith('.handlers_message') or _name == 'handlers_message':
                     _mod = _m
@@ -343,7 +330,6 @@ def _clear_lang_cache_local(context) -> None:
     except Exception as e:
         logger.debug(f"_clear_lang_cache_local sys.modules: {e}")
 
-    # ─── المستوى 2: fallback يدوي ───
     if not _cleared:
         try:
             if context is not None and hasattr(context, 'user_data'):
@@ -352,6 +338,45 @@ def _clear_lang_cache_local(context) -> None:
                     context.user_data.pop(_k, None)
         except Exception as e:
             logger.debug(f"_clear_lang_cache_local fallback: {e}")
+
+
+# =====================================================================
+# ✅ v9.4.21: دالة مساعدة لتطبيق الحالة على أزرار auto_reply
+# =====================================================================
+
+def _apply_auto_reply_status_icons(
+    kb: InlineKeyboardMarkup,
+    enabled: int,
+    admins_only: int,
+    enabled_label: str,
+    admins_label: str,
+) -> InlineKeyboardMarkup:
+    """
+    ✅ v9.4.21: يُظهر ✅/❌ على أزرار auto_reply بناءً على الحالة.
+
+    - enabled=1 → "✅ Toggle", enabled=0 → "❌ Toggle"
+    - admins_only=1 → "✅ Admins only", =0 → "❌ Admins only"
+    """
+    try:
+        e_icon = "✅" if int(enabled or 0) == 1 else "❌"
+        a_icon = "✅" if int(admins_only or 0) == 1 else "❌"
+        new_rows = []
+        for row in kb.inline_keyboard:
+            new_row = []
+            for btn in row:
+                cb = btn.callback_data or ""
+                if cb.startswith("auto_reply_toggle"):
+                    new_row.append(InlineKeyboardButton(
+                        f"{e_icon} {enabled_label}", callback_data=cb))
+                elif cb.startswith("auto_reply_admins"):
+                    new_row.append(InlineKeyboardButton(
+                        f"{a_icon} {admins_label}", callback_data=cb))
+                else:
+                    new_row.append(btn)
+            new_rows.append(new_row)
+        return InlineKeyboardMarkup(new_rows)
+    except Exception:
+        return kb
 
 
 # =====================================================================
@@ -1051,9 +1076,6 @@ class CallbackHandlers:
                     update, context, query, user_id, lang)
                 return
 
-            # ═════════════════════════════════════════════════════════
-            # ✅ v9.4.18: زر قناة التحديثات
-            # ═════════════════════════════════════════════════════════
             if base_data == "updates_channel_btn":
                 await CallbackHandlers._show_updates_channel(
                     query, context, user_id, lang)
@@ -1228,13 +1250,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang):
-        """
-        ✅ v9.4.18: عرض قناة التحديثات للمستخدم برابط قابل للنقر.
-        يدعم: @username, رقم صحيح, رابط كامل.
-
-        ✅ v9.4.19: فحص نهائي لصحة URL قبل تمريرها لـ Telegram
-        (كان يُرسل روابط غير صالحة → BadRequest صامت → زر معطّل).
-        """
+        """✅ v9.4.18/19: عرض قناة التحديثات."""
         title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
 
         try:
@@ -1262,12 +1278,9 @@ class CallbackHandlers:
         display = ch_str
 
         try:
-            # 1) @username
             if ch_str.startswith('@'):
                 url = f"https://t.me/{ch_str[1:]}"
                 display = ch_str
-
-            # 2) رقم سالب → محاولة الحصول على رابط
             elif ch_str.lstrip('-').isdigit():
                 cid = int(ch_str)
                 try:
@@ -1287,8 +1300,6 @@ class CallbackHandlers:
                 except Exception as e:
                     logger.debug(f"get_chat {cid}: {e}")
                     url = None
-
-            # 3) رابط كامل
             elif ch_str.startswith(('https://', 'http://')):
                 url = ch_str
                 display = ch_str
@@ -1296,29 +1307,24 @@ class CallbackHandlers:
                 url = f"https://{ch_str}"
                 display = url
             else:
-                # username بدون @
                 url = f"https://t.me/{ch_str}"
                 display = f"@{ch_str}"
 
         except Exception as e:
             logger.debug(f"_show_updates_channel build url: {e}")
 
-        # ✅ v9.4.19: فحص نهائي قبل بناء الزر
         url_is_valid = _is_valid_url(url)
         if url and not url_is_valid:
             logger.warning(
-                f"⚠️ v9.4.19: updates_channel URL غير صالح: {url!r} "
-                f"(ch_str={ch_str!r}) — سيُعرض بدون زر"
+                f"⚠️ v9.4.19: updates_channel URL غير صالح: {url!r}"
             )
 
-        # ─── بناء النص ───
         text = (
             f"{title}\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📌 <b>{_html.escape(display)}</b>"
         )
 
-        # ─── الأزرار ───
         rows = []
         if url_is_valid:
             open_text = await _trans('open_channel_btn', lang, "📢 فتح القناة")
@@ -1336,7 +1342,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # دوال الأمان
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
@@ -1411,7 +1417,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # القائمة الرئيسية
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id) -> bool:
@@ -1497,7 +1503,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Parameterized
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
@@ -2062,7 +2068,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Refresh
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _refresh_security_view(query, context, chat_id, lang):
@@ -2075,7 +2081,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # معالجات صغيرة
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _render_settings(query, context, user_id, lang):
@@ -2174,7 +2180,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # قائمة الترجمة
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _render_translation_menu(query, context, user_id, lang):
@@ -2226,7 +2232,6 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
                         parse_mode='HTML', bot=context.bot)
 
-    # ✅ v9.4.20: استخدام _clear_lang_cache_local بدل import مباشر
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
         data = query.data or ""
@@ -2242,7 +2247,6 @@ class CallbackHandlers:
                 context.user_data.pop('lang', None)
             except Exception:
                 pass
-            # ✅ v9.4.20: لا نعتمد على import مباشر (circular import)
             _clear_lang_cache_local(context)
             ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
             if not ok:
@@ -2254,7 +2258,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # معالجات فرعية
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_buy_subscription(update, context, query, user_id, data, lang):
@@ -3431,7 +3435,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # قناة السجل
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
@@ -3931,7 +3935,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Admin
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_admin(update, context, query, user_id, lang=None):
@@ -4857,7 +4861,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Analytics
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_analytics_menu(query, context, user_id, lang):
@@ -5300,8 +5304,8 @@ class CallbackHandlers:
         return file_path
 
     # ═════════════════════════════════════════════════════════════
-    # Auto replies
-    # =================================================================
+    # ✅ v9.4.21: Auto replies — إصلاح bool/int
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_auto_reply(update, context, query, user_id, lang=None):
@@ -5348,8 +5352,20 @@ class CallbackHandlers:
         try:
             if action == "menu":
                 context.user_data['auto_chat'] = chat_id
+                settings = await DB.get_auto_reply_settings(chat_id) or {}
+                if not isinstance(settings, dict):
+                    settings = _row_to_dict(settings) or {}
                 kb = KeyboardFactory.build("auto_reply",
                                             chat_id=chat_id, lang=lang)
+                # ✅ v9.4.21: عرض الحالة على الأزرار
+                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = _apply_auto_reply_status_icons(
+                    kb,
+                    int(settings.get('enabled', 0) or 0),
+                    int(settings.get('only_admins', 0) or 0),
+                    enabled_lbl, admins_lbl,
+                )
                 await safe_edit(query,
                     await _trans('auto_reply_title', lang, "🤖"),
                     reply_markup=kb, bot=context.bot)
@@ -5362,17 +5378,26 @@ class CallbackHandlers:
                     settings = await DB.get_auto_reply_settings(chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                new_status = not settings.get('enabled', False)
+                # ✅ v9.4.21: int بدل bool (PG يرفض bool في INTEGER)
+                new_status = 1 - _coerce_int(settings.get('enabled', 0))
                 await DB.update_auto_reply_settings(chat_id, enabled=new_status)
                 settings['enabled'] = new_status
                 context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build("auto_reply",
                                             chat_id=chat_id, lang=lang)
+                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = _apply_auto_reply_status_icons(
+                    kb,
+                    int(new_status or 0),
+                    _coerce_int(settings.get('only_admins', 0)),
+                    enabled_lbl, admins_lbl,
+                )
                 status = (await _trans('auto_reply_status_enabled', lang, "✅")
-                          if new_status
+                          if new_status == 1
                           else await _trans('auto_reply_status_disabled', lang, "❌"))
                 admins = (await _trans('auto_reply_admins_yes', lang, "✅")
-                          if settings.get('only_admins')
+                          if _coerce_int(settings.get('only_admins', 0)) == 1
                           else await _trans('auto_reply_admins_no', lang, "❌"))
                 text = _fmt(await _trans('auto_reply_full', lang,
                                           "🤖\n{status}\n{admins}"),
@@ -5387,17 +5412,26 @@ class CallbackHandlers:
                     settings = await DB.get_auto_reply_settings(chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                new_status = not settings.get('only_admins', 0)
+                # ✅ v9.4.21: int بدل bool (PG يرفض bool في INTEGER)
+                new_status = 1 - _coerce_int(settings.get('only_admins', 0))
                 await DB.update_auto_reply_settings(chat_id, only_admins=new_status)
                 settings['only_admins'] = new_status
                 context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build("auto_reply",
                                             chat_id=chat_id, lang=lang)
+                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = _apply_auto_reply_status_icons(
+                    kb,
+                    _coerce_int(settings.get('enabled', 0)),
+                    int(new_status or 0),
+                    enabled_lbl, admins_lbl,
+                )
                 status = (await _trans('auto_reply_status_enabled', lang, "✅")
-                          if settings.get('enabled')
+                          if _coerce_int(settings.get('enabled', 0)) == 1
                           else await _trans('auto_reply_status_disabled', lang, "❌"))
                 admins = (await _trans('auto_reply_admins_yes', lang, "✅")
-                          if new_status
+                          if new_status == 1
                           else await _trans('auto_reply_admins_no', lang, "❌"))
                 text = _fmt(await _trans('auto_reply_full', lang,
                                           "🤖\n{status}\n{admins}"),
@@ -5494,7 +5528,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Schedule
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_schedule(update, context, query, user_id):
@@ -5562,7 +5596,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Advanced actions
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_advanced_actions(update, context, query, user_id):
@@ -5669,7 +5703,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Panel
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data, lang='ar'):
@@ -5727,7 +5761,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Contests
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_contests(update, context, query, user_id):
@@ -5826,7 +5860,7 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # Backup
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _do_backup(context, user_id, lang='ar'):
@@ -5894,5 +5928,6 @@ __all__ = [
     "_invalidate_log_channel_menu_cache",
     "_ANALYTICS_ALIASES",
     "_clear_lang_cache_local",
+    "_apply_auto_reply_status_icons",
     "ACTIVE_TASKS",
 ]
