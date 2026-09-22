@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.1)
+handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.2)
 ================================================================================
 يحل مشكلة تأخر /start عبر:
 
@@ -10,6 +10,12 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
 2. ✅ تحديث قاعدة البيانات عند كل تغيير في صلاحيات المشرفين
 3. ✅ تحديث الكاش في utils.py لمنع استدعاءات getChatAdministrators
 4. ✅ التعامل مع جميع أنواع التغييرات
+
+🆕 v1.2 (CRITICAL FIX — منع تسجيل القنوات كمجموعات):
+    ✅ on_my_chat_member_update: فحص chat.type قبل register_group
+    ✅ القنوات (channel/supergroup من نوع channel) تُتجاهل تماماً
+    ✅ القنوات تُدار عبر _handle_channel_input في handlers_message.py
+    ✅ يمنع ظهور القنوات في "مجموعاتي"
 
 🆕 v1.1 إصلاحات جوهرية:
     ✅ إزالة getChatAdministrators من كل تحديث (الهدف الحقيقي!)
@@ -28,6 +34,7 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
    - استجابة فورية لتغييرات المشرفين
    - تقليل الحمل على Telegram API بنسبة 95%
    - تسريع /start من 5 ثوان إلى < 300ms
+   - القنوات لا تدخل قائمة المجموعات ✅ v1.2
 
 📌 التسجيل في bot.py:
    from handlers import chat_member
@@ -56,6 +63,9 @@ logger = logging.getLogger(__name__)
 # حالات المشرف
 ADMIN_STATUSES = ("administrator", "creator")
 
+# ✅ v1.2: أنواع الدردشة المقبولة (مجموعات فقط — القنوات مستبعدة)
+GROUP_CHAT_TYPES = ("group", "supergroup")
+
 # ✅ v1.1: مدة منع تكرار الترحيب (بالثواني)
 WELCOME_DEBOUNCE_SECONDS = 30
 
@@ -77,6 +87,19 @@ _TEMPLATE_PATTERN = re.compile(
 def _is_admin_status(status: str) -> bool:
     """هل الحالة تعتبر مشرفاً؟"""
     return status in ADMIN_STATUSES
+
+
+def _is_group_chat(chat: Optional[Chat]) -> bool:
+    """
+    ✅ v1.2: هل الدردشة مجموعة (لا قناة)؟
+    يستخدم هذا الفحص في on_my_chat_member_update لمنع تسجيل القنوات.
+    """
+    if chat is None:
+        return False
+    try:
+        return chat.type in GROUP_CHAT_TYPES
+    except Exception:
+        return False
 
 
 def _is_transition_admin(old_status: str, new_status: str) -> bool:
@@ -457,7 +480,7 @@ async def on_chat_member_update(
         cm_update: ChatMemberUpdated = update.chat_member
         chat: Chat = cm_update.chat
 
-        if chat.type not in ("group", "supergroup"):
+        if chat.type not in GROUP_CHAT_TYPES:
             return
 
         old_status = cm_update.old_chat_member.status
@@ -674,7 +697,9 @@ async def on_my_chat_member_update(
 ) -> None:
     """
     معالج تغييرات عضوية البوت نفسه.
-    عند إضافة البوت لمجموعة → مزامنة كاملة للمشرفين.
+
+    ✅ v1.2: يفحص chat.type — يتجاهل القنوات تماماً.
+    القنوات تُدار عبر _handle_channel_input في handlers_message.py.
     """
     if not update.my_chat_member:
         return
@@ -682,6 +707,15 @@ async def on_my_chat_member_update(
     try:
         cm_update: ChatMemberUpdated = update.my_chat_member
         chat = cm_update.chat
+
+        # ✅ v1.2: تجاهل القنوات (المشكلة الحقيقية)
+        if not _is_group_chat(chat):
+            logger.debug(
+                f"⏭️ on_my_chat_member_update: تجاهل chat.type={chat.type} "
+                f"(chat_id={chat.id}, title={chat.title})"
+            )
+            return
+
         old_status = cm_update.old_chat_member.status
         new_status = cm_update.new_chat_member.status
 
@@ -784,5 +818,5 @@ def register(app) -> None:
     )
 
     logger.info(
-        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.1"
+        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.2"
     )
