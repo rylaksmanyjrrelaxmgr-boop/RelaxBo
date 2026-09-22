@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.15)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.16)
 ================================================================================
+🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES — إصلاح بطء النشر 2s):
+  ✅ حُذف 3 فهارس زائدة على جدول posts:
+      • idx_posts_channel (يُغطّيه prefix من idx_posts_channel_pub_fail_created)
+      • idx_posts_published (low cardinality، بلا قيمة)
+      • idx_posts_channel_published (يُغطّيه idx_posts_channel_pub_fail_created)
+  ✅ السبب: كل UPDATE على published يُحدّث 5 فهارس → 2.02s/UPDATE
+  ✅ المتوقع بعد الحذف: 2.02s → < 100ms (تحسّن ~20x)
+  ✅ CURRENT_SCHEMA_VERSION: 14 → 15
+  ✅ EXPECTED_INDEX_COUNT: 75 → 72
+  ✅ نقل الفهارس المحذوفة إلى DEPRECATED_INDEXES
+
 🚀 v7.6.15 (SLOW-QUERY-FIX — idx_posts_next_post):
   ✅ idx_posts_channel_unpub_fresh_created: created_at → id
       • الاستعلام في _publish_single_channel: ORDER BY id ASC
@@ -37,8 +48,8 @@ from datetime import datetime, timezone
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.15: 13 → 14 (يفرض rebuild بعد تعديل idx_posts_channel_unpub_fresh_created)
-CURRENT_SCHEMA_VERSION = 14
+# ✅ v7.6.16: 14 → 15 (يفرض إعادة تهيئة + حذف 3 فهارس زائدة من posts)
+CURRENT_SCHEMA_VERSION = 15
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -68,10 +79,10 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.15: يبقى 75 (لم نضف فهرساً — فقط عدّلنا تعريف قائم)
-EXPECTED_INDEX_COUNT = 75
+# ✅ v7.6.16: 75 → 72 (حُذف 3 فهارس زائدة من posts)
+EXPECTED_INDEX_COUNT = 72
 
-# ✅ v7.6.14: فهارس تُتخطى على MySQL بعد التكييف (تصبح مكررة مع PK)
+# ✅ v7.6.14: فهارس تُتخطى على MySQL بعد التكيف (تصبح مكررة مع PK)
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",  # id هو PK في user_penalties
 })
@@ -94,13 +105,12 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (7) — ✅ v7.6.15: idx_posts_channel_unpub_fresh_created
-    #                يستخدم id بدل created_at (يطابق ORDER BY id ASC)
+    # ═══ POSTS (4) — ✅ v7.6.16: حُذف 3 فهارس زائدة
+    # السبب: كل UPDATE على published يُحدّث 5 فهارس → 2.02s/UPDATE
+    #   • idx_posts_channel          → prefix مغطّى
+    #   • idx_posts_published        → low cardinality
+    #   • idx_posts_channel_published → مغطّى بـ pub_fail_created
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
-    ("posts", "idx_posts_channel", "posts(channel_db_id)"),
-    ("posts", "idx_posts_published", "posts(published)"),
-    ("posts", "idx_posts_channel_published",
-     "posts(channel_db_id, published)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
     ("posts", "idx_posts_channel_pub_at",
@@ -272,7 +282,10 @@ COMMON_INDEXES = [
 ]
 
 DEPRECATED_INDEXES = [
-    # ═══ POSTS ═══
+    # ═══ POSTS — ✅ v7.6.16: حُذف 3 فهارس زائدة على published ═══
+    "idx_posts_channel",              # مغطّى بـ prefix من pub_fail_created
+    "idx_posts_published",            # low cardinality، بلا قيمة
+    "idx_posts_channel_published",    # مغطّى بـ pub_fail_created
     "idx_posts_channel_pub_fail_created_optimized",
     "idx_posts_next", "idx_posts_channel_unpub",
     "idx_posts_channel_pub", "idx_posts_channel_pub_fail",
@@ -362,8 +375,6 @@ DEPRECATED_INDEXES = [
 
 CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_log_channel",
-    "idx_posts_channel",
-    "idx_posts_channel_published",
     "idx_posts_channel_pub_fail_created",
     "idx_posts_channel_pub_at",
     "idx_posts_channel_unpub_fresh_created",
@@ -2473,7 +2484,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "slow-query-fix-idx-posts"),
+             "remove-redundant-posts-indexes"),
         )
         await conn.commit()
     except Exception as e:
@@ -3103,7 +3114,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "slow-query-fix-idx-posts",
+            "remove-redundant-posts-indexes",
         )
     except Exception as e:
         if logger:
@@ -3742,7 +3753,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "slow-query-fix-idx-posts",
+                    "remove-redundant-posts-indexes",
                 ),
             )
         except Exception as e:
