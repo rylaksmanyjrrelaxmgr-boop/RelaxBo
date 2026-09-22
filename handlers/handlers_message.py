@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.10 - Fix _fmt)
+handlers_message.py - معالجات الرسائل (v7.9.11 - Auto-Delete Penalty)
 =====================================================================
-🆕 v7.9.10 (إصلاح حرج — _fmt TypeError):
-    ✅ _fmt: تغيير اسم البارامتر من `text` إلى `template`
-       - كان: def _fmt(text, **kwargs) → _fmt(await _trans(...), text=...)
-         يرفع: TypeError: _fmt() got multiple values for argument 'text'
-       - الآن: def _fmt(template, **kwargs) → يعمل بأمان
+🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني):
+    ✅ _delete_and_warn: رسالة العقوبة (🚨) تُحذف بعد 10 ثواني
+       - كانت تبقى في المجموعة
+       - الآن تختفي مثل رسالة التحذير (⚠️)
+
+🆕 v7.9.10 (إصلاح _fmt TypeError):
+    ✅ _fmt: اسم البارامتر `template` بدل `text`
 
 🆕 v7.9.9:
     ✅ apply_penalty: بدون سطر @username (utils.py)
@@ -142,6 +144,9 @@ _MEDIA_REPLY_TYPES = frozenset({
 
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
+
+# ✅ v7.9.11: مدة بقاء رسالة العقوبة قبل الحذف
+PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # =====================================================================
@@ -415,6 +420,13 @@ async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
 
 
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
+    """
+    ✅ حذف رسالة بعد تأخير محدد (افتراضياً 10 ثواني).
+    يُستخدم لحذف:
+      - رسالة التحذير (⚠️)
+      - رسالة العقوبة (🚨) — v7.9.11
+      - رسالة الترجمة
+    """
     await asyncio.sleep(delay)
     await _safe_delete_message(bot, chat_id, message_id)
 
@@ -1180,8 +1192,13 @@ class MessageHandlers:
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id,
                                 violation_type, settings):
+        """
+        ✅ v7.9.11: كلتا الرسالتين (⚠️ التحذير و 🚨 العقوبة)
+                    تُحذفان تلقائياً بعد 10 ثواني.
+        """
         lang = await _ensure_lang(update, context)
 
+        # ═══ حذف رسالة المخالفة الأصلية ═══
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
@@ -1190,11 +1207,13 @@ class MessageHandlers:
             if not _is_delete_ignore_error(e):
                 logger.warning(f"delete failed: {e}")
 
+        # ═══ عدّاد المخالفات ═══
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
         except Exception:
             violation_count = 1
 
+        # ═══ قراءة قاعدة العقوبة ═══
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(chat_id, violation_type)
@@ -1230,6 +1249,9 @@ class MessageHandlers:
         violation_message = await MessageHandlers._get_violation_message(
             violation_type, lang)
 
+        # ═══════════════════════════════════════════════════════════════
+        # ⚠️ رسالة التحذير — تُحذف بعد 10 ثواني
+        # ═══════════════════════════════════════════════════════════════
         try:
             user_name = escape(update.effective_user.first_name or "User")
             warn_title = await _trans('violation_warning_title', lang, "⚠️")
@@ -1243,10 +1265,14 @@ class MessageHandlers:
             sent_msg = await context.bot.send_message(
                 chat_id, message_text, parse_mode='HTML')
             asyncio.create_task(_delete_after_delay(
-                context.bot, chat_id, sent_msg.message_id, 10))
+                context.bot, chat_id, sent_msg.message_id,
+                PENALTY_MESSAGE_DELETE_DELAY))
         except Exception as e:
             logger.warning(f"violation message: {e}")
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🚨 رسالة العقوبة — تُحذف بعد 10 ثواني (v7.9.11)
+        # ═══════════════════════════════════════════════════════════════
         if penalty_type:
             max_strikes = (settings.get('violation_strikes')
                            or settings.get('max_warnings') or 3)
@@ -1257,14 +1283,22 @@ class MessageHandlers:
                     lang=lang)
                 if success:
                     try:
-                        msg_prefix = await _trans('violation_penalty_applied',
-                                                   lang, "🚨 {msg}")
-                        await safe_send(context.bot, chat_id,
-                                        _fmt(msg_prefix, msg=msg),
-                                        parse_mode='HTML')
+                        msg_prefix = await _trans(
+                            'violation_penalty_applied', lang, "🚨 {msg}")
+                        sent_penalty = await safe_send(
+                            context.bot, chat_id,
+                            _fmt(msg_prefix, msg=msg),
+                            parse_mode='HTML')
+                        # ✅ v7.9.11: حذف تلقائي بعد 10 ثواني
+                        if sent_penalty is not None and getattr(
+                                sent_penalty, 'message_id', None):
+                            asyncio.create_task(_delete_after_delay(
+                                context.bot, chat_id,
+                                sent_penalty.message_id,
+                                PENALTY_MESSAGE_DELETE_DELAY))
                         await DB.reset_violation_count(user_id, chat_id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"penalty send/delete: {e}")
 
     @staticmethod
     async def _process_auto_reply(update, context, chat_id, text, user_id=None):
