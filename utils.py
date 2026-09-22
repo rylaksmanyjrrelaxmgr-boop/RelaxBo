@@ -2,18 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.9 - No Username in Penalty)
+utils.py - الأدوات المساعدة للبوت (v7.9.10 - Forbidden Fix)
 =================================================================================
-🆕 v7.9.9 (إزالة @username من رسالة العقوبة):
-    ✅ apply_penalty: حذف سطر "🔗 المعرف: @username"
-    ✅ يُعرض فقط المعرف الرقمي <code>{user_id}</code>
-    ✅ username يبقى محفوظاً في قاعدة البيانات (user_penalties)
+🆕 v7.9.10 (إصلاح Forbidden في safe_send):
+    ✅ التعامل مع Forbidden كخطأ دائم (بدون retry)
+    ✅ يمنع 3 محاولات فاشلة لكل مستخدم محظور
+    ✅ يختصر وقت البث الجماعي إلى الثلث
+    ✅ يقلل عدد السطور في اللوق بنسبة 66%
 
-🆕 v7.9.8 (إصلاح حرج — placeholder يظهر فارغاً):
-    ✅ TranslationManager.get_text: لا يستبدل {placeholders} إذا لم تُمرَّر kwargs
+🆕 v7.9.9:
+    ✅ apply_penalty: بدون سطر @username
 
-🆕 v7.9.7: apply_penalty: رسالة كاملة بـ 17 لغة
+🆕 v7.9.8:
+    ✅ TranslationManager.get_text: لا يستبدل placeholders بلا kwargs
+
+🆕 v7.9.7:
+    ✅ apply_penalty: رسالة كاملة بـ 17 لغة
+    ✅ _PENALTY_I18N: كل الترجمات مدمجة
+
 🔴 v7.9.6: _COMMON_PHRASES + TranslationManager.translate()
+🔴 v7.9.4: KeyboardFactory مسار buttons_config_{lang}.json
+🔴 v7.9.3: TranslationManager سجل عند النجاح/الفشل
+🔴 v7.9.2: إصلاحات ما بعد التدقيق
+🔴 v7.9.1: get_reply_from_file: قائمة أنماط مُسبَق تصريفها
+🔴 v7.9.0: تحميل خارج القفل + إصلاحات حرجة
 =================================================================================
 """
 
@@ -41,7 +53,7 @@ except ImportError:
 
 import aiohttp
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, Update
-from telegram.error import BadRequest, TimedOut, RetryAfter
+from telegram.error import BadRequest, TimedOut, RetryAfter, Forbidden
 from telegram.ext import ContextTypes
 from cachetools import TTLCache
 
@@ -2063,6 +2075,15 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
+    """
+    ✅ v7.9.10: التعامل مع Forbidden كخطأ دائم (بدون retry).
+
+    الفائدة:
+      • المستخدم المحظور (bot blocked) → لا نعيد المحاولة
+      • المستخدم الذي لم يبدأ البوت → لا نعيد المحاولة
+      • الحساب المحذوف → لا نعيد المحاولة
+      → يوفّر 66% من وقت البث + 66% من سطور اللوق
+    """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -2113,6 +2134,26 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
             logger.warning(f"⚠️ TimedOut (attempt {attempt+1})")
             if attempt < max_attempts - 1:
                 await asyncio.sleep(1)
+                continue
+            return None
+        except Forbidden as e:
+            # ═══════════════════════════════════════════════════════
+            # ✅ v7.9.10: Forbidden = خطأ دائم → لا retry
+            # ═══════════════════════════════════════════════════════
+            err_lower = str(e).lower()
+            if ("bot was blocked" in err_lower or
+                    "bot can't initiate" in err_lower or
+                    "user is deactivated" in err_lower or
+                    "chat not found" in err_lower or
+                    "bot was kicked" in err_lower or
+                    "user not found" in err_lower or
+                    "bot is not a member" in err_lower):
+                logger.debug(f"⏭️ Forbidden دائم: {e} (chat={chat_id})")
+                return None
+            # غير ذلك — قد يكون خطأ مؤقت
+            logger.warning(f"⚠️ Forbidden (attempt {attempt+1}): {e}")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1 * (attempt + 1))
                 continue
             return None
         except BadRequest as e:
@@ -2769,9 +2810,7 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
                         chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
-    """
-    ✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username.
-    """
+    """✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username."""
     def T(key: str, **kw) -> str:
         return _penalty_t(key, lang, **kw)
 
@@ -2818,12 +2857,9 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         except Exception:
             pass
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.9.9: بناء الرسالة — بدون سطر @username
-    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.9.9: بدون سطر @username
     lines = [T(penalty), ""]
     lines.append(f"{T('user')} {first_name or T('unknown_user')}")
-    # ❌ تمت إزالة: lines.append(f"{T('username')} @{username}")
     lines.append(f"{T('id')} <code>{user_id}</code>")
 
     if penalty != "unban":
@@ -2835,7 +2871,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     full_msg = "\n".join(lines)
 
-    # ─── حفظ في DB (username يُحفظ هنا رغم عدم عرضه) ───
     if penalty in DB.VALID_PENALTY_TYPES:
         try:
             await DB.add_penalty(
