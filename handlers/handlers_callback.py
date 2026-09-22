@@ -4,18 +4,10 @@
 """
 handlers_callback.py - معالج الأزرار (v9.4.21)
 =====================================================================
-🆕 v9.4.21 — إصلاح أزرار الردود التلقائية:
-  - toggle/admins: استخدام int بدل bool
-  - PG يرفض bool في عمود INTEGER → كان يفشل صامتاً
-  - إضافة عرض الحالة على الأزرار (✅/❌)
-
-✅ v9.4.20 — إصلاح circular import:
-  - _handle_language_change: sys.modules + fallback يدوي
-
-✅ v9.4.19 — updates_channel_btn: فحص URL نهائي
-✅ v9.4.18 — إضافة زر قناة التحديثات
-✅ v9.4.17 — ترجمة كاملة
-✅ v9.4.16 — إصلاح أزرار التحليلات
+✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
+✅ v9.4.20 — إصلاح clear_lang_cache (circular import)
+✅ v9.4.19 — فحص URL لـ updates_channel
+✅ v9.4.18 — زر قناة التحديثات
 =====================================================================
 """
 
@@ -1251,7 +1243,7 @@ class CallbackHandlers:
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang):
         """✅ v9.4.18/19: عرض قناة التحديثات."""
-        title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
+        title = await _trans('updates_channel_title', lang, "📢 Updates Channel")
 
         try:
             ch = await DB.get_updates_channel()
@@ -1265,7 +1257,7 @@ class CallbackHandlers:
             text = (f"{title}\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     + await _trans('no_update_channel', lang,
-                                   "📭 لم يتم تعيين قناة تحديثات بعد"))
+                                   "📭 No update channel set"))
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton(back_text, callback_data=CB.BACK)
             ]])
@@ -1327,12 +1319,12 @@ class CallbackHandlers:
 
         rows = []
         if url_is_valid:
-            open_text = await _trans('open_channel_btn', lang, "📢 فتح القناة")
+            open_text = await _trans('open_channel_btn', lang, "📢 Open Channel")
             rows.append([InlineKeyboardButton(open_text, url=url)])
         else:
             text += ("\n\n⚠️ " +
                      await _trans('channel_link_unavailable', lang,
-                                  "لا يمكن إنشاء رابط لهذه القناة"))
+                                  "Cannot generate link for this channel"))
 
         rows.append([InlineKeyboardButton(back_text, callback_data=CB.BACK)])
 
@@ -1845,9 +1837,9 @@ class CallbackHandlers:
 
             for prefix, state, prompt_key, prompt_default in (
                 ("sec_set_antiflood_messages:", UserState.WAIT_ANTIFLOOD_MESSAGES,
-                 "send_antiflood_messages", "📊 أرسل عدد الرسائل:"),
+                 "send_antiflood_messages", "📊 Send allowed messages:"),
                 ("sec_set_antiflood_seconds:", UserState.WAIT_ANTIFLOOD_SECONDS,
-                 "send_antiflood_seconds", "⏱️ أرسل عدد الثواني:"),
+                 "send_antiflood_seconds", "⏱️ Send seconds:"),
             ):
                 if data.startswith(prefix):
                     parts = data.split(":")
@@ -1898,9 +1890,9 @@ class CallbackHandlers:
 
             for prefix, state, prompt_key, prompt_default in (
                 ("sec_set_night_start:", UserState.WAIT_NIGHT_START,
-                 "send_night_start", "🌙 أرسل وقت البدء (HH:MM):"),
+                 "send_night_start", "🌙 Send start time (HH:MM):"),
                 ("sec_set_night_end:", UserState.WAIT_NIGHT_END,
-                 "send_night_end", "🌙 أرسل وقت النهاية (HH:MM):"),
+                 "send_night_end", "🌙 Send end time (HH:MM):"),
             ):
                 if data.startswith(prefix):
                     parts = data.split(":")
@@ -2197,12 +2189,14 @@ class CallbackHandlers:
         title = await _trans('translation', lang, "🌐")
 
         if is_off:
-            state_line = await _trans('translation_off', lang, "❌")
-            hint_line = await _trans('choose_language', lang, "💡")
+            state_line = await _trans('translation_state_off', lang, "❌")
+            hint_line = await _trans('translation_hint_off', lang, "💡")
         else:
             current_name = langs.get(current_lang, current_lang)
-            state_line = f"✅ {_html.escape(str(current_name))}"
-            hint_line = await _trans('choose_language', lang, "💡")
+            state_line = _fmt(
+                await _trans('translation_state_on', lang, "✅ {name}"),
+                name=_html.escape(str(current_name)))
+            hint_line = await _trans('translation_hint_on', lang, "💡")
 
         text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"{state_line}\n<i>{hint_line}</i>")
@@ -2223,7 +2217,7 @@ class CallbackHandlers:
 
         if not is_off:
             kb.append([InlineKeyboardButton(
-                await _trans('translation_off', lang, "❌"),
+                await _trans('translation_stop_btn', lang, "❌"),
                 callback_data=CB.TRANS_OFF)])
 
         kb.append([InlineKeyboardButton(
@@ -2642,9 +2636,9 @@ class CallbackHandlers:
             status = "⛔" if gd.get('banned') else "✅"
             number = _group_number(display_idx)
             text += f"{status} {number} {name}\n"
-            sec_label = _fmt(await _trans('group_security_btn', lang, "{number} ⚙️"),
+            sec_label = _fmt(await _trans('group_security_btn', lang, "{number} ⚙️ Security"),
                              number=number)
-            del_label = _fmt(await _trans('group_delete_btn', lang, "{number} 🗑️"),
+            del_label = _fmt(await _trans('group_delete_btn', lang, "{number} 🗑️ Delete"),
                              number=number)
             kb.append([
                 InlineKeyboardButton(sec_label,
@@ -2954,7 +2948,7 @@ class CallbackHandlers:
                 callback_data="ch_page_prev"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
-                await _trans('next_btn', lang, "➡️"),
+                await _trans('next_btn', lang, "Next ➡️"),
                 callback_data="ch_page_next"))
         if nav:
             kb.append(nav)
@@ -3010,12 +3004,12 @@ class CallbackHandlers:
                 callback_data="post_page_prev"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
-                await _trans('next_btn', lang, "➡️"),
+                await _trans('next_btn', lang, "Next ➡️"),
                 callback_data="post_page_next"))
         if nav:
             kb.append(nav)
         kb.append([InlineKeyboardButton(
-            await _trans('post_rec', lang, "🔄"), callback_data=CB.POST_REC)])
+            await _trans('post_rec', lang, "♻️"), callback_data=CB.POST_REC)])
         kb.append([InlineKeyboardButton(
             await _trans('post_clear', lang, "🧹"),
             callback_data=f"{CB.POST_CLEAR}_confirm")])
@@ -3069,6 +3063,9 @@ class CallbackHandlers:
 
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
+                settings = await DB.get_auto_reply_settings(chat_id) or {}
+                if not isinstance(settings, dict):
+                    settings = _row_to_dict(settings) or {}
                 try:
                     kb = KeyboardFactory.build("auto_reply",
                                                 chat_id=chat_id, lang=lang)
@@ -3077,6 +3074,15 @@ class CallbackHandlers:
                         [InlineKeyboardButton(
                             KeyboardFactory.get_text("back", lang),
                             callback_data=f"{CB.GRP_SET}:{chat_id}")]])
+                # ✅ v9.4.21: عرض الحالة على الأزرار
+                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = _apply_auto_reply_status_icons(
+                    kb,
+                    _coerce_int(settings.get('enabled', 0)),
+                    _coerce_int(settings.get('only_admins', 0)),
+                    enabled_lbl, admins_lbl,
+                )
                 await safe_edit(query,
                     await _trans('auto_reply_title', lang, "🤖"),
                     reply_markup=kb, bot=context.bot)
@@ -3464,18 +3470,18 @@ class CallbackHandlers:
             status_block = "❌"
 
         help_text = KeyboardFactory.get_text("log_channel_help", lang) or ""
-        title = await _trans('log_channel_btn', lang, "📢")
+        title = await _trans('log_channel_btn', lang, "📢 Log channel")
         text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"{status_block}\n\n<i>{_html.escape(help_text)}</i>\n\n"
                 f"🆔 <code>{chat_id}</code>")
 
         if current:
-            set_text = KeyboardFactory.get_text("log_channel_change", lang) or "🔄"
+            set_text = KeyboardFactory.get_text("log_channel_change", lang) or "🔄 Change channel"
         else:
-            set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗"
-        test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪"
-        remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️"
-        back_text = KeyboardFactory.get_text("back", lang) or "🔙"
+            set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗 Set log"
+        test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 Test"
+        remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️ Remove log"
+        back_text = KeyboardFactory.get_text("back", lang) or "🔙 Back"
 
         rows = [[InlineKeyboardButton(
             set_text, callback_data=f"log_channel_set:{chat_id}")]]
@@ -3536,7 +3542,7 @@ class CallbackHandlers:
                 StateManager.set(user_id, UserState.WAIT_LOG_CH)
                 context.user_data['log_group_id'] = chat_id
                 await safe_edit(query,
-                    await _trans('log_channel_set', lang, "🔗"),
+                    await _trans('log_channel_set', lang, "🔗 Set log"),
                     parse_mode='HTML', bot=context.bot)
                 return
 
@@ -3558,8 +3564,8 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('delete_failed', lang, "❌"), bot=context.bot)
                     return
-                back_text = KeyboardFactory.get_text("back", lang) or "🔙"
-                msg = await _trans('log_channel_removed', lang, "🗑️")
+                back_text = KeyboardFactory.get_text("back", lang) or "🔙 Back"
+                msg = await _trans('log_channel_removed', lang, "🗑️ Log channel removed")
                 await safe_edit(
                     query,
                     f"{msg}\n\n🆔 <code>{chat_id}</code>{share_info}",
@@ -3575,11 +3581,11 @@ class CallbackHandlers:
                     current = await DB.get_log_channel()
                 if not current:
                     await safe_edit(query,
-                        await _trans('log_channel_none', lang, "❌"),
+                        await _trans('log_channel_none', lang, "❌ No log channel"),
                         bot=context.bot)
                     return
                 try:
-                    test_msg = await _trans('log_channel_test', lang, "🧪")
+                    test_msg = await _trans('log_channel_test', lang, "🧪 Test — Log channel works!")
                     await safe_send(
                         context.bot, current,
                         f"{test_msg}\n"
@@ -3752,13 +3758,13 @@ class CallbackHandlers:
                 reply_markup=kb, bot=context.bot)
             return
         durations = [
-            (await _trans('permanent', lang, "∞"), 0),
-            (await _trans('half_hour', lang, "30m"), 1800),
-            (await _trans('hour', lang, "1h"), 3600),
-            (await _trans('day', lang, "1d"), 86400),
-            (await _trans('week', lang, "1w"), 604800),
-            (await _trans('ten_days', lang, "10d"), 864000),
-            (await _trans('month', lang, "1mo"), 2592000),
+            (await _trans('duration_permanent', lang, "∞"), 0),
+            (await _trans('duration_half_hour', lang, "30m"), 1800),
+            (await _trans('duration_hour', lang, "1h"), 3600),
+            (await _trans('duration_day', lang, "1d"), 86400),
+            (await _trans('duration_week', lang, "1w"), 604800),
+            (await _trans('duration_ten_days', lang, "10d"), 864000),
+            (await _trans('duration_month', lang, "1mo"), 2592000),
         ]
         kb = []
         for i in range(0, len(durations), 2):
@@ -3778,7 +3784,8 @@ class CallbackHandlers:
         type_key = f"duration_type_{penalty_type}"
         type_name = await _trans(type_key, lang, penalty_type)
         msg = _fmt(await _trans('choose_duration_for', lang,
-                                "⏱️ {type_name}"), type_name=type_name)
+                                "⏱️ Choose {type_name} duration:"),
+                   type_name=type_name)
         await safe_edit(query, msg, reply_markup=InlineKeyboardMarkup(kb),
                         bot=context.bot)
 
@@ -3812,7 +3819,7 @@ class CallbackHandlers:
                 await _trans('seconds_btn', lang, "⏱️"),
                 callback_data=f"sec_set_antiflood_seconds:{chat_id}")],
             [InlineKeyboardButton(
-                await _trans('penalty_type_btn', lang, "🚫"),
+                await _trans('penalty_type_btn', lang, "Penalty type"),
                 callback_data=f"sec_antiflood_penalty:{chat_id}"),
              InlineKeyboardButton(
                 await _trans('penalty_duration_btn', lang, "⏱️"),
@@ -3879,7 +3886,7 @@ class CallbackHandlers:
                 await _trans('act_pin', lang, "📌"),
                 callback_data=f"act_pin:{chat_id}")],
             [InlineKeyboardButton(
-                await _trans('log_btn', lang, "📋"),
+                await _trans('act_log', lang, "📜"),
                 callback_data=f"act_log:{chat_id}")],
             [InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
@@ -4367,7 +4374,7 @@ class CallbackHandlers:
             if data == CB.ADMIN_LOG_CH:
                 ch = await DB.get_log_channel()
                 if ch:
-                    text = _fmt(await _trans('log_channel_set', lang, "📋 {ch}"),
+                    text = _fmt(await _trans('log_channel_set_success', lang, "📋 {ch}"),
                                 ch=ch)
                 else:
                     text = await _trans('log_channel_not_set', lang, "📭")
@@ -4763,7 +4770,7 @@ class CallbackHandlers:
                     callback_data=f"adm_ch_page:{page - 1}"))
             if page < total_pages - 1:
                 nav.append(InlineKeyboardButton(
-                    await _trans('next_btn', lang, "➡️"),
+                    await _trans('next_btn', lang, "Next ➡️"),
                     callback_data=f"adm_ch_page:{page + 1}"))
             if nav:
                 kb.append(nav)
@@ -4812,7 +4819,7 @@ class CallbackHandlers:
                     callback_data=f"adm_gr_page:{page - 1}"))
             if page < total_pages - 1:
                 nav.append(InlineKeyboardButton(
-                    await _trans('next_btn', lang, "➡️"),
+                    await _trans('next_btn', lang, "Next ➡️"),
                     callback_data=f"adm_gr_page:{page + 1}"))
             if nav:
                 kb.append(nav)
@@ -5362,8 +5369,8 @@ class CallbackHandlers:
                 admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
-                    int(settings.get('enabled', 0) or 0),
-                    int(settings.get('only_admins', 0) or 0),
+                    _coerce_int(settings.get('enabled', 0)),
+                    _coerce_int(settings.get('only_admins', 0)),
                     enabled_lbl, admins_lbl,
                 )
                 await safe_edit(query,
@@ -5389,7 +5396,7 @@ class CallbackHandlers:
                 admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
-                    int(new_status or 0),
+                    _coerce_int(new_status),
                     _coerce_int(settings.get('only_admins', 0)),
                     enabled_lbl, admins_lbl,
                 )
@@ -5424,7 +5431,7 @@ class CallbackHandlers:
                 kb = _apply_auto_reply_status_icons(
                     kb,
                     _coerce_int(settings.get('enabled', 0)),
-                    int(new_status or 0),
+                    _coerce_int(new_status),
                     enabled_lbl, admins_lbl,
                 )
                 status = (await _trans('auto_reply_status_enabled', lang, "✅")
@@ -5571,7 +5578,7 @@ class CallbackHandlers:
                 StateManager.set(user_id, UserState.WAIT_DAY)
                 context.user_data['schedule_ch'] = ch_id
                 await safe_edit(query,
-                    await _trans('send_days_btn', lang, "📅"), bot=context.bot)
+                    await _trans('send_days_btn_short', lang, "📅"), bot=context.bot)
                 return
             if action == "time":
                 StateManager.set(user_id, UserState.WAIT_PUB_TIME)
