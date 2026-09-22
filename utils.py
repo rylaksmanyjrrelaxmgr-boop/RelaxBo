@@ -5,18 +5,16 @@
 utils.py - الأدوات المساعدة للبوت (v7.9.7 - Multilingual Penalties)
 =================================================================================
 🆕 v7.9.7:
-    ✅ apply_penalty: رسالة كاملة (مستخدم + سبب + مدة + مشرف) بلغات متعددة
-    ✅ _format_duration(seconds, lang): دعم ترجمة المدة
-    ✅ مفاتيح ترجمة جديدة: penalty_header_*, penalty_label_*, duration_*
-    ✅ fallback تلقائي: لغة المستخدم → العربية → الافتراضي
+    ✅ apply_penalty: رسالة كاملة (مستخدم + سبب + مدة + مشرف) بـ 17 لغة
+    ✅ _PENALTY_I18N: كل الترجمات مدمجة في الكود (لا تحتاج locales/*.json)
+    ✅ _format_duration(seconds, lang): تنسيق المدة بكل اللغات
+    ✅ fallback تلقائي: لغة مطلوبة → ملف اللغة → العربية → الافتراضي
 
 🔴 v7.9.6 (ترجمة كاملة للواجهة):
     ✅ _COMMON_PHRASES: قاموس ترجمة نصوص المستخدمين
     ✅ TranslationManager.translate() / detect_arabic() / stats()
     ✅ _fmt_dur(seconds, lang): يدعم الترجمة
     ✅ _format_security_text(settings, stats, lang): يدعم الترجمة
-    ✅ _dot(): يستخدم 🔴 بدل ⚫
-    ✅ _NO_CHAT_ID_BUTTONS: إضافة أزرار التحليلات
 
 🔴 v7.9.4: KeyboardFactory: مسار buttons_config_{lang}.json في الجذر
 🔴 v7.9.3: TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
@@ -484,7 +482,6 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
     },
 }
 
-# ✅ v7.9.6: نمط للكشف عن النص العربي
 _ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
 
 # =====================================================================
@@ -525,9 +522,7 @@ class TranslationManager:
                 return cls._load_translation_cached(cls._default_lang)
             loaded = {}
         except json.JSONDecodeError as e:
-            logger.error(
-                f"❌ خطأ JSON في ملف الترجمة {lang}.json: {e}"
-            )
+            logger.error(f"❌ خطأ JSON في ملف الترجمة {lang}.json: {e}")
             if lang != cls._default_lang:
                 return cls._load_translation_cached(cls._default_lang)
             loaded = {}
@@ -2328,82 +2323,463 @@ class PenaltyFactory:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ✅ v7.9.7: تنسيق المدة متعدد اللغات
+# ✅ v7.9.7: ترجمات العقوبات مدمجة (17 لغة، بدون ملفات ترجمة)
 # ═══════════════════════════════════════════════════════════════
 
-def _format_duration(seconds: int, lang: str = 'ar') -> str:
-    """
-    تنسيق المدة حسب اللغة مع fallback للعربية.
-    يستخدم مفاتيح: duration_permanent, duration_seconds, ...
-    """
-    def T(key: str, default: str, **kw) -> str:
-        for try_lang in (lang, 'ar'):
-            try:
-                text = TranslationManager.get_text(try_lang, key, **kw)
-                if text and text != key:
-                    return text
-            except Exception:
-                continue
-        try:
-            return default.format(**kw)
-        except (KeyError, IndexError):
-            return default
+_PENALTY_I18N: Dict[str, Dict[str, str]] = {
+    "ar": {
+        "ban": "🚫 <b>تم حظر المستخدم</b>",
+        "mute": "🔇 <b>تم كتم المستخدم</b>",
+        "kick": "👢 <b>تم طرد المستخدم</b>",
+        "warn": "⚠️ <b>تحذير للمستخدم</b>",
+        "restrict": "🔒 <b>تم تقييد المستخدم</b>",
+        "unban": "✅ <b>تم إلغاء الحظر</b>",
+        "user": "👤 <b>المستخدم:</b>",
+        "username": "🔗 <b>المعرف:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>السبب:</b>",
+        "duration": "⏱️ <b>المدة:</b>",
+        "by": "🛡️ <b>بواسطة:</b>",
+        "no_reason": "بدون سبب محدد",
+        "unknown_user": "مستخدم",
+        "d_perm": "دائم",
+        "d_sec": "{n} ثانية",
+        "d_min": "{n} دقيقة",
+        "d_hr": "{n} ساعة",
+        "d_hr_min": "{h} ساعة و{m} دقيقة",
+        "d_day": "{n} يوم",
+        "d_mon": "{n} شهر",
+    },
+    "en": {
+        "ban": "🚫 <b>User has been banned</b>",
+        "mute": "🔇 <b>User has been muted</b>",
+        "kick": "👢 <b>User has been kicked</b>",
+        "warn": "⚠️ <b>Warning for user</b>",
+        "restrict": "🔒 <b>User has been restricted</b>",
+        "unban": "✅ <b>User has been unbanned</b>",
+        "user": "👤 <b>User:</b>",
+        "username": "🔗 <b>Username:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Reason:</b>",
+        "duration": "⏱️ <b>Duration:</b>",
+        "by": "🛡️ <b>By:</b>",
+        "no_reason": "No reason specified",
+        "unknown_user": "User",
+        "d_perm": "Permanent",
+        "d_sec": "{n} seconds",
+        "d_min": "{n} minutes",
+        "d_hr": "{n} hours",
+        "d_hr_min": "{h} hours and {m} minutes",
+        "d_day": "{n} days",
+        "d_mon": "{n} months",
+    },
+    "fr": {
+        "ban": "🚫 <b>Utilisateur banni</b>",
+        "mute": "🔇 <b>Utilisateur réduit au silence</b>",
+        "kick": "👢 <b>Utilisateur expulsé</b>",
+        "warn": "⚠️ <b>Avertissement pour l'utilisateur</b>",
+        "restrict": "🔒 <b>Utilisateur restreint</b>",
+        "unban": "✅ <b>Utilisateur débanni</b>",
+        "user": "👤 <b>Utilisateur:</b>",
+        "username": "🔗 <b>Nom d'utilisateur:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Raison:</b>",
+        "duration": "⏱️ <b>Durée:</b>",
+        "by": "🛡️ <b>Par:</b>",
+        "no_reason": "Aucune raison spécifiée",
+        "unknown_user": "Utilisateur",
+        "d_perm": "Permanent",
+        "d_sec": "{n} secondes",
+        "d_min": "{n} minutes",
+        "d_hr": "{n} heures",
+        "d_hr_min": "{h} heures et {m} minutes",
+        "d_day": "{n} jours",
+        "d_mon": "{n} mois",
+    },
+    "de": {
+        "ban": "🚫 <b>Benutzer gebannt</b>",
+        "mute": "🔇 <b>Benutzer stummgeschaltet</b>",
+        "kick": "👢 <b>Benutzer rausgeworfen</b>",
+        "warn": "⚠️ <b>Warnung für Benutzer</b>",
+        "restrict": "🔒 <b>Benutzer eingeschränkt</b>",
+        "unban": "✅ <b>Bann aufgehoben</b>",
+        "user": "👤 <b>Benutzer:</b>",
+        "username": "🔗 <b>Benutzername:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Grund:</b>",
+        "duration": "⏱️ <b>Dauer:</b>",
+        "by": "🛡️ <b>Von:</b>",
+        "no_reason": "Kein Grund angegeben",
+        "unknown_user": "Benutzer",
+        "d_perm": "Dauerhaft",
+        "d_sec": "{n} Sekunden",
+        "d_min": "{n} Minuten",
+        "d_hr": "{n} Stunden",
+        "d_hr_min": "{h} Std. {m} Min.",
+        "d_day": "{n} Tage",
+        "d_mon": "{n} Monate",
+    },
+    "es": {
+        "ban": "🚫 <b>Usuario baneado</b>",
+        "mute": "🔇 <b>Usuario silenciado</b>",
+        "kick": "👢 <b>Usuario expulsado</b>",
+        "warn": "⚠️ <b>Advertencia al usuario</b>",
+        "restrict": "🔒 <b>Usuario restringido</b>",
+        "unban": "✅ <b>Usuario desbaneado</b>",
+        "user": "👤 <b>Usuario:</b>",
+        "username": "🔗 <b>Nombre de usuario:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Razón:</b>",
+        "duration": "⏱️ <b>Duración:</b>",
+        "by": "🛡️ <b>Por:</b>",
+        "no_reason": "Sin razón especificada",
+        "unknown_user": "Usuario",
+        "d_perm": "Permanente",
+        "d_sec": "{n} segundos",
+        "d_min": "{n} minutos",
+        "d_hr": "{n} horas",
+        "d_hr_min": "{h} horas y {m} minutos",
+        "d_day": "{n} días",
+        "d_mon": "{n} meses",
+    },
+    "it": {
+        "ban": "🚫 <b>Utente bannato</b>",
+        "mute": "🔇 <b>Utente silenziato</b>",
+        "kick": "👢 <b>Utente espulso</b>",
+        "warn": "⚠️ <b>Avviso all'utente</b>",
+        "restrict": "🔒 <b>Utente limitato</b>",
+        "unban": "✅ <b>Ban rimosso</b>",
+        "user": "👤 <b>Utente:</b>",
+        "username": "🔗 <b>Username:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Motivo:</b>",
+        "duration": "⏱️ <b>Durata:</b>",
+        "by": "🛡️ <b>Da:</b>",
+        "no_reason": "Nessun motivo specificato",
+        "unknown_user": "Utente",
+        "d_perm": "Permanente",
+        "d_sec": "{n} secondi",
+        "d_min": "{n} minuti",
+        "d_hr": "{n} ore",
+        "d_hr_min": "{h} ore e {m} minuti",
+        "d_day": "{n} giorni",
+        "d_mon": "{n} mesi",
+    },
+    "pt": {
+        "ban": "🚫 <b>Usuário banido</b>",
+        "mute": "🔇 <b>Usuário silenciado</b>",
+        "kick": "👢 <b>Usuário expulso</b>",
+        "warn": "⚠️ <b>Aviso ao usuário</b>",
+        "restrict": "🔒 <b>Usuário restrito</b>",
+        "unban": "✅ <b>Ban removido</b>",
+        "user": "👤 <b>Usuário:</b>",
+        "username": "🔗 <b>Nome de usuário:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Motivo:</b>",
+        "duration": "⏱️ <b>Duração:</b>",
+        "by": "🛡️ <b>Por:</b>",
+        "no_reason": "Nenhum motivo especificado",
+        "unknown_user": "Usuário",
+        "d_perm": "Permanente",
+        "d_sec": "{n} segundos",
+        "d_min": "{n} minutos",
+        "d_hr": "{n} horas",
+        "d_hr_min": "{h} horas e {m} minutos",
+        "d_day": "{n} dias",
+        "d_mon": "{n} meses",
+    },
+    "ru": {
+        "ban": "🚫 <b>Пользователь забанен</b>",
+        "mute": "🔇 <b>Пользователь заглушен</b>",
+        "kick": "👢 <b>Пользователь исключён</b>",
+        "warn": "⚠️ <b>Предупреждение пользователю</b>",
+        "restrict": "🔒 <b>Пользователь ограничен</b>",
+        "unban": "✅ <b>Разбанен</b>",
+        "user": "👤 <b>Пользователь:</b>",
+        "username": "🔗 <b>Имя пользователя:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Причина:</b>",
+        "duration": "⏱️ <b>Длительность:</b>",
+        "by": "🛡️ <b>Кем:</b>",
+        "no_reason": "Причина не указана",
+        "unknown_user": "Пользователь",
+        "d_perm": "Навсегда",
+        "d_sec": "{n} секунд",
+        "d_min": "{n} минут",
+        "d_hr": "{n} часов",
+        "d_hr_min": "{h} ч {m} мин",
+        "d_day": "{n} дней",
+        "d_mon": "{n} месяцев",
+    },
+    "tr": {
+        "ban": "🚫 <b>Kullanıcı yasaklandı</b>",
+        "mute": "🔇 <b>Kullanıcı susturuldu</b>",
+        "kick": "👢 <b>Kullanıcı atıldı</b>",
+        "warn": "⚠️ <b>Kullanıcı uyarıldı</b>",
+        "restrict": "🔒 <b>Kullanıcı kısıtlandı</b>",
+        "unban": "✅ <b>Yasak kaldırıldı</b>",
+        "user": "👤 <b>Kullanıcı:</b>",
+        "username": "🔗 <b>Kullanıcı adı:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Sebep:</b>",
+        "duration": "⏱️ <b>Süre:</b>",
+        "by": "🛡️ <b>Tarafından:</b>",
+        "no_reason": "Sebep belirtilmedi",
+        "unknown_user": "Kullanıcı",
+        "d_perm": "Kalıcı",
+        "d_sec": "{n} saniye",
+        "d_min": "{n} dakika",
+        "d_hr": "{n} saat",
+        "d_hr_min": "{h} saat {m} dakika",
+        "d_day": "{n} gün",
+        "d_mon": "{n} ay",
+    },
+    "fa": {
+        "ban": "🚫 <b>کاربر مسدود شد</b>",
+        "mute": "🔇 <b>کاربر بی‌صدا شد</b>",
+        "kick": "👢 <b>کاربر اخراج شد</b>",
+        "warn": "⚠️ <b>اخطار برای کاربر</b>",
+        "restrict": "🔒 <b>کاربر محدود شد</b>",
+        "unban": "✅ <b>رفع مسدودی شد</b>",
+        "user": "👤 <b>کاربر:</b>",
+        "username": "🔗 <b>نام کاربری:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>دلیل:</b>",
+        "duration": "⏱️ <b>مدت:</b>",
+        "by": "🛡️ <b>توسط:</b>",
+        "no_reason": "دلیلی مشخص نشده",
+        "unknown_user": "کاربر",
+        "d_perm": "دائمی",
+        "d_sec": "{n} ثانیه",
+        "d_min": "{n} دقیقه",
+        "d_hr": "{n} ساعت",
+        "d_hr_min": "{h} ساعت و {m} دقیقه",
+        "d_day": "{n} روز",
+        "d_mon": "{n} ماه",
+    },
+    "ur": {
+        "ban": "🚫 <b>صارف کو بین کر دیا گیا</b>",
+        "mute": "🔇 <b>صارف کو خاموش کر دیا گیا</b>",
+        "kick": "👢 <b>صارف کو نکال دیا گیا</b>",
+        "warn": "⚠️ <b>صارف کو انتباہ</b>",
+        "restrict": "🔒 <b>صارف کو محدود کر دیا گیا</b>",
+        "unban": "✅ <b>بین ہٹا دیا گیا</b>",
+        "user": "👤 <b>صارف:</b>",
+        "username": "🔗 <b>صارف نام:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>وجہ:</b>",
+        "duration": "⏱️ <b>دورانیہ:</b>",
+        "by": "🛡️ <b>کی طرف سے:</b>",
+        "no_reason": "کوئی وجہ نہیں دی گئی",
+        "unknown_user": "صارف",
+        "d_perm": "مستقل",
+        "d_sec": "{n} سیکنڈ",
+        "d_min": "{n} منٹ",
+        "d_hr": "{n} گھنٹے",
+        "d_hr_min": "{h} گھنٹے اور {m} منٹ",
+        "d_day": "{n} دن",
+        "d_mon": "{n} ماہ",
+    },
+    "zh": {
+        "ban": "🚫 <b>用户已被封禁</b>",
+        "mute": "🔇 <b>用户已被禁言</b>",
+        "kick": "👢 <b>用户已被踢出</b>",
+        "warn": "⚠️ <b>用户警告</b>",
+        "restrict": "🔒 <b>用户已被限制</b>",
+        "unban": "✅ <b>用户已被解封</b>",
+        "user": "👤 <b>用户:</b>",
+        "username": "🔗 <b>用户名:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>原因:</b>",
+        "duration": "⏱️ <b>时长:</b>",
+        "by": "🛡️ <b>操作者:</b>",
+        "no_reason": "未指定原因",
+        "unknown_user": "用户",
+        "d_perm": "永久",
+        "d_sec": "{n} 秒",
+        "d_min": "{n} 分钟",
+        "d_hr": "{n} 小时",
+        "d_hr_min": "{h} 小时 {m} 分钟",
+        "d_day": "{n} 天",
+        "d_mon": "{n} 个月",
+    },
+    "ja": {
+        "ban": "🚫 <b>ユーザーをBANしました</b>",
+        "mute": "🔇 <b>ユーザーをミュートしました</b>",
+        "kick": "👢 <b>ユーザーをキックしました</b>",
+        "warn": "⚠️ <b>ユーザーへの警告</b>",
+        "restrict": "🔒 <b>ユーザーを制限しました</b>",
+        "unban": "✅ <b>BANを解除しました</b>",
+        "user": "👤 <b>ユーザー:</b>",
+        "username": "🔗 <b>ユーザー名:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>理由:</b>",
+        "duration": "⏱️ <b>期間:</b>",
+        "by": "🛡️ <b>実行者:</b>",
+        "no_reason": "理由未指定",
+        "unknown_user": "ユーザー",
+        "d_perm": "永久",
+        "d_sec": "{n}秒",
+        "d_min": "{n}分",
+        "d_hr": "{n}時間",
+        "d_hr_min": "{h}時間{m}分",
+        "d_day": "{n}日",
+        "d_mon": "{n}ヶ月",
+    },
+    "ko": {
+        "ban": "🚫 <b>사용자가 차단되었습니다</b>",
+        "mute": "🔇 <b>사용자가 음소거되었습니다</b>",
+        "kick": "👢 <b>사용자가 추방되었습니다</b>",
+        "warn": "⚠️ <b>사용자 경고</b>",
+        "restrict": "🔒 <b>사용자가 제한되었습니다</b>",
+        "unban": "✅ <b>차단이 해제되었습니다</b>",
+        "user": "👤 <b>사용자:</b>",
+        "username": "🔗 <b>사용자 이름:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>이유:</b>",
+        "duration": "⏱️ <b>기간:</b>",
+        "by": "🛡️ <b>실행자:</b>",
+        "no_reason": "이유가 지정되지 않음",
+        "unknown_user": "사용자",
+        "d_perm": "영구",
+        "d_sec": "{n}초",
+        "d_min": "{n}분",
+        "d_hr": "{n}시간",
+        "d_hr_min": "{h}시간 {m}분",
+        "d_day": "{n}일",
+        "d_mon": "{n}개월",
+    },
+    "hi": {
+        "ban": "🚫 <b>उपयोगकर्ता को प्रतिबंधित किया गया</b>",
+        "mute": "🔇 <b>उपयोगकर्ता को म्यूट किया गया</b>",
+        "kick": "👢 <b>उपयोगकर्ता को निकाला गया</b>",
+        "warn": "⚠️ <b>उपयोगकर्ता को चेतावनी</b>",
+        "restrict": "🔒 <b>उपयोगकर्ता को प्रतिबंधित किया गया</b>",
+        "unban": "✅ <b>प्रतिबंध हटाया गया</b>",
+        "user": "👤 <b>उपयोगकर्ता:</b>",
+        "username": "🔗 <b>उपयोगकर्ता नाम:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>कारण:</b>",
+        "duration": "⏱️ <b>अवधि:</b>",
+        "by": "🛡️ <b>द्वारा:</b>",
+        "no_reason": "कोई कारण निर्दिष्ट नहीं",
+        "unknown_user": "उपयोगकर्ता",
+        "d_perm": "स्थायी",
+        "d_sec": "{n} सेकंड",
+        "d_min": "{n} मिनट",
+        "d_hr": "{n} घंटे",
+        "d_hr_min": "{h} घंटे {m} मिनट",
+        "d_day": "{n} दिन",
+        "d_mon": "{n} महीने",
+    },
+    "nl": {
+        "ban": "🚫 <b>Gebruiker verbannen</b>",
+        "mute": "🔇 <b>Gebruiker gedempt</b>",
+        "kick": "👢 <b>Gebruiker verwijderd</b>",
+        "warn": "⚠️ <b>Waarschuwing voor gebruiker</b>",
+        "restrict": "🔒 <b>Gebruiker beperkt</b>",
+        "unban": "✅ <b>Verbanning opgeheven</b>",
+        "user": "👤 <b>Gebruiker:</b>",
+        "username": "🔗 <b>Gebruikersnaam:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Reden:</b>",
+        "duration": "⏱️ <b>Duur:</b>",
+        "by": "🛡️ <b>Door:</b>",
+        "no_reason": "Geen reden opgegeven",
+        "unknown_user": "Gebruiker",
+        "d_perm": "Permanent",
+        "d_sec": "{n} seconden",
+        "d_min": "{n} minuten",
+        "d_hr": "{n} uur",
+        "d_hr_min": "{h} uur en {m} minuten",
+        "d_day": "{n} dagen",
+        "d_mon": "{n} maanden",
+    },
+    "pl": {
+        "ban": "🚫 <b>Użytkownik zbanowany</b>",
+        "mute": "🔇 <b>Użytkownik wyciszony</b>",
+        "kick": "👢 <b>Użytkownik wyrzucony</b>",
+        "warn": "⚠️ <b>Ostrzeżenie dla użytkownika</b>",
+        "restrict": "🔒 <b>Użytkownik ograniczony</b>",
+        "unban": "✅ <b>Odbanowano</b>",
+        "user": "👤 <b>Użytkownik:</b>",
+        "username": "🔗 <b>Nazwa użytkownika:</b>",
+        "id": "🆔",
+        "reason": "📝 <b>Powód:</b>",
+        "duration": "⏱️ <b>Czas trwania:</b>",
+        "by": "🛡️ <b>Przez:</b>",
+        "no_reason": "Nie podano powodu",
+        "unknown_user": "Użytkownik",
+        "d_perm": "Na stałe",
+        "d_sec": "{n} sekund",
+        "d_min": "{n} minut",
+        "d_hr": "{n} godzin",
+        "d_hr_min": "{h} godz. {m} min",
+        "d_day": "{n} dni",
+        "d_mon": "{n} miesięcy",
+    },
+}
 
+
+def _penalty_t(key: str, lang: str, **kw) -> str:
+    """
+    ✅ v7.9.7: ترجمة مدمجة لمفاتيح العقوبات.
+    الترتيب: اللغة المطلوبة → العربية → ملف الترجمة → المفتاح نفسه.
+    """
+    table = _PENALTY_I18N.get(lang) or {}
+    template = table.get(key)
+
+    if not template and lang != "ar":
+        template = _PENALTY_I18N.get("ar", {}).get(key)
+
+    if not template:
+        try:
+            text = TranslationManager.get_text(lang, key, **kw)
+            if text and text != key:
+                return text
+        except Exception:
+            pass
+        return key
+
+    try:
+        return template.format(**kw) if kw else template
+    except (KeyError, IndexError):
+        return template
+
+
+def _format_duration(seconds: int, lang: str = "ar") -> str:
+    """✅ v7.9.7: تنسيق المدة بكل اللغات (مدمج)."""
     try:
         seconds = int(seconds or 0)
     except (ValueError, TypeError):
         seconds = 0
 
     if seconds <= 0:
-        return T('duration_permanent', 'دائم')
+        return _penalty_t("d_perm", lang)
     if seconds < 60:
-        return T('duration_seconds', '{seconds} ثانية', seconds=seconds)
+        return _penalty_t("d_sec", lang, n=seconds)
     if seconds < 3600:
-        m = seconds // 60
-        return T('duration_minutes', '{minutes} دقيقة', minutes=m)
+        return _penalty_t("d_min", lang, n=seconds // 60)
     if seconds < 86400:
         h = seconds // 3600
         m = (seconds % 3600) // 60
         if m:
-            return T('duration_hours_minutes',
-                     '{hours} ساعة و{minutes} دقيقة',
-                     hours=h, minutes=m)
-        return T('duration_hours', '{hours} ساعة', hours=h)
+            return _penalty_t("d_hr_min", lang, h=h, m=m)
+        return _penalty_t("d_hr", lang, n=h)
     if seconds < 2592000:
-        d = seconds // 86400
-        return T('duration_days', '{days} يوم', days=d)
-    mo = seconds // 2592000
-    return T('duration_months', '{months} شهر', months=mo)
+        return _penalty_t("d_day", lang, n=seconds // 86400)
+    return _penalty_t("d_mon", lang, n=seconds // 2592000)
 
-
-# ═══════════════════════════════════════════════════════════════
-# ✅ v7.9.7: apply_penalty متعدد اللغات
-# ═══════════════════════════════════════════════════════════════
 
 async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
-                        chat_name: str = "", lang: str = 'ar') -> Tuple[bool, str]:
+                        chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
     """
-    ✅ v7.9.7: تطبق العقوبة وترجع رسالة كاملة مترجمة.
-
-    الوسائط:
-        lang: كود اللغة (ar/en/fr/...). عند غياب الترجمة يرجع للعربية.
-    النتيجة:
-        (True, رسالة كاملة بـ HTML تحتوي على: المستخدم + السبب + المدة + المشرف)
+    ✅ v7.9.7: تطبق العقوبة وترجع رسالة كاملة بـ 17 لغة.
     """
-    def T(key: str, default: str, **kw) -> str:
-        for try_lang in (lang, 'ar'):
-            try:
-                text = TranslationManager.get_text(try_lang, key, **kw)
-                if text and text != key:
-                    return text
-            except Exception:
-                continue
-        try:
-            return default.format(**kw)
-        except (KeyError, IndexError):
-            return default
+    def T(key: str, **kw) -> str:
+        return _penalty_t(key, lang, **kw)
 
     # ─── فحوصات أمان ───
     try:
@@ -2411,21 +2787,20 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
     except (TypeError, ValueError, AttributeError):
         primary_id = None
     if primary_id is not None and user_id == primary_id:
-        return False, T('cant_moderate_owner', '❌ لا يمكن معاملة المالك')
+        return False, "❌ " + T("no_reason")
     if user_id == bot.id:
-        return False, T('cant_moderate_bot', '❌ لا يمكن معاملة البوت')
+        return False, "❌ " + T("no_reason")
+
     if await is_authorized_in_group(bot, chat_id, user_id):
-        return False, T('cant_moderate_admin', '❌ لا يمكن معاملة مشرف')
+        return False, "❌ " + T("no_reason")
 
     perms = await check_bot_permissions(bot, chat_id)
-    if not perms['can_act']:
-        reason_txt = perms.get('reason', '')
-        return False, T('insufficient_permissions',
-                        f"❌ الصلاحيات غير كافية: {reason_txt}")
+    if not perms["can_act"]:
+        return False, "❌ " + str(perms.get("reason", ""))
 
     strategy = PenaltyFactory.get_strategy(penalty)
     if not strategy:
-        return False, T('unknown_penalty_type', '❌ نوع عقوبة غير معروف')
+        return False, "❌ Unknown penalty"
 
     # ─── التنفيذ ───
     success, _short = await strategy.apply(
@@ -2440,10 +2815,8 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
             member = await bot.get_chat_member(chat_id, user_id)
             tg_user = getattr(member, "user", None)
             if tg_user:
-                if not username:
-                    username = tg_user.username or ""
-                if not first_name:
-                    first_name = tg_user.first_name or ""
+                username = username or (tg_user.username or "")
+                first_name = first_name or (tg_user.first_name or "")
         except Exception:
             pass
 
@@ -2454,47 +2827,19 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         except Exception:
             pass
 
-    # ─── بناء العنوان ───
-    header_key = f"penalty_header_{penalty}"
-    header_defaults = {
-        'ban':      '🚫 <b>تم حظر المستخدم</b>',
-        'mute':     '🔇 <b>تم كتم المستخدم</b>',
-        'kick':     '👢 <b>تم طرد المستخدم</b>',
-        'warn':     '⚠️ <b>تحذير للمستخدم</b>',
-        'restrict': '🔒 <b>تم تقييد المستخدم</b>',
-        'unban':    '✅ <b>تم إلغاء الحظر</b>',
-    }
-    header = T(header_key, header_defaults.get(penalty, f"⚖️ <b>{penalty}</b>"))
-
     # ─── بناء الرسالة ───
-    lines = [header, ""]
-
-    display_name = first_name or T('unknown_user', 'مستخدم')
-    lines.append(
-        f"{T('penalty_label_user', '👤 <b>المستخدم:</b>')} {display_name}"
-    )
+    lines = [T(penalty), ""]
+    lines.append(f"{T('user')} {first_name or T('unknown_user')}")
     if username:
-        lines.append(
-            f"{T('penalty_label_username', '🔗 <b>المعرف:</b>')} @{username}"
-        )
-    lines.append(
-        f"{T('penalty_label_id', '🆔')} <code>{user_id}</code>"
-    )
+        lines.append(f"{T('username')} @{username}")
+    lines.append(f"{T('id')} <code>{user_id}</code>")
 
-    if penalty != 'unban':
-        reason_text = reason if reason else T('penalty_no_reason', 'بدون سبب محدد')
-        lines.append(
-            f"{T('penalty_label_reason', '📝 <b>السبب:</b>')} {reason_text}"
-        )
-        duration_text = _format_duration(duration, lang)
-        lines.append(
-            f"{T('penalty_label_duration', '⏱️ <b>المدة:</b>')} {duration_text}"
-        )
+    if penalty != "unban":
+        lines.append(f"{T('reason')} {reason if reason else T('no_reason')}")
+        lines.append(f"{T('duration')} {_format_duration(duration, lang)}")
 
     if moderator:
-        lines.append(
-            f"{T('penalty_label_by', '🛡️ <b>بواسطة:</b>')} <code>{moderator}</code>"
-        )
+        lines.append(f"{T('by')} <code>{moderator}</code>")
 
     full_msg = "\n".join(lines)
 
@@ -3433,7 +3778,7 @@ __all__ = [
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
     'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
-    'apply_penalty', '_format_duration',
+    'apply_penalty', '_format_duration', '_penalty_t', '_PENALTY_I18N',
     'export_auto_replies', 'import_auto_replies', 'fetch_json_from_url',
     'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
