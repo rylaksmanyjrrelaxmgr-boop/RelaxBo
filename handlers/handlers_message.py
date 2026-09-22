@@ -2,37 +2,28 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.8 - Lang for Penalty)
+handlers_message.py - معالجات الرسائل (v7.9.10 - Fix _fmt)
 =====================================================================
-🆕 v7.9.8 (تمرير lang لدعم كل اللغات):
-    ✅ apply_violation_penalty: يقبل lang ويعيد رسالة كاملة (مستخدم + سبب
-       + مدة + مشرف) بلغة المجموعة
-    ✅ _delete_and_warn: يمرر lang إلى apply_violation_penalty
-    ✅ حل مشكلة ظهور "🚨" فقط — الآن يظهر:
-       "🚨 🔇 تم كتم المستخدم / 👤 المستخدم / 📝 السبب / ⏱️ المدة"
+🆕 v7.9.10 (إصلاح حرج — _fmt TypeError):
+    ✅ _fmt: تغيير اسم البارامتر من `text` إلى `template`
+       - كان: def _fmt(text, **kwargs) → _fmt(await _trans(...), text=...)
+         يرفع: TypeError: _fmt() got multiple values for argument 'text'
+       - الآن: def _fmt(template, **kwargs) → يعمل بأمان
 
-🆕 v7.9.3 (إصلاح):
-    ✅ _handle_redeem_gift_input: send_code_empty بدل send_code
-       (send_code الآن prompt: "📝 أرسل الكود: /redeem_gift <الكود>")
+🆕 v7.9.9:
+    ✅ apply_penalty: بدون سطر @username (utils.py)
 
-🆕 v7.9.2 (إصلاحات):
-    ✅ handle_private: معالجة رسائل log_group_id بدل إسقاطها صامتاً
-    ✅ handle_log_group_input: دالة جديدة لقناة سجل المجموعات
-    ✅ _handle_update_ch_input: يتحقق من صحة الإدخال قبل الحفظ
-    ✅ _handle_log_ch_input: يستدعي handle_log_group_input عند وجود log_group_id
-    ✅ _handle_penalty_input: استخدام needs_duration فعلياً
-    ✅ _do_db_restore: حذف -wal/-shm/-journal بعد الاستعادة
+🆕 v7.9.8:
+    ✅ apply_violation_penalty: يقبل lang ويعيد رسالة كاملة
 
-🆕 v7.9.1:
-    ✅ _handle_log_ch_input: يتحقق من صحة الإدخال قبل الحفظ
-       - يقبل: معرّف رقمي، @username، username، t.me/...
-       - يرفض: أي نص آخر (Heartbeat, تعليقات، إلخ)
-       - يترك WAIT_LOG_CH لمجموعة عند وجود log_group_id
+🆕 v7.9.3:
+    ✅ _handle_redeem_gift_input: send_code_empty
 
-🆕 v7.9.0:
-    ✅ _trans: يستخدم TranslationManager + fallback
-    ✅ clear_lang_cache مُصدَّرة
-    ✅ HTML بدل Markdown
+🆕 v7.9.2:
+    ✅ handle_log_group_input
+    ✅ _handle_update_ch_input: تحقق من الصحة
+    ✅ _handle_penalty_input: needs_duration
+    ✅ _do_db_restore: حذف WAL/SHM
 =====================================================================
 """
 
@@ -80,13 +71,12 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# ✅ v7.9.1: استيراد أداة التحقق من database_settings
+# استيراد أداة التحقق من database_settings
 # =====================================================================
 
 try:
     from database_settings import _is_valid_channel_ref
 except ImportError:
-    # Fallback: نسخة محلية إذا لم تُحمَّل
     _TG_USERNAME_RE_FALLBACK = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{3,31}$')
 
     def _is_valid_channel_ref(value) -> bool:
@@ -255,7 +245,7 @@ async def _invalidate_after_channel_change(
 
 
 # =====================================================================
-# Rate Limiter
+# Rate Limiter Manager
 # =====================================================================
 
 class GroupRateLimiterManager:
@@ -308,7 +298,7 @@ class GroupRateLimiterManager:
 
 
 # =====================================================================
-# ✅ الترجمة
+# الترجمة
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
@@ -332,11 +322,26 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     return default or key
 
 
-def _fmt(text: str, **kwargs) -> str:
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.9.10: _fmt مُصلَح — اسم البارامتر template بدل text
+# ═══════════════════════════════════════════════════════════════════
+def _fmt(template: str, **kwargs) -> str:
+    """
+    ✅ v7.9.10: اسم البارامتر `template` بدل `text`.
+
+    كان الخطأ:
+      def _fmt(text: str, **kwargs):
+      _fmt(await _trans('set_success', lang, "✅ {text}"), text=escape(text))
+      → TypeError: _fmt() got multiple values for argument 'text'
+
+    الإصلاح:
+      def _fmt(template: str, **kwargs):
+      ↑ يُستخدَم `text` كـ kwarg بحرية
+    """
     try:
-        return text.format(**kwargs)
+        return template.format(**kwargs)
     except (KeyError, IndexError):
-        return text
+        return template
 
 
 async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -464,27 +469,15 @@ async def _send_translation_reply(bot, chat_id, original_message_id, translated,
         logger.debug(f"_send_translation_reply: {e}")
 
 
-# ═════════════════════════════════════════════════════════════════════
-# ✅ v7.9.8: apply_violation_penalty مع lang — رسالة كاملة
-# ═════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# apply_violation_penalty — يقبل lang
+# ═══════════════════════════════════════════════════════════════════
 
 async def apply_violation_penalty(update, context, chat_id, user_id,
                                    violation_type, penalty_type,
                                    duration_seconds,
                                    lang: str = 'ar') -> Tuple[bool, str]:
-    """
-    ✅ v7.9.8: تدعم تمرير lang لترجمة رسالة العقوبة كاملة.
-
-    بعد هذا التعديل، `apply_penalty` سيبني رسالة كاملة:
-      - عنوان العقوبة (كتم/حظر/...)
-      - المستخدم
-      - المعرف
-      - السبب
-      - المدة
-      - المشرف
-
-    بدلاً من الرمز "🚨" وحده.
-    """
+    """✅ v7.9.8: تدعم تمرير lang."""
     try:
         username = first_name = chat_name = ""
         try:
@@ -496,7 +489,6 @@ async def apply_violation_penalty(update, context, chat_id, user_id,
         except Exception:
             pass
 
-        # ✅ v7.9.8: تمرير lang إلى apply_penalty
         success, msg = await apply_penalty(
             context.bot, chat_id, user_id, penalty_type, duration_seconds,
             f"violation: {violation_type}", moderator=context.bot.id,
@@ -664,7 +656,6 @@ class MessageHandlers:
             user_id = update.effective_user.id
             state = StateManager.get(user_id)
 
-            # ✅ v7.9.2: عند WAIT_LOG_CH مع log_group_id → استدعِ المعالج المخصص
             if state == UserState.WAIT_LOG_CH and context.user_data.get('log_group_id'):
                 handled = await MessageHandlers.handle_log_group_input(update, context)
                 if handled:
@@ -733,18 +724,12 @@ class MessageHandlers:
                 pass
 
     # =================================================================
-    # ✅ v7.9.2: معالج قناة سجل المجموعة
+    # handle_log_group_input
     # =================================================================
 
     @staticmethod
     async def handle_log_group_input(update, context) -> bool:
-        """
-        ✅ v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة.
-
-        Returns:
-            True إذا عُولج الإدخال (نجاح أو فشل نهائي)
-            False إذا لم يكن هذا المعالج مسؤولاً
-        """
+        """✅ v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة."""
         user_id = update.effective_user.id
         log_group_id = context.user_data.get('log_group_id')
         if not log_group_id:
@@ -761,7 +746,6 @@ class MessageHandlers:
 
         text = (update.effective_message.text or "").strip()
 
-        # إزالة قناة السجل
         if text.lower() in ('none', 'cancel', 'remove', '-'):
             try:
                 ok = await DB.remove_group_log_channel(log_group_id)
@@ -775,7 +759,6 @@ class MessageHandlers:
             context.user_data.pop('log_group_id', None)
             return True
 
-        # تحقق من الصيغة
         if not _is_valid_channel_ref(text):
             preview = text[:50] if text else ""
             logger.warning(
@@ -792,10 +775,8 @@ class MessageHandlers:
                 "أو أرسل <code>none</code> للإزالة."
             )
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
-            # لا نمسح الحالة — اسمح بإعادة المحاولة
             return True
 
-        # حل القناة إلى int
         channel_int = None
         try:
             if text.lstrip('-').isdigit():
@@ -812,7 +793,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return True
 
-        # حفظ
         try:
             ok = await DB.set_group_log_channel(log_group_id, channel_int)
         except Exception as e:
@@ -1271,9 +1251,6 @@ class MessageHandlers:
             max_strikes = (settings.get('violation_strikes')
                            or settings.get('max_warnings') or 3)
             if violation_count >= max_strikes:
-                # ═══════════════════════════════════════════════════
-                # ✅ v7.9.8: تمرير lang إلى apply_violation_penalty
-                # ═══════════════════════════════════════════════════
                 success, msg = await apply_violation_penalty(
                     update, context, chat_id, user_id,
                     violation_type, penalty_type, duration_seconds,
@@ -1646,11 +1623,17 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # ✅ v7.9.2: تحقق من صحة الإدخال
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.9.10: _handle_update_ch_input — يحفظ فقط في settings
+    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_update_ch_input(update, context):
         """
-        ✅ v7.9.2: يتحقق من الصحة قبل الحفظ.
+        ✅ v7.9.10: يحفظ في settings.updates_channel فقط.
+        - لا add_channel
+        - لا active_channel
+        - لا user_channels
+        - _fmt مُصلَح (يعمل بلا TypeError)
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -1660,8 +1643,8 @@ class MessageHandlers:
 
         text = (update.effective_message.text or "").strip()
 
-        # فارغ أو 'none' = إزالة
-        if not text or text.lower() == 'none':
+        # ═══════ حذف القناة ═══════
+        if not text or text.lower() in ('none', 'cancel', 'remove', '-'):
             try:
                 ok = await DB.set_setting('updates_channel', '')
             except Exception as e:
@@ -1675,11 +1658,11 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ✅ تحقق من الصيغة
+        # ═══════ تحقق من الصيغة ═══════
         if not _is_valid_channel_ref(text):
             preview = text[:50]
             logger.warning(
-                f"⚠️ v7.9.2: رفض updates_channel غير صالح "
+                f"⚠️ v7.9.10: رفض updates_channel غير صالح "
                 f"من {user_id}: {preview!r}"
             )
             msg = await _trans(
@@ -1692,10 +1675,9 @@ class MessageHandlers:
                 "أو أرسل <code>none</code> للإزالة."
             )
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
-            # لا نمسح الحالة — اسمح بإعادة المحاولة
             return
 
-        # حاول الحفظ
+        # ═══════ حفظ في settings.updates_channel فقط ═══════
         try:
             ok = await DB.set_setting('updates_channel', text)
         except Exception as e:
@@ -1710,7 +1692,6 @@ class MessageHandlers:
         else:
             msg = await _trans('save_failed', lang, "❌ فشل الحفظ")
             await safe_send(context.bot, user_id, msg)
-            # لا نمسح الحالة — اسمح بإعادة المحاولة
 
     @staticmethod
     async def _handle_force_input(update, context):
@@ -1752,32 +1733,24 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # ✅ v7.9.1: log channel input مع تحقق
+    # log channel input
     # =================================================================
 
     @staticmethod
     async def _handle_log_ch_input(update, context):
-        """
-        ✅ v7.9.1: يتحقق من صحة الإدخال قبل الحفظ.
-
-        - يقبل: معرّف رقمي، @username، username، t.me/...
-        - يرفض: أي نص آخر (Heartbeat, تعليقات...)
-        - يمرّر لـ handle_log_group_input عند وجود log_group_id
-        """
+        """يتحقق من صحة الإدخال قبل الحفظ."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
             StateManager.clear(user_id)
             return
 
-        # ✅ v7.9.2: معالجة قناة سجل لمجموعة
         if context.user_data.get('log_group_id'):
             await MessageHandlers.handle_log_group_input(update, context)
             return
 
         text = (update.effective_message.text or "").strip()
 
-        # ✅ v7.9.1: تحقق من صحة المدخل
         if not _is_valid_channel_ref(text):
             preview = text[:50] if text else ""
             logger.warning(
@@ -1794,10 +1767,8 @@ class MessageHandlers:
                 "أو أرسل <code>none</code> للإلغاء."
             )
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
-            # ⚠️ لا نمسح الحالة — اسمح بإعادة المحاولة
             return
 
-        # حاول الحفظ
         try:
             ok = await DB.set_setting('log_channel_id', text)
         except Exception as e:
@@ -1813,7 +1784,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # نجح الحفظ
         if text:
             msg = _fmt(await _trans('set_success', lang, "✅ {text}"),
                        text=escape(text))
@@ -2602,7 +2572,6 @@ class MessageHandlers:
         await MessageHandlers._handle_penalty_input(
             update, context, 'unban', needs_duration=False)
 
-    # ✅ v7.9.2: استخدام needs_duration
     @staticmethod
     async def _handle_penalty_input(update, context, action, needs_duration):
         user_id = update.effective_user.id
@@ -2630,7 +2599,6 @@ class MessageHandlers:
             if target <= 0:
                 raise ValueError("target out of range")
 
-            # ✅ v7.9.2: احترام needs_duration
             duration = 0
             if needs_duration and len(parts) > 1:
                 try:
@@ -2771,14 +2739,12 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # ✅ v7.9.3: send_code_empty بدل send_code
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         code = (update.effective_message.text or "").strip()[:MAX_GIFT_CODE_LENGTH]
         if not code:
-            # ✅ v7.9.3: مفتاح مختلف — لأن send_code الآن prompt كامل
             msg = await _trans('send_code_empty', lang, "❌ أرسل الكود")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
@@ -2877,7 +2843,6 @@ class MessageHandlers:
                 except Exception as e2:
                     restore_error = e2
 
-            # ✅ v7.9.2: حذف WAL/SHM/journal القديمة
             if success_restore:
                 for suffix in ('-wal', '-shm', '-journal'):
                     stale = Path(str(PATHS.DB) + suffix)
