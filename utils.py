@@ -2,31 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.6 - Full i18n)
+utils.py - الأدوات المساعدة للبوت (v7.9.7 - Multilingual Penalties)
 =================================================================================
+🆕 v7.9.7:
+    ✅ apply_penalty: رسالة كاملة (مستخدم + سبب + مدة + مشرف) بلغات متعددة
+    ✅ _format_duration(seconds, lang): دعم ترجمة المدة
+    ✅ مفاتيح ترجمة جديدة: penalty_header_*, penalty_label_*, duration_*
+    ✅ fallback تلقائي: لغة المستخدم → العربية → الافتراضي
+
 🔴 v7.9.6 (ترجمة كاملة للواجهة):
     ✅ _COMMON_PHRASES: قاموس ترجمة نصوص المستخدمين
     ✅ TranslationManager.translate() / detect_arabic() / stats()
     ✅ _fmt_dur(seconds, lang): يدعم الترجمة
     ✅ _format_security_text(settings, stats, lang): يدعم الترجمة
-    ✅ _dot(): يستخدم 🔴 بدل ⚫ (متوافق مع كل الإيموجي)
+    ✅ _dot(): يستخدم 🔴 بدل ⚫
     ✅ _NO_CHAT_ID_BUTTONS: إضافة أزرار التحليلات
-    ✅ analytics fallback في _get_default_menus
 
-🔴 v7.9.4 (إصلاح مسار ملفات الأزرار):
-    ✅ KeyboardFactory: مسار buttons_config_{lang}.json في الجذر
-
-🔴 v7.9.3 (سجلّ تحميل ملفات الترجمة):
-    ✅ TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
-
-🔴 v7.9.2 (إصلاحات ما بعد التدقيق):
-    ✅ _read_pool_stats: دعم asyncmy
-    ✅ _get_global_words_cached: loaded_at>0
-    ✅ _send_media: تمرير parse_mode للـ captions
-    ✅ safe_send: BadRequest fallback
-    ✅ safe_parse_iso: توحيد naive/aware
-    ✅ SmartCache: time.monotonic()
-
+🔴 v7.9.4: KeyboardFactory: مسار buttons_config_{lang}.json في الجذر
+🔴 v7.9.3: TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
+🔴 v7.9.2: إصلاحات ما بعد التدقيق
 🔴 v7.9.1: get_reply_from_file: قائمة أنماط مُسبَق تصريفها
 🔴 v7.9.0: تحميل خارج القفل + إصلاحات حرجة
 =================================================================================
@@ -72,11 +66,6 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class SmartCache:
-    """
-    🧠 v7.8.1: كاش موحّد async-safe مع حماية من thundering herd.
-    🔴 v7.9.0: إصلاح تسرّب الأقفال عند فشل loader (try/finally + هوية).
-    🔴 v7.9.2: time.monotonic() بدل time.time().
-    """
     __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
 
     def __init__(self, ttl: int = 60, max_size: int = 5000):
@@ -366,7 +355,7 @@ class AutoReplyCache:
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
-# 5.1 ✅ v7.9.6: قاموس ترجمة العبارات الشائعة لنصوص المستخدمين
+# 5.1 ✅ v7.9.6: قاموس ترجمة العبارات الشائعة
 # =====================================================================
 
 _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
@@ -499,11 +488,7 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
 _ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
 
 # =====================================================================
-# 6. الترجمات — Preload + Warmup + سجل كامل
-# 🔴 v7.9.0: تحميل خارج القفل
-# 🔴 v7.9.3: سجل عند كل تحميل/فشل/خطأ
-# 🔴 v7.9.6: translate() + detect_arabic() + stats()
-# 📂 المسار: locales/{lang}.json (نسبة إلى utils.py)
+# 6. الترجمات
 # =====================================================================
 
 class TranslationManager:
@@ -514,10 +499,6 @@ class TranslationManager:
 
     @classmethod
     def _load_translation_cached(cls, lang: str) -> Dict:
-        """
-        🔴 v7.9.3: يُسجّل رسالة عند كل تحميل/فشل/خطأ.
-        📂 المسار: locales/{lang}.json
-        """
         if lang == 'off':
             lang = cls._default_lang
 
@@ -531,7 +512,6 @@ class TranslationManager:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-
             logger.info(
                 f"✅ تم تحميل ملف الترجمة {lang}.json: "
                 f"{len(loaded)} مفتاح"
@@ -606,24 +586,14 @@ class TranslationManager:
             "pl": "Polski 🇵🇱", "hi": "हिन्दी 🇮🇳"
         }
 
-    # =============================================================
-    # ✅ v7.9.6: الترجمة الفعلية لنصوص المستخدمين
-    # =============================================================
-
     @classmethod
     def is_supported(cls, lang: str) -> bool:
-        """فحص إذا كانت اللغة مدعومة."""
         if not lang or lang == 'off':
             return False
         return lang in cls.get_available_languages()
 
     @classmethod
     def translate(cls, text: str, target_lang: str) -> Optional[str]:
-        """
-        ✅ v7.9.6: ترجمة نص باستخدام قاموس العبارات الشائعة.
-        - يعيد النص المترجم إذا وُجد
-        - يعيد None إذا لم تكن الترجمة معروفة
-        """
         if not text or not target_lang:
             return None
 
@@ -631,7 +601,6 @@ class TranslationManager:
         if not stripped:
             return None
 
-        # إزالة علامات الترقيم للأطراف
         normalized = re.sub(r"[!؟?،,.\s]+$", "", stripped).strip().lower()
         if not normalized:
             return None
@@ -640,11 +609,9 @@ class TranslationManager:
         if not phrases:
             return None
 
-        # 1) بحث مباشر بعد التطبيع
         if normalized in phrases:
             return phrases[normalized]
 
-        # 2) بحث بحدود كلمات كاملة
         for src, dst in phrases.items():
             try:
                 pattern = r"\b" + re.escape(src) + r"\b"
@@ -660,14 +627,12 @@ class TranslationManager:
 
     @classmethod
     def detect_arabic(cls, text: str) -> bool:
-        """✅ v7.9.6: فحص إذا كان النص عربياً."""
         if not text:
             return False
         return bool(_ARABIC_TEXT_PATTERN.search(text))
 
     @classmethod
     def stats(cls) -> Dict[str, Any]:
-        """✅ v7.9.6: إحصائيات المترجم."""
         return {
             "available_languages": list(cls.get_available_languages().keys()),
             "loaded_translations": list(cls._translations.keys()),
@@ -683,7 +648,7 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
 
 # =====================================================================
-# 7. إدارة الحالات — TTLCache
+# 7. إدارة الحالات
 # =====================================================================
 
 class UserState(Enum):
@@ -750,7 +715,6 @@ class UserState(Enum):
     WAIT_BACKUP_FILE = auto()
     WAIT_BAN_USER_ID = auto()
     WAIT_UNBAN_USER_ID = auto()
-    # ✅ v7.9.6: إضافة WAIT_REM_LANG
     WAIT_REM_LANG = auto()
 
 
@@ -949,10 +913,7 @@ class CB:
     AUTO_REPLY_LIST = "auto_reply_list"
 
 # =====================================================================
-# 9. مصنع الكيبوردات — Preload
-# 🔴 v7.9.0: تحميل خارج القفل
-# ✅ v7.9.4: المسار أُعيد إلى الجذر
-# ✅ v7.9.6: إضافة أزرار التحليلات + analytics fallback
+# 9. مصنع الكيبوردات
 # =====================================================================
 
 class KeyboardFactory:
@@ -990,7 +951,6 @@ class KeyboardFactory:
         "admin_export_replies", "admin_import_replies", "admin_import_github",
         "admin_refresh_cache", "admin_invoices", "admin_payment_logs",
         "admin_grant_free", "admin_del_contest",
-        # ✅ v7.9.6: أزرار التحليلات (لا تحتاج chat_id)
         "admin_analytics",
         "admin_declare_winner_sel",
         "growth_30d_btn",
@@ -1174,7 +1134,6 @@ class KeyboardFactory:
         "buy_sub_90": "🗓️ 3 أشهر",
         "buy_sub_365": "🗓️ سنة",
 
-        # ✅ v7.9.6: أزرار التحليلات
         "admin_analytics": "📊 التحليلات المتقدمة",
         "growth_30d_btn": "📈 نمو المستخدمين",
         "top_channels_btn": "🏆 أفضل 10 قنوات",
@@ -1403,7 +1362,6 @@ class KeyboardFactory:
                 ["sec_set_violation_strikes", "sec_set_violation_duration"],
                 ["back"],
             ],
-            # ✅ v7.9.6: fallback للتحليلات
             "analytics": [
                 ["growth_30d_btn"],
                 ["top_channels_btn"],
@@ -1468,12 +1426,10 @@ class KeyboardFactory:
 
     @classmethod
     def _dot(cls, enabled: bool) -> str:
-        """✅ v7.9.6: استخدام 🔴 بدل ⚫ (مدعومة في كل الأجهزة)"""
         return "🟢" if enabled else "🔴"
 
     @classmethod
     def _fmt_dur(cls, seconds: int, lang: str = 'ar') -> str:
-        """✅ v7.9.6: يدعم الترجمة"""
         def T(key, default):
             try:
                 text = TranslationManager.get_text(lang, key)
@@ -1599,7 +1555,6 @@ class KeyboardFactory:
 
     @classmethod
     def _format_security_text(cls, settings: dict, stats: dict = None, lang: str = 'ar') -> str:
-        """✅ v7.9.6: يدعم الترجمة عبر lang"""
         def T(key, default):
             try:
                 text = TranslationManager.get_text(lang, key)
@@ -1949,7 +1904,7 @@ async def get_min_publish_interval() -> int:
         return CONFIG.MIN_PUBLISH_INTERVAL
 
 # =====================================================================
-# 11. دوال الصلاحيات — Smart cache
+# 11. دوال الصلاحيات
 # =====================================================================
 
 _auth_cache = TTLCache(
@@ -2064,7 +2019,7 @@ async def check_bot_permissions(bot, chat_id: int) -> dict:
         return {'can_act': False, 'reason': str(e)[:50]}
 
 # =====================================================================
-# 12. إرسال آمن — Exponential backoff
+# 12. إرسال آمن
 # =====================================================================
 
 async def _send_media(bot, chat_id, media_type, media_file_id,
@@ -2372,66 +2327,200 @@ class PenaltyFactory:
         return cls._strategies.get(penalty_type)
 
 
+# ═══════════════════════════════════════════════════════════════
+# ✅ v7.9.7: تنسيق المدة متعدد اللغات
+# ═══════════════════════════════════════════════════════════════
+
+def _format_duration(seconds: int, lang: str = 'ar') -> str:
+    """
+    تنسيق المدة حسب اللغة مع fallback للعربية.
+    يستخدم مفاتيح: duration_permanent, duration_seconds, ...
+    """
+    def T(key: str, default: str, **kw) -> str:
+        for try_lang in (lang, 'ar'):
+            try:
+                text = TranslationManager.get_text(try_lang, key, **kw)
+                if text and text != key:
+                    return text
+            except Exception:
+                continue
+        try:
+            return default.format(**kw)
+        except (KeyError, IndexError):
+            return default
+
+    try:
+        seconds = int(seconds or 0)
+    except (ValueError, TypeError):
+        seconds = 0
+
+    if seconds <= 0:
+        return T('duration_permanent', 'دائم')
+    if seconds < 60:
+        return T('duration_seconds', '{seconds} ثانية', seconds=seconds)
+    if seconds < 3600:
+        m = seconds // 60
+        return T('duration_minutes', '{minutes} دقيقة', minutes=m)
+    if seconds < 86400:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        if m:
+            return T('duration_hours_minutes',
+                     '{hours} ساعة و{minutes} دقيقة',
+                     hours=h, minutes=m)
+        return T('duration_hours', '{hours} ساعة', hours=h)
+    if seconds < 2592000:
+        d = seconds // 86400
+        return T('duration_days', '{days} يوم', days=d)
+    mo = seconds // 2592000
+    return T('duration_months', '{months} شهر', months=mo)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ✅ v7.9.7: apply_penalty متعدد اللغات
+# ═══════════════════════════════════════════════════════════════
+
 async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
-                        chat_name: str = "") -> Tuple[bool, str]:
+                        chat_name: str = "", lang: str = 'ar') -> Tuple[bool, str]:
+    """
+    ✅ v7.9.7: تطبق العقوبة وترجع رسالة كاملة مترجمة.
+
+    الوسائط:
+        lang: كود اللغة (ar/en/fr/...). عند غياب الترجمة يرجع للعربية.
+    النتيجة:
+        (True, رسالة كاملة بـ HTML تحتوي على: المستخدم + السبب + المدة + المشرف)
+    """
+    def T(key: str, default: str, **kw) -> str:
+        for try_lang in (lang, 'ar'):
+            try:
+                text = TranslationManager.get_text(try_lang, key, **kw)
+                if text and text != key:
+                    return text
+            except Exception:
+                continue
+        try:
+            return default.format(**kw)
+        except (KeyError, IndexError):
+            return default
+
+    # ─── فحوصات أمان ───
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
         primary_id = None
     if primary_id is not None and user_id == primary_id:
-        return False, "لا يمكن معاملة المالك"
+        return False, T('cant_moderate_owner', '❌ لا يمكن معاملة المالك')
     if user_id == bot.id:
-        return False, "لا يمكن معاملة البوت"
+        return False, T('cant_moderate_bot', '❌ لا يمكن معاملة البوت')
     if await is_authorized_in_group(bot, chat_id, user_id):
-        return False, "لا يمكن معاملة مشرف"
+        return False, T('cant_moderate_admin', '❌ لا يمكن معاملة مشرف')
+
     perms = await check_bot_permissions(bot, chat_id)
     if not perms['can_act']:
-        return False, "الصلاحيات غير كافية"
+        reason_txt = perms.get('reason', '')
+        return False, T('insufficient_permissions',
+                        f"❌ الصلاحيات غير كافية: {reason_txt}")
+
     strategy = PenaltyFactory.get_strategy(penalty)
     if not strategy:
-        return False, "نوع عقوبة غير معروف"
-    success, msg = await strategy.apply(bot, chat_id, user_id, duration=duration)
-    if success:
-        if not username or not first_name:
-            try:
-                member = await bot.get_chat_member(chat_id, user_id)
-                tg_user = getattr(member, "user", None)
-                if tg_user:
-                    if not username:
-                        username = tg_user.username or ""
-                    if not first_name:
-                        first_name = tg_user.first_name or ""
-            except Exception:
-                pass
-        if not chat_name:
-            try:
-                chat = await bot.get_chat(chat_id)
-                chat_name = getattr(chat, "title", "") or ""
-            except Exception:
-                pass
-        if penalty in DB.VALID_PENALTY_TYPES:
-            try:
-                await DB.add_penalty(
-                    user_id=user_id, chat_id=chat_id, penalty_type=penalty,
-                    duration=duration, reason=reason, issued_by=moderator,
-                    username=username, first_name=first_name, chat_name=chat_name,
-                )
-            except TypeError:
-                await DB.add_penalty(
-                    user_id=user_id, chat_id=chat_id, penalty_type=penalty,
-                    duration=duration, reason=reason, issued_by=moderator,
-                )
-        if moderator:
-            try:
-                await DB.add_admin_log(chat_id, moderator, penalty, user_id, reason)
-            except Exception:
-                pass
-    return success, msg
+        return False, T('unknown_penalty_type', '❌ نوع عقوبة غير معروف')
+
+    # ─── التنفيذ ───
+    success, _short = await strategy.apply(
+        bot, chat_id, user_id, duration=duration
+    )
+    if not success:
+        return False, _short
+
+    # ─── جمع البيانات ───
+    if not username or not first_name:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            tg_user = getattr(member, "user", None)
+            if tg_user:
+                if not username:
+                    username = tg_user.username or ""
+                if not first_name:
+                    first_name = tg_user.first_name or ""
+        except Exception:
+            pass
+
+    if not chat_name:
+        try:
+            chat = await bot.get_chat(chat_id)
+            chat_name = getattr(chat, "title", "") or ""
+        except Exception:
+            pass
+
+    # ─── بناء العنوان ───
+    header_key = f"penalty_header_{penalty}"
+    header_defaults = {
+        'ban':      '🚫 <b>تم حظر المستخدم</b>',
+        'mute':     '🔇 <b>تم كتم المستخدم</b>',
+        'kick':     '👢 <b>تم طرد المستخدم</b>',
+        'warn':     '⚠️ <b>تحذير للمستخدم</b>',
+        'restrict': '🔒 <b>تم تقييد المستخدم</b>',
+        'unban':    '✅ <b>تم إلغاء الحظر</b>',
+    }
+    header = T(header_key, header_defaults.get(penalty, f"⚖️ <b>{penalty}</b>"))
+
+    # ─── بناء الرسالة ───
+    lines = [header, ""]
+
+    display_name = first_name or T('unknown_user', 'مستخدم')
+    lines.append(
+        f"{T('penalty_label_user', '👤 <b>المستخدم:</b>')} {display_name}"
+    )
+    if username:
+        lines.append(
+            f"{T('penalty_label_username', '🔗 <b>المعرف:</b>')} @{username}"
+        )
+    lines.append(
+        f"{T('penalty_label_id', '🆔')} <code>{user_id}</code>"
+    )
+
+    if penalty != 'unban':
+        reason_text = reason if reason else T('penalty_no_reason', 'بدون سبب محدد')
+        lines.append(
+            f"{T('penalty_label_reason', '📝 <b>السبب:</b>')} {reason_text}"
+        )
+        duration_text = _format_duration(duration, lang)
+        lines.append(
+            f"{T('penalty_label_duration', '⏱️ <b>المدة:</b>')} {duration_text}"
+        )
+
+    if moderator:
+        lines.append(
+            f"{T('penalty_label_by', '🛡️ <b>بواسطة:</b>')} <code>{moderator}</code>"
+        )
+
+    full_msg = "\n".join(lines)
+
+    # ─── حفظ في DB ───
+    if penalty in DB.VALID_PENALTY_TYPES:
+        try:
+            await DB.add_penalty(
+                user_id=user_id, chat_id=chat_id, penalty_type=penalty,
+                duration=duration, reason=reason, issued_by=moderator,
+                username=username, first_name=first_name, chat_name=chat_name,
+            )
+        except TypeError:
+            await DB.add_penalty(
+                user_id=user_id, chat_id=chat_id, penalty_type=penalty,
+                duration=duration, reason=reason, issued_by=moderator,
+            )
+    if moderator:
+        try:
+            await DB.add_admin_log(chat_id, moderator, penalty, user_id, reason)
+        except Exception:
+            pass
+
+    return True, full_msg
 
 # =====================================================================
-# 15. الردود التلقائية — helpers
+# 15. الردود التلقائية
 # =====================================================================
 
 _usage_updates: Dict[Tuple[int, str], int] = {}
@@ -2633,7 +2722,7 @@ def reload_replies_from_file() -> dict:
     return _REPLIES_FROM_FILE
 
 # =====================================================================
-# 17. المهام الخلفية — Adaptive + Batch + Pool Monitor
+# 17. المهام الخلفية
 # =====================================================================
 
 class BackgroundTasks:
@@ -3344,7 +3433,7 @@ __all__ = [
     'ban_user_by_id', 'unban_user_by_id',
     'PenaltyStrategy', 'BanPenalty', 'MutePenalty', 'KickPenalty',
     'WarnPenalty', 'RestrictPenalty', 'UnbanPenalty', 'PenaltyFactory',
-    'apply_penalty',
+    'apply_penalty', '_format_duration',
     'export_auto_replies', 'import_auto_replies', 'fetch_json_from_url',
     'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
