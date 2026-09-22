@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.2)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.3)
 ================================================================================
+🆕 v5.4.3 (Maintenance integration):
+    ✅ integration مع maintenance.py — صيانة دورية كل 24 ساعة
+    ✅ حذف admin_logs/penalty_archive/user_violations القديمة
+    ✅ VACUUM ANALYZE تلقائي على الجداول الحرجة
+    ✅ تقرير HTML يُرسل للمالك عبر Telegram بعد كل صيانة
+
 🆕 v5.4.2 (DB Diagnostics):
     ✅ db_diag: /db_diag — تشخيص قاعدة البيانات (للمطور)
     ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE (للمطور)
@@ -101,6 +107,15 @@ except ImportError as _e:
     _GROUP_LOG_INIT_AVAILABLE = False
     _GROUP_LOG_INIT_IMPORT_ERROR = str(_e)
 
+# ✅ v5.4.3: الصيانة الدورية لقاعدة البيانات
+try:
+    from maintenance import maintenance_loop as _maintenance_loop
+    _MAINTENANCE_AVAILABLE = True
+except ImportError as _e:
+    _maintenance_loop = None
+    _MAINTENANCE_AVAILABLE = False
+    _MAINTENANCE_IMPORT_ERROR = str(_e)
+
 from utils import (
     TranslationManager, KeyboardFactory, BackgroundTasks,
     ErrorHandler, setup_webhook, safe_send,
@@ -180,6 +195,17 @@ try:
         logger.info(f"✅ كل الـ {len(_mixins_status)} Mixins محمّلة")
 except Exception as _e:
     logger.debug(f"⚠️ فحص Mixins: {_e}")
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔍 v5.4.3: فحص توفر maintenance
+# ═══════════════════════════════════════════════════════════════════
+if _MAINTENANCE_AVAILABLE:
+    logger.info("✅ maintenance محمّل — الصيانة الدورية مُفعّلة")
+else:
+    logger.warning(
+        f"⚠️ maintenance غير متاح: "
+        f"{globals().get('_MAINTENANCE_IMPORT_ERROR', 'unknown')}"
+    )
 
 ALLOWED_UPDATES = [
     "message",
@@ -1008,6 +1034,35 @@ async def main():
             )
         ),
     ]
+
+    # ✅ v5.4.3: الصيانة الدورية لقاعدة البيانات (كل 24 ساعة)
+    if _MAINTENANCE_AVAILABLE and callable(_maintenance_loop):
+        try:
+            owner_id = int(CONFIG.PRIMARY_OWNER_ID)
+        except (TypeError, ValueError):
+            owner_id = None
+            logger.warning(
+                "⚠️ PRIMARY_OWNER_ID غير صالح — "
+                "لن يُرسل تقرير الصيانة"
+            )
+
+        tasks.append(asyncio.create_task(
+            run_task_with_retry(
+                _maintenance_loop,
+                app.bot,        # للإشعار
+                owner_id,       # معرّف المالك
+                task_name="maintenance"
+            )
+        ))
+        logger.info(
+            "✅ maintenance: مهمة الصيانة الدورية مُضافة "
+            "(كل 24 ساعة)"
+        )
+    else:
+        logger.warning(
+            f"⚠️ maintenance غير متاح — الصيانة التلقائية معطّلة: "
+            f"{globals().get('_MAINTENANCE_IMPORT_ERROR', 'module missing')}"
+        )
 
     logger.info(f"✅ تم تشغيل {len(tasks)} مهمة خلفية")
 
