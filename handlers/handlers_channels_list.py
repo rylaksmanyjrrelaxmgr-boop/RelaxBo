@@ -2,24 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.0.1)
+handlers_channels_list.py - واجهة قائمة القنوات مع حالتها (v2.0.2)
 ================================================================================
+🆕 v2.0.2 (إصلاح اعتراض الرسائل):
+    ✅ add_channel_from_message: لا يعترض إذا كان المستخدم في حالة معلقة
+       (WAIT_UPDATE_CH, WAIT_CHANNEL, WAIT_LOG_CH, ...)
+    ✅ add_channel_redirect_callback: يصفّر الحالة عند الضغط على الزر
+       (لتفادي تعارضات مع عمليات سابقة)
+
 🆕 v2.0.1 (إصلاح answer() المزدوج في 4 دوال):
     ✅ channel_delete_menu_callback: answer بعد فحص القنوات
     ✅ channel_delete_confirm_callback: answer بعد فحص القناة
     ✅ channel_schedule_callback: answer بعد فحص الملكية
     ✅ channel_delete_execute_callback: answer بالنتيجة النهائية فقط
-
-🆕 v2.0.0 (إصلاح أخطاء حرجة):
-    ✅ إصلاح query.answer() المزدوج في recycle/schedule_set
-    ✅ استخراج _render_channel_info (helper مشترك)
-    ✅ حماية DB=None في كل handler
-    ✅ تضييق regex t.me ليطابق الروابط النقية فقط
-    ✅ stats/channel_info محميّة ضد None
-    ✅ استعلام واحد بدل اثنين في posts_add_callback
-    ✅ نقل timedelta إلى imports المستوى الأعلى
-    ✅ تبسيط _send_main_menu_fallback
-    ✅ توحيد معالجة الأخطاء
 ================================================================================
 """
 
@@ -49,6 +44,16 @@ except ImportError:
 
 
 try:
+    from utils import StateManager, UserState
+    _STATE_AVAILABLE = True
+except ImportError:
+    logger.warning("⚠️ StateManager/UserState غير متاح")
+    StateManager = None
+    UserState = None
+    _STATE_AVAILABLE = False
+
+
+try:
     from utils.keyboards import get_back_button
 except (ImportError, AttributeError):
     def get_back_button():
@@ -67,8 +72,24 @@ def _db_ready() -> bool:
     return True
 
 
+def _user_has_pending_state(user_id: int) -> bool:
+    """
+    ✅ v2.0.2: هل المستخدم في حالة معلقة (غير NONE)؟
+    """
+    if not _STATE_AVAILABLE or StateManager is None:
+        return False
+    try:
+        state = StateManager.get(user_id)
+        if UserState is not None:
+            return state != UserState.NONE
+        return state is not None
+    except Exception as e:
+        logger.debug(f"_user_has_pending_state({user_id}): {e}")
+        return False
+
+
 async def _safe_answer(query, text: str = None, show_alert: bool = False) -> None:
-    """✅ v2.0.0: answer() آمن (يُتجاهل إذا أُجيب مسبقاً)."""
+    """✅ v2.0.0: answer() آمن."""
     try:
         if text is not None:
             await query.answer(text, show_alert=show_alert)
@@ -95,9 +116,7 @@ def _format_date(dt_value) -> str:
 
 
 async def _get_active_channel_id(user_id: int) -> Optional[int]:
-    """
-    ✅ v2.0.0: استعلام مباشر بدل الاعتماد على DB.get_active_channel.
-    """
+    """✅ v2.0.0: استعلام مباشر."""
     try:
         return await DB.fetchval(
             "SELECT active_channel FROM users WHERE user_id = ?",
@@ -306,15 +325,11 @@ async def channel_select_callback(
 
 
 # =====================================================================
-# 3. تفاصيل قناة (helper مشترك)
+# 3. تفاصيل قناة
 # =====================================================================
 
 async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
-    """
-    ✅ v2.0.0: helper مشترك لعرض تفاصيل القناة.
-
-    يفترض أن query.answer() تم استدعاؤه بالفعل (لا يُعيد الاستدعاء).
-    """
+    """✅ v2.0.0: helper مشترك."""
     try:
         ch = await DB.get_channel_by_id(user_id, ch_db_id)
         if not ch:
@@ -407,7 +422,7 @@ async def _render_channel_info(query, user_id: int, ch_db_id: int) -> None:
 async def channel_info_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عند الضغط على ℹ️ - عرض تفاصيل القناة."""
+    """عند الضغط على ℹ️."""
     if not _db_ready():
         return
 
@@ -431,11 +446,7 @@ async def channel_info_callback(
 async def channel_delete_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    عرض قائمة القنوات للحذف.
-
-    ✅ v2.0.1: answer بعد فحص القنوات (كان مُزدوجاً).
-    """
+    """عرض قائمة القنوات للحذف."""
     if not _db_ready():
         return
 
@@ -444,7 +455,6 @@ async def channel_delete_menu_callback(
 
     channels = await _get_channels_with_stats(user_id)
     if not channels:
-        # ✅ الإجابة الوحيدة — قبل أي شيء آخر
         await _safe_answer(query, "📭 لا توجد قنوات", show_alert=True)
         return
 
@@ -487,11 +497,7 @@ async def channel_delete_menu_callback(
 async def channel_delete_confirm_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    تأكيد الحذف.
-
-    ✅ v2.0.1: answer بعد فحص القناة (كان مُزدوجاً).
-    """
+    """تأكيد الحذف."""
     if not _db_ready():
         return
 
@@ -507,7 +513,6 @@ async def channel_delete_confirm_callback(
     try:
         ch = await DB.get_channel_by_id(user_id, ch_db_id)
         if not ch:
-            # ✅ الوحيدة
             await _safe_answer(query, "⚠️ القناة غير موجودة", show_alert=True)
             return
 
@@ -554,11 +559,7 @@ async def channel_delete_confirm_callback(
 async def channel_delete_execute_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    تنفيذ الحذف.
-
-    ✅ v2.0.1: answer بالنتيجة النهائية فقط (كان "⏳" يستهلك الـanswer).
-    """
+    """تنفيذ الحذف."""
     if not _db_ready():
         return
 
@@ -572,15 +573,12 @@ async def channel_delete_execute_callback(
         return
 
     try:
-        # لا نُجيب مسبقاً بـ "⏳"
         success = await DB.delete_channel(user_id, ch_db_id)
 
         if not success:
-            # ✅ الوحيدة
             await _safe_answer(query, "⚠️ فشل الحذف", show_alert=True)
             return
 
-        # نجاح — الوحيدة
         await _safe_answer(query, "✅ تم الحذف", show_alert=True)
         logger.info(f"✅ حُذفت القناة {ch_db_id} بواسطة {user_id}")
 
@@ -597,11 +595,7 @@ async def channel_delete_execute_callback(
 async def channel_recycle_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    إعادة تدوير المنشورات لقناة محددة.
-
-    ✅ v2.0.0: تم إصلاح answer() المزدوج.
-    """
+    """إعادة تدوير المنشورات."""
     if not _db_ready():
         return
 
@@ -622,14 +616,12 @@ async def channel_recycle_callback(
 
         count = await DB.reset_posts(user_id, ch_db_id)
 
-        # ✅ answer واحد فقط
         await _safe_answer(
             query,
             f"✅ تم إعادة تدوير {count} منشور",
             show_alert=True,
         )
 
-        # ✅ عرض التفاصيل بدون استدعاء answer مرة أخرى
         await _render_channel_info(query, user_id, ch_db_id)
     except Exception as e:
         logger.error(f"❌ channel_recycle: {e}", exc_info=True)
@@ -643,11 +635,7 @@ async def channel_recycle_callback(
 async def channel_schedule_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    عرض خيارات الجدولة لقناة.
-
-    ✅ v2.0.1: answer بعد فحص الملكية (كان مُزدوجاً).
-    """
+    """عرض خيارات الجدولة."""
     if not _db_ready():
         return
 
@@ -663,7 +651,6 @@ async def channel_schedule_callback(
     try:
         owns = await DB.is_channel_owner(user_id, ch_db_id)
         if not owns:
-            # ✅ الوحيدة
             await _safe_answer(query, "⚠️ لا تملك هذه القناة", show_alert=True)
             return
 
@@ -721,11 +708,7 @@ async def channel_schedule_callback(
 async def channel_schedule_set_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    تعيين التردد الجديد.
-
-    ✅ v2.0.0: تم إصلاح answer() المزدوج.
-    """
+    """تعيين التردد الجديد."""
     if not _db_ready():
         return
 
@@ -765,10 +748,8 @@ async def channel_schedule_set_callback(
         except Exception as e:
             logger.debug(f"update_next_publish: {e}")
 
-        # ✅ answer واحد فقط
         await _safe_answer(query, f"✅ التردد الجديد: {minutes} دقيقة")
 
-        # ✅ عرض التفاصيل بدون استدعاء answer آخر
         await _render_channel_info(query, user_id, ch_db_id)
     except Exception as e:
         logger.error(f"❌ channel_schedule_set: {e}", exc_info=True)
@@ -802,7 +783,6 @@ async def back_to_main_menu_callback(
     except ImportError as e:
         logger.debug(f"handlers.handlers_command غير متاح: {e}")
 
-    # fallback
     try:
         await _send_main_menu_fallback(context, query.from_user.id)
     except Exception as e:
@@ -838,9 +818,22 @@ async def _send_main_menu_fallback(context, user_id: int):
 async def add_channel_redirect_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """عرض تعليمات إضافة قناة."""
+    """
+    عرض تعليمات إضافة قناة.
+
+    ✅ v2.0.2: يصفّر الحالة لتفادي تعارضات مع عمليات سابقة.
+    """
     query = update.callback_query
     await _safe_answer(query)
+
+    user_id = query.from_user.id
+
+    # ✅ v2.0.2: تصفير الحالة
+    if _STATE_AVAILABLE and StateManager is not None:
+        try:
+            StateManager.clear(user_id)
+        except Exception as e:
+            logger.debug(f"StateManager.clear({user_id}): {e}")
 
     if context.user_data is not None:
         context.user_data["awaiting_channel_add"] = True
@@ -875,7 +868,6 @@ async def add_channel_redirect_callback(
 # 9. معالج الرسائل النصية لإضافة قناة
 # =====================================================================
 
-# ✅ v2.0.0: regex مُضيَّق — يطابق فقط @channel أو t.me/channel منفردين
 _USERNAME_RE = re.compile(r"^@([a-zA-Z0-9_]{4,})$")
 _URL_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]{4,})/?$",
@@ -884,7 +876,7 @@ _URL_RE = re.compile(
 
 
 def _extract_channel_username(text: str) -> Optional[str]:
-    """استخراج اسم القناة من النص (فقط إذا كان النص قناة نقية)."""
+    """استخراج اسم القناة من النص."""
     text = text.strip()
     m = _USERNAME_RE.match(text)
     if m:
@@ -901,7 +893,7 @@ async def add_channel_from_message(
     """
     معالج الرسائل النصية لإضافة قناة.
 
-    ✅ v2.0.0: يعمل فقط إذا كان النص قناة نقية (@username أو t.me/…).
+    ✅ v2.0.2: لا يعترض إذا كان المستخدم في حالة معلقة.
     """
     if not _db_ready():
         return
@@ -910,12 +902,22 @@ async def add_channel_from_message(
     if not message or not message.text:
         return
 
-    text = message.text.strip()
     user_id = message.from_user.id
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v2.0.2: لا تعترض إذا كان المستخدم في حالة معلقة
+    # ═══════════════════════════════════════════════════════════════
+    if _user_has_pending_state(user_id):
+        logger.debug(
+            f"⏭️ add_channel_from_message: تجاهل — "
+            f"المستخدم {user_id} في حالة معلقة"
+        )
+        return
+
+    text = message.text.strip()
 
     channel_username = _extract_channel_username(text)
     if not channel_username:
-        # إذا كان المستخدم في وضع الإضافة، أخبره بالصيغة
         if context.user_data and context.user_data.get("awaiting_channel_add"):
             try:
                 await message.reply_text(
@@ -1115,17 +1117,13 @@ async def _edit_or_send(processing_msg, message, text: str):
 
 
 # =====================================================================
-# 10. ⚡ معالج سريع لزر "إضافة منشورات"
+# 10. معالج سريع لزر "إضافة منشورات"
 # =====================================================================
 
 async def posts_add_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    """
-    ⚡ معالج سريع لزر إضافة منشورات.
-
-    ✅ v2.0.0: استعلام واحد فقط بدل اثنين.
-    """
+    """معالج سريع لزر إضافة منشورات."""
     if not _db_ready():
         return
 
@@ -1133,7 +1131,6 @@ async def posts_add_callback(
     user_id = query.from_user.id
     await _safe_answer(query)
 
-    # ✅ استعلام واحد يجلب اسم القناة النشطة إن وُجدت
     ch_name = None
     try:
         row = await DB.fetchone(
@@ -1150,7 +1147,6 @@ async def posts_add_callback(
     except Exception as e:
         logger.error(f"posts_add_callback query: {e}")
 
-    # بناء النص
     if ch_name:
         text = (
             f"➕ <b>إضافة منشورات</b>\n\n"
@@ -1193,7 +1189,6 @@ async def posts_add_callback(
 def register_channels_list_handlers(application):
     """تسجيل كل handlers قائمة القنوات."""
     try:
-        # ═══ الرجوع للقائمة الرئيسية ═══
         application.add_handler(
             CallbackQueryHandler(
                 back_to_main_menu_callback,
@@ -1201,7 +1196,6 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ إضافة قناة (زر) ═══
         application.add_handler(
             CallbackQueryHandler(
                 add_channel_redirect_callback,
@@ -1209,7 +1203,6 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ ⚡ إضافة منشورات (سريع) ═══
         application.add_handler(
             CallbackQueryHandler(
                 posts_add_callback,
@@ -1217,12 +1210,10 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ قائمة القنوات ═══
         application.add_handler(
             CallbackQueryHandler(show_channels_list, pattern=r"^ch_list$")
         )
 
-        # ═══ اختيار/تفاصيل ═══
         application.add_handler(
             CallbackQueryHandler(channel_select_callback, pattern=r"^ch_select:")
         )
@@ -1230,7 +1221,6 @@ def register_channels_list_handlers(application):
             CallbackQueryHandler(channel_info_callback, pattern=r"^ch_info:")
         )
 
-        # ═══ الحذف ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_delete_menu_callback, pattern=r"^ch_delete_menu$"
@@ -1247,14 +1237,12 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ إعادة التدوير ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_recycle_callback, pattern=r"^ch_recycle:"
             )
         )
 
-        # ═══ الجدولة ═══
         application.add_handler(
             CallbackQueryHandler(
                 channel_schedule_callback, pattern=r"^ch_schedule:"
@@ -1266,7 +1254,9 @@ def register_channels_list_handlers(application):
             )
         )
 
-        # ═══ معالج الرسائل النصية لإضافة قناة ═══
+        # ✅ v2.0.2: تم نقل التعليق ليشرح السبب
+        # هذا المعالج في group=-1 (يسبق group=0 في handlers_message)
+        # يجب أن يفحص الحالة أولاً داخل add_channel_from_message
         application.add_handler(
             MessageHandler(
                 filters.TEXT
@@ -1281,7 +1271,7 @@ def register_channels_list_handlers(application):
             group=-1,
         )
 
-        logger.info("✅ تم تسجيل handlers قائمة القنوات (v2.0.1)")
+        logger.info("✅ تم تسجيل handlers قائمة القنوات (v2.0.2)")
         return True
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers: {e}", exc_info=True)
