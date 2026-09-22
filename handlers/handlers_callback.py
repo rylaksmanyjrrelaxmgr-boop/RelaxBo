@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.21)
+handlers_callback.py - معالج الأزرار (v9.4.22)
 =====================================================================
+🆕 v9.4.22 — شاشة إدارة قناة التحديثات:
+    ✅ _show_admin_update_channel_menu: عرض + تغيير + حذف قناة التحديثات
+    ✅ admin_update_ch_btn: زر فتح الشاشة
+    ✅ admin_change_update_ch: زر تغيير القناة
+    ✅ admin_remove_update_ch: زر حذف القناة
+
 ✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
 ✅ v9.4.20 — إصلاح clear_lang_cache (circular import)
 ✅ v9.4.19 — فحص URL لـ updates_channel
@@ -285,7 +291,6 @@ def _set_sec_chat(context, chat_id: int) -> None:
 
 
 def _is_valid_url(url: Optional[str]) -> bool:
-    """✅ v9.4.19: فحص نهائي لصلاحية URL قبل تمريره لـ Telegram."""
     if not url:
         return False
     if not isinstance(url, str):
@@ -301,11 +306,10 @@ def _is_valid_url(url: Optional[str]) -> bool:
 
 
 # =====================================================================
-# ✅ v9.4.20: clear_lang_cache — محلي لتفادي circular import
+# clear_lang_cache — محلي لتفادي circular import
 # =====================================================================
 
 def _clear_lang_cache_local(context) -> None:
-    """✅ v9.4.20: نسخة محلية من clear_lang_cache بدون import."""
     _cleared = False
     try:
         _mod = sys.modules.get('handlers_message')
@@ -333,7 +337,7 @@ def _clear_lang_cache_local(context) -> None:
 
 
 # =====================================================================
-# ✅ v9.4.21: دالة مساعدة لتطبيق الحالة على أزرار auto_reply
+# تطبيق الحالة على أزرار auto_reply
 # =====================================================================
 
 def _apply_auto_reply_status_icons(
@@ -343,12 +347,6 @@ def _apply_auto_reply_status_icons(
     enabled_label: str,
     admins_label: str,
 ) -> InlineKeyboardMarkup:
-    """
-    ✅ v9.4.21: يُظهر ✅/❌ على أزرار auto_reply بناءً على الحالة.
-
-    - enabled=1 → "✅ Toggle", enabled=0 → "❌ Toggle"
-    - admins_only=1 → "✅ Admins only", =0 → "❌ Admins only"
-    """
     try:
         e_icon = "✅" if int(enabled or 0) == 1 else "❌"
         a_icon = "✅" if int(admins_only or 0) == 1 else "❌"
@@ -1236,7 +1234,7 @@ class CallbackHandlers:
             pass
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ v9.4.18: قناة التحديثات
+    # ✅ v9.4.18: قناة التحديثات (للمستخدم العادي)
     # ✅ v9.4.19: فحص نهائي لصحة URL
     # ═════════════════════════════════════════════════════════════
 
@@ -1329,6 +1327,97 @@ class CallbackHandlers:
         rows.append([InlineKeyboardButton(back_text, callback_data=CB.BACK)])
 
         kb = InlineKeyboardMarkup(rows)
+        await safe_edit(query, text, reply_markup=kb,
+                        parse_mode='HTML', bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.4.22: شاشة إدارة قناة التحديثات (للمطور)
+    # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _show_admin_update_channel_menu(query, context, user_id, lang):
+        """
+        ✅ v9.4.22: شاشة إدارة قناة التحديثات.
+
+        تعرض:
+          - القناة الحالية (إن وُجدت)
+          - زر تغيير
+          - زر حذف
+          - زر إرسال تحديث
+        """
+        if not CONFIG.is_developer(user_id):
+            await safe_edit(query,
+                await _trans('unauthorized', lang, "❌ غير مصرح"),
+                bot=context.bot)
+            return
+
+        title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
+
+        try:
+            ch = await DB.get_updates_channel()
+        except Exception as e:
+            logger.warning(f"get_updates_channel (admin): {e}")
+            ch = None
+
+        back_text = KeyboardFactory.get_text("back", lang)
+        change_text = await _trans('change_update_ch_btn', lang, "🔄 تغيير القناة")
+        remove_text = await _trans('remove_update_ch_btn', lang, "🗑️ حذف القناة")
+        send_text = await _trans('admin_send_update', lang, "📤 إرسال تحديث")
+
+        # ═══════════════ القناة موجودة ═══════════════
+        if ch:
+            ch_str = str(ch).strip()
+            display = ch_str
+
+            try:
+                if ch_str.startswith('@'):
+                    display = ch_str
+                elif ch_str.lstrip('-').isdigit():
+                    cid = int(ch_str)
+                    try:
+                        chat = await context.bot.get_chat(cid)
+                        if getattr(chat, 'username', None):
+                            display = f"@{chat.username}"
+                        elif getattr(chat, 'title', None):
+                            display = chat.title
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            text = (
+                f"{title}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ <b>القناة الحالية:</b>\n"
+                f"🔗 {_html.escape(str(display))}\n"
+                f"🆔 <code>{_html.escape(ch_str)}</code>"
+            )
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(change_text,
+                                      callback_data="admin_change_update_ch")],
+                [InlineKeyboardButton(remove_text,
+                                      callback_data="admin_remove_update_ch")],
+                [InlineKeyboardButton(send_text,
+                                      callback_data="admin_send_update")],
+                [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)],
+            ])
+
+        # ═══════════════ لا توجد قناة ═══════════════
+        else:
+            text = (
+                f"{title}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                + await _trans('no_update_channel', lang,
+                               "📭 لم يتم تعيين قناة تحديثات")
+            )
+            set_text = await _trans('set_update_ch_btn', lang, "🔗 تعيين قناة")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(set_text,
+                                      callback_data="admin_change_update_ch")],
+                [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)],
+            ])
+
         await safe_edit(query, text, reply_markup=kb,
                         parse_mode='HTML', bot=context.bot)
 
@@ -3074,7 +3163,6 @@ class CallbackHandlers:
                         [InlineKeyboardButton(
                             KeyboardFactory.get_text("back", lang),
                             callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                # ✅ v9.4.21: عرض الحالة على الأزرار
                 enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
                 admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
@@ -3956,6 +4044,44 @@ class CallbackHandlers:
         data = query.data
 
         try:
+            # ═══════════════════════════════════════════════════════
+            # ✅ v9.4.22: شاشة إدارة قناة التحديثات
+            # ═══════════════════════════════════════════════════════
+            if data == "admin_update_ch_btn":
+                await CallbackHandlers._show_admin_update_channel_menu(
+                    query, context, user_id, lang)
+                return
+
+            if data == "admin_change_update_ch":
+                StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
+                await safe_edit(query,
+                    await _trans('send_update_ch_prompt', lang,
+                                 "📢 أرسل معرف قناة التحديثات:"),
+                    bot=context.bot)
+                return
+
+            if data == "admin_remove_update_ch":
+                try:
+                    ok = await DB.set_setting('updates_channel', '')
+                except Exception as e:
+                    logger.error(f"remove updates_channel: {e}")
+                    ok = False
+
+                if ok:
+                    await safe_edit(query,
+                        await _trans('update_channel_removed', lang,
+                                     "🗑️ تم حذف قناة التحديثات"),
+                        bot=context.bot)
+                else:
+                    await safe_edit(query,
+                        await _trans('save_failed', lang, "❌ فشل الحذف"),
+                        bot=context.bot)
+                return
+
+            # ═══════════════════════════════════════════════════════
+            # باقي أزرار الأدمن
+            # ═══════════════════════════════════════════════════════
+
             if data == "admin_grant_free":
                 StateManager.set(user_id, UserState.WAIT_GRANT_FREE)
                 await safe_edit(query,
@@ -5311,7 +5437,7 @@ class CallbackHandlers:
         return file_path
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ v9.4.21: Auto replies — إصلاح bool/int
+    # Auto replies — إصلاح bool/int
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -5364,7 +5490,6 @@ class CallbackHandlers:
                     settings = _row_to_dict(settings) or {}
                 kb = KeyboardFactory.build("auto_reply",
                                             chat_id=chat_id, lang=lang)
-                # ✅ v9.4.21: عرض الحالة على الأزرار
                 enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
                 admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
@@ -5385,7 +5510,6 @@ class CallbackHandlers:
                     settings = await DB.get_auto_reply_settings(chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                # ✅ v9.4.21: int بدل bool (PG يرفض bool في INTEGER)
                 new_status = 1 - _coerce_int(settings.get('enabled', 0))
                 await DB.update_auto_reply_settings(chat_id, enabled=new_status)
                 settings['enabled'] = new_status
@@ -5419,7 +5543,6 @@ class CallbackHandlers:
                     settings = await DB.get_auto_reply_settings(chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                # ✅ v9.4.21: int بدل bool (PG يرفض bool في INTEGER)
                 new_status = 1 - _coerce_int(settings.get('only_admins', 0))
                 await DB.update_auto_reply_settings(chat_id, only_admins=new_status)
                 settings['only_admins'] = new_status
