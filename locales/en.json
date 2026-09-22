@@ -896,5 +896,29 @@
   "updates_channel_btn": "📢 Updates Channel",
   "updates_channel_title": "📢 Updates Channel",
   "open_channel_btn": "📢 Open Channel",
-  "channel_link_unavailable": "⚠️ Cannot generate link for this channel"
+  "channel_link_unavailable": "⚠️ Cannot generate link for this channel",
+
+  "penalty_header_ban": "🚫 <b>User has been banned</b>",
+  "penalty_header_mute": "🔇 <b>User has been muted</b>",
+  "penalty_header_kick": "👢 <b>User has been kicked</b>",
+  "penalty_header_warn": "⚠️ <b>Warning for user</b>",
+  "penalty_header_restrict": "🔒 <b>User has been restricted</b>",
+  "penalty_header_unban": "✅ <b>User has been unbanned</b>",
+
+  "penalty_label_user": "👤 <b>User:</b>",
+  "penalty_label_username": "🔗 <b>Username:</b>",
+  "penalty_label_id": "🆔",
+  "penalty_label_reason": "📝 <b>Reason:</b>",
+  "penalty_label_duration": "⏱️ <b>Duration:</b>",
+  "penalty_label_by": "🛡️ <b>By:</b>",
+  "penalty_no_reason": "No reason specified",
+  "unknown_user": "User",
+
+  "duration_permanent": "Permanent",
+  "duration_seconds": "{seconds} seconds",
+  "duration_minutes": "{minutes} minutes",
+  "duration_hours": "{hours} hours",
+  "duration_hours_minutes": "{hours} hours and {minutes} minutes",
+  "duration_days": "{days} days",
+  "duration_months": "{months} months"
 }
