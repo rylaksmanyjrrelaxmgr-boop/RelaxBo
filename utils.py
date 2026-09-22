@@ -2,13 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.7 - Multilingual Penalties)
+utils.py - الأدوات المساعدة للبوت (v7.9.8 - GetText Fix)
 =================================================================================
+🆕 v7.9.8 (إصلاح حرج — placeholder يظهر فارغاً):
+    ✅ TranslationManager.get_text: لا يستبدل {placeholders} إذا لم تُمرَّر
+       kwargs — يمنع ظهور "💾 الإجمالي:  GB" بدل "💾 الإجمالي: 8 GB"
+    ✅ يحل مشكلة: الرام، مقاييس النظام، مدة التشغيل، والإحصائيات الفارغة
+    ✅ الإصلاح يخدم كل الأماكن التي تستخدم _fmt(await _trans(...), ...)
+
 🆕 v7.9.7:
     ✅ apply_penalty: رسالة كاملة (مستخدم + سبب + مدة + مشرف) بـ 17 لغة
-    ✅ _PENALTY_I18N: كل الترجمات مدمجة في الكود (لا تحتاج locales/*.json)
+    ✅ _PENALTY_I18N: كل الترجمات مدمجة في الكود
     ✅ _format_duration(seconds, lang): تنسيق المدة بكل اللغات
-    ✅ fallback تلقائي: لغة مطلوبة → ملف اللغة → العربية → الافتراضي
 
 🔴 v7.9.6 (ترجمة كاملة للواجهة):
     ✅ _COMMON_PHRASES: قاموس ترجمة نصوص المستخدمين
@@ -555,14 +560,29 @@ class TranslationManager:
                 logger.debug(f"preload {lang}: {e}")
         return count
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.9.8: get_text مُصلَح — لا يستبدل placeholders بلا kwargs
+    # ═══════════════════════════════════════════════════════════════
     @classmethod
     def get_text(cls, lang: str, key: str, **kwargs) -> str:
+        """
+        جلب نص مترجم من locales/*.json.
+
+        ✅ v7.9.8: إذا لم تُمرَّر kwargs، يُعاد القالب كما هو
+        (بدون استبدال placeholders بـ '' — كان يسبب ظهور
+         "💾 الإجمالي:  GB" بدل "💾 الإجمالي: 8 GB").
+        """
         translations = cls.load_translation(lang)
         template = translations.get(key)
         if template is None and lang != cls._default_lang:
             template = cls.load_translation(cls._default_lang).get(key)
         if template is None:
             template = key
+
+        # ✅ FIX v7.9.8: لا تستبدل placeholders إذا لم تُمرَّر kwargs
+        if not kwargs:
+            return template
+
         try:
             return template.format_map(kwargs)
         except KeyError:
@@ -2323,7 +2343,7 @@ class PenaltyFactory:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ✅ v7.9.7: ترجمات العقوبات مدمجة (17 لغة، بدون ملفات ترجمة)
+# ✅ v7.9.7: ترجمات العقوبات مدمجة (17 لغة)
 # ═══════════════════════════════════════════════════════════════
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
@@ -2722,16 +2742,11 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
 
 
 def _penalty_t(key: str, lang: str, **kw) -> str:
-    """
-    ✅ v7.9.7: ترجمة مدمجة لمفاتيح العقوبات.
-    الترتيب: اللغة المطلوبة → العربية → ملف الترجمة → المفتاح نفسه.
-    """
+    """✅ v7.9.7: ترجمة مدمجة لمفاتيح العقوبات."""
     table = _PENALTY_I18N.get(lang) or {}
     template = table.get(key)
-
     if not template and lang != "ar":
         template = _PENALTY_I18N.get("ar", {}).get(key)
-
     if not template:
         try:
             text = TranslationManager.get_text(lang, key, **kw)
@@ -2740,7 +2755,6 @@ def _penalty_t(key: str, lang: str, **kw) -> str:
         except Exception:
             pass
         return key
-
     try:
         return template.format(**kw) if kw else template
     except (KeyError, IndexError):
@@ -2775,13 +2789,10 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
                         chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
-    """
-    ✅ v7.9.7: تطبق العقوبة وترجع رسالة كاملة بـ 17 لغة.
-    """
+    """✅ v7.9.7: رسالة كاملة بـ 17 لغة."""
     def T(key: str, **kw) -> str:
         return _penalty_t(key, lang, **kw)
 
-    # ─── فحوصات أمان ───
     try:
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
@@ -2802,14 +2813,12 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
     if not strategy:
         return False, "❌ Unknown penalty"
 
-    # ─── التنفيذ ───
     success, _short = await strategy.apply(
         bot, chat_id, user_id, duration=duration
     )
     if not success:
         return False, _short
 
-    # ─── جمع البيانات ───
     if not username or not first_name:
         try:
             member = await bot.get_chat_member(chat_id, user_id)
@@ -2827,7 +2836,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         except Exception:
             pass
 
-    # ─── بناء الرسالة ───
     lines = [T(penalty), ""]
     lines.append(f"{T('user')} {first_name or T('unknown_user')}")
     if username:
@@ -2843,7 +2851,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     full_msg = "\n".join(lines)
 
-    # ─── حفظ في DB ───
     if penalty in DB.VALID_PENALTY_TYPES:
         try:
             await DB.add_penalty(
