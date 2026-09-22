@@ -617,7 +617,6 @@
   "flood_duration_btn": "⏱️ مدة الفيضان",
   "night_duration_btn": "⏱️ مدة الليلي",
   "delete_penalty_duration_btn": "⏱️ مدة عقوبة الحذف",
-  "duration_permanent": "دائم",
   "duration_half_hour": "نصف ساعة",
   "duration_hour": "ساعة",
   "duration_day": "يوم",
@@ -896,5 +895,28 @@
   "updates_channel_btn": "📢 قناة التحديثات",
   "updates_channel_title": "📢 قناة التحديثات",
   "open_channel_btn": "📢 فتح القناة",
-  "channel_link_unavailable": "⚠️ لا يمكن إنشاء رابط لهذه القناة"
+
+  "penalty_header_ban": "🚫 <b>تم حظر المستخدم</b>",
+  "penalty_header_mute": "🔇 <b>تم كتم المستخدم</b>",
+  "penalty_header_kick": "👢 <b>تم طرد المستخدم</b>",
+  "penalty_header_warn": "⚠️ <b>تحذير للمستخدم</b>",
+  "penalty_header_restrict": "🔒 <b>تم تقييد المستخدم</b>",
+  "penalty_header_unban": "✅ <b>تم إلغاء الحظر</b>",
+
+  "penalty_label_user": "👤 <b>المستخدم:</b>",
+  "penalty_label_username": "🔗 <b>المعرف:</b>",
+  "penalty_label_id": "🆔",
+  "penalty_label_reason": "📝 <b>السبب:</b>",
+  "penalty_label_duration": "⏱️ <b>المدة:</b>",
+  "penalty_label_by": "🛡️ <b>بواسطة:</b>",
+  "penalty_no_reason": "بدون سبب محدد",
+  "unknown_user": "مستخدم",
+
+  "duration_permanent": "دائم",
+  "duration_seconds": "{seconds} ثانية",
+  "duration_minutes": "{minutes} دقيقة",
+  "duration_hours": "{hours} ساعة",
+  "duration_hours_minutes": "{hours} ساعة و{minutes} دقيقة",
+  "duration_days": "{days} يوم",
+  "duration_months": "{months} شهر"
 }
