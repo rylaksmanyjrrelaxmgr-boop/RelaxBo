@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.33 — DELETE_PENALTY_FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.34 — VACUUM_METHOD)
 ================================================================================
-🆕 v7.7.33 (DELETE_PENALTY_TYPE_FIX):
+🆕 v7.7.34 (VACUUM_METHOD):
+  ✅ async def vacuum(table): VACUUM خارج transaction
+     - متوافق مع maintenance.py (يتجنّب transaction rollback)
+     - يستخدم pool.acquire مباشر + autocommit
+     - timeout خاص (300s افتراضياً)
+     - حماية من SQL injection على اسم الجدول
+
+✅ v7.7.33 (DELETE_PENALTY_TYPE_FIX):
   ✅ _MIGRATIONS_TYPES: delete_penalty → TEXT DEFAULT 'none'
-     (كان INTEGER، والكود يستخدم قيم نصية: 'none'/'mute'/'ban'/...)
-  ✅ _migrate_delete_penalty_type: ترحيل تلقائي للقواعد الموجودة
-     - PostgreSQL: ALTER COLUMN INTEGER → TEXT (مع USING)
-     - MySQL: MODIFY COLUMN NUMBER → VARCHAR(20)
-     - SQLite: type affinity — لا حاجة لتغيير
-  ✅ _analyze_after_tune: تبسيط (لا فحص وجود مكرر)
+  ✅ _migrate_delete_penalty_type: ترحيل تلقائي
+  ✅ _analyze_after_tune: تبسيط
   ✅ _execute_with_conn PG: rowcount بدون regex
-     (rsplit بدلاً من re.search)
 
-🆕 v7.7.32 (PERF-FIX — لحل الاستعلامات البطيئة 1.5-2.5s):
-  ✅ expire_penalties: BATCH 5000 → 500 (تقليل lock duration)
-  ✅ _tune_heavy_tables_autovacuum: ضبط autovacuum على posts/subscriptions
-  ✅ _analyze_after_tune: ANALYZE فوري بعد الضبط
-  ✅ _pg_stat_statements_reset (اختياري): إعادة تعيين إحصاءات الاستعلامات
-  ✅ توثيق كامل لأسباب البطء (VACUUM, dead tuples, pool contention)
+✅ v7.7.32 (PERF-FIX — لحل البطء 1.5-2.5s):
+  ✅ expire_penalties: BATCH 5000 → 500
+  ✅ _tune_heavy_tables_autovacuum
+  ✅ _analyze_after_tune
 
-🆕 v7.7.31 (PUBLISH-FAST):
+✅ v7.7.31 (PUBLISH-FAST):
   ✅ has_active_subscription: MV fast path على PG
-  ✅ MV_REFRESH_COOLDOWN: 300s → 3600s
 
-🆕 v7.7.30 (PERFORMANCE-HARDENING):
-  ✅ C1-C5, H1, H3-H6, P1-P4, M1 (تفاصيل كاملة في نهاية الملف)
-
-🆕 v7.7.29 (POST-AUDIT-HARDENING — 13 إصلاحاً)
-🆕 v7.7.28 (HARDENING-AFTER-AUDIT — 9 إصلاحات)
-🆕 v7.7.27 (CACHE-COHERENCE)
+✅ v7.7.30 (PERFORMANCE-HARDENING)
+✅ v7.7.29 (POST-AUDIT-HARDENING)
+✅ v7.7.28 (HARDENING-AFTER-AUDIT)
+✅ v7.7.27 (CACHE-COHERENCE)
 ================================================================================
 """
 
@@ -105,7 +102,7 @@ logger = logging.getLogger(__name__)
 logger.info(f"📌 قاعدة البيانات: {DB_TYPE.upper()}")
 
 # =====================================================================
-# 0.0) مسارات stdlib و asyncio (لـ _get_caller_info)
+# 0.0) مسارات stdlib و asyncio
 # =====================================================================
 
 _ASYNCIO_DIR = ""
@@ -210,7 +207,7 @@ except ImportError as e:
     TABLES_MODULE_AVAILABLE = False
 
 # =====================================================================
-# 0.3) Mixins — fallback فريد لكل Mixin
+# 0.3) Mixins
 # =====================================================================
 
 def _load_mixin(module_name: str, class_name: str):
@@ -508,9 +505,6 @@ except ImportError:
 _USER_CACHE_INVALIDATE_ORIG = user_cache.invalidate
 
 async def _user_cache_invalidate_wrapper(key=None):
-    """
-    🆕 v7.7.29: key=None → يمسح internal_cache بالكامل (coherence).
-    """
     try:
         await _USER_CACHE_INVALIDATE_ORIG(key)
     except Exception as e:
@@ -566,18 +560,9 @@ USER_CACHE_TTL = 60
 LANG_CACHE_TTL = 600
 SETTINGS_BATCH_CACHE_TTL = 120
 
-# 🆕 v7.7.31: TTL للاشتراك
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
-
-# 🆕 v7.7.32: BATCH في expire_penalties (كان 5000)
-# 5000 صف = قفل طويل على user_penalties → يبطئ كل الاستعلامات
 EXPIRED_PENALTIES_BATCH = int(os.getenv("EXPIRED_PENALTIES_BATCH", "500"))
 
-# 🆕 v7.7.32: جداول تحتاج autovacuum aggressive
-# posts: يُحدَّث كثيراً (publish/fail_count/recycle)
-# subscriptions: يُحدَّث عند التجديد/الانتهاء
-# group_security / auto_reply_settings: PK lookups يجب أن تكون <1ms
-# user_penalties: يُكتب كثيراً (كل عقوبة)
 HEAVY_TABLES_FOR_AUTOVACUUM = (
     "posts",
     "subscriptions",
@@ -589,7 +574,7 @@ SLOW_QUERY_FULL_STACK = (
 )
 
 # =====================================================================
-# 0.8) v7.7.29 — MIGRATIONS ثابت وحيد (single source of truth)
+# 0.8) v7.7.29 — MIGRATIONS ثابت
 # =====================================================================
 
 _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
@@ -645,8 +630,6 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
         ("nsfw_filter", "INTEGER DEFAULT 0"),
         ("auto_penalty", "TEXT DEFAULT 'mute'"),
         ("auto_mute_duration", "INTEGER DEFAULT 3600"),
-        # ✅ v7.7.33: delete_penalty → TEXT (كان INTEGER)
-        # السبب: الكود يستخدم قيم نصية 'none'/'mute'/'ban'/'kick'/'restrict'/'warn'
         ("delete_penalty", "TEXT DEFAULT 'none'"),
         ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
         ("delete_penalty_messages", "INTEGER DEFAULT 0"),
@@ -685,9 +668,6 @@ _MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
 }
 
 def _compute_migrations_signature() -> Dict[str, List[str]]:
-    """
-    🆕 v7.7.30: يشمل نوع العمود — يكشف تغيير INTEGER → BIGINT.
-    """
     return {
         table: [f"{col}:{typ}" for col, typ in cols]
         for table, cols in _MIGRATIONS_TYPES.items()
@@ -764,9 +744,6 @@ _ALLOWED_COL_KEYWORDS = frozenset({
 })
 
 def _validate_column_def(col_name: str, col_def: str) -> bool:
-    """
-    🆕 v7.7.29: التحقق يمنع الأحرف الخطرة فقط.
-    """
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
         logger.error(f"❌ اسم عمود غير صالح: {col_name}")
         return False
@@ -1512,9 +1489,6 @@ async def _convert_insert_or_ignore(query: str, conn=None) -> str:
     return query
 
 async def _convert_insert_or_replace(query: str, conn=None) -> str:
-    """
-    ⚠️ DO UPDATE SET ليس REPLACE حقيقياً.
-    """
     if DB_TYPE == "sqlite":
         return query
     upper_query = query.upper().lstrip()
@@ -2325,6 +2299,91 @@ class Database(
             return {"type": "error", "message": str(e)}
 
     # =================================================================
+    # 🆕 v7.7.34: VACUUM خارج transaction
+    # =================================================================
+
+    async def vacuum(self, table: str) -> None:
+        """
+        🧹 VACUUM (ANALYZE) خارج transaction — PostgreSQL فقط.
+
+        السبب: VACUUM لا يعمل داخل BEGIN/COMMIT. نستخدم pool.acquire()
+        مباشر لتجنّب asynccontextmanager connection() الذي قد يفتح
+        transaction تلقائياً.
+
+        الفائدة على DB.execute():
+          - timeout خاص (300s بدل 60s)
+          - بدون إعادة محاولة عند الفشل (فشل VACUUM = فشل نهائي غالباً)
+          - بدون overhead من _convert_placeholders/_adapt_params
+          - رسائل خطأ أوضح
+
+        Args:
+            table: اسم الجدول (يُتحقّق منه بـ regex لمنع injection)
+
+        Raises:
+            RuntimeError: إذا pool غير متاح
+            asyncio.TimeoutError: إذا تجاوز VACUUM الـ timeout
+        """
+        # SQLite: VACUUM على كامل القاعدة — لا يقبل اسم جدول
+        if DB_TYPE == "sqlite":
+            try:
+                await self.execute("VACUUM")
+                logger.debug("🧹 SQLite VACUUM مكتمل")
+            except Exception as e:
+                logger.debug(f"⚠️ SQLite VACUUM: {e}")
+            return
+
+        # MySQL: VACUUM غير مدعوم (OPTIMIZE TABLE بدلاً منه)
+        if USE_MYSQL:
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+                logger.error(
+                    f"❌ vacuum: اسم جدول غير صالح: {table!r}"
+                )
+                return
+            try:
+                await self.execute(f"OPTIMIZE TABLE `{table}`")
+                logger.debug(f"🧹 MySQL OPTIMIZE {table}")
+            except Exception as e:
+                logger.debug(f"⚠️ MySQL OPTIMIZE {table}: {e}")
+            return
+
+        # PostgreSQL: VACUUM ANALYZE خارج transaction
+        if not USE_POSTGRES:
+            return
+
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+            logger.error(
+                f"❌ vacuum: اسم جدول غير صالح: {table!r}"
+            )
+            return
+
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError(
+                f"PG pool is None — لا يمكن VACUUM {table}"
+            )
+
+        vacuum_timeout = float(os.getenv("VACUUM_TIMEOUT", "300"))
+
+        conn = await asyncio.wait_for(
+            pool.acquire(),
+            timeout=self._connection_timeout,
+        )
+        try:
+            # ⚠️ لا نستدعي _execute_with_conn — نريد autocommit مباشر
+            await asyncio.wait_for(
+                conn.execute(f"VACUUM (ANALYZE) {table}"),
+                timeout=vacuum_timeout,
+            )
+            logger.debug(f"🧹 PG VACUUM (ANALYZE) {table}")
+        finally:
+            try:
+                await pool.release(conn)
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ release after VACUUM {table}: {e}"
+                )
+
+    # =================================================================
     # 🆕 v7.7.32: ضبط autovacuum للجداول الثقيلة
     # =================================================================
 
@@ -2385,10 +2444,7 @@ class Database(
     async def _analyze_after_tune(self, conn) -> int:
         """
         🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
-        🆕 v7.7.33: تبسيط — لا فحص وجود مكرر (كان يُكرّر الاستعلامات).
-
-        يجبر planner على إعادة حساب الإحصاءات.
-        PostgreSQL يقبل `ANALYZE t1, t2, t3` في أمر واحد.
+        🆕 v7.7.33: تبسيط — لا فحص وجود مكرر.
         """
         if not USE_POSTGRES:
             return 0
@@ -3505,8 +3561,6 @@ class Database(
             )
             if not result:
                 return 0
-            # ✅ v7.7.33: rowcount بدون regex (أسرع وأوضح)
-            # asyncpg يُرجع: "INSERT 0 5" | "UPDATE 3" | "DELETE 2"
             parts = result.rsplit(None, 1)
             if len(parts) == 2:
                 try:
@@ -4286,16 +4340,12 @@ class Database(
             return False
 
     # =================================================================
-    # 🆕 v7.7.33: ترحيل نوع delete_penalty (INTEGER → TEXT)
+    # 🆕 v7.7.33: ترحيل نوع delete_penalty
     # =================================================================
 
     async def _migrate_delete_penalty_type(self, conn) -> bool:
         """
         🆕 v7.7.33: ترحيل delete_penalty من INTEGER إلى TEXT.
-
-        السبب: الكود يستخدم قيم نصية:
-          - 'none', 'mute', 'ban', 'kick', 'restrict', 'warn'
-        بينما كان العمود INTEGER → asyncpg يرفض النص.
 
         - SQLite: type affinity يسمح بالمزج — لا حاجة لتغيير.
         - PostgreSQL: ALTER COLUMN TYPE TEXT (مع USING).
@@ -4306,7 +4356,6 @@ class Database(
 
         try:
             if USE_POSTGRES:
-                # فحص نوع العمود الحالي
                 row = await conn.fetchrow(
                     "SELECT data_type FROM information_schema.columns "
                     "WHERE table_name = 'group_security' "
@@ -4314,11 +4363,10 @@ class Database(
                     "AND table_schema = current_schema()"
                 )
                 if not row:
-                    # العمود غير موجود — لا حاجة
                     return False
                 current_type = (row["data_type"] or "").lower()
                 if current_type in ("text", "character varying", "varchar"):
-                    return True  # بالفعل TEXT
+                    return True
 
                 if current_type != "integer":
                     logger.debug(
@@ -4327,7 +4375,6 @@ class Database(
                     )
                     return False
 
-                # تحويل INTEGER → TEXT مع USING
                 try:
                     await conn.execute(
                         "ALTER TABLE group_security "
@@ -4365,9 +4412,8 @@ class Database(
                     data_type = (row[0] or "").lower()
                     column_type = (row[1] or "").lower()
                     if data_type in ("varchar", "text", "char"):
-                        return True  # بالفعل نصي
+                        return True
 
-                    # تحويل القيم الرقمية → نصية أولاً
                     await cursor.execute(
                         "UPDATE group_security SET delete_penalty = "
                         "  CASE "
@@ -4376,7 +4422,6 @@ class Database(
                         "    ELSE 'mute' "
                         "  END"
                     )
-                    # ثم تغيير النوع
                     await cursor.execute(
                         "ALTER TABLE group_security "
                         "MODIFY COLUMN delete_penalty "
@@ -4680,7 +4725,6 @@ class Database(
             await self._ensure_text_hash_column(conn)
             await self._ensure_bigint_ids(conn)
 
-            # ✅ v7.7.33: ترحيل نوع delete_penalty
             try:
                 await self._migrate_delete_penalty_type(conn)
             except Exception as e:
@@ -5586,9 +5630,6 @@ class Database(
         return None
 
     async def has_active_subscription(self, user_id: int) -> bool:
-        """
-        🆕 v7.7.31: MV fast path على PG (1.19s → <5ms).
-        """
         cache_key = f"has_active_sub_{user_id}"
         cached = await internal_cache.get(cache_key)
         if cached is not None:
@@ -6569,10 +6610,6 @@ class Database(
             )
             return 0
 
-    # =================================================================
-    # الجدولة
-    # =================================================================
-
     async def get_schedule(self, channel_db_id: int) -> Dict:
         async with self.transaction() as conn:
             await self._execute_with_conn(
@@ -6967,10 +7004,6 @@ class Database(
                 query, (now, owner_id, now, limit)
             )
 
-    # =================================================================
-    # العقوبات
-    # =================================================================
-
     async def add_penalty(
         self,
         user_id: int,
@@ -7163,13 +7196,6 @@ class Database(
         return await self.fetchall(query, tuple(params))
 
     async def expire_penalties(self) -> int:
-        """
-        🆕 v7.7.32: BATCH = EXPIRED_PENALTIES_BATCH (500 افتراضياً).
-
-        السبب: BATCH=5000 كان يمسك قفلاً على آلاف الصفوف لدورة كاملة
-        → كل استعلام على user_penalties ينتظر → 2+ ثانية.
-        مع 500 صف، القفل ينتهي بسرعة، والدورات اللاحقة تكمل.
-        """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
         try:
