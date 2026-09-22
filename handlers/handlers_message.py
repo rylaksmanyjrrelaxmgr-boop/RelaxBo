@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.3 - Bugfixes)
+handlers_message.py - معالجات الرسائل (v7.9.8 - Lang for Penalty)
 =====================================================================
+🆕 v7.9.8 (تمرير lang لدعم كل اللغات):
+    ✅ apply_violation_penalty: يقبل lang ويعيد رسالة كاملة (مستخدم + سبب
+       + مدة + مشرف) بلغة المجموعة
+    ✅ _delete_and_warn: يمرر lang إلى apply_violation_penalty
+    ✅ حل مشكلة ظهور "🚨" فقط — الآن يظهر:
+       "🚨 🔇 تم كتم المستخدم / 👤 المستخدم / 📝 السبب / ⏱️ المدة"
+
 🆕 v7.9.3 (إصلاح):
     ✅ _handle_redeem_gift_input: send_code_empty بدل send_code
        (send_code الآن prompt: "📝 أرسل الكود: /redeem_gift <الكود>")
@@ -457,9 +464,27 @@ async def _send_translation_reply(bot, chat_id, original_message_id, translated,
         logger.debug(f"_send_translation_reply: {e}")
 
 
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v7.9.8: apply_violation_penalty مع lang — رسالة كاملة
+# ═════════════════════════════════════════════════════════════════════
+
 async def apply_violation_penalty(update, context, chat_id, user_id,
                                    violation_type, penalty_type,
-                                   duration_seconds) -> Tuple[bool, str]:
+                                   duration_seconds,
+                                   lang: str = 'ar') -> Tuple[bool, str]:
+    """
+    ✅ v7.9.8: تدعم تمرير lang لترجمة رسالة العقوبة كاملة.
+
+    بعد هذا التعديل، `apply_penalty` سيبني رسالة كاملة:
+      - عنوان العقوبة (كتم/حظر/...)
+      - المستخدم
+      - المعرف
+      - السبب
+      - المدة
+      - المشرف
+
+    بدلاً من الرمز "🚨" وحده.
+    """
     try:
         username = first_name = chat_name = ""
         try:
@@ -470,10 +495,13 @@ async def apply_violation_penalty(update, context, chat_id, user_id,
                 chat_name = update.effective_chat.title or ""
         except Exception:
             pass
+
+        # ✅ v7.9.8: تمرير lang إلى apply_penalty
         success, msg = await apply_penalty(
             context.bot, chat_id, user_id, penalty_type, duration_seconds,
             f"violation: {violation_type}", moderator=context.bot.id,
             username=username, first_name=first_name, chat_name=chat_name,
+            lang=lang,
         )
         return success, msg
     except Exception as e:
@@ -1243,15 +1271,20 @@ class MessageHandlers:
             max_strikes = (settings.get('violation_strikes')
                            or settings.get('max_warnings') or 3)
             if violation_count >= max_strikes:
+                # ═══════════════════════════════════════════════════
+                # ✅ v7.9.8: تمرير lang إلى apply_violation_penalty
+                # ═══════════════════════════════════════════════════
                 success, msg = await apply_violation_penalty(
                     update, context, chat_id, user_id,
-                    violation_type, penalty_type, duration_seconds)
+                    violation_type, penalty_type, duration_seconds,
+                    lang=lang)
                 if success:
                     try:
                         msg_prefix = await _trans('violation_penalty_applied',
                                                    lang, "🚨 {msg}")
                         await safe_send(context.bot, chat_id,
-                                        _fmt(msg_prefix, msg=msg))
+                                        _fmt(msg_prefix, msg=msg),
+                                        parse_mode='HTML')
                         await DB.reset_violation_count(user_id, chat_id)
                     except Exception:
                         pass
@@ -2989,4 +3022,5 @@ __all__ = [
     "_invalidate_after_channel_change",
     "_detect_and_translate",
     "_send_translation_reply",
+    "apply_violation_penalty",
 ]
