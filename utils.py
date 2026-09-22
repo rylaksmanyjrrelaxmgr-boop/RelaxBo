@@ -2,30 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.8 - GetText Fix)
+utils.py - الأدوات المساعدة للبوت (v7.9.9 - No Username in Penalty)
 =================================================================================
+🆕 v7.9.9 (إزالة @username من رسالة العقوبة):
+    ✅ apply_penalty: حذف سطر "🔗 المعرف: @username"
+    ✅ يُعرض فقط المعرف الرقمي <code>{user_id}</code>
+    ✅ username يبقى محفوظاً في قاعدة البيانات (user_penalties)
+
 🆕 v7.9.8 (إصلاح حرج — placeholder يظهر فارغاً):
-    ✅ TranslationManager.get_text: لا يستبدل {placeholders} إذا لم تُمرَّر
-       kwargs — يمنع ظهور "💾 الإجمالي:  GB" بدل "💾 الإجمالي: 8 GB"
-    ✅ يحل مشكلة: الرام، مقاييس النظام، مدة التشغيل، والإحصائيات الفارغة
-    ✅ الإصلاح يخدم كل الأماكن التي تستخدم _fmt(await _trans(...), ...)
+    ✅ TranslationManager.get_text: لا يستبدل {placeholders} إذا لم تُمرَّر kwargs
 
-🆕 v7.9.7:
-    ✅ apply_penalty: رسالة كاملة (مستخدم + سبب + مدة + مشرف) بـ 17 لغة
-    ✅ _PENALTY_I18N: كل الترجمات مدمجة في الكود
-    ✅ _format_duration(seconds, lang): تنسيق المدة بكل اللغات
-
-🔴 v7.9.6 (ترجمة كاملة للواجهة):
-    ✅ _COMMON_PHRASES: قاموس ترجمة نصوص المستخدمين
-    ✅ TranslationManager.translate() / detect_arabic() / stats()
-    ✅ _fmt_dur(seconds, lang): يدعم الترجمة
-    ✅ _format_security_text(settings, stats, lang): يدعم الترجمة
-
-🔴 v7.9.4: KeyboardFactory: مسار buttons_config_{lang}.json في الجذر
-🔴 v7.9.3: TranslationManager._load_translation_cached: سجل عند النجاح/الفشل
-🔴 v7.9.2: إصلاحات ما بعد التدقيق
-🔴 v7.9.1: get_reply_from_file: قائمة أنماط مُسبَق تصريفها
-🔴 v7.9.0: تحميل خارج القفل + إصلاحات حرجة
+🆕 v7.9.7: apply_penalty: رسالة كاملة بـ 17 لغة
+🔴 v7.9.6: _COMMON_PHRASES + TranslationManager.translate()
 =================================================================================
 """
 
@@ -65,7 +53,7 @@ from database import DB
 logger = logging.getLogger(__name__)
 
 # =====================================================================
-# 0. 🧠 SmartCache — كاش موحّد مع dedup
+# 0. 🧠 SmartCache
 # =====================================================================
 
 class SmartCache:
@@ -153,7 +141,7 @@ _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 _security_stats_cache = SmartCache(ttl=5, max_size=500)
 
 # =====================================================================
-# 1. أدوات الوقت
+# 1. TimeUtils
 # =====================================================================
 
 class TimeUtils:
@@ -211,7 +199,7 @@ class TimeUtils:
             return None
 
 # =====================================================================
-# 2. أدوات النصوص
+# 2. TextUtils
 # =====================================================================
 
 class TextUtils:
@@ -249,7 +237,7 @@ class TextUtils:
         return text[:max_len] + ("..." if len(text) > max_len else "")
 
 # =====================================================================
-# 3. Rate Limiter — Adaptive
+# 3. RateLimiter
 # =====================================================================
 
 class RateLimiter:
@@ -299,7 +287,7 @@ RATE_LIMITER = RateLimiter(max_concurrent=15, max_per_second=30)
 PUBLISH_RATE_LIMITER = RateLimiter(max_concurrent=5, max_per_second=10)
 
 # =====================================================================
-# 4. مقاييس الأداء
+# 4. MetricsCollector
 # =====================================================================
 
 class MetricsCollector:
@@ -332,7 +320,7 @@ class MetricsCollector:
 METRICS = MetricsCollector()
 
 # =====================================================================
-# 5. كاش الردود
+# 5. AutoReplyCache
 # =====================================================================
 
 class AutoReplyCache:
@@ -358,7 +346,7 @@ class AutoReplyCache:
 _auto_reply_cache = AutoReplyCache(maxsize=300, ttl=300)
 
 # =====================================================================
-# 5.1 ✅ v7.9.6: قاموس ترجمة العبارات الشائعة
+# 5.1 _COMMON_PHRASES
 # =====================================================================
 
 _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
@@ -490,7 +478,7 @@ _COMMON_PHRASES: Dict[str, Dict[str, str]] = {
 _ARABIC_TEXT_PATTERN = re.compile(r'[\u0600-\u06FF]')
 
 # =====================================================================
-# 6. الترجمات
+# 6. TranslationManager
 # =====================================================================
 
 class TranslationManager:
@@ -560,17 +548,10 @@ class TranslationManager:
                 logger.debug(f"preload {lang}: {e}")
         return count
 
-    # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.9.8: get_text مُصلَح — لا يستبدل placeholders بلا kwargs
-    # ═══════════════════════════════════════════════════════════════
     @classmethod
     def get_text(cls, lang: str, key: str, **kwargs) -> str:
         """
-        جلب نص مترجم من locales/*.json.
-
-        ✅ v7.9.8: إذا لم تُمرَّر kwargs، يُعاد القالب كما هو
-        (بدون استبدال placeholders بـ '' — كان يسبب ظهور
-         "💾 الإجمالي:  GB" بدل "💾 الإجمالي: 8 GB").
+        ✅ v7.9.8: إذا لم تُمرَّر kwargs، يُعاد القالب كما هو.
         """
         translations = cls.load_translation(lang)
         template = translations.get(key)
@@ -579,7 +560,6 @@ class TranslationManager:
         if template is None:
             template = key
 
-        # ✅ FIX v7.9.8: لا تستبدل placeholders إذا لم تُمرَّر kwargs
         if not kwargs:
             return template
 
@@ -663,7 +643,7 @@ async def get_text(lang: str, key: str, **kwargs) -> str:
     return TranslationManager.get_text(lang, key, **kwargs)
 
 # =====================================================================
-# 7. إدارة الحالات
+# 7. UserState + StateManager
 # =====================================================================
 
 class UserState(Enum):
@@ -758,7 +738,7 @@ class StateManager:
             return user_id not in cls._cache
 
 # =====================================================================
-# 8. تعريفات الأزرار (CB)
+# 8. CB
 # =====================================================================
 
 class CB:
@@ -928,7 +908,7 @@ class CB:
     AUTO_REPLY_LIST = "auto_reply_list"
 
 # =====================================================================
-# 9. مصنع الكيبوردات
+# 9. KeyboardFactory
 # =====================================================================
 
 class KeyboardFactory:
@@ -957,6 +937,8 @@ class KeyboardFactory:
         "admin_backup", "admin_restore", "admin_restore_sel",
         "admin_show_backups", "admin_upload_backup",
         "admin_send_update", "admin_set_update_ch", "admin_show_update",
+        "admin_update_ch_btn", "admin_change_update_ch",
+        "admin_remove_update_ch",
         "admin_force_sub", "admin_set_force", "admin_disable_force",
         "admin_broadcast", "admin_tickets", "admin_del_tickets",
         "admin_log_ch", "admin_set_log_ch",
@@ -2233,7 +2215,7 @@ async def unban_user_by_id(user_id: int) -> Tuple[bool, str]:
         return False, f"❌ فشل فك الحظر: {str(e)[:100]}"
 
 # =====================================================================
-# 14. نظام العقوبات — Singleton strategies
+# 14. نظام العقوبات
 # =====================================================================
 
 class PenaltyStrategy(ABC):
@@ -2343,7 +2325,7 @@ class PenaltyFactory:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ✅ v7.9.7: ترجمات العقوبات مدمجة (17 لغة)
+# _PENALTY_I18N — 17 لغة
 # ═══════════════════════════════════════════════════════════════
 
 _PENALTY_I18N: Dict[str, Dict[str, str]] = {
@@ -2742,7 +2724,6 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
 
 
 def _penalty_t(key: str, lang: str, **kw) -> str:
-    """✅ v7.9.7: ترجمة مدمجة لمفاتيح العقوبات."""
     table = _PENALTY_I18N.get(lang) or {}
     template = table.get(key)
     if not template and lang != "ar":
@@ -2762,7 +2743,6 @@ def _penalty_t(key: str, lang: str, **kw) -> str:
 
 
 def _format_duration(seconds: int, lang: str = "ar") -> str:
-    """✅ v7.9.7: تنسيق المدة بكل اللغات (مدمج)."""
     try:
         seconds = int(seconds or 0)
     except (ValueError, TypeError):
@@ -2789,7 +2769,9 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
                         chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
-    """✅ v7.9.7: رسالة كاملة بـ 17 لغة."""
+    """
+    ✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username.
+    """
     def T(key: str, **kw) -> str:
         return _penalty_t(key, lang, **kw)
 
@@ -2836,10 +2818,12 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         except Exception:
             pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.9.9: بناء الرسالة — بدون سطر @username
+    # ═══════════════════════════════════════════════════════════════
     lines = [T(penalty), ""]
     lines.append(f"{T('user')} {first_name or T('unknown_user')}")
-    if username:
-        lines.append(f"{T('username')} @{username}")
+    # ❌ تمت إزالة: lines.append(f"{T('username')} @{username}")
     lines.append(f"{T('id')} <code>{user_id}</code>")
 
     if penalty != "unban":
@@ -2851,6 +2835,7 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     full_msg = "\n".join(lines)
 
+    # ─── حفظ في DB (username يُحفظ هنا رغم عدم عرضه) ───
     if penalty in DB.VALID_PENALTY_TYPES:
         try:
             await DB.add_penalty(
@@ -3643,7 +3628,7 @@ class BackgroundTasks:
                 logger.error(f"❌ فشل تنظيف قاعدة البيانات: {e}")
 
 # =====================================================================
-# 18. Warmup الشامل
+# 18. Warmup
 # =====================================================================
 
 async def warmup_all() -> Dict[str, Any]:
