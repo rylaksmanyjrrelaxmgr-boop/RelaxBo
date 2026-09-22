@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.25
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.26
 ===================================================================================
+🆕 v7.5.26 (FIX /start STATE):
+    ✅ start() يُصفِّر StateManager + user_data keys المعلقة
+    ✅ حل مشكلة: /start بعد "تعيين قناة التحديثات" كان يبقي الحالة
+       معلقة → الرسالة التالية تُفسَّر كإضافة قناة
+
 🆕 v7.5.25 (DB-DIAGNOSTICS):
     ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
     ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
-    ✅ كلاهما للمطور فقط
-    ✅ يستخدمان db_diagnostics.py (ملف منفصل)
 
 🆕 v7.5.24 (RENDER-READY):
     ✅ _trans: fallback آمن لكل المفاتيح
     ✅ HTML بدل Markdown في كل الرسائل
-    ✅ لا اعتماد على مفاتيح ناقصة
-    ✅ يعمل مباشرة مع locales/ar.json + locales/en.json الحاليين
 ===================================================================================
 """
 
@@ -47,6 +48,50 @@ logger = logging.getLogger(__name__)
 
 ANONYMOUS_BOT_ID = 1087968824   # GroupAnonymousBot
 CHANNEL_BOT_ID = 136817688      # ChannelBot
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.26: مفاتيح user_data المعلقة التي تُمسح عند /start
+# ═══════════════════════════════════════════════════════════════════
+
+_STALE_KEYS_ON_START = (
+    'sec_chat', 'security_chat_id', 'adv_chat', 'auto_chat',
+    'schedule_ch', 'ban_chat', 'contest_join', 'log_group_id',
+    'pin_msg_id', 'channel_page', 'post_page', 'adm_ch_page',
+    'adm_gr_page', 'auto_keyword', 'contest_id', 'contest_title',
+    'contest_desc', 'contest_prize', 'last_cb_',
+)
+
+
+def _clear_stale_state(user_id: int, context) -> None:
+    """
+    ✅ v7.5.26: يمسح أي حالة معلقة عند /start.
+
+    المشكلة المُصلَحة:
+      المستخدم يضغط "تعيين قناة التحديثات" (WAIT_UPDATE_CH)
+      → يرسل /start (لا يمسح الحالة)
+      → يرسل @channel
+      → handle_private يعالجها كـ WAIT_UPDATE_CH أو WAIT_CHANNEL
+
+    هذا يُصلح بمسح الحالة عند كل /start.
+    """
+    try:
+        StateManager.clear(user_id)
+    except Exception as e:
+        logger.debug(f"StateManager.clear({user_id}): {e}")
+
+    try:
+        for k in _STALE_KEYS_ON_START:
+            try:
+                context.user_data.pop(k, None)
+            except Exception:
+                pass
+        # مسح إضافي لأي key يبدأ بـ last_cb_
+        for k in list(context.user_data.keys()):
+            if isinstance(k, str) and k.startswith('last_cb_'):
+                context.user_data.pop(k, None)
+    except Exception as e:
+        logger.debug(f"_clear_stale_state user_data: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -107,16 +152,12 @@ def _is_anonymous_sender(update: Update) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.24: الترجمة الآمنة
+# ✅ الترجمة الآمنة
 # ═══════════════════════════════════════════════════════════════════
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
     """
     ✅ v7.5.24: ترجمة آمنة مع fallback عربي.
-    - يحاول من TranslationManager (locales/*.json)
-    - ثم من get_text (قديم)
-    - ثم يعيد default
-    - لا يرفع استثناء أبداً
     """
     if not key:
         return default or ""
@@ -319,11 +360,18 @@ def _invalidate_force_sub_cache(user_id: int = None):
 
 class CommandHandlers:
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.26: start — يمسح الحالة المعلقة أولاً
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         username = update.effective_user.username or ""
         first_name = update.effective_user.first_name or ""
+
+        # ✅ v7.5.26: امسح أي حالة معلقة من عمليات سابقة
+        _clear_stale_state(user_id, context)
 
         try:
             user_exists = await DB.fetchval(
@@ -528,7 +576,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════════
-    # ✅ developer — مترجم
+    # developer — مترجم
     # ═══════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -1531,11 +1579,13 @@ class CommandHandlers:
                 )
             return
 
+        # ✅ v7.9.8: تمرير lang لـ apply_penalty
         success, msg = await apply_penalty(
             context.bot, chat_id, target, action,
             duration_seconds, reason, user_id,
+            lang=lang,
         )
-        await _safe_edit_or_send(update, context, msg, parse_mode=None)
+        await _safe_edit_or_send(update, context, msg, parse_mode='HTML')
         if success:
             try:
                 await invalidate_auth_cache(chat_id=chat_id, user_id=target)
@@ -1740,22 +1790,11 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.25: أوامر تشخيص قاعدة البيانات (للمطور فقط)
+    # ✅ v7.5.25: أوامر تشخيص قاعدة البيانات
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ✅ v7.5.25: /db_diag — تشخيص قاعدة البيانات.
-
-        يشغّل استعلامات PostgreSQL لجمع:
-          - Dead tuples (سبب البطء الرئيسي)
-          - أحجام الجداول
-          - الفهارس الحرجة
-          - إعدادات autovacuum
-
-        للمطور فقط.
-        """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -1771,7 +1810,6 @@ class CommandHandlers:
             from db_diagnostics import diagnose_db
             result = await diagnose_db()
 
-            # إرسال مباشر (طويل — قد يحتاج تقسيم)
             if len(result) > 4000:
                 parts = [result[i:i+4000] for i in range(0, len(result), 4000)]
                 for i, part in enumerate(parts, 1):
@@ -1802,12 +1840,6 @@ class CommandHandlers:
 
     @staticmethod
     async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ✅ v7.5.25: /db_vacuum — تنظيف VACUUM ANALYZE للجداول الحرجة.
-
-        آمن: لا يقفل الجداول (ليس VACUUM FULL).
-        للمطور فقط.
-        """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
