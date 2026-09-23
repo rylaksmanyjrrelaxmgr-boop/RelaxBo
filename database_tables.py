@@ -2,59 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.19)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.20)
 ================================================================================
+🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS):
+  ✅ إصلاح جوهري: إضافة _drop_deprecated_indexes_* إلى fast-path
+       - السبب: كان يُستدعى فقط عند رفع schema_version
+       - النتيجة: الفهارس الزائدة (idx_posts_channel...) لا تُحذف أبداً
+       - الأثر: UPDATE posts = 3.14s → المتوقع <100ms بعد النشر
+  ✅ إضافة: ADMIN_LOGS_MAX_ROWS = 5000
+       - حتى لو كل الصفوف أحدث من 30 يوم، يحذف الأقدم للوصول للحد
+       - السبب: admin_logs وصل 11,184 صف ثابت
+  ✅ ADMIN_LOGS_RETENTION_DAYS: 60 → 30 (تنظيف أكثر شدة)
+  ✅ CURRENT_SCHEMA_VERSION: 18 → 19
+
 🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX — تغطية الجداول المتبقية):
   ✅ إضافة 3 جداول لـ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
       • schedule              → كان 46 dead / 24 live (65.7%)
       • user_reminder_settings → كان 9 dead / 2 live (81.8%)
       • support_tickets       → كان 1 dead / 0 live
-  ✅ السبب: autovacuum الافتراضي يحتاج 50 + 0.2×N صف ميت
-       - schedule (24 صف): يحتاج ~55 dead ليتفعّل
-       - user_reminder_settings (2 صف): يحتاج ~50 dead
-       - كلاهما لا يصل العتبة → dead tuples تتراكم
-  ✅ الحل: نفس إعدادات auto_replies (scale_factor=0.05, threshold=10)
   ✅ CURRENT_SCHEMA_VERSION: 17 → 18
 
 🚀 v7.6.18 (DIAGNOSIS-FIXES — تنظيف admin_logs + autovacuum للجداول الصغيرة):
-  ✅ إضافة: ADMIN_LOGS_RETENTION_DAYS = 60 (سياسة احتفاظ تلقائية)
+  ✅ إضافة: ADMIN_LOGS_RETENTION_DAYS (سياسة احتفاظ تلقائية)
   ✅ إضافة: _cleanup_old_admin_logs_* (PG/SQLite/MySQL)
-       - السبب: 11,127 صف في admin_logs → تحذير التشخيص
-       - التنظيف يُشغَّل في كل bootstrap (fast-path + إنشاء أولي)
   ✅ إضافة: SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
-       - الجداول الصغيرة (<1000 صف) لا تُفعّل autovacuum افتراضياً
-       - auto_replies: 53 dead / 192 live = 21.6% → يحتاج tuning
   ✅ إضافة: _tune_autovacuum_postgres
-       - ALTER TABLE ... SET (autovacuum_vacuum_scale_factor=0.05, ...)
-       - نفس إعدادات posts/subscriptions/user_penalties/users
-       - يعمل فقط على PostgreSQL (SQLite/MySQL لا يحتاجان)
 
 🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX):
-  ✅ _fetch_existing_indexes_postgres: إضافة schemaname = ANY(current_schemas(false))
-  ✅ _drop_deprecated_indexes_postgres: نفس الفلتر
-  ✅ _ensure_index_definitions_match_postgres: نفس الفلتر
-  ✅ _ensure_all_indexes_exist_postgres: نفس الفلتر
-  ✅ _verify_critical_indexes_postgres: نفس الفلتر
+  ✅ schemaname = ANY(current_schemas(false)) في كل pg_indexes queries
   ✅ _migrate_missing_columns_postgres: إصلاح عداد مضلل
-       - كان: added += 1 حتى لو العمود موجود (IF NOT EXISTS)
-       - صار: فحص information_schema أولاً + counters منفصلة
-       - الآن: checked + added (صحيحتان)
 
 🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES — إصلاح بطء النشر 2s):
-  ✅ حُذف 3 فهارس زائدة على جدول posts:
-      • idx_posts_channel (يُغطّيه prefix من idx_posts_channel_pub_fail_created)
-      • idx_posts_published (low cardinality، بلا قيمة)
-      • idx_posts_channel_published (يُغطّيه idx_posts_channel_pub_fail_created)
-  ✅ السبب: كل UPDATE على published يُحدّث 5 فهارس → 2.02s/UPDATE
-  ✅ المتوقع بعد الحذف: 2.02s → < 100ms (تحسّن ~20x)
+  ✅ حُذف 3 فهارس زائدة على جدول posts
 
-🚀 v7.6.15 (SLOW-QUERY-FIX — idx_posts_next_post):
-  ✅ idx_posts_channel_unpub_fresh_created: created_at → id
-
-🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB):
-  ✅ +3 فهارس متقدمة: partial/covering indexes
-  ✅ _adapt_cols_for_db: تكييف WHERE/INCLUDE حسب DB
-
+🚀 v7.6.15 (SLOW-QUERY-FIX — idx_posts_next_post)
+🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB)
 🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
 🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX)
 🚀 v7.6.11 (MISSING-TABLES-MIGRATION)
@@ -74,8 +56,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.19: 17 → 18 (تغطية جداول إضافية بـ autovacuum tuning)
-CURRENT_SCHEMA_VERSION = 18
+# ✅ v7.6.20: 18 → 19 (force deprecated index drop + max rows)
+CURRENT_SCHEMA_VERSION = 19
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -86,8 +68,13 @@ MAINTENANCE_INTERVAL_SECONDS = 86400
 # ✅ v7.6.13: فاصل بين عمليات VACUUM لكل جدول
 VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 
-# ✅ v7.6.18: سياسة احتفاظ admin_logs (60 يوم)
-ADMIN_LOGS_RETENTION_DAYS = 60
+# ✅ v7.6.20: 60 → 30 (تنظيف أكثر شدة)
+ADMIN_LOGS_RETENTION_DAYS = 30
+
+# ✅ v7.6.20: حد أقصى لعدد الصفوف في admin_logs
+# السبب: admin_logs كان 11,184 صف ثابت
+# حتى لو كل الصفوف حديثة، يجب حذف الأقدم للوصول للحد
+ADMIN_LOGS_MAX_ROWS = 5000
 
 # ✅ v7.6.12: الجداول التي تحتاج VACUUM دوري
 MAINTENANCE_TABLES = (
@@ -102,13 +89,6 @@ MAINTENANCE_TABLES = (
 )
 
 # ✅ v7.6.19: جداول صغيرة تحتاج autovacuum عدواني
-# السبب: PostgreSQL افتراضياً يحتاج 50 + 0.2*N صف ميت لتفعيل autovacuum
-# الجداول الصغيرة (<1000 صف) لا تصل للعتبة → dead tuples تتراكم
-# 
-# ✅ v7.6.19: أُضيفت schedule + user_reminder_settings + support_tickets
-#    - schedule: 46 dead / 24 live = 65.7% (كان لا يتفعّل)
-#    - user_reminder_settings: 9 dead / 2 live = 81.8% (لا يتفعّل)
-#    - support_tickets: 1 dead / 0 live (جدول فاضي)
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -128,7 +108,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "bot_admins",
     "chat_locks",
     "group_rules",
-    # ✅ v7.6.19: جداول إضافية كانت تفوت على autovacuum
     "schedule",
     "user_reminder_settings",
     "support_tickets",
@@ -141,12 +120,12 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.16: 75 → 72 (حُذف 3 فهارس زائدة من posts)
+# ✅ v7.6.16: 72 (حُذف 3 فهارس زائدة من posts)
 EXPECTED_INDEX_COUNT = 72
 
-# ✅ v7.6.14: فهارس تُتخطى على MySQL بعد التكيف (تصبح مكررة مع PK)
+# ✅ v7.6.14: فهارس تُتخطى على MySQL
 MYSQL_SKIP_INDEXES = frozenset({
-    "idx_penalties_active_id",  # id هو PK في user_penalties
+    "idx_penalties_active_id",
 })
 
 COMMON_INDEXES = [
@@ -167,13 +146,12 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (4) — ✅ v7.6.16: حُذف 3 فهارس زائدة
+    # ═══ POSTS (4) ═══
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
     ("posts", "idx_posts_channel_pub_at",
      "posts(channel_db_id, published, published_at)"),
-    # ✅ v7.6.15: created_at → id (يطابق get_next_post)
     ("posts", "idx_posts_channel_unpub_fresh_created",
      "posts(channel_db_id, id) WHERE published = 0 "
      "AND (fail_count IS NULL OR fail_count < 3)"),
@@ -504,7 +482,6 @@ def _normalize_columns_mysql(col_str: str) -> str:
 
 
 def _parse_expected_columns(cols: str) -> str:
-    """يستخرج الأعمدة من صيغ متعددة."""
     if not cols:
         return ""
     m = re.match(r"^\w+\s*\((.+?)\)(?:\s|$)", cols.strip())
@@ -514,7 +491,6 @@ def _parse_expected_columns(cols: str) -> str:
 
 
 def _adapt_cols_for_db(cols: str, db_type: str) -> str:
-    """يُحوّل تعريف فهرس من PG baseline إلى DB محدد."""
     if not cols:
         return cols
     if db_type == "postgres":
@@ -522,7 +498,6 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
 
     s = cols
 
-    # INCLUDE
     include_match = re.search(
         r"\s+INCLUDE\s*\(([^)]*)\)", s, re.IGNORECASE
     )
@@ -537,7 +512,6 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
             else:
                 s += included + ")"
 
-    # WHERE
     if db_type == "mysql":
         s = re.sub(
             r"\s+WHERE\s+.*$", "", s,
@@ -551,7 +525,6 @@ def _adapt_cols_for_db(cols: str, db_type: str) -> str:
 def _get_expected_cols_for_index(
     idx_name: str, db_type: str = "postgres"
 ) -> str:
-    """يرجع الأعمدة المتوقعة لفهرس مع تكييفها."""
     for _table, name, cols in COMMON_INDEXES:
         if name == idx_name:
             return _adapt_cols_for_db(cols, db_type)
@@ -559,7 +532,6 @@ def _get_expected_cols_for_index(
 
 
 def _is_advanced_index(cols: str) -> bool:
-    """هل التعريف يحتوي WHERE أو INCLUDE؟"""
     if not cols:
         return False
     s = cols.upper()
@@ -567,40 +539,75 @@ def _is_advanced_index(cols: str) -> bool:
 
 
 # =====================================================================
-# ✅ v7.6.18: تنظيف admin_logs القديمة (Retention Policy)
+# ✅ v7.6.18/v7.6.20: تنظيف admin_logs القديمة + حد أقصى للصفوف
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
     """
-    ✅ v7.6.18: حذف سجلات admin_logs الأقدم من ADMIN_LOGS_RETENTION_DAYS.
-    السبب: التشخيص أظهر 11,127 صف → يستهلك 1.95 MB.
+    ✅ v7.6.20: تنظيف مزدوج:
+      1. حذف الصفوف الأقدم من ADMIN_LOGS_RETENTION_DAYS (30 يوم)
+      2. إذا العدد الكلي > ADMIN_LOGS_MAX_ROWS، احذف الأقدم للوصول للحد
     """
+    total_deleted = 0
+
+    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         result = await conn.execute(
             "DELETE FROM admin_logs "
             "WHERE created_at < NOW() - "
             f"INTERVAL '{ADMIN_LOGS_RETENTION_DAYS} days'"
         )
-        deleted = 0
         if result and isinstance(result, str) and result.startswith("DELETE "):
             try:
                 deleted = int(result.split()[1])
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 PG: حُذف {deleted} صف قديم من admin_logs "
+                        f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
+                    )
             except (IndexError, ValueError):
                 pass
-        if logger and deleted:
-            logger.info(
-                f"🧹 PG: حُذف {deleted} صف قديم من admin_logs "
-                f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
-            )
-        return deleted
     except Exception as e:
         if logger:
-            logger.debug(f"⚠️ PG cleanup admin_logs: {e}")
-        return 0
+            logger.debug(f"⚠️ PG cleanup admin_logs (age): {e}")
+
+    # ─── الخطوة 2: فرض الحد الأقصى للصفوف ───
+    try:
+        total = await conn.fetchval("SELECT COUNT(*) FROM admin_logs")
+        if total and total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            result = await conn.execute(
+                "DELETE FROM admin_logs "
+                "WHERE id IN ("
+                "  SELECT id FROM admin_logs "
+                "  ORDER BY id ASC "
+                f"  LIMIT {to_delete}"
+                ")"
+            )
+            if result and isinstance(result, str) and result.startswith("DELETE "):
+                try:
+                    deleted = int(result.split()[1])
+                    total_deleted += deleted
+                    if logger and deleted:
+                        logger.info(
+                            f"🧹 PG: حُذف {deleted} صف من admin_logs "
+                            f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
+                        )
+                except (IndexError, ValueError):
+                    pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup admin_logs (max_rows): {e}")
+
+    return total_deleted
 
 
 async def _cleanup_old_admin_logs_sqlite(conn, logger):
-    """✅ v7.6.18: SQLite — استخدام ISO cutoff string."""
+    """✅ v7.6.20: تنظيف مزدوج لـ SQLite."""
+    total_deleted = 0
+
+    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         cutoff = (
             datetime.now(timezone.utc)
@@ -612,6 +619,12 @@ async def _cleanup_old_admin_logs_sqlite(conn, logger):
         )
         try:
             deleted = cursor.rowcount or 0
+            total_deleted += deleted
+            if logger and deleted:
+                logger.info(
+                    f"🧹 SQLite: حُذف {deleted} صف قديم من admin_logs "
+                    f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
+                )
         finally:
             try:
                 await cursor.close()
@@ -621,20 +634,62 @@ async def _cleanup_old_admin_logs_sqlite(conn, logger):
             await conn.commit()
         except Exception:
             pass
-        if logger and deleted:
-            logger.info(
-                f"🧹 SQLite: حُذف {deleted} صف قديم من admin_logs "
-                f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
-            )
-        return deleted
     except Exception as e:
         if logger:
-            logger.debug(f"⚠️ SQLite cleanup admin_logs: {e}")
-        return 0
+            logger.debug(f"⚠️ SQLite cleanup admin_logs (age): {e}")
+
+    # ─── الخطوة 2: فرض الحد ───
+    try:
+        cursor = await conn.execute("SELECT COUNT(*) FROM admin_logs")
+        try:
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+
+        if total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            cursor = await conn.execute(
+                "DELETE FROM admin_logs "
+                "WHERE id IN ("
+                "  SELECT id FROM admin_logs "
+                "  ORDER BY id ASC "
+                "  LIMIT ?"
+                ")",
+                (to_delete,),
+            )
+            try:
+                deleted = cursor.rowcount or 0
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 SQLite: حُذف {deleted} صف من admin_logs "
+                        f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
+                    )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup admin_logs (max_rows): {e}")
+
+    return total_deleted
 
 
 async def _cleanup_old_admin_logs_mysql(conn, logger):
-    """✅ v7.6.18: MySQL — INTERVAL N DAY."""
+    """✅ v7.6.20: تنظيف مزدوج لـ MySQL."""
+    total_deleted = 0
+
+    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         cursor = await conn.cursor()
         try:
@@ -644,6 +699,12 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
                 f"INTERVAL {ADMIN_LOGS_RETENTION_DAYS} DAY"
             )
             deleted = cursor.rowcount or 0
+            total_deleted += deleted
+            if logger and deleted:
+                logger.info(
+                    f"🧹 MySQL: حُذف {deleted} صف قديم من admin_logs "
+                    f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
+                )
         finally:
             try:
                 await cursor.close()
@@ -653,41 +714,61 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
             await conn.commit()
         except Exception:
             pass
-        if logger and deleted:
-            logger.info(
-                f"🧹 MySQL: حُذف {deleted} صف قديم من admin_logs "
-                f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
-            )
-        return deleted
     except Exception as e:
         if logger:
-            logger.debug(f"⚠️ MySQL cleanup admin_logs: {e}")
-        return 0
+            logger.debug(f"⚠️ MySQL cleanup admin_logs (age): {e}")
+
+    # ─── الخطوة 2: فرض الحد ───
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute("SELECT COUNT(*) FROM admin_logs")
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+
+        if total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "DELETE FROM admin_logs "
+                    f"ORDER BY id ASC "
+                    f"LIMIT {to_delete}"
+                )
+                deleted = cursor.rowcount or 0
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 MySQL: حُذف {deleted} صف من admin_logs "
+                        f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
+                    )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup admin_logs (max_rows): {e}")
+
+    return total_deleted
 
 
 # =====================================================================
-# ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة (PostgreSQL فقط)
-# ✅ v7.6.19: توسيع التغطية لتشمل schedule + user_reminder_settings + support_tickets
+# ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
-    """
-    ✅ v7.6.18/v7.6.19: PostgreSQL — ضبط autovacuum للجداول الصغيرة.
-
-    المشكلة:
-      autovacuum الافتراضي يحتاج: 50 + 0.2 × N صف ميت ليتفعّل.
-      جدول مثل auto_replies (192 صف) يحتاج ~88 صف ميت.
-      عنده 53 → ما يتفعّل أبداً → dead tuples تتراكم.
-
-    الحل:
-      - autovacuum_vacuum_scale_factor = 0.05 (بدل 0.2)
-      - autovacuum_vacuum_threshold = 10 (بدل 50)
-      - autovacuum_analyze_scale_factor = 0.02 (بدل 0.1)
-      - autovacuum_analyze_threshold = 10
-
-    ✅ v7.6.19: يمتد لـ 21 جدول صغير (كان 18).
-    يعمل مرة واحدة فقط لكل جدول (ALTER TABLE ... SET idempotent).
-    """
+    """✅ v7.6.18/v7.6.19: PostgreSQL — autovacuum عدواني للجداول الصغيرة."""
     tuned = 0
     failed = 0
     for tbl in SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
@@ -695,7 +776,6 @@ async def _tune_autovacuum_postgres(conn, logger):
             failed += 1
             continue
         try:
-            # ✅ التحقق أولاً أن الجدول موجود في الـ schema الحالي
             exists = await conn.fetchval(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = $1 "
@@ -730,10 +810,6 @@ async def _tune_autovacuum_postgres(conn, logger):
 # =====================================================================
 
 async def _ensure_all_indexes_exist_postgres(conn, logger):
-    """
-    ✅ v7.6.17: فحص جماعي لـ COMMON_INDEXES في fast-path.
-    ✅ schema-aware: schemaname = ANY(current_schemas(false)).
-    """
     try:
         all_names = [n for _, n, _ in COMMON_INDEXES]
         rows = await conn.fetch(
@@ -787,7 +863,6 @@ async def _ensure_all_indexes_exist_postgres(conn, logger):
 
 
 async def _ensure_all_indexes_exist_sqlite(conn, logger):
-    """✅ v7.6.13/v7.6.14: نفس المنطق لـ SQLite مع تكييف الفهارس."""
     try:
         all_names = [n for _, n, _ in COMMON_INDEXES]
         placeholders = ",".join(["?"] * len(all_names))
@@ -853,7 +928,6 @@ async def _ensure_all_indexes_exist_sqlite(conn, logger):
 
 
 async def _ensure_all_indexes_exist_mysql(conn, logger):
-    """✅ v7.6.13/v7.6.14: نفس المنطق لـ MySQL مع MYSQL_SKIP_INDEXES."""
     try:
         tables = set(t for t, _, _ in COMMON_INDEXES)
         try:
@@ -924,7 +998,6 @@ async def _ensure_all_indexes_exist_mysql(conn, logger):
 # =====================================================================
 
 async def _quick_analyze_postgres(conn, logger):
-    """ANALYZE فقط — رخيص ولا يحصل على قفل حصري."""
     try:
         done = 0
         for tbl in MAINTENANCE_TABLES:
@@ -944,7 +1017,6 @@ async def _quick_analyze_postgres(conn, logger):
 
 
 async def _quick_analyze_mysql(conn, logger):
-    """ANALYZE TABLE سريع لـ MySQL."""
     try:
         done = 0
         for tbl in MAINTENANCE_TABLES:
@@ -968,7 +1040,6 @@ async def _quick_analyze_mysql(conn, logger):
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
-    """VACUUM (ANALYZE, SKIP_LOCKED) بدل VACUUM ANALYZE."""
     try:
         try:
             last_val = await conn.fetchval(
@@ -1044,7 +1115,6 @@ async def _run_maintenance_postgres(conn, logger):
 
 
 async def _run_maintenance_sqlite(conn, logger):
-    """SQLite — VACUUM + ANALYZE كل 24 ساعة."""
     try:
         try:
             cursor = await conn.execute(
@@ -1107,7 +1177,6 @@ async def _run_maintenance_sqlite(conn, logger):
 
 
 async def _run_maintenance_mysql(conn, logger):
-    """MySQL — ANALYZE + OPTIMIZE مع تأخير."""
     try:
         try:
             cursor = await conn.cursor()
@@ -1195,7 +1264,6 @@ _GROUP_SECURITY_NEW_COLUMNS = [
 
 
 async def _migrate_missing_columns_sqlite(conn, logger):
-    """SQLite: ALTER TABLE ADD COLUMN بدون IF NOT EXISTS."""
     checked = 0
     added = 0
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
@@ -1220,10 +1288,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
 
 
 async def _migrate_missing_columns_postgres(conn, logger):
-    """
-    ✅ v7.6.17: إصلاح عداد مضلل.
-    فحص information_schema أولاً، ثم ADD COLUMN بدون IF NOT EXISTS.
-    """
     checked = 0
     added = 0
     skipped = 0
@@ -1261,7 +1325,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
 
 
 async def _migrate_missing_columns_mysql(conn, logger):
-    """MySQL: فحص information_schema أولاً."""
     checked = 0
     added = 0
     skipped = 0
@@ -1499,7 +1562,7 @@ async def _cleanup_stale_links_mysql(conn, logger):
 
 
 # =====================================================================
-# فحص الفهارس الحرجة (SCHEMA-AWARE)
+# فحص الفهارس الحرجة
 # =====================================================================
 
 async def _verify_critical_indexes_postgres(conn, logger):
@@ -1639,11 +1702,10 @@ async def _verify_critical_indexes_mysql(conn, logger):
 
 
 # =====================================================================
-# دوال فحص جماعية (SCHEMA-AWARE)
+# دوال فحص جماعية
 # =====================================================================
 
 async def _fetch_existing_indexes_postgres(conn, index_names):
-    """✅ v7.6.17: فلترة على schemaname الفعلي."""
     if not index_names:
         return set()
     try:
@@ -1718,7 +1780,7 @@ async def _fetch_existing_indexes_mysql(conn, tables):
 
 
 # =====================================================================
-# فحص تعريفات الفهارس (SCHEMA-AWARE)
+# فحص تعريفات الفهارس
 # =====================================================================
 
 async def _ensure_index_definitions_match_postgres(conn, logger):
@@ -1901,12 +1963,14 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
 
 # =====================================================================
-# حذف الفهارس القديمة (SCHEMA-AWARE)
+# ✅ v7.6.20: حذف الفهارس القديمة (SCHEMA-AWARE)
+# ⚠️ مهم: يُستدعى الآن من الـ fast-path + الإنشاء الأولي
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
     if not DEPRECATED_INDEXES:
-        return
+        return 0
+    dropped = 0
     try:
         rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
@@ -1916,25 +1980,30 @@ async def _drop_deprecated_indexes_postgres(conn, logger):
         )
         existing = {row["indexname"] for row in rows}
         if not existing:
-            return
-        dropped = 0
+            if logger:
+                logger.debug("🧹 PG: 0 فهرس قديم للحذف")
+            return 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
                 continue
             try:
                 await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
                 dropped += 1
+                if logger:
+                    logger.info(f"🧹 PG: حُذف فهرس قديم {idx_name}")
             except Exception as e:
                 logger.warning(f"⚠️ فشل حذف فهرس {idx_name}: {e}")
         if dropped > 0:
-            logger.info(f"🧹 PG: حُذف {dropped} فهرس قديم")
+            logger.info(f"🧹 PG: حُذف إجمالي {dropped} فهرس قديم")
     except Exception as e:
         logger.warning(f"⚠️ _drop_deprecated_indexes_postgres: {e}")
+    return dropped
 
 
 async def _drop_deprecated_indexes_sqlite(conn, logger):
     if not DEPRECATED_INDEXES:
-        return
+        return 0
+    dropped = 0
     try:
         placeholders = ",".join(["?"] * len(DEPRECATED_INDEXES))
         cursor = await conn.execute(
@@ -1950,7 +2019,6 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
             except Exception:
                 pass
         existing = {row[0] for row in rows}
-        dropped = 0
         for idx_name in existing:
             if not _is_valid_index_name(idx_name):
                 continue
@@ -1963,15 +2031,16 @@ async def _drop_deprecated_indexes_sqlite(conn, logger):
             logger.info(f"🧹 SQLite: حُذف {dropped} فهرس قديم")
     except Exception as e:
         logger.warning(f"⚠️ _drop_deprecated_indexes_sqlite: {e}")
+    return dropped
 
 
 async def _drop_deprecated_indexes_mysql(conn, logger):
     if not DEPRECATED_INDEXES:
-        return
+        return 0
+    dropped = 0
     try:
         tables = set(t for t, _, _ in COMMON_INDEXES)
         existing = await _fetch_existing_indexes_mysql(conn, tables)
-        dropped = 0
         for table, idx_name in existing:
             if idx_name in DEPRECATED_INDEXES:
                 if not _is_valid_index_name(idx_name):
@@ -1993,6 +2062,7 @@ async def _drop_deprecated_indexes_mysql(conn, logger):
             logger.info(f"🧹 MySQL: حُذف {dropped} فهرس قديم")
     except Exception as e:
         logger.warning(f"⚠️ _drop_deprecated_indexes_mysql: {e}")
+    return dropped
 
 
 # =====================================================================
@@ -2127,10 +2197,11 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
         await _verify_critical_indexes_sqlite(conn, logger)
         await _ensure_all_indexes_exist_sqlite(conn, logger)
+        await _drop_deprecated_indexes_sqlite(conn, logger)  # ✅ جديد
         await _cleanup_stale_links_sqlite(conn, logger)
-        # ✅ v7.6.18: تنظيف admin_logs القديمة
         await _cleanup_old_admin_logs_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
         await _run_maintenance_sqlite(conn, logger)
@@ -2725,7 +2796,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
     await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
     await _cleanup_stale_links_sqlite(conn, logger)
-    # ✅ v7.6.18: تنظيف admin_logs القديمة
     await _cleanup_old_admin_logs_sqlite(conn, logger)
     await _migrate_missing_columns_sqlite(conn, logger)
 
@@ -2735,7 +2805,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "autovacuum-coverage-fix"),
+             "force-deprecated-index-drop"),
         )
         await conn.commit()
     except Exception as e:
@@ -2753,13 +2823,17 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
+        if logger:
+            logger.info(
+                f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
+            )
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
         await _ensure_index_definitions_match_postgres(conn, logger)
+        await _drop_deprecated_indexes_postgres(conn, logger)  # ✅ جديد
         await _cleanup_stale_links_postgres(conn, logger)
-        # ✅ v7.6.18: تنظيف admin_logs القديمة
         await _cleanup_old_admin_logs_postgres(conn, logger)
-        # ✅ v7.6.18/v7.6.19: ضبط autovacuum للجداول الصغيرة
         await _tune_autovacuum_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
@@ -3359,9 +3433,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
-    # ✅ v7.6.18: تنظيف admin_logs القديمة
     await _cleanup_old_admin_logs_postgres(conn, logger)
-    # ✅ v7.6.18/v7.6.19: ضبط autovacuum للجداول الصغيرة
     await _tune_autovacuum_postgres(conn, logger)
     await _migrate_missing_columns_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
@@ -3373,7 +3445,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "autovacuum-coverage-fix",
+            "force-deprecated-index-drop",
         )
     except Exception as e:
         if logger:
@@ -3390,11 +3462,12 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
         await _verify_critical_indexes_mysql(conn, logger)
         await _ensure_all_indexes_exist_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
+        await _drop_deprecated_indexes_mysql(conn, logger)  # ✅ جديد
         await _cleanup_stale_links_mysql(conn, logger)
-        # ✅ v7.6.18: تنظيف admin_logs القديمة
         await _cleanup_old_admin_logs_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
@@ -4003,7 +4076,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
-        # ✅ v7.6.18: تنظيف admin_logs القديمة
         await _cleanup_old_admin_logs_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
@@ -4016,7 +4088,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "autovacuum-coverage-fix",
+                    "force-deprecated-index-drop",
                 ),
             )
         except Exception as e:
@@ -4054,6 +4126,7 @@ __all__ = [
     "VACUUM_INTER_TABLE_DELAY_SECONDS",
     "MYSQL_SKIP_INDEXES",
     "ADMIN_LOGS_RETENTION_DAYS",
+    "ADMIN_LOGS_MAX_ROWS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
     "_adapt_cols_for_db",
 ]
