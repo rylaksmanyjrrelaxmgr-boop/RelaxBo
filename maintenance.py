@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-maintenance.py - الصيانة التلقائية لقاعدة البيانات (v1.0.1)
+maintenance.py - الصيانة التلقائية لقاعدة البيانات (v1.1.0)
 ================================================================================
 🎯 الوظائف الرئيسية:
   - maintenance_loop()        : 🔄 حلقة دورية (متكاملة مع main.py v5.4.3)
@@ -12,8 +12,8 @@ maintenance.py - الصيانة التلقائية لقاعدة البيانات
 
 🗑️ دوال التنظيف:
   - cleanup_old_logs()         : admin_logs (> 30 يوم)
-  - cleanup_penalty_archive()  : penalty_archive (> 90 يوم)
-  - cleanup_violations()       : user_violations (> 7 أيام)
+  - cleanup_penalty_archive()  : penalty_archive (> 90 يوم — يعتمد archived_at)
+  - cleanup_violations()       : user_violations (> 7 أيام — يعتمد last_violation_time)
   - cleanup_payment_logs()     : payment_logs (> 180 يوم)
 
 🧹 VACUUM:
@@ -24,6 +24,15 @@ maintenance.py - الصيانة التلقائية لقاعدة البيانات
 
 📊 التقرير:
   - تقرير HTML يُرسل للمالك عبر Telegram
+
+🆕 v1.1.0 (MAINTENANCE-CORRECTNESS):
+  ✅ _should_run_maintenance : دعم MySQL backticks بشكل صحيح
+  ✅ _record_maintenance_time : اكتشاف نوع DB (PG/MySQL/SQLite)
+  ✅ cleanup_violations : استخدام last_violation_time (بدل created_at غير الموجود)
+  ✅ cleanup_penalty_archive : استخدام archived_at (بدل created_at)
+  ✅ VACUUM_TABLES : إضافة "users" (متوافق مع v7.7.37)
+  ✅ عرض التوقيت بـ TimeUtils.mecca_now() بدل datetime.now()
+  ✅ دمج _detect_db_type() داخلياً
 
 🆕 v1.0.1:
   ✅ _should_run_maintenance : احترام settings.last_maintenance_at
@@ -63,7 +72,10 @@ PENALTY_ARCHIVE_RETENTION_DAYS = 90
 USER_VIOLATIONS_RETENTION_DAYS = 7
 PAYMENT_LOGS_RETENTION_DAYS = 180
 
-# الجداول التي تحتاج VACUUM دوري
+# 🆕 v1.1.0: الجداول التي تحتاج VACUUM دوري
+# يشمل:
+#   • HEAVY_TABLES_FOR_AUTOVACUUM (posts, subscriptions, user_penalties, users)
+#   • جداول تحتاج تنظيف دوري بعد الحذف (admin_logs, penalty_archive, user_violations)
 VACUUM_TABLES: Tuple[str, ...] = (
     'admin_logs',
     'user_violations',
@@ -71,6 +83,7 @@ VACUUM_TABLES: Tuple[str, ...] = (
     'penalty_archive',
     'user_penalties',
     'subscriptions',
+    'users',              # 🆕 v1.1.0 (متوافق مع v7.7.37)
 )
 
 # التوقيت المحلي (للتسجيل فقط)
@@ -87,12 +100,74 @@ LAST_MAINTENANCE_KEY = "last_maintenance_at"
 
 
 # =====================================================================
-# 🆕 v1.0.1: احترام last_maintenance_at
+# 🆕 v1.1.0: كشف نوع DB
+# =====================================================================
+
+def _is_postgres() -> bool:
+    if DB is None:
+        return False
+    try:
+        return bool(getattr(DB, 'USE_POSTGRES', False))
+    except Exception:
+        return False
+
+
+def _is_mysql() -> bool:
+    if DB is None:
+        return False
+    try:
+        return bool(getattr(DB, 'USE_MYSQL', False))
+    except Exception:
+        return False
+
+
+def _is_sqlite() -> bool:
+    return not (_is_postgres() or _is_mysql())
+
+
+# =====================================================================
+# 🆕 v1.1.0: Query Builder لـ settings (MySQL vs PG/SQLite)
+# =====================================================================
+
+def _settings_select_query() -> str:
+    """يرجع SELECT value FROM settings WHERE key = ? بالصيغة الصحيحة."""
+    if _is_mysql():
+        return "SELECT `value` FROM settings WHERE `key` = ?"
+    return "SELECT value FROM settings WHERE key = ?"
+
+
+def _settings_upsert_query() -> str:
+    """يرجع upsert query الصحيح حسب نوع DB."""
+    if _is_postgres():
+        return (
+            "INSERT INTO settings (key, value) VALUES ($1, $2) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+        )
+    if _is_mysql():
+        return (
+            "INSERT INTO settings (`key`, `value`) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)"
+        )
+    # SQLite
+    return (
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+
+
+def _settings_upsert_params(key: str, value: str) -> tuple:
+    """يرجع tuple parameters بالصيغة الصحيحة."""
+    # كل الصيغ تستخدم positional — التحويل الداخلي يتولى بقية الأمر
+    return (key, value)
+
+
+# =====================================================================
+# 🆕 v1.0.1 + v1.1.0: احترام last_maintenance_at
 # =====================================================================
 
 async def _should_run_maintenance(force: bool = False) -> bool:
     """
-    ✅ v1.0.1: يتحقق من settings.last_maintenance_at.
+    ✅ v1.1.0: يتحقق من settings.last_maintenance_at.
     يمنع VACUUM المزدوج مع database_tables.py.
 
     Args:
@@ -107,9 +182,9 @@ async def _should_run_maintenance(force: bool = False) -> bool:
         return True
 
     try:
+        query = _settings_select_query()
         last_val = await DB.fetchval(
-            f"SELECT value FROM settings WHERE key = '{LAST_MAINTENANCE_KEY}'",
-            default=None,
+            query, (LAST_MAINTENANCE_KEY,), default=None
         )
     except Exception as e:
         logger.debug(f"_should_run_maintenance fetchval: {e}")
@@ -146,216 +221,269 @@ async def _should_run_maintenance(force: bool = False) -> bool:
 
 async def _record_maintenance_time() -> None:
     """
-    ✅ v1.0.1: يسجّل توقيت آخر صيانة (متوافق مع database_tables.py).
+    ✅ v1.1.0: يسجّل توقيت آخر صيانة (متوافق مع database_tables.py).
 
-    يدعم PostgreSQL (ON CONFLICT)، MySQL (ON DUPLICATE KEY)،
-    و SQLite (ON CONFLICT) — عبر DB.execute.
+    يستخدم الصيغة الصحيحة حسب نوع DB:
+      - PostgreSQL : ON CONFLICT (key) DO UPDATE
+      - MySQL      : ON DUPLICATE KEY UPDATE
+      - SQLite     : ON CONFLICT(key) DO UPDATE
     """
     if DB is None:
         return
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # نحاول أولاً upsert بصيغة SQLite/PG (كلاهما يدعم ON CONFLICT)
     try:
+        query = _settings_upsert_query()
         await DB.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (LAST_MAINTENANCE_KEY, now_iso),
+            query, _settings_upsert_params(LAST_MAINTENANCE_KEY, now_iso)
         )
         return
-    except Exception as e1:
-        logger.debug(f"record (upsert-1): {e1}")
+    except Exception as e:
+        logger.debug(f"record upsert: {e}")
 
-    # MySQL fallback: ON DUPLICATE KEY
+    # fallback: UPDATE ثم INSERT (نادر)
     try:
         await DB.execute(
-            "INSERT INTO settings (`key`, `value`) VALUES (?, ?) "
-            "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
-            (LAST_MAINTENANCE_KEY, now_iso),
-        )
-        return
-    except Exception as e2:
-        logger.debug(f"record (upsert-2): {e2}")
-
-    # آخر محاولة: INSERT ثم UPDATE
-    try:
-        await DB.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?)",
-            (LAST_MAINTENANCE_KEY, now_iso),
+            "UPDATE settings SET value = ? WHERE key = ?",
+            (now_iso, LAST_MAINTENANCE_KEY),
         )
     except Exception:
         try:
             await DB.execute(
-                "UPDATE settings SET value = ? WHERE key = ?",
-                (now_iso, LAST_MAINTENANCE_KEY),
+                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                (LAST_MAINTENANCE_KEY, now_iso),
             )
         except Exception as e3:
-            logger.debug(f"record (fallback): {e3}")
+            logger.debug(f"record fallback: {e3}")
 
 
 # =====================================================================
 # 🗑️ دوال التنظيف
 # =====================================================================
 
-async def cleanup_old_logs() -> Dict[str, Any]:
-    """🗑️ حذف سجلات admin_logs الأقدم من 30 يوم."""
+async def _safe_delete_with_count(
+    table: str,
+    where_clause: str,
+    params: tuple,
+    logger_label: str,
+) -> Dict[str, Any]:
+    """
+    🆕 v1.1.0: helper لحذف صفوف مع عداد المتأثرين.
+
+    Args:
+        table: اسم الجدول
+        where_clause: شرط WHERE (بدون كلمة WHERE)
+        params: tuple
+        logger_label: اسم للّوق
+
+    Returns:
+        {'deleted': int, 'remaining': int} أو {'error': str}
+    """
     if DB is None:
         return {'deleted': 0, 'remaining': 0, 'error': 'DB غير متاح'}
 
     try:
-        await DB.execute(
-            f"DELETE FROM admin_logs "
-            f"WHERE created_at < NOW() - INTERVAL "
-            f"'{ADMIN_LOGS_RETENTION_DAYS} days'"
+        deleted = await DB.execute(
+            f"DELETE FROM {table} WHERE {where_clause}",
+            params,
         )
+        if not isinstance(deleted, int) or deleted < 0:
+            deleted = 0
+
         remaining = await DB.fetchval(
-            "SELECT COUNT(*) FROM admin_logs", default=0
+            f"SELECT COUNT(*) FROM {table}", default=0
         ) or 0
+
         logger.info(
-            f"🧹 admin_logs: retention={ADMIN_LOGS_RETENTION_DAYS}d, "
+            f"🧹 {logger_label}: deleted={deleted}, "
             f"remaining={remaining}"
         )
-        return {'deleted': 0, 'remaining': int(remaining)}
+        return {'deleted': deleted, 'remaining': int(remaining)}
     except Exception as e:
-        logger.warning(f"⚠️ cleanup_old_logs: {e}")
-        # fallback لصيغة مختلفة
+        logger.warning(f"⚠️ cleanup {logger_label}: {e}")
+        return {'deleted': 0, 'remaining': 0, 'error': str(e)}
+
+
+async def cleanup_old_logs() -> Dict[str, Any]:
+    """
+    🗑️ حذف سجلات admin_logs الأقدم من 30 يوم.
+
+    ✅ v1.1.0: يحاول أولاً بصيغة PG (NOW() - INTERVAL).
+    ✅ v1.1.0: fallback بـ cutoff datetime.
+    """
+    if DB is None:
+        return {'deleted': 0, 'remaining': 0, 'error': 'DB غير متاح'}
+
+    # ─── محاولة 1: PG/MySQL format ───
+    if _is_postgres() or _is_mysql():
         try:
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(days=ADMIN_LOGS_RETENTION_DAYS))
-            await DB.execute(
-                "DELETE FROM admin_logs WHERE created_at < ?",
-                (cutoff,),
+            deleted = await DB.execute(
+                f"DELETE FROM admin_logs "
+                f"WHERE created_at < NOW() - INTERVAL "
+                f"'{ADMIN_LOGS_RETENTION_DAYS} days'"
             )
+            if not isinstance(deleted, int) or deleted < 0:
+                deleted = 0
             remaining = await DB.fetchval(
                 "SELECT COUNT(*) FROM admin_logs", default=0
             ) or 0
-            return {'deleted': 0, 'remaining': int(remaining)}
-        except Exception as e2:
-            logger.warning(f"⚠️ cleanup_old_logs fallback: {e2}")
-            return {'deleted': 0, 'remaining': 0, 'error': str(e)}
+            logger.info(
+                f"🧹 admin_logs: retention={ADMIN_LOGS_RETENTION_DAYS}d, "
+                f"deleted={deleted}, remaining={remaining}"
+            )
+            return {'deleted': deleted, 'remaining': int(remaining)}
+        except Exception as e:
+            logger.debug(f"cleanup_old_logs PG format: {e}")
+
+    # ─── fallback: cutoff datetime ───
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=ADMIN_LOGS_RETENTION_DAYS
+    )
+    return await _safe_delete_with_count(
+        "admin_logs",
+        "created_at < ?",
+        (cutoff,),
+        "admin_logs",
+    )
 
 
 async def cleanup_penalty_archive() -> Dict[str, Any]:
-    """🗑️ حذف penalty_archive الأقدم من 90 يوم."""
+    """
+    🗑️ حذف penalty_archive الأقدم من 90 يوم.
+
+    ✅ v1.1.0: يستخدم archived_at (وليس created_at) — لأن الأرشيف
+    يحتوي عقوبات منتهية، والمقصود حذف ما انتهى منذ 90 يوم.
+    """
     if DB is None:
         return {'deleted': 0, 'remaining': 0, 'error': 'DB غير متاح'}
 
-    try:
-        await DB.execute(
-            f"DELETE FROM penalty_archive "
-            f"WHERE created_at < NOW() - INTERVAL "
-            f"'{PENALTY_ARCHIVE_RETENTION_DAYS} days'"
-        )
-        remaining = await DB.fetchval(
-            "SELECT COUNT(*) FROM penalty_archive", default=0
-        ) or 0
-        logger.info(
-            f"🧹 penalty_archive: retention={PENALTY_ARCHIVE_RETENTION_DAYS}d, "
-            f"remaining={remaining}"
-        )
-        return {'deleted': 0, 'remaining': int(remaining)}
-    except Exception as e:
-        logger.debug(f"cleanup_penalty_archive: {e}")
+    # ─── محاولة 1: PG/MySQL format ───
+    if _is_postgres() or _is_mysql():
         try:
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(days=PENALTY_ARCHIVE_RETENTION_DAYS))
-            await DB.execute(
-                "DELETE FROM penalty_archive WHERE created_at < ?",
-                (cutoff,),
+            deleted = await DB.execute(
+                f"DELETE FROM penalty_archive "
+                f"WHERE archived_at IS NOT NULL "
+                f"AND archived_at < NOW() - INTERVAL "
+                f"'{PENALTY_ARCHIVE_RETENTION_DAYS} days'"
             )
+            if not isinstance(deleted, int) or deleted < 0:
+                deleted = 0
             remaining = await DB.fetchval(
                 "SELECT COUNT(*) FROM penalty_archive", default=0
             ) or 0
-            return {'deleted': 0, 'remaining': int(remaining)}
-        except Exception as e2:
-            logger.debug(f"cleanup_penalty_archive fallback: {e2}")
-            return {'deleted': 0, 'remaining': 0, 'error': str(e)}
+            logger.info(
+                f"🧹 penalty_archive: retention="
+                f"{PENALTY_ARCHIVE_RETENTION_DAYS}d, "
+                f"deleted={deleted}, remaining={remaining}"
+            )
+            return {'deleted': deleted, 'remaining': int(remaining)}
+        except Exception as e:
+            logger.debug(f"cleanup_penalty_archive PG format: {e}")
+
+    # ─── fallback: cutoff datetime ───
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=PENALTY_ARCHIVE_RETENTION_DAYS
+    )
+    return await _safe_delete_with_count(
+        "penalty_archive",
+        "archived_at IS NOT NULL AND archived_at < ?",
+        (cutoff,),
+        "penalty_archive",
+    )
 
 
 async def cleanup_violations() -> Dict[str, Any]:
-    """🗑️ حذف user_violations المنتهية (> 7 أيام + action_taken)."""
+    """
+    🗑️ حذف user_violations المنتهية (> 7 أيام).
+
+    ✅ v1.1.0: يستخدم last_violation_time (وليس created_at).
+    الجدول الحقيقي لا يحتوي created_at ولا action_taken.
+
+    المنطق:
+      DELETE FROM user_violations
+      WHERE last_violation_time < NOW() - INTERVAL '7 days'
+
+    هذا يعني: نُسقط عدّاد المخالفات للمستخدمين الذين لم يخالفوا
+    منذ 7 أيام.
+    """
     if DB is None:
         return {'deleted': 0, 'remaining': 0, 'error': 'DB غير متاح'}
 
-    try:
-        # محاولة مع action_taken
+    # ─── محاولة 1: PG/MySQL format ───
+    if _is_postgres() or _is_mysql():
         try:
-            await DB.execute(
+            deleted = await DB.execute(
                 f"DELETE FROM user_violations "
-                f"WHERE created_at < NOW() - INTERVAL "
-                f"'{USER_VIOLATIONS_RETENTION_DAYS} days' "
-                f"AND (action_taken = TRUE OR action_taken = 1)"
-            )
-        except Exception:
-            # fallback: بدون action_taken
-            await DB.execute(
-                f"DELETE FROM user_violations "
-                f"WHERE created_at < NOW() - INTERVAL "
+                f"WHERE last_violation_time IS NOT NULL "
+                f"AND last_violation_time < NOW() - INTERVAL "
                 f"'{USER_VIOLATIONS_RETENTION_DAYS} days'"
             )
-
-        remaining = await DB.fetchval(
-            "SELECT COUNT(*) FROM user_violations", default=0
-        ) or 0
-        logger.info(
-            f"🧹 user_violations: retention="
-            f"{USER_VIOLATIONS_RETENTION_DAYS}d, remaining={remaining}"
-        )
-        return {'deleted': 0, 'remaining': int(remaining)}
-    except Exception as e:
-        logger.warning(f"⚠️ cleanup_violations: {e}")
-        try:
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(days=USER_VIOLATIONS_RETENTION_DAYS))
-            await DB.execute(
-                "DELETE FROM user_violations WHERE created_at < ?",
-                (cutoff,),
-            )
+            if not isinstance(deleted, int) or deleted < 0:
+                deleted = 0
             remaining = await DB.fetchval(
                 "SELECT COUNT(*) FROM user_violations", default=0
             ) or 0
-            return {'deleted': 0, 'remaining': int(remaining)}
-        except Exception as e2:
-            logger.warning(f"⚠️ cleanup_violations fallback: {e2}")
-            return {'deleted': 0, 'remaining': 0, 'error': str(e)}
+            logger.info(
+                f"🧹 user_violations: retention="
+                f"{USER_VIOLATIONS_RETENTION_DAYS}d, "
+                f"deleted={deleted}, remaining={remaining}"
+            )
+            return {'deleted': deleted, 'remaining': int(remaining)}
+        except Exception as e:
+            logger.debug(f"cleanup_violations PG format: {e}")
+
+    # ─── fallback: cutoff datetime ───
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=USER_VIOLATIONS_RETENTION_DAYS
+    )
+    return await _safe_delete_with_count(
+        "user_violations",
+        "last_violation_time IS NOT NULL AND last_violation_time < ?",
+        (cutoff,),
+        "user_violations",
+    )
 
 
 async def cleanup_payment_logs() -> Dict[str, Any]:
-    """🗑️ حذف payment_logs الأقدم من 180 يوم."""
+    """
+    🗑️ حذف payment_logs الأقدم من 180 يوم.
+    """
     if DB is None:
         return {'deleted': 0, 'remaining': 0, 'error': 'DB غير متاح'}
 
-    try:
-        await DB.execute(
-            f"DELETE FROM payment_logs "
-            f"WHERE created_at < NOW() - INTERVAL "
-            f"'{PAYMENT_LOGS_RETENTION_DAYS} days'"
-        )
-        remaining = await DB.fetchval(
-            "SELECT COUNT(*) FROM payment_logs", default=0
-        ) or 0
-        logger.info(
-            f"🧹 payment_logs: retention="
-            f"{PAYMENT_LOGS_RETENTION_DAYS}d, remaining={remaining}"
-        )
-        return {'deleted': 0, 'remaining': int(remaining)}
-    except Exception as e:
-        logger.debug(f"cleanup_payment_logs: {e}")
+    # ─── محاولة 1: PG/MySQL format ───
+    if _is_postgres() or _is_mysql():
         try:
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(days=PAYMENT_LOGS_RETENTION_DAYS))
-            await DB.execute(
-                "DELETE FROM payment_logs WHERE created_at < ?",
-                (cutoff,),
+            deleted = await DB.execute(
+                f"DELETE FROM payment_logs "
+                f"WHERE created_at < NOW() - INTERVAL "
+                f"'{PAYMENT_LOGS_RETENTION_DAYS} days'"
             )
+            if not isinstance(deleted, int) or deleted < 0:
+                deleted = 0
             remaining = await DB.fetchval(
                 "SELECT COUNT(*) FROM payment_logs", default=0
             ) or 0
-            return {'deleted': 0, 'remaining': int(remaining)}
-        except Exception as e2:
-            logger.debug(f"cleanup_payment_logs fallback: {e2}")
-            return {'deleted': 0, 'remaining': 0, 'error': str(e)}
+            logger.info(
+                f"🧹 payment_logs: retention="
+                f"{PAYMENT_LOGS_RETENTION_DAYS}d, "
+                f"deleted={deleted}, remaining={remaining}"
+            )
+            return {'deleted': deleted, 'remaining': int(remaining)}
+        except Exception as e:
+            logger.debug(f"cleanup_payment_logs PG format: {e}")
+
+    # ─── fallback: cutoff datetime ───
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=PAYMENT_LOGS_RETENTION_DAYS
+    )
+    return await _safe_delete_with_count(
+        "payment_logs",
+        "created_at < ?",
+        (cutoff,),
+        "payment_logs",
+    )
 
 
 # =====================================================================
@@ -366,9 +494,10 @@ async def vacuum_critical_tables() -> Dict[str, bool]:
     """
     🧹 VACUUM ANALYZE على الجداول الحرجة.
 
-    - لو `DB.vacuum()` موجودة → يستخدمها (autocommit مضمون).
-    - وإلا → fallback إلى `DB.execute()` (يعمل في وضع connection()
-      بدون transaction على PostgreSQL).
+    ✅ v1.1.0:
+      - يستخدم DB.vacuum() إن وُجدت.
+      - يتجاهل الجداول غير الموجودة (لا يكسر الدورة).
+      - يقرأ VACUUM_TABLES من الثوابت (مع users).
     """
     if DB is None:
         return {}
@@ -384,15 +513,33 @@ async def vacuum_critical_tables() -> Dict[str, bool]:
             if has_vacuum_method:
                 await DB.vacuum(table)
             else:
-                await DB.execute(f"VACUUM (ANALYZE) {table}")
+                # fallback: VACUUM (ANALYZE) عبر execute
+                # (يعمل فقط في وضع connection بلا transaction)
+                if _is_postgres():
+                    await DB.execute(
+                        f"VACUUM (ANALYZE, SKIP_LOCKED) {table}"
+                    )
+                elif _is_mysql():
+                    await DB.execute(f"ANALYZE TABLE `{table}`")
+                else:
+                    await DB.execute(f"ANALYZE {table}")
             results[table] = True
             logger.info(f"✅ VACUUM {table}")
         except Exception as e:
-            results[table] = False
-            logger.warning(f"⚠️ VACUUM {table}: {e}")
+            err_msg = str(e).lower()
+            # الجدول غير موجود → تخطٍّ صامت
+            if "does not exist" in err_msg or "doesn't exist" in err_msg:
+                logger.debug(f"⏩ VACUUM {table}: جدول غير موجود")
+                results[table] = False
+            else:
+                results[table] = False
+                logger.warning(f"⚠️ VACUUM {table}: {e}")
 
-        # تأخير بين VACUUMs لتجنب القفل المتراكم
-        await asyncio.sleep(0.3)
+        # تأخير بين VACUUMs
+        try:
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            raise
 
     return results
 
@@ -412,8 +559,7 @@ async def get_table_snapshot(limit: int = 20) -> Dict[str, Dict[str, Any]]:
         return {}
 
     try:
-        # PostgreSQL فقط
-        if not getattr(DB, 'USE_POSTGRES', False):
+        if not _is_postgres():
             return {}
 
         rows = await DB.fetchall(f"""
@@ -471,7 +617,7 @@ async def daily_maintenance(
         notify_admin_id: معرّف الأدمن للإشعار (اختياري)
         force: تجاوز فحص الفاصل الزمني (افتراضي False)
     """
-    start = datetime.now()
+    start = datetime.now(timezone.utc)
     logger.info("=" * 60)
     logger.info("🔧 بدء الصيانة اليومية")
     logger.info("=" * 60)
@@ -495,7 +641,7 @@ async def daily_maintenance(
     if not await _should_run_maintenance(force=force):
         report['skipped'] = True
         report['skipped_reason'] = 'recent_maintenance'
-        report['finished_at'] = datetime.now().isoformat()
+        report['finished_at'] = datetime.now(timezone.utc).isoformat()
         logger.info("⏩ maintenance: تخطي (حديثة)")
         return report
 
@@ -542,7 +688,7 @@ async def daily_maintenance(
         report['errors'].append(f"snapshot_after: {e}")
 
     # 5) الحساب النهائي
-    end = datetime.now()
+    end = datetime.now(timezone.utc)
     report['duration_sec'] = round((end - start).total_seconds(), 1)
     report['finished_at'] = end.isoformat()
 
@@ -554,7 +700,7 @@ async def daily_maintenance(
             logger.warning(f"   • {err}")
     logger.info("=" * 60)
 
-    # 🆕 v1.0.1: تسجيل التوقيت (بعد نجاح كل المراحل الأساسية)
+    # 🆕 v1.0.1: تسجيل التوقيت
     try:
         await _record_maintenance_time()
     except Exception as e:
@@ -583,7 +729,7 @@ async def run_maintenance_now(
     🧪 تشغيل الصيانة يدوياً الآن.
 
     ✅ v1.0.1: افتراضياً يتجاوز فحص last_maintenance_at
-    (force=True) — مناسب للأمر اليدوي /db_vacuum.
+    (force=True) — مناسب للأمر اليدوي.
     """
     return await daily_maintenance(
         bot=bot,
@@ -629,22 +775,30 @@ async def _send_maintenance_report(
 
     # الاحتفاظ والحذف
     lines.append("🗑️ <b>الاحتفاظ والحذف:</b>")
-    lines.append(
-        f"  • admin_logs (>{ADMIN_LOGS_RETENTION_DAYS}d): "
-        f"متبقٍ <b>{report.get('admin_logs', {}).get('remaining', 0)}</b>"
-    )
-    lines.append(
-        f"  • penalty_archive (>{PENALTY_ARCHIVE_RETENTION_DAYS}d): "
-        f"متبقٍ <b>{report.get('penalty_archive', {}).get('remaining', 0)}</b>"
-    )
-    lines.append(
-        f"  • user_violations (>{USER_VIOLATIONS_RETENTION_DAYS}d): "
-        f"متبقٍ <b>{report.get('user_violations', {}).get('remaining', 0)}</b>"
-    )
-    lines.append(
-        f"  • payment_logs (>{PAYMENT_LOGS_RETENTION_DAYS}d): "
-        f"متبقٍ <b>{report.get('payment_logs', {}).get('remaining', 0)}</b>"
-    )
+
+    for label, key, days in (
+        ("admin_logs", "admin_logs", ADMIN_LOGS_RETENTION_DAYS),
+        ("penalty_archive", "penalty_archive",
+         PENALTY_ARCHIVE_RETENTION_DAYS),
+        ("user_violations", "user_violations",
+         USER_VIOLATIONS_RETENTION_DAYS),
+        ("payment_logs", "payment_logs", PAYMENT_LOGS_RETENTION_DAYS),
+    ):
+        info = report.get(key, {})
+        deleted = info.get('deleted', 0)
+        remaining = info.get('remaining', 0)
+        err = info.get('error')
+        if err:
+            lines.append(
+                f"  • {label} (>{days}d): "
+                f"⚠️ <i>خطأ</i>"
+            )
+        else:
+            lines.append(
+                f"  • {label} (>{days}d): "
+                f"حُذف <b>{deleted}</b>، "
+                f"متبقٍ <b>{remaining}</b>"
+            )
     lines.append("")
 
     # VACUUM
@@ -708,9 +862,8 @@ async def _send_maintenance_report(
 
     # تذييل
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(
-        f"🕐 <i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
-    )
+    now_str = _mecca_iso_short()
+    lines.append(f"🕐 <i>{now_str}</i>")
 
     text = "\n".join(lines)
 
@@ -794,12 +947,20 @@ async def maintenance_loop(
         logger.info(
             f"⏳ maintenance_loop: أول تشغيل خلال {startup_delay_sec}s"
         )
-        await asyncio.sleep(startup_delay_sec)
+        try:
+            await asyncio.sleep(startup_delay_sec)
+        except asyncio.CancelledError:
+            logger.info("🛑 maintenance_loop: startup sleep أُلغي")
+            raise
     else:
         logger.info(
             f"⏳ maintenance_loop: أول تشغيل بعد {interval_hours}h"
         )
-        await asyncio.sleep(interval_sec)
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            logger.info("🛑 maintenance_loop: initial sleep أُلغي")
+            raise
 
     # الحلقة
     iteration = 0
@@ -926,12 +1087,18 @@ def register_maintenance_job(
 # 🧰 أدوات مساعدة
 # =====================================================================
 
-def _safe_int(value, default: int = 0) -> int:
-    """تحويل آمن إلى int."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+def _mecca_iso_short() -> str:
+    """يرجع الوقت الحالي بتوقيت مكة (للعرض)."""
+    if TimeUtils is not None and hasattr(TimeUtils, 'mecca_now'):
+        try:
+            dt = TimeUtils.mecca_now()
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+    # fallback
+    return (
+        datetime.now(timezone.utc) + timedelta(hours=3)
+    ).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def _html_safe(text: str) -> str:
