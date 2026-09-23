@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.18)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.19)
 ================================================================================
+🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX — تغطية الجداول المتبقية):
+  ✅ إضافة 3 جداول لـ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
+      • schedule              → كان 46 dead / 24 live (65.7%)
+      • user_reminder_settings → كان 9 dead / 2 live (81.8%)
+      • support_tickets       → كان 1 dead / 0 live
+  ✅ السبب: autovacuum الافتراضي يحتاج 50 + 0.2×N صف ميت
+       - schedule (24 صف): يحتاج ~55 dead ليتفعّل
+       - user_reminder_settings (2 صف): يحتاج ~50 dead
+       - كلاهما لا يصل العتبة → dead tuples تتراكم
+  ✅ الحل: نفس إعدادات auto_replies (scale_factor=0.05, threshold=10)
+  ✅ CURRENT_SCHEMA_VERSION: 17 → 18
+
 🚀 v7.6.18 (DIAGNOSIS-FIXES — تنظيف admin_logs + autovacuum للجداول الصغيرة):
   ✅ إضافة: ADMIN_LOGS_RETENTION_DAYS = 60 (سياسة احتفاظ تلقائية)
   ✅ إضافة: _cleanup_old_admin_logs_* (PG/SQLite/MySQL)
@@ -16,12 +28,9 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
        - ALTER TABLE ... SET (autovacuum_vacuum_scale_factor=0.05, ...)
        - نفس إعدادات posts/subscriptions/user_penalties/users
        - يعمل فقط على PostgreSQL (SQLite/MySQL لا يحتاجان)
-  ✅ CURRENT_SCHEMA_VERSION: 16 → 17
 
 🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX):
   ✅ _fetch_existing_indexes_postgres: إضافة schemaname = ANY(current_schemas(false))
-       - السبب: pg_indexes قد يرجع فهارس من schemas أخرى
-       - الفائدة: كشف دقيق للتطابق
   ✅ _drop_deprecated_indexes_postgres: نفس الفلتر
   ✅ _ensure_index_definitions_match_postgres: نفس الفلتر
   ✅ _ensure_all_indexes_exist_postgres: نفس الفلتر
@@ -65,8 +74,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.18: 16 → 17 (تنظيف admin_logs + autovacuum tuning)
-CURRENT_SCHEMA_VERSION = 17
+# ✅ v7.6.19: 17 → 18 (تغطية جداول إضافية بـ autovacuum tuning)
+CURRENT_SCHEMA_VERSION = 18
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -92,9 +101,14 @@ MAINTENANCE_TABLES = (
     "admin_logs",
 )
 
-# ✅ v7.6.18: جداول صغيرة تحتاج autovacuum عدواني
+# ✅ v7.6.19: جداول صغيرة تحتاج autovacuum عدواني
 # السبب: PostgreSQL افتراضياً يحتاج 50 + 0.2*N صف ميت لتفعيل autovacuum
 # الجداول الصغيرة (<1000 صف) لا تصل للعتبة → dead tuples تتراكم
+# 
+# ✅ v7.6.19: أُضيفت schedule + user_reminder_settings + support_tickets
+#    - schedule: 46 dead / 24 live = 65.7% (كان لا يتفعّل)
+#    - user_reminder_settings: 9 dead / 2 live = 81.8% (لا يتفعّل)
+#    - support_tickets: 1 dead / 0 live (جدول فاضي)
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -114,6 +128,10 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "bot_admins",
     "chat_locks",
     "group_rules",
+    # ✅ v7.6.19: جداول إضافية كانت تفوت على autovacuum
+    "schedule",
+    "user_reminder_settings",
+    "support_tickets",
 )
 
 DEFAULT_SETTINGS = (
@@ -649,11 +667,12 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 # =====================================================================
 # ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة (PostgreSQL فقط)
+# ✅ v7.6.19: توسيع التغطية لتشمل schedule + user_reminder_settings + support_tickets
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
     """
-    ✅ v7.6.18: PostgreSQL — ضبط autovacuum للجداول الصغيرة.
+    ✅ v7.6.18/v7.6.19: PostgreSQL — ضبط autovacuum للجداول الصغيرة.
 
     المشكلة:
       autovacuum الافتراضي يحتاج: 50 + 0.2 × N صف ميت ليتفعّل.
@@ -666,6 +685,7 @@ async def _tune_autovacuum_postgres(conn, logger):
       - autovacuum_analyze_scale_factor = 0.02 (بدل 0.1)
       - autovacuum_analyze_threshold = 10
 
+    ✅ v7.6.19: يمتد لـ 21 جدول صغير (كان 18).
     يعمل مرة واحدة فقط لكل جدول (ALTER TABLE ... SET idempotent).
     """
     tuned = 0
@@ -2715,7 +2735,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "diagnosis-fixes-adminlogs-autovacuum"),
+             "autovacuum-coverage-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -2739,7 +2759,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _cleanup_stale_links_postgres(conn, logger)
         # ✅ v7.6.18: تنظيف admin_logs القديمة
         await _cleanup_old_admin_logs_postgres(conn, logger)
-        # ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
+        # ✅ v7.6.18/v7.6.19: ضبط autovacuum للجداول الصغيرة
         await _tune_autovacuum_postgres(conn, logger)
         await _migrate_missing_columns_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
@@ -3341,7 +3361,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _cleanup_stale_links_postgres(conn, logger)
     # ✅ v7.6.18: تنظيف admin_logs القديمة
     await _cleanup_old_admin_logs_postgres(conn, logger)
-    # ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
+    # ✅ v7.6.18/v7.6.19: ضبط autovacuum للجداول الصغيرة
     await _tune_autovacuum_postgres(conn, logger)
     await _migrate_missing_columns_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
@@ -3353,7 +3373,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "diagnosis-fixes-adminlogs-autovacuum",
+            "autovacuum-coverage-fix",
         )
     except Exception as e:
         if logger:
@@ -3996,7 +4016,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "diagnosis-fixes-adminlogs-autovacuum",
+                    "autovacuum-coverage-fix",
                 ),
             )
         except Exception as e:
