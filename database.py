@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.36 — PG-SERVER-SETTINGS-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.37 — USERS-AUTOVACUUM)
 ================================================================================
+🆕 v7.7.37 (USERS-AUTOVACUUM):
+  ✅ HEAVY_TABLES_FOR_AUTOVACUUM: أُضيف "users"
+     - السبب: users من أكثر الجداول عرضة للتحديثات (كل /start)
+     - النتيجة: autovacuum يبدأ عند 5% بدل 20%
+     - يمنع تراكم dead tuples (شوهدت 106 dead / 22.6%)
+
 🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX — إصلاح فشل الاتصال بـ PostgreSQL):
   ✅ _pg_factory: إزالة "wal_writer_delay" و "commit_delay" من server_settings
      — كلاهما sighup/postmaster context، لا يمكن تغييرهما per-session عبر
      asyncpg (يرفع CantChangeRuntimeParamError عند فتح أي اتصال).
-     — بعد synchronous_commit=off لم يعد لهما تأثير على الأداء أصلاً.
-  ✅ _pg_factory: اكتشاف CantChangeRuntimeParamError → لا إعادة محاولة
-     (خطأ دائم، إعادة المحاولة تطيل وقت الإقلاع بلا فائدة).
-  ✅ الرأس: تحديث الإصدار.
+  ✅ _pg_factory: اكتشاف CantChangeRuntimeParamError → لا إعادة محاولة.
 
 🆕 v7.7.35 (FAST-COMMIT — إصلاح بطء النشر 1s+):
   ✅ _pg_factory: synchronous_commit=off (commit من ~1s → ~10ms)
   ✅ _pg_factory: min_size=max(5, ...) — تقليل إعادة إنشاء الاتصال
-  ✅ _pg_factory: max_inactive_connection_lifetime=0 — لا تُغلق خاملاً
+  ✅ _pg_factory: max_inactive_connection_lifetime=0
   ✅ mark_published_and_advance: دمج 3 معاملات في واحدة
-     - كان: 3 commits × ~1s = ~3s لكل منشور
-     - صار: 1 commit × ~10ms = ~30ms لكل منشور
   ✅ _compute_publish_interval: منطق حساب الفاصل (مُستخرج)
 
 🆕 v7.7.34 (VACUUM_METHOD):
@@ -573,10 +574,12 @@ SETTINGS_BATCH_CACHE_TTL = 120
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
 EXPIRED_PENALTIES_BATCH = int(os.getenv("EXPIRED_PENALTIES_BATCH", "500"))
 
+# 🆕 v7.7.37: أُضيف "users" لتفادي تراكم dead tuples (شوهدت 106/22.6%)
 HEAVY_TABLES_FOR_AUTOVACUUM = (
     "posts",
     "subscriptions",
     "user_penalties",
+    "users",
 )
 
 SLOW_QUERY_FULL_STACK = (
@@ -2676,8 +2679,7 @@ class Database(
                     # اتصال جديد → فشل كامل في create_pool → فشل bootstrap.
                     #
                     # بعد synchronous_commit=off، لم يعد لهذين الإعدادين
-                    # تأثير على أداء الـ commit أصلاً. الإبقاء عليهما كان
-                    # زيادة ضارة.
+                    # تأثير على أداء الـ commit أصلاً.
                     #
                     # المخاطرة المتبقية من synchronous_commit=off:
                     #   قد تُفقد آخر ~200ms من المعاملات عند crash مفاجئ
