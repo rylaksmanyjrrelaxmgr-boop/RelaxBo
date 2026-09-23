@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.34 — VACUUM_METHOD)
+database.py - قاعدة البيانات المتكاملة (v7.7.35 — FAST-COMMIT)
 ================================================================================
+🆕 v7.7.35 (FAST-COMMIT — إصلاح بطء النشر 1s+):
+  ✅ _pg_factory: synchronous_commit=off (commit من ~1s → ~10ms)
+  ✅ _pg_factory: wal_writer_delay=10ms + commit_delay=0
+  ✅ _pg_factory: min_size=max(5, ...) — تقليل إعادة إنشاء الاتصال
+  ✅ _pg_factory: max_inactive_connection_lifetime=0 — لا تُغلق خاملاً
+  ✅ mark_published_and_advance: دمج 3 معاملات في واحدة
+     - كان: 3 commits × ~1s = ~3s لكل منشور
+     - صار: 1 commit × ~10ms = ~30ms لكل منشور
+  ✅ _compute_publish_interval: منطق حساب الفاصل (مُستخرج)
+
 🆕 v7.7.34 (VACUUM_METHOD):
   ✅ async def vacuum(table): VACUUM خارج transaction
-     - متوافق مع maintenance.py (يتجنّب transaction rollback)
-     - يستخدم pool.acquire مباشر + autocommit
-     - timeout خاص (300s افتراضياً)
-     - حماية من SQL injection على اسم الجدول
 
 ✅ v7.7.33 (DELETE_PENALTY_TYPE_FIX):
   ✅ _MIGRATIONS_TYPES: delete_penalty → TEXT DEFAULT 'none'
-  ✅ _migrate_delete_penalty_type: ترحيل تلقائي
-  ✅ _analyze_after_tune: تبسيط
-  ✅ _execute_with_conn PG: rowcount بدون regex
 
 ✅ v7.7.32 (PERF-FIX — لحل البطء 1.5-2.5s):
   ✅ expire_penalties: BATCH 5000 → 500
   ✅ _tune_heavy_tables_autovacuum
-  ✅ _analyze_after_tune
 
 ✅ v7.7.31 (PUBLISH-FAST):
   ✅ has_active_subscription: MV fast path على PG
@@ -2657,17 +2659,26 @@ class Database(
         try:
             if USE_POSTGRES:
                 async def _pg_factory():
+                    # 🆕 v7.7.35: FAST-COMMIT — تقليل زمن كل commit
+                    # من ~1s إلى ~10ms على أقراص بطيئة (EBS/سحابة).
+                    # المخاطرة: قد تُفقد آخر ~200ms من المعاملات عند
+                    # crash مفاجئ للـ PostgreSQL. مقبول لهذا النوع.
                     pool = await asyncpg.create_pool(
                         dsn=DATABASE_URL,
-                        min_size=self._min_connections,
+                        min_size=max(5, self._min_connections),
                         max_size=self._max_connections,
                         timeout=self._connection_timeout,
                         command_timeout=self._connection_timeout,
                         statement_cache_size=500,
+                        max_inactive_connection_lifetime=0,
                         server_settings={
                             "application_name": "RelaxManager",
                             "statement_timeout": "30s",
                             "timezone": "UTC",
+                            # 🆕 v7.7.35: المفتاح الأهم — من ~1s إلى ~10ms
+                            "synchronous_commit": "off",
+                            "wal_writer_delay": "10ms",
+                            "commit_delay": "0",
                         },
                     )
                     try:
@@ -2691,8 +2702,9 @@ class Database(
                 )
                 logger.info(
                     f"✅ Pool PostgreSQL جاهز "
-                    f"(min={self._min_connections}, "
-                    f"max={self._max_connections})"
+                    f"(min={max(5, self._min_connections)}, "
+                    f"max={self._max_connections}) "
+                    f"[synchronous_commit=off]"
                 )
             elif USE_MYSQL:
                 try:
@@ -6776,6 +6788,172 @@ class Database(
                 next_date, channel_db_id,
             )
         return True
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🆕 v7.7.35: دمج 3 معاملات في واحدة (تقليل fsync من 3 إلى 1)
+    # ═════════════════════════════════════════════════════════════════
+
+    def _compute_publish_interval(self, row: Optional[Dict]) -> int:
+        """
+        🆕 v7.7.35: حساب الفاصل الزمني للنشر (بالثواني).
+
+        مُستخرج من منطق update_next_publish الأصلي — بلا تغيير في السلوك.
+        """
+        if not row:
+            return (
+                DEFAULT_PUBLISH_INTERVAL_MINUTES * 60
+                - PUBLISH_POLLING_COMPENSATION_SECONDS
+            )
+
+        st = row.get("schedule_type") or "interval_minutes"
+
+        if st == "interval_minutes":
+            im = row.get("interval_minutes") or 0
+            try:
+                im = int(im)
+            except (ValueError, TypeError):
+                im = 0
+            if im and im != DEFAULT_PUBLISH_INTERVAL_MINUTES:
+                mins = max(1, im)
+            else:
+                try:
+                    gi = int(row.get("gi") or 0)
+                except (ValueError, TypeError):
+                    gi = 0
+                mins = (
+                    max(1, gi) if gi > 0
+                    else DEFAULT_PUBLISH_INTERVAL_MINUTES
+                )
+            return max(
+                60,
+                mins * 60 - PUBLISH_POLLING_COMPENSATION_SECONDS,
+            )
+
+        if st == "interval_hours":
+            return max(
+                60,
+                (row.get("interval_hours") or 1) * 3600
+                - PUBLISH_POLLING_COMPENSATION_SECONDS,
+            )
+
+        if st == "interval_days":
+            return max(
+                60,
+                (row.get("interval_days") or 1) * 86400
+                - PUBLISH_POLLING_COMPENSATION_SECONDS,
+            )
+
+        try:
+            gi = int(row.get("gi") or 0)
+        except (ValueError, TypeError):
+            gi = 0
+        mins = (
+            max(1, gi) if gi > 0
+            else DEFAULT_PUBLISH_INTERVAL_MINUTES
+        )
+        return max(
+            60,
+            mins * 60 - PUBLISH_POLLING_COMPENSATION_SECONDS,
+        )
+
+    async def mark_published_and_advance(
+        self, channel_db_id: int, post_id: int
+    ) -> bool:
+        """
+        🆕 v7.7.35: transaction واحد بدل 3 معاملات منفصلة.
+
+        يستبدل في _publish_single_channel:
+            await DB.mark_post_published(post['id'])
+            await DB.update_last_publish(ch['id'])
+            await DB.update_next_publish(ch['id'])
+
+        الفائدة:
+          • commit واحد بدل 3 → fsync واحد بدل 3
+          • زمن UPDATE posts من ~1s → ~30ms
+          • ذرّية كاملة: لن يحدث أن يُعلَّم المنشور كمنشور
+            بينما last_publish لم يُحدَّث
+
+        Returns:
+            True إذا نجحت المعاملة بالكامل، False خلاف ذلك.
+        """
+        if post_id is None or channel_db_id is None:
+            return False
+
+        now = TimeUtils.utc_now()
+        try:
+            async with self.transaction() as conn:
+                # ─── 1) تعليم المنشور كمنشور ───
+                updated = await self._execute_with_conn(
+                    conn,
+                    "UPDATE posts SET published = 1, "
+                    "published_at = ?, fail_count = 0 "
+                    "WHERE id = ?",
+                    now, post_id,
+                )
+                if not updated:
+                    # المنشور غير موجود — ربما حُذف بالتوازي
+                    logger.warning(
+                        f"⚠️ mark_published_and_advance: "
+                        f"المنشور {post_id} غير موجود"
+                    )
+                    return False
+
+                # ─── 2) upsert last_publish ───
+                await self._execute_with_conn(
+                    conn,
+                    "INSERT INTO last_publish "
+                    "(channel_db_id, last_publish_time) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(channel_db_id) DO UPDATE SET "
+                    "last_publish_time = excluded.last_publish_time",
+                    channel_db_id, now,
+                )
+
+                # ─── 3) اقرأ جدولة القناة (استعلام واحد) ───
+                row = await self._fetchone_with_conn(
+                    conn,
+                    "SELECT schedule_type, interval_minutes, "
+                    "interval_hours, interval_days, "
+                    "COALESCE(("
+                    "    SELECT value FROM settings "
+                    "    WHERE key = 'min_publish_interval'"
+                    "), ?) AS gi "
+                    "FROM schedule WHERE channel_db_id = ?",
+                    str(DEFAULT_PUBLISH_INTERVAL_MINUTES),
+                    channel_db_id,
+                )
+
+                # ─── 4) احسب next_date في Python ───
+                interval_sec = self._compute_publish_interval(row)
+                next_date = now + timedelta(seconds=interval_sec)
+
+                # ─── 5) upsert schedule ───
+                await self._execute_with_conn(
+                    conn,
+                    "INSERT INTO schedule "
+                    "(channel_db_id, next_publish_date) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(channel_db_id) DO UPDATE SET "
+                    "next_publish_date = excluded.next_publish_date",
+                    channel_db_id, next_date,
+                )
+
+            # ─── إبطال الكاش خارج transaction ───
+            try:
+                if CACHE_AVAILABLE:
+                    from cache import posts_cache as _pc
+                    await _pc.invalidate(channel_db_id)
+            except Exception as ce:
+                logger.debug(f"posts_cache invalidate: {ce}")
+
+            return True
+        except Exception as e:
+            logger.error(
+                f"❌ mark_published_and_advance("
+                f"ch={channel_db_id}, post={post_id}): {e}",
+                exc_info=True,
+            )
+            return False
 
     async def update_last_publish(self, channel_db_id: int) -> bool:
         try:
