@@ -4,11 +4,12 @@
 """
 handlers_callback.py - معالج الأزرار (v9.4.22)
 =====================================================================
-🆕 v9.4.22 — شاشة إدارة قناة التحديثات:
+✅ v9.4.22 — شاشة إدارة قناة التحديثات:
     ✅ _show_admin_update_channel_menu: عرض + تغيير + حذف قناة التحديثات
     ✅ admin_update_ch_btn: زر فتح الشاشة
     ✅ admin_change_update_ch: زر تغيير القناة
     ✅ admin_remove_update_ch: زر حذف القناة
+    ✅ متوافق مع buttons_config_ar.json (الزر موجود في admin_panel)
 
 ✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
 ✅ v9.4.20 — إصلاح clear_lang_cache (circular import)
