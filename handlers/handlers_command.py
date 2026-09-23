@@ -13,9 +13,12 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.27
 
 🆕 v7.5.26 (FIX /start STATE):
     ✅ start() يُصفِّر StateManager + user_data keys المعلقة
+    ✅ حل مشكلة: /start بعد "تعيين قناة التحديثات" كان يبقي الحالة
+       معلقة → الرسالة التالية تُفسَّر كإضافة قناة
 
 🆕 v7.5.25 (DB-DIAGNOSTICS):
-    ✅ db_diag + db_vacuum
+    ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
+    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
 
 🆕 v7.5.24 (RENDER-READY):
     ✅ _trans: fallback آمن لكل المفاتيح
