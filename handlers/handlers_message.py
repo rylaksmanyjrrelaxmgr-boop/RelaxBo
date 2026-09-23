@@ -2,24 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.12 - Refresh admin commands)
+handlers_message.py - معالجات الرسائل (v7.9.13 - Log channel permission check)
 =====================================================================
+🆕 v7.9.13 (فحص صلاحيات البوت في قناة السجل):
+    ✅ handle_log_group_input: التحقق من أن البوت مشرف في القناة قبل الحفظ
+       - يستخدم bot.get_chat_member(channel_id, bot.id)
+       - يرفض الحفظ إذا لم يكن البوت administrator/creator
+       - يرفض إذا فشل الوصول للقناة (get_chat errors)
+       - يمنع مشاكل "قناة سجل لا يعمل فيها البوت"
+
 🆕 v7.9.12 (تحديث أوامر الأدمن عند إضافة/إزالة):
     ✅ _handle_admin_add_input: بعد نجاح الإضافة → refresh_admin_commands(True)
     ✅ _handle_admin_rem_input: بعد نجاح الإزالة → refresh_admin_commands(False)
     ✅ _refresh_admin_commands_safe: lazy import آمن (لا circular import)
-    ✅ فشل التحديث لا يُفشل العملية الأساسية (try/except)
 
-🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني):
-    ✅ _delete_and_warn: رسالة العقوبة (🚨) تُحذف بعد 10 ثواني
-
-🆕 v7.9.10 (إصلاح _fmt TypeError):
-    ✅ _fmt: اسم البارامتر `template` بدل `text`
-
-🆕 v7.9.9: apply_penalty: بدون سطر @username (utils.py)
-🆕 v7.9.8: apply_violation_penalty: يقبل lang ويعيد رسالة كاملة
-🆕 v7.9.3: _handle_redeem_gift_input: send_code_empty
-🆕 v7.9.2: handle_log_group_input + _do_db_restore: حذف WAL/SHM
+🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني)
+🆕 v7.9.10 (إصلاح _fmt TypeError)
+🆕 v7.9.9 (apply_penalty: بدون سطر @username)
+🆕 v7.9.8 (apply_violation_penalty: يقبل lang)
+🆕 v7.9.3 (_handle_redeem_gift_input: send_code_empty)
+🆕 v7.9.2 (handle_log_group_input + _do_db_restore)
 =====================================================================
 """
 
@@ -460,6 +462,10 @@ async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
     """
     ✅ حذف رسالة بعد تأخير محدد (افتراضياً 10 ثواني).
+    يُستخدم لحذف:
+      - رسالة التحذير (⚠️)
+      - رسالة العقوبة (🚨) — v7.9.11
+      - رسالة الترجمة
     """
     await asyncio.sleep(delay)
     await _safe_delete_message(bot, chat_id, message_id)
@@ -622,6 +628,95 @@ async def _is_mysql_db() -> bool:
 
 
 # =====================================================================
+# 🆕 v7.9.13: التحقق من صلاحيات البوت في قناة السجل
+# =====================================================================
+
+async def _verify_bot_in_log_channel(context, channel_id: int) -> Tuple[bool, str]:
+    """
+    🆕 v7.9.13: التحقق من أن البوت مشرف في القناة المستهدفة.
+
+    لماذا هذا مهم:
+      - النظام السابق كان يحفظ المعرّف دون التحقق
+      - النتيجة: قناة سجل "لا يعمل فيها البوت" → فشل صامت عند الإرسال
+      - الآن: رفض الحفظ فوراً مع سبب واضح
+
+    Args:
+        context: ContextTypes.DEFAULT_TYPE
+        channel_id: معرّف رقمي للقناة (int)
+
+    Returns:
+        (True, "") — إذا البوت مشرف
+        (False, "سبب الفشل") — خلاف ذلك
+    """
+    if not channel_id:
+        return False, "invalid_channel_id"
+
+    bot_id = None
+    try:
+        bot_id = context.bot.id
+    except Exception:
+        return False, "bot_id_unavailable"
+
+    if not bot_id:
+        return False, "bot_id_missing"
+
+    try:
+        member = await asyncio.wait_for(
+            context.bot.get_chat_member(channel_id, bot_id),
+            timeout=10.0,
+        )
+    except asyncio.TimeoutError:
+        return False, "timeout"
+    except BadRequest as e:
+        err = str(e).lower()
+        # البوت ليس عضواً / القناة غير موجودة / لا وصول
+        if ("chat not found" in err
+                or "bot is not a member" in err
+                or "member not found" in err
+                or "user not found" in err):
+            return False, "bot_not_member"
+        if ("chat_admin_required" in err
+                or "not enough rights" in err):
+            return False, "need_admin_rights"
+        logger.warning(f"_verify_bot_in_log_channel BadRequest: {e}")
+        return False, "bad_request"
+    except Exception as e:
+        logger.warning(f"_verify_bot_in_log_channel: {e}")
+        return False, "unknown_error"
+
+    status = getattr(member, "status", None)
+    if status not in ("administrator", "creator"):
+        return False, "not_admin"
+
+    # اختياري: التحقق من صلاحية النشر (can_post_messages)
+    # في القنوات، يمكن للمشرف أن يكون "administrator" لكن بلا حق النشر
+    can_post = getattr(member, "can_post_messages", None)
+    if can_post is False:
+        return False, "no_post_permission"
+
+    return True, ""
+
+
+def _verify_bot_in_log_channel_error_text(reason: str, lang: str) -> str:
+    """
+    🆕 v7.9.13: رسالة خطأ مترجمة لأسباب فشل التحقق.
+    """
+    mapping = {
+        "invalid_channel_id": "❌ معرّف القناة غير صالح.",
+        "bot_id_unavailable": "❌ لا يمكن تحديد معرّف البوت.",
+        "bot_id_missing": "❌ لا يمكن تحديد معرّف البوت.",
+        "timeout": "⏱️ انتهت مهلة الاتصال بـ Telegram. حاول مجدداً.",
+        "bot_not_member": "❌ البوت ليس عضواً في القناة. أضفه أولاً.",
+        "need_admin_rights": "❌ البوت يحتاج صلاحيات مشرف في القناة.",
+        "not_admin": "❌ البوت ليس مشرفاً في القناة. رقّه أولاً.",
+        "no_post_permission": "❌ البوت لا يملك صلاحية النشر في القناة.",
+        "bad_request": "❌ تعذّر الوصول للقناة. تحقق من المعرّف.",
+        "unknown_error": "❌ خطأ غير متوقع أثناء التحقق من القناة.",
+    }
+    return mapping.get(reason, "❌ تعذّر التحقق من صلاحيات البوت في القناة.")
+
+
+# =====================================================================
 # MessageHandlers
 # =====================================================================
 
@@ -770,12 +865,22 @@ class MessageHandlers:
                 pass
 
     # =================================================================
-    # handle_log_group_input
+    # 🆕 v7.9.13: handle_log_group_input — مع فحص صلاحيات البوت
     # =================================================================
 
     @staticmethod
     async def handle_log_group_input(update, context) -> bool:
-        """✅ v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة."""
+        """
+        🆕 v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة.
+        🆕 v7.9.13: يتحقق من أن البوت مشرف في القناة قبل الحفظ.
+
+        التسلسل:
+          1. التحقق من أن المستخدم مشرف في المجموعة
+          2. التحقق من صيغة الإدخال
+          3. تحويل الإدخال إلى channel_id رقمي
+          4. 🆕 التحقق من أن البوت مشرف في القناة (جديد v7.9.13)
+          5. الحفظ في DB
+        """
         user_id = update.effective_user.id
         log_group_id = context.user_data.get('log_group_id')
         if not log_group_id:
@@ -783,6 +888,7 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
+        # ─── 1) التحقق من صلاحيات المستخدم في المجموعة ───
         if not await _check_admin_in_chat(context, log_group_id, user_id):
             msg = await _trans('no_permission', lang, "❌")
             await safe_send(context.bot, user_id, msg)
@@ -792,6 +898,7 @@ class MessageHandlers:
 
         text = (update.effective_message.text or "").strip()
 
+        # ─── حالة الإزالة ───
         if text.lower() in ('none', 'cancel', 'remove', '-'):
             try:
                 ok = await DB.remove_group_log_channel(log_group_id)
@@ -805,6 +912,7 @@ class MessageHandlers:
             context.user_data.pop('log_group_id', None)
             return True
 
+        # ─── 2) التحقق من صيغة الإدخال ───
         if not _is_valid_channel_ref(text):
             preview = text[:50] if text else ""
             logger.warning(
@@ -823,6 +931,7 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
             return True
 
+        # ─── 3) تحويل الإدخال إلى معرّف رقمي ───
         channel_int = None
         try:
             if text.lstrip('-').isdigit():
@@ -835,10 +944,45 @@ class MessageHandlers:
             channel_int = None
 
         if channel_int is None:
-            msg = await _trans('channel_not_found', lang, "❌")
+            msg = await _trans('channel_not_found', lang,
+                               "❌ لم يتم العثور على القناة.")
             await safe_send(context.bot, user_id, msg)
             return True
 
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v7.9.13: التحقق من أن البوت مشرف في القناة
+        # ═══════════════════════════════════════════════════════════
+        try:
+            verified, reason = await _verify_bot_in_log_channel(
+                context, channel_int
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ _verify_bot_in_log_channel({channel_int}): {e}",
+                exc_info=True,
+            )
+            verified, reason = False, "unknown_error"
+
+        if not verified:
+            error_text = _verify_bot_in_log_channel_error_text(reason, lang)
+            full_msg = (
+                f"{error_text}\n\n"
+                f"💡 <b>خطوات الحل:</b>\n"
+                f"1️⃣ أضف البوت إلى القناة\n"
+                f"2️⃣ رقّيه كمشرف\n"
+                f"3️⃣ فعّل صلاحية 'نشر الرسائل' (إن كانت قناة)\n"
+                f"4️⃣ أعد الإرسال هنا"
+            )
+            logger.warning(
+                f"⚠️ v7.9.13: رفض قناة السجل {channel_int} "
+                f"للمجموعة {log_group_id} — السبب: {reason}"
+            )
+            await safe_send(context.bot, user_id, full_msg, parse_mode='HTML')
+            # ⚠️ لا نمسح الحالة — نُتيح للمستخدم إعادة المحاولة
+            # ⚠️ لا نمسح log_group_id — ليبقى السياق
+            return True
+
+        # ─── 5) الحفظ في DB ───
         try:
             ok = await DB.set_group_log_channel(log_group_id, channel_int)
         except Exception as e:
@@ -857,7 +1001,7 @@ class MessageHandlers:
             )
             await safe_send(context.bot, user_id, msg)
         else:
-            msg = await _trans('save_failed', lang, "❌")
+            msg = await _trans('save_failed', lang, "❌ فشل الحفظ.")
             await safe_send(context.bot, user_id, msg)
 
         StateManager.clear(user_id)
@@ -1698,6 +1842,10 @@ class MessageHandlers:
     async def _handle_update_ch_input(update, context):
         """
         ✅ v7.9.10: يحفظ في settings.updates_channel فقط.
+        - لا add_channel
+        - لا active_channel
+        - لا user_channels
+        - _fmt مُصلَح (يعمل بلا TypeError)
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -3066,4 +3214,5 @@ __all__ = [
     "_detect_and_translate",
     "_send_translation_reply",
     "apply_violation_penalty",
+    "_verify_bot_in_log_channel",
 ]
