@@ -2,25 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.27
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.28
 ===================================================================================
-🆕 v7.5.27 (MOOD IMPORT FIX):
+🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن):
+    ✅ db_diag: يستخدم diagnose_db_split() بدل القصّ اليدوي
+       - يتجنب فشل Telegram عند > 4096 حرف
+       - يحافظ على HTML tags في الأجزاء
+       - يعرض رقم الجزء في كل رسالة (i/N)
+    ✅ fallback تلقائي إلى diagnose_db() إن لم تتوفر الواجهة الجديدة
+
+✅ v7.5.27 (MOOD IMPORT FIX):
     ✅ mood(): تصحيح مسار الاستيراد
        - كان: from handlers_message import analyze_sentiment  ❌
        - صار: from handlers.handlers_message import ...        ✅
        - مع fallback للتوافق مع أي هيكل قديم
        - النتيجة: /mood يعمل الآن
 
-🆕 v7.5.26 (FIX /start STATE):
+✅ v7.5.26 (FIX /start STATE):
     ✅ start() يُصفِّر StateManager + user_data keys المعلقة
     ✅ حل مشكلة: /start بعد "تعيين قناة التحديثات" كان يبقي الحالة
        معلقة → الرسالة التالية تُفسَّر كإضافة قناة
 
-🆕 v7.5.25 (DB-DIAGNOSTICS):
+✅ v7.5.25 (DB-DIAGNOSTICS):
     ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
     ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
 
-🆕 v7.5.24 (RENDER-READY):
+✅ v7.5.24 (RENDER-READY):
     ✅ _trans: fallback آمن لكل المفاتيح
     ✅ HTML بدل Markdown في كل الرسائل
 ===================================================================================
@@ -29,7 +36,7 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.27
 import asyncio
 import time as _time_module
 import logging
-from typing import Optional
+from typing import Optional, List
 from html import escape
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -55,6 +62,13 @@ logger = logging.getLogger(__name__)
 
 ANONYMOUS_BOT_ID = 1087968824   # GroupAnonymousBot
 CHANNEL_BOT_ID = 136817688      # ChannelBot
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.28: حدود Telegram
+# ═══════════════════════════════════════════════════════════════════
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+DB_DIAG_SPLIT_DELAY = 0.35      # ثوانٍ بين أجزاء /db_diag
 
 # ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.27: import دالة تحليل المشاعر مع fallback
@@ -372,6 +386,144 @@ def _invalidate_force_sub_cache(user_id: int = None):
         keys_to_del = [k for k in _force_sub_cache if k[0] == user_id]
         for k in keys_to_del:
             _force_sub_cache.pop(k, None)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.28: مُرسِل التقرير المُقسَّم
+# ═══════════════════════════════════════════════════════════════════
+
+async def _send_long_report(
+    context,
+    chat_id: int,
+    text: str,
+    parse_mode: Optional[str] = 'HTML',
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
+    split_delay: float = DB_DIAG_SPLIT_DELAY,
+) -> int:
+    """
+    ✅ v7.5.28: يرسل تقريراً طويلاً على أجزاء.
+
+    Args:
+        context: ContextTypes
+        chat_id: الوجهة
+        text: النص الكامل
+        parse_mode: HTML / None
+        limit: حدّ كل رسالة (افتراضياً 4096)
+        split_delay: تأخير بين الأجزاء
+
+    Returns:
+        عدد الأجزاء المُرسَلة.
+    """
+    if not text:
+        return 0
+
+    # ─── قصير: رسالة واحدة ───
+    if len(text) <= limit:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=parse_mode,
+            )
+            return 1
+        except BadRequest as e:
+            err = str(e).lower()
+            if "can't parse" in err or "parse" in err:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=text, parse_mode=None,
+                    )
+                    return 1
+                except Exception:
+                    return 0
+            return 0
+        except Exception:
+            return 0
+
+    # ─── طويل: تقسيم آمن ───
+    parts = _split_text_for_telegram(text, limit=limit)
+    total = len(parts)
+    sent = 0
+
+    for i, part in enumerate(parts, 1):
+        header = f"<i>({i}/{total})</i>\n"
+        body = part
+
+        # لو أضفنا header سيصبح النص أطول
+        max_body_len = limit - len(header) - 10
+        if len(body) > max_body_len:
+            body = body[:max_body_len]
+
+        full = f"{header}{body}"
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=full, parse_mode=parse_mode,
+            )
+            sent += 1
+        except BadRequest as e:
+            err = str(e).lower()
+            if "can't parse" in err or "parse" in err:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=full, parse_mode=None,
+                    )
+                    sent += 1
+                except Exception as inner:
+                    logger.warning(f"⚠️ split part {i}/{total}: {inner}")
+            else:
+                logger.warning(f"⚠️ split part {i}/{total}: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ split part {i}/{total}: {e}")
+
+        if i < total:
+            await asyncio.sleep(split_delay)
+
+    return sent
+
+
+def _split_text_for_telegram(
+    text: str,
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
+) -> List[str]:
+    """
+    ✅ v7.5.28: يقسم نصاً طويلاً إلى أجزاء آمنة.
+
+    - يُفضّل القسمة عند newline
+    - يترك هامشاً أمان للأحرف
+    - يتفادى كسر HTML tags كلياً قدر الإمكان
+    """
+    if not text:
+        return [""]
+
+    if len(text) <= limit:
+        return [text]
+
+    # هامش للأحرف الخاصة بـ HTML tags + header (i/N)
+    safe_limit = max(1, limit - 200)
+
+    parts: List[str] = []
+    remaining = text
+
+    while len(remaining) > safe_limit:
+        # أفضل موضع: آخر newline قبل الحدّ
+        cut = remaining.rfind("\n", 0, safe_limit)
+
+        # لا newline مناسب → جرّب مسافة
+        if cut < safe_limit // 2:
+            cut = remaining.rfind(" ", 0, safe_limit)
+
+        # لا شيء مناسب → قطع قسري
+        if cut < safe_limit // 2:
+            cut = safe_limit
+
+        part = remaining[:cut].rstrip()
+        if part:
+            parts.append(part)
+        remaining = remaining[cut:].lstrip("\n")
+
+    if remaining:
+        parts.append(remaining.rstrip())
+
+    return parts or [text]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1845,15 +1997,22 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.25: أوامر تشخيص قاعدة البيانات
+    # ✅ v7.5.28: db_diag — يستخدم diagnose_db_split() إن توفر
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.5.28: /db_diag — تشخيص قاعدة البيانات.
+
+        - يحاول استخدام diagnose_db_split() أولاً (تقسيم آمن)
+        - fallback إلى diagnose_db() إن لم تتوفر الواجهة الجديدة
+        """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
 
+        # إشعار البدء
         await _safe_edit_or_send(
             update, context,
             "⏳ <b>جاري التشخيص...</b>\n\n"
@@ -1861,40 +2020,137 @@ class CommandHandlers:
             parse_mode='HTML',
         )
 
+        # ─── محاولة الواجهة الجديدة أولاً ───
         try:
-            from db_diagnostics import diagnose_db
-            result = await diagnose_db()
+            from db_diagnostics import diagnose_db_split
+            _has_split = True
+        except (ImportError, AttributeError):
+            diagnose_db_split = None
+            _has_split = False
 
-            if len(result) > 4000:
-                parts = [result[i:i+4000] for i in range(0, len(result), 4000)]
-                for i, part in enumerate(parts, 1):
+        if _has_split:
+            try:
+                parts = await diagnose_db_split()
+                if not parts:
                     await context.bot.send_message(
                         chat_id=user_id,
-                        text=f"<i>({i}/{len(parts)})</i>\n{part}",
-                        parse_mode='HTML'
+                        text="⚠️ التقرير فارغ.",
                     )
-                    await asyncio.sleep(0.3)
-            else:
-                await context.bot.send_message(
-                    chat_id=user_id, text=result,
-                    parse_mode='HTML'
+                    return
+
+                total = len(parts)
+                sent = 0
+
+                for i, part in enumerate(parts, 1):
+                    header = (
+                        f"<i>({i}/{total})</i>\n" if total > 1 else ""
+                    )
+                    body = f"{header}{part}"
+
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=body,
+                            parse_mode='HTML',
+                        )
+                        sent += 1
+                    except BadRequest as e:
+                        err = str(e).lower()
+                        if "can't parse" in err or "parse" in err:
+                            # fallback: بلا HTML
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=user_id,
+                                    text=body,
+                                    parse_mode=None,
+                                )
+                                sent += 1
+                            except Exception as inner:
+                                logger.warning(
+                                    f"⚠️ db_diag part {i}/{total}: {inner}"
+                                )
+                        else:
+                            logger.warning(
+                                f"⚠️ db_diag part {i}/{total}: {e}"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ db_diag part {i}/{total}: {e}"
+                        )
+
+                    if i < total:
+                        await asyncio.sleep(DB_DIAG_SPLIT_DELAY)
+
+                logger.info(
+                    f"✅ db_diag: أُرسِلت {sent}/{total} جزء"
                 )
+                return
+
+            except Exception as e:
+                logger.error(
+                    f"db_diag split فشل، fallback: {e}",
+                    exc_info=True,
+                )
+                # نكمل إلى fallback
+
+        # ─── fallback: diagnose_db() ───
+        try:
+            from db_diagnostics import diagnose_db
         except ImportError:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="❌ ملف <code>db_diagnostics.py</code> غير موجود في المشروع",
-                parse_mode='HTML'
+                text=(
+                    "❌ ملف <code>db_diagnostics.py</code> "
+                    "غير موجود في المشروع"
+                ),
+                parse_mode='HTML',
             )
+            return
+
+        try:
+            result = await diagnose_db()
         except Exception as e:
             logger.error(f"db_diag: {e}", exc_info=True)
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"❌ فشل التشخيص: <code>{escape(str(e)[:200])}</code>",
-                parse_mode='HTML'
+                text=(
+                    f"❌ فشل التشخيص: "
+                    f"<code>{escape(str(e)[:200])}</code>"
+                ),
+                parse_mode='HTML',
             )
+            return
+
+        # إرسال
+        try:
+            sent = await _send_long_report(
+                context, user_id, result,
+                parse_mode='HTML',
+                limit=TELEGRAM_MESSAGE_LIMIT,
+                split_delay=DB_DIAG_SPLIT_DELAY,
+            )
+            if sent == 0:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⚠️ فشل إرسال التقرير.",
+                )
+        except Exception as e:
+            logger.error(f"db_diag send: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ فشل الإرسال: <code>{escape(str(e)[:150])}</code>",
+                parse_mode='HTML',
+            )
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.28: db_vacuum — مع نفس أسلوب التقسيم
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.5.28: /db_vacuum — VACUUM ANALYZE.
+        """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -1908,24 +2164,35 @@ class CommandHandlers:
 
         try:
             from db_diagnostics import vacuum_analyze_tables
-            result = await vacuum_analyze_tables()
-            await context.bot.send_message(
-                chat_id=user_id, text=result,
-                parse_mode='HTML'
-            )
         except ImportError:
             await context.bot.send_message(
                 chat_id=user_id,
                 text="❌ ملف <code>db_diagnostics.py</code> غير موجود",
-                parse_mode='HTML'
+                parse_mode='HTML',
             )
+            return
+
+        try:
+            result = await vacuum_analyze_tables()
         except Exception as e:
             logger.error(f"db_vacuum: {e}", exc_info=True)
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"❌ فشل التنظيف: <code>{escape(str(e)[:200])}</code>",
-                parse_mode='HTML'
+                text=(
+                    f"❌ فشل التنظيف: "
+                    f"<code>{escape(str(e)[:200])}</code>"
+                ),
+                parse_mode='HTML',
             )
+            return
+
+        # إرسال (عادةً قصير، لكن نستخدم نفس الأسلوب)
+        await _send_long_report(
+            context, user_id, result,
+            parse_mode='HTML',
+            limit=TELEGRAM_MESSAGE_LIMIT,
+            split_delay=DB_DIAG_SPLIT_DELAY,
+        )
 
 
 __all__ = ['CommandHandlers']
