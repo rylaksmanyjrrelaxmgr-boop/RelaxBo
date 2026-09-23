@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.4.3)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.0)
 ================================================================================
+🆕 v5.5.0 (COMMAND SCOPING — إخفاء الأوامر الإدارية عن المستخدم العادي):
+    ✅ تقسيم private_commands إلى:
+        • public_commands  → تظهر لكل المستخدمين (17 أمراً)
+        • admin_commands   → تظهر للأدمن/المالك/المطورين فقط (15 أمراً)
+    ✅ الأوامر العامة تُسجَّل على BotCommandScopeAllPrivateChats
+    ✅ الأوامر الإدارية تُسجَّل على BotCommandScopeChat لكل أدمن
+    ✅ حذف Default Scope القديم لمنع تسرّب قائمة قديمة
+    ✅ refresh_admin_commands() — دالة عامة لتحديث أوامر أدمن بلا restart
+       (تُستدعى من handlers add_admin/remove_admin)
+    ✅ قوائم الأوامر أصبحت module-level constants لتُستدعى من أي مكان
+
 🆕 v5.4.3 (Maintenance integration):
     ✅ integration مع maintenance.py — صيانة دورية كل 24 ساعة
     ✅ حذف admin_logs/penalty_archive/user_violations القديمة
@@ -13,48 +24,20 @@
 🆕 v5.4.2 (DB Diagnostics):
     ✅ db_diag: /db_diag — تشخيص قاعدة البيانات (للمطور)
     ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE (للمطور)
-    ✅ إضافة الأمرين إلى private_commands + CommandHandler
 
 🔍 v5.4.1 (Analytics check):
     ✅ فحص تحميل AnalyticsMixin بعد logging.basicConfig
-    ✅ يسجّل بوضوح: "✅ AnalyticsMixin محمّل" أو "⚠️ مفقود"
-    ✅ يحل مشكلة صمت _load_mixin بسبب ترتيب التحميل
 
 🔍 v5.4.0 (Pool Monitor integration):
     ✅ استيراد BackgroundTasks.monitor_pool + monitor_pool_alert
-    ✅ تشغيل monitor_pool (يسجّل حالة Pool كل 60s)
-    ✅ تشغيل monitor_pool_alert (تنبيه Telegram عند ≥85%)
-    ✅ زيادة عدد المهام الخلفية من 13 → 15
 
 🆕 v5.3.1 (group_log integration كامل):
-    ✅ استيراد init_group_log من group_log
-    ✅ استدعاء init_group_log(DB, app.bot) + gl.start() بعد initialize
-    ✅ إغلاق لطيف لـgroup_log عبر shutdown() في finally
-    ✅ حماية شاملة — البوت يعمل حتى لو غاب group_log
+    ✅ استيراد init_group_log + إغلاق لطيف
 
-🆕 v5.3.0 (group_log integration أساسي):
-    ✅ استيراد register_group_log_handlers من handlers.handlers_group_log
-    ✅ تسجيل معالجات سجل قناة المجموعات
-    ✅ فحص توفر دوال group_log عند البدء (غير معطِّل)
-
-🆕 v5.2.0 (periodic cleanup + تحسينات):
-    ✅ GroupRateLimiterManager.periodic_cleanup_task
-    ✅ استيراد GroupRateLimiterManager من handlers.handlers_message
-    ✅ تقرير تلقائي بعد كل مهمة خلفية
-    ✅ فحص توافق DB_TYPE مع DATABASE_URL عند البدء
-
-🆕 v5.1.0 (Warmup + فحص دوال):
-    ✅ warmup_all() عند بدء التشغيل
-    ✅ _verify_command_handlers() — فحص دوال CommandHandlers
-    ✅ قياس زمن warmup في السجلّات
-
-🆕 v5.0.0 (أمان + إصلاحات):
-    🔒 تصفية httpx/httpcore logs — منع تسريب BOT_TOKEN
-    🔒 إخفاء التوكن من سجلات Webhook URL
-    🔒 دعم BOT_TOKEN من متغيرات البيئة
-    ✅ إصلاح حساب زمن التطبيق
-    ✅ إصلاح plan['days'] → plan.get('duration_days')
-    ✅ حماية من فشل DB.get_invoice داخل _validate_invoice
+🆕 v5.3.0 (group_log integration أساسي)
+🆕 v5.2.0 (periodic cleanup + تحسينات)
+🆕 v5.1.0 (Warmup + فحص دوال)
+🆕 v5.0.0 (أمان + إصلاحات)
 ================================================================================
 """
 
@@ -67,7 +50,12 @@ import time
 from urllib.parse import urlparse
 from aiohttp import web
 
-from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+from telegram import (
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+)
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatJoinRequestHandler, filters,
@@ -218,6 +206,193 @@ ALLOWED_UPDATES = [
 
 # ✅ v5.3.1: مرجع عالمي لـgroup_log للإغلاق اللطيف
 _GROUP_LOG_INSTANCE = None
+
+
+# =====================================================================
+# 🆕 v5.5.0: قوائم الأوامر — module-level constants
+# =====================================================================
+# يمكن استدعاؤها من أي مكان (handlers, refresh function).
+# تظهر للمستخدم حسب النطاق (Scope) المُسجَّل في Telegram.
+# =====================================================================
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ الأوامر العامة — تظهر لكل مستخدم في الخاص
+# ═══════════════════════════════════════════════════════════════════
+PUBLIC_COMMANDS = [
+    ("start", "🏠 القائمة الرئيسية"),
+    ("help", "📚 المساعدة"),
+    ("trial", "🎁 تجربة مجانية"),
+    ("subscribe", "💎 اشتراك"),
+    ("support", "📞 دعم فني"),
+    ("language", "🌐 اللغة"),
+    ("developer", "👨‍💻 المطور"),
+    ("contests", "🏆 المسابقات"),
+    ("stats", "📊 الإحصائيات"),
+    ("replies", "💬 الردود التلقائية"),
+    ("gift_plans", "🎁 خطط الهدايا"),
+    ("redeem_gift", "🎟️ استرداد كود هدية"),
+    ("mood", "🎭 تحليل المشاعر"),
+    ("channels", "📡 قنواتي"),
+    ("posts", "📋 منشوراتي"),
+    ("auto_publish", "📤 تبديل النشر التلقائي"),
+    ("auto_recycle", "♻️ تبديل التدوير"),
+]
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ الأوامر الإدارية — تظهر للأدمن/المالك/المطورين فقط
+# ═══════════════════════════════════════════════════════════════════
+ADMIN_COMMANDS = [
+    ("grant", "🎁 منح اشتراك يدوي"),
+    ("set_min_interval", "⏱️ تعيين الحد الأدنى للفاصل"),
+    ("admin", "👑 لوحة الأدمن"),
+    ("broadcast", "📨 بث جماعي"),
+    ("set_force", "🔒 تعيين الاشتراك الإجباري"),
+    ("set_update_ch", "📢 تعيين قناة التحديثات"),
+    ("set_log_ch", "📋 تعيين قناة السجلات"),
+    ("add_admin", "👑 إضافة مشرف"),
+    ("remove_admin", "🗑️ إزالة مشرف"),
+    ("export_replies", "📤 تصدير الردود"),
+    ("import_replies", "📥 استيراد الردود"),
+    ("backup", "💾 نسخ احتياطي"),
+    ("restore", "🔄 عرض النسخ"),
+    ("db_diag", "🔬 تشخيص قاعدة البيانات"),
+    ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
+]
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ أوامر المجموعات — تظهر في كل المجموعات
+# ═══════════════════════════════════════════════════════════════════
+GROUP_COMMANDS = [
+    ("syncgroup", "🔗 تفعيل المجموعة"),
+    ("security", "🛡️ إعدادات الأمان"),
+    ("panel", "📋 لوحة التحكم"),
+    ("lock", "🔒 قفل المجموعة"),
+    ("unlock", "🔓 فتح المجموعة"),
+    ("ban", "🚫 حظر مستخدم"),
+    ("mute", "🔇 كتم مستخدم"),
+    ("warn", "⚠️ تحذير مستخدم"),
+    ("kick", "👢 طرد مستخدم"),
+    ("restrict", "🔒 تقييد مستخدم"),
+    ("unban", "🔓 إلغاء حظر"),
+    ("pin", "📌 تثبيت رسالة"),
+]
+
+
+# =====================================================================
+# 🆕 v5.5.0: جمع معرّفات الأدمن
+# =====================================================================
+
+async def _collect_admin_ids() -> list:
+    """
+    جمع كل معرّفات الأدمن الذين يجب أن تظهر لهم الأوامر الإدارية.
+
+    المصادر:
+      • CONFIG.PRIMARY_OWNER_ID (المالك)
+      • CONFIG.DEVELOPER_IDS (المطورون)
+      • DB.get_all_admins() (إن وُجد)
+
+    يرجع قائمة أعداد صحيحة بدون تكرار.
+    """
+    admin_ids = set()
+
+    # المالك
+    try:
+        owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
+        if owner:
+            admin_ids.add(owner)
+    except (TypeError, ValueError):
+        pass
+
+    # المطورون
+    try:
+        devs = getattr(CONFIG, "DEVELOPER_IDS", []) or []
+        for dev in devs:
+            try:
+                d = int(dev)
+                if d:
+                    admin_ids.add(d)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+
+    # الأدمن من DB (إن وُجدت الدالة)
+    try:
+        if hasattr(DB, "get_all_admins"):
+            result = DB.get_all_admins()
+            if asyncio.iscoroutine(result):
+                db_admins = await result
+            else:
+                db_admins = result
+            for a in (db_admins or []):
+                uid = a.get("user_id") if isinstance(a, dict) else a
+                if uid:
+                    try:
+                        admin_ids.add(int(uid))
+                    except (TypeError, ValueError):
+                        continue
+    except Exception as _e:
+        logger.debug(f"get_all_admins: {_e}")
+
+    return sorted(admin_ids)
+
+
+# =====================================================================
+# 🆕 v5.5.0: تحديث أوامر أدمن بلا restart
+# =====================================================================
+
+async def refresh_admin_commands(bot, user_id: int, is_admin: bool) -> bool:
+    """
+    تحديث قائمة أوامر مستخدم بعد إضافته/إزالته من الأدمن.
+
+    Args:
+        bot: instance الـ bot
+        user_id: معرّف المستخدم
+        is_admin: True = أضف الأوامر الإدارية | False = ارجع للعامة فقط
+
+    Returns:
+        True إذا نجح، False خلاف ذلك.
+
+    الاستخدام من handlers:
+        from main import refresh_admin_commands
+        await refresh_admin_commands(context.bot, new_admin_id, True)
+    """
+    if not user_id:
+        return False
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        if is_admin:
+            await bot.set_my_commands(
+                PUBLIC_COMMANDS + ADMIN_COMMANDS,
+                scope=BotCommandScopeChat(chat_id=uid),
+            )
+        else:
+            # امسح أي scope خاص
+            try:
+                await bot.delete_my_commands(
+                    scope=BotCommandScopeChat(chat_id=uid)
+                )
+            except Exception:
+                pass
+            # أعد المستخدم للـ AllPrivateChats (يرث العامة)
+            await bot.set_my_commands(
+                PUBLIC_COMMANDS,
+                scope=BotCommandScopeChat(chat_id=uid),
+            )
+        logger.info(
+            f"✅ refresh_admin_commands({uid}, "
+            f"is_admin={is_admin}) نجح"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"⚠️ refresh_admin_commands({uid}): {e}"
+        )
+        return False
 
 
 # =====================================================================
@@ -610,7 +785,7 @@ async def successful_payment(update, context):
                 logger.info(f"✅ Gift code created: user={user_id}")
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في توليد كود الهدية.")
-                logger.error(f"❌ Failed to create gift code: user={user_id}")
+                logger.error(f"❌ Failed to create gift code: {user_id}")
         except Exception as e:
             logger.exception(f"❌ Exception in gift payment: {e}")
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
@@ -780,63 +955,76 @@ async def main():
                 "نظام سجل المجموعات"
             )
 
-    # ========== قائمة الأوامر الخاصة ==========
-    private_commands = [
-        ("start", "🏠 القائمة الرئيسية"),
-        ("help", "📚 المساعدة"),
-        ("trial", "🎁 تجربة مجانية"),
-        ("subscribe", "💎 اشتراك"),
-        ("support", "📞 دعم فني"),
-        ("language", "🌐 اللغة"),
-        ("developer", "👨‍💻 المطور"),
-        ("contests", "🏆 المسابقات"),
-        ("stats", "📊 الإحصائيات"),
-        ("replies", "💬 الردود التلقائية"),
-        ("grant", "🎁 منح اشتراك يدوي"),
-        ("set_min_interval", "⏱️ تعيين الحد الأدنى للفاصل"),
-        ("gift_plans", "🎁 خطط الهدايا"),
-        ("redeem_gift", "🎟️ استرداد كود هدية"),
-        ("mood", "🎭 تحليل المشاعر"),
-        ("admin", "👑 لوحة الأدمن"),
-        ("broadcast", "📨 بث جماعي"),
-        ("set_force", "🔒 تعيين الاشتراك الإجباري"),
-        ("set_update_ch", "📢 تعيين قناة التحديثات"),
-        ("set_log_ch", "📋 تعيين قناة السجلات"),
-        ("add_admin", "👑 إضافة مشرف"),
-        ("remove_admin", "🗑️ إزالة مشرف"),
-        ("export_replies", "📤 تصدير الردود"),
-        ("import_replies", "📥 استيراد الردود"),
-        ("backup", "💾 نسخ احتياطي"),
-        ("restore", "🔄 عرض النسخ"),
-        ("auto_publish", "📤 تبديل النشر التلقائي"),
-        ("auto_recycle", "♻️ تبديل التدوير"),
-        ("channels", "📡 قنواتي"),
-        ("posts", "📋 منشوراتي"),
-        # ✅ v5.4.2: أوامر تشخيص قاعدة البيانات
-        ("db_diag", "🔬 تشخيص قاعدة البيانات"),
-        ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
-    ]
+    # =================================================================
+    # 🆕 v5.5.0: تسجيل الأوامر بنطاقات صحيحة
+    # =================================================================
+    # 1) امسح أي قوائم قديمة (خصوصاً Default لتجنّب تسرّب)
+    # 2) سجّل العامة على AllPrivateChats
+    # 3) سجّل أوامر المجموعات على AllGroupChats
+    # 4) سجّل الإدارية على BotCommandScopeChat لكل أدمن منفرداً
+    # =================================================================
 
-    group_commands = [
-        ("syncgroup", "🔗 تفعيل المجموعة"),
-        ("security", "🛡️ إعدادات الأمان"),
-        ("panel", "📋 لوحة التحكم"),
-        ("lock", "🔒 قفل المجموعة"),
-        ("unlock", "🔓 فتح المجموعة"),
-        ("ban", "🚫 حظر مستخدم"),
-        ("mute", "🔇 كتم مستخدم"),
-        ("warn", "⚠️ تحذير مستخدم"),
-        ("kick", "👢 طرد مستخدم"),
-        ("restrict", "🔒 تقييد مستخدم"),
-        ("unban", "🔓 إلغاء حظر"),
-        ("pin", "📌 تثبيت رسالة"),
-    ]
+    # ─── 1) حذف Scopes القديمة ───
+    for _scope_name, _scope in (
+        ("Default", BotCommandScopeDefault()),
+        ("AllPrivateChats", BotCommandScopeAllPrivateChats()),
+        ("AllGroupChats", BotCommandScopeAllGroupChats()),
+    ):
+        try:
+            await app.bot.delete_my_commands(scope=_scope)
+            logger.debug(f"🧹 حُذفت أوامر {_scope_name} القديمة")
+        except Exception as _e:
+            logger.debug(f"delete {_scope_name} commands: {_e}")
 
-    await app.bot.set_my_commands(
-        private_commands, scope=BotCommandScopeAllPrivateChats()
-    )
-    await app.bot.set_my_commands(
-        group_commands, scope=BotCommandScopeAllGroupChats()
+    # ─── 2) الأوامر العامة ───
+    try:
+        await app.bot.set_my_commands(
+            PUBLIC_COMMANDS,
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+        logger.info(
+            f"✅ سُجِّلت {len(PUBLIC_COMMANDS)} أمراً عاماً "
+            f"(AllPrivateChats)"
+        )
+    except Exception as _e:
+        logger.error(f"❌ فشل تسجيل الأوامر العامة: {_e}")
+
+    # ─── 3) أوامر المجموعات ───
+    try:
+        await app.bot.set_my_commands(
+            GROUP_COMMANDS,
+            scope=BotCommandScopeAllGroupChats(),
+        )
+        logger.info(
+            f"✅ سُجِّلت {len(GROUP_COMMANDS)} أمراً للمجموعات "
+            f"(AllGroupChats)"
+        )
+    except Exception as _e:
+        logger.error(f"❌ فشل تسجيل أوامر المجموعات: {_e}")
+
+    # ─── 4) الأوامر الإدارية — لكل أدمن منفرداً ───
+    _admin_ids = await _collect_admin_ids()
+    _registered_admins = 0
+    _failed_admins = 0
+    _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
+
+    for _admin_id in _admin_ids:
+        try:
+            await app.bot.set_my_commands(
+                _admin_full_list,
+                scope=BotCommandScopeChat(chat_id=_admin_id),
+            )
+            _registered_admins += 1
+        except Exception as _e:
+            _failed_admins += 1
+            logger.warning(
+                f"⚠️ فشل تسجيل أوامر الأدمن {_admin_id}: {_e}"
+            )
+
+    logger.info(
+        f"✅ الأوامر الإدارية: {len(ADMIN_COMMANDS)} أمراً | "
+        f"سُجِّلت لـ {_registered_admins}/{len(_admin_ids)} أدمن "
+        f"(فشل {_failed_admins})"
     )
 
     # ========== تسجيل المعالجات ==========
