@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.10 - Forbidden Fix)
+utils.py - الأدوات المساعدة للبوت (v7.9.11 - Fast Commit)
 =================================================================================
+🆕 v7.9.11 (دمج معاملات النشر):
+    ✅ _publish_single_channel: استبدال 3 استدعاءات DB بـ 1
+       - mark_post_published + update_last_publish + update_next_publish
+       → mark_published_and_advance (tx واحد)
+    ✅ _security_stats_cache TTL: 5s → 60s (تقليل الضغط 12x)
+
 🆕 v7.9.10 (إصلاح Forbidden في safe_send):
     ✅ التعامل مع Forbidden كخطأ دائم (بدون retry)
     ✅ يمنع 3 محاولات فاشلة لكل مستخدم محظور
@@ -150,7 +156,11 @@ class SmartCache:
 
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
-_security_stats_cache = SmartCache(ttl=5, max_size=500)
+
+# ✅ v7.9.11: TTL من 5 → 60 (تقليل الضغط 12x)
+# السبب: _get_security_stats يُنفّذ 6 استعلامات متوازية، وTTL=5s
+# كان يولّدها كل 5 ثوانٍ لكل مجموعة.
+_security_stats_cache = SmartCache(ttl=60, max_size=500)
 
 # =====================================================================
 # 1. TimeUtils
@@ -1559,7 +1569,8 @@ class KeyboardFactory:
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
 
-        await _security_stats_cache.set(cache_key, stats, ttl=5)
+        # ✅ v7.9.11: TTL=60 عبر SmartCache المُعرَّف أعلى الملف
+        await _security_stats_cache.set(cache_key, stats, ttl=60)
         return stats
 
     @classmethod
@@ -3340,9 +3351,10 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                await DB.mark_post_published(post['id'])
-                await DB.update_last_publish(ch['id'])
-                await DB.update_next_publish(ch['id'])
+                # ✅ v7.9.11: transaction واحد بدل 3 معاملات منفصلة
+                # كان: mark_post_published + update_last_publish + update_next_publish
+                # صار: mark_published_and_advance (3 fsync → 1 fsync)
+                await DB.mark_published_and_advance(ch['id'], post['id'])
                 if published_count == 0 or recycled:
                     if user_id:
                         with suppress(Exception):
