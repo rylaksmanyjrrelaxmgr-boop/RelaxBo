@@ -4,24 +4,22 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.2.0 — ACCURATE SIGNIFICANCE ENGINE
+v6.3.0 — PARAMETER-BINDING FIX + THRESHOLD TUNING
 
-التحسينات على v6.1.0:
-    ✅ تصحيح استعلامات pg_class / pg_indexes (schema mismatch)
-       - استخدام pg_table_is_visible بدل nspname = current_schema()
+التحسينات على v6.2.0:
+    ✅ إصلاح جذري لتمرير المعاملات: IN ($1,$2,...) بدل ANY($1::text[])
+       - السبب: ANY($1::text[]) قد لا يعمل مع list في asyncpg على Aiven
        - النتيجة: الجداول والفهارس تُكتشف بشكل صحيح
-    ✅ خوارزمية health score متدرجة
-       - تُقارن dead tuples المطلقة أولاً
-       - عقوبة متدرجة (لا خطية)
-       - تتجاهل الجداول الصغيرة (<200 صف)
-    ✅ thresholds جديدة
-       - MIN_TABLE_SIZE_FOR_ALERT = 200 صف
-       - لا نُطلق "حرج" على جدول بحجم 10 صفوف
-    ✅ تنبيه admin_logs تلقائي (عند تجاوز 10000 صف)
-    ✅ عرض current_schema() للتشخيص
-    ✅ _get_per_table_autovacuum: رسالة أوضح للجداول غير المرئية
+    ✅ إصلاح pg_table_is_visible: استخدام pg_namespace + current_schemas(false)
+       - أكثر تسامحاً من pg_table_is_visible
+    ✅ عرض current_schemas(false) في التقرير للتشخيص
+    ✅ تعديل thresholds للجداول الصغيرة
+       - auto_replies (dead=51): لم يعد حرجاً
+       - critical يتطلب dead ≥ 100
+    ✅ فحص مزدوج (fallback) لـ pg_class و pg_indexes
+    ✅ دالة _build_in_clause مساعدة
 
-المبادئ:
+المبادئ (محفوظة من v6.0.0):
     ✅ لا نخلط بين "الدليل" و"الاحتمال".
     ✅ backend_xmin وحده لا يُعتبر إثباتاً للحجب.
     ✅ لا نفترض أن VACUUM سيعيد المساحة لنظام الملفات.
@@ -29,13 +27,9 @@ v6.2.0 — ACCURATE SIGNIFICANCE ENGINE
     ✅ SQL identifiers تُقتبس بأمان.
     ✅ PostgreSQL / MySQL / SQLite لها تحليلات مختلفة.
     ✅ جميع عمليات التشخيص read-only.
-    ✅ عمليات VACUUM/OPTIMIZE منفصلة عن التشخيص.
 
 الاستخدام:
     from db_diagnostics import diagnose_db, diagnose_db_split, vacuum_analyze_tables
-    report = await diagnose_db()
-    parts  = await diagnose_db_split()
-    result = await vacuum_analyze_tables()
 ================================================================================
 """
 
@@ -54,7 +48,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.2.0"
+VERSION = "6.3.0"
 
 
 # =============================================================================
@@ -67,11 +61,16 @@ DEAD_TUPLE_CRIT_PCT = 20.0
 DEAD_TUPLE_WARN_ABS = 1_000
 DEAD_TUPLE_CRIT_ABS = 10_000
 
-# 🆕 v6.2.0: عتبة أهمية الجدول
-# لا نُطلق "حرج/تحذير" على جدول إجمالي صفوفه < هذا الرقم
+# 🆕 v6.3.0: عتبة أهمية الجدول
+# لا نُطلق critical على جدول إجمالي صفوفه < هذا الرقم
 MIN_TABLE_SIZE_FOR_ALERT = 200
 
-# 🆕 v6.2.0: thresholds جديدة لـ admin_logs
+# 🆕 v6.3.0: للجداول الصغيرة (بين 200 و 500)، نحتاج dead أعلى للحرج
+SMALL_TABLE_THRESHOLD = 500
+SMALL_TABLE_MIN_DEAD_CRIT = 100
+SMALL_TABLE_MIN_DEAD_WARN = 50
+
+# admin_logs
 ADMIN_LOGS_WARN_ROWS = 10_000
 ADMIN_LOGS_CRIT_ROWS = 50_000
 
@@ -95,11 +94,6 @@ DEFAULT_ANALYZE_THRESHOLD = 50
 
 AVG_ROW_BYTES_ESTIMATE = 200
 
-MAX_TABLES = 50
-MAX_SIZE_TABLES = 20
-MAX_INDEX_TABLES = 100
-
-# حدّ Telegram
 REPORT_MAX_CHARS = 3800
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -150,8 +144,6 @@ _CRITICAL_INDEXES: Dict[str, List[str]] = {
 
 @dataclass
 class CauseItem:
-    """سبب مرشح."""
-
     text: str
     confidence: str = "medium"
     evidence: List[str] = field(default_factory=list)
@@ -159,8 +151,6 @@ class CauseItem:
 
 @dataclass
 class RootCause:
-    """تحليل جدول واحد."""
-
     table: str
     causes: List[CauseItem] = field(default_factory=list)
     severity: str = "🟢"
@@ -270,24 +260,36 @@ def _dead_pct(dead: int, live: int) -> float:
 
 
 def _is_significant_table(dead: int, live: int) -> bool:
-    """
-    🆕 v6.2.0: هل الجدول كبير بما يكفي ليستحق التنبيه؟
-
-    لا نُطلق critical/warning على جداول صغيرة
-    (مثل جدول بـ 10 صفوف و 15 dead) — هذه ضوضاء.
-    """
     total = max(dead, 0) + max(live, 0)
     return total >= MIN_TABLE_SIZE_FOR_ALERT
 
 
 def _dead_severity(dead: int, live: int) -> str:
     """
-    🆕 v6.2.0: يُرجع "ok" للجداول الصغيرة دائماً.
+    🆕 v6.3.0: منع critical على جداول صغيرة
+
+    المنطق:
+      • جدول < 200 صف: دائماً "ok"
+      • جدول 200-500 صف: يحتاج dead ≥ 100 للحرج، ≥ 50 للتحذير
+      • جدول > 500 صف: النسبة المئوية كافية
     """
-    if not _is_significant_table(dead, live):
+    total = max(dead, 0) + max(live, 0)
+    if total < MIN_TABLE_SIZE_FOR_ALERT:
         return "ok"
 
     pct = _dead_pct(dead, live)
+
+    # 🆕 v6.3.0: للجداول الصغيرة
+    if total < SMALL_TABLE_THRESHOLD:
+        if dead >= DEAD_TUPLE_CRIT_ABS:
+            return "critical"
+        if dead >= SMALL_TABLE_MIN_DEAD_CRIT and pct >= DEAD_TUPLE_CRIT_PCT:
+            return "critical"
+        if dead >= SMALL_TABLE_MIN_DEAD_WARN and pct >= DEAD_TUPLE_WARN_PCT:
+            return "warning"
+        return "ok"
+
+    # جداول كبيرة: النسبة كافية
     if dead >= DEAD_TUPLE_CRIT_ABS or pct >= DEAD_TUPLE_CRIT_PCT:
         return "critical"
     if dead >= DEAD_TUPLE_WARN_ABS or pct >= DEAD_TUPLE_WARN_PCT:
@@ -305,7 +307,6 @@ def _dead_emoji(dead: int, live: int) -> str:
 
 
 def _parse_interval_seconds(value: Any) -> Optional[int]:
-    """تحويل 60s / 5min / 1h / 00:05:00 / 300 إلى ثواني."""
     if value is None:
         return None
     text = str(value).strip().lower()
@@ -342,6 +343,27 @@ def _parse_interval_seconds(value: Any) -> Optional[int]:
         "d": 86400, "day": 86400, "days": 86400,
     }
     return int(number * multipliers.get(unit, 1))
+
+
+# =============================================================================
+# 🆕 v6.3.0: IN CLAUSE BUILDER
+# =============================================================================
+
+def _build_pg_in_clause(
+    items: List[str], start_index: int = 1
+) -> Tuple[str, List[str]]:
+    """
+    🆕 v6.3.0: يبني IN ($1, $2, ...) مع placeholders صريحة.
+
+    السبب: ANY($1::text[]) قد لا يعمل بشكل صحيح مع asyncpg
+    على بعض إعدادات Aiven.
+    """
+    if not items:
+        return ("NULL", [])
+    placeholders = []
+    for i, _ in enumerate(items):
+        placeholders.append(f"${start_index + i}")
+    return (", ".join(placeholders), list(items))
 
 
 # =============================================================================
@@ -648,20 +670,15 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# 🆕 v6.2.0: CURRENT SCHEMA INFO
+# 🆕 v6.3.0: SCHEMA INFO (مُوسَّع)
 # =============================================================================
 
 async def _get_schema_info() -> Dict[str, Any]:
-    """
-    🆕 v6.2.0: معلومات schema للتشخيص.
-
-    مفيد جداً عندما تكون الجداول "غير موجودة" — قد يكون السبب
-    أن current_schema() مختلف عن الحقيقي.
-    """
     from database import DB, USE_POSTGRES
 
     info = {
         "current_schema": None,
+        "current_schemas": None,
         "search_path": None,
         "database": None,
         "user": None,
@@ -675,6 +692,19 @@ async def _get_schema_info() -> Dict[str, Any]:
         info["current_schema"] = await DB.fetchval(
             "SELECT current_schema()"
         )
+    except Exception:
+        pass
+
+    try:
+        # 🆕 v6.3.0: قائمة الـ schemas الفعّالة في search_path
+        schemas_str = await DB.fetchval(
+            "SELECT array_to_string(current_schemas(false), ',')"
+        )
+        if schemas_str:
+            info["current_schemas"] = [
+                s.strip() for s in str(schemas_str).split(",")
+                if s.strip()
+            ]
     except Exception:
         pass
 
@@ -704,17 +734,17 @@ async def _get_schema_info() -> Dict[str, Any]:
 
 
 # =============================================================================
-# 3. PER-TABLE AUTOVACUUM (FIXED v6.2.0)
+# 🆕 v6.3.0: PER-TABLE AUTOVACUUM (FIXED AGAIN)
 # =============================================================================
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     """
-    🆕 v6.2.0: تصحيح schema mismatch.
+    🆕 v6.3.0: إصلاح جذري.
 
-    كان: `WHERE n.nspname = current_schema()` → لا يجد الجداول
-    إن كان current_schema() مختلفاً عن الـ schema الحقيقي.
+    المشكلة السابقة: `pg_table_is_visible(c.oid)` قد يُرجع False
+    حتى للجداول الموجودة (Aiven مع asyncpg).
 
-    صار: `pg_table_is_visible(c.oid)` → صحيح بغض النظر عن search_path.
+    الحل: استخدام pg_namespace + current_schemas(false).
     """
     from database import DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM
 
@@ -730,18 +760,40 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     if not USE_POSTGRES or not heavy:
         return result
 
+    # 🆕 v6.3.0: بناء IN clause صريح
+    in_clause, params = _build_pg_in_clause(heavy, 1)
+
+    query = f"""
+        SELECT c.relname AS table_name,
+               c.reloptions,
+               n.nspname AS schema_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname IN ({in_clause})
+          AND c.relkind IN ('r', 'p')
+          AND n.nspname = ANY(current_schemas(false))
+    """
+
     try:
-        rows = await DB.fetchall("""
-            SELECT c.relname AS table_name,
-                   c.reloptions
-            FROM pg_class c
-            WHERE c.relname = ANY($1::text[])
-              AND c.relkind = 'r'
-              AND pg_table_is_visible(c.oid)
-        """, heavy)
+        rows = await DB.fetchall(query, tuple(params))
     except Exception as exc:
         logger.warning("_get_per_table_autovacuum: %s", exc)
-        return result
+        # 🆕 v6.3.0: fallback بدون فلترة schema
+        try:
+            fallback_query = f"""
+                SELECT c.relname AS table_name,
+                       c.reloptions,
+                       n.nspname AS schema_name
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relname IN ({in_clause})
+                  AND c.relkind IN ('r', 'p')
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            """
+            rows = await DB.fetchall(fallback_query, tuple(params))
+        except Exception as exc2:
+            logger.warning("_get_per_table_autovacuum fallback: %s", exc2)
+            return result
 
     for row in rows or []:
         name = row.get("table_name")
@@ -762,12 +814,13 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             "reloptions": options,
             "is_tuned": tuned,
             "exists": True,
+            "schema": row.get("schema_name"),
         }
     return result
 
 
 # =============================================================================
-# 4. POSTGRES ACTIVITY / BLOCKERS
+# 4. BLOCKERS
 # =============================================================================
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
@@ -778,7 +831,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
 
     blockers: List[Dict[str, Any]] = []
 
-    # Long transactions
     try:
         rows = await DB.fetchall("""
             SELECT pid, state, usename, application_name,
@@ -815,7 +867,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.debug("blockers(long transaction): %s", exc)
 
-    # Idle in transaction
     try:
         rows = await DB.fetchall("""
             SELECT pid, usename, application_name,
@@ -847,7 +898,6 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.debug("blockers(idle transaction): %s", exc)
 
-    # Running VACUUM
     try:
         rows = await DB.fetchall("""
             SELECT pid, datname,
@@ -894,11 +944,10 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# XMIN HORIZON
+# XMIN
 # =============================================================================
 
 async def _get_current_xmin_horizon() -> Optional[int]:
-    """يجلب pg_snapshot_xmin كعدد صحيح."""
     from database import DB
     try:
         row = await DB.fetchone(
@@ -932,7 +981,6 @@ def _detect_xmin_blockers(
     blockers: List[Dict[str, Any]],
     current_xmin: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """يحدد المعاملات التي تستحق التحقيق بسبب backend_xmin قديم."""
     candidates: List[Dict[str, Any]] = []
 
     for item in blockers:
@@ -993,17 +1041,17 @@ def _detect_xmin_blocker(
 
 
 # =============================================================================
-# 5. INDEXES (FIXED v6.2.0)
+# 5. INDEXES (FIXED AGAIN v6.3.0)
 # =============================================================================
 
 async def _get_indexes(
     tables: List[str],
 ) -> Dict[str, List[str]]:
     """
-    🆕 v6.2.0: تصحيح schema mismatch.
+    🆕 v6.3.0: إصلاح جذري.
 
-    كان: `WHERE schemaname = current_schema()` → لا يجد الفهارس
-    صار: `WHERE schemaname NOT IN ('pg_catalog', 'information_schema')`
+    المشكلة: `tablename = ANY($1::text[])` لا يعمل.
+    الحل: IN clause صريح بـ placeholders.
     """
     from database import DB
 
@@ -1013,16 +1061,19 @@ async def _get_indexes(
 
     try:
         if _is_postgres():
-            rows = await DB.fetchall("""
+            # 🆕 v6.3.0: IN clause صريح
+            in_clause, params = _build_pg_in_clause(tables, 1)
+            query = f"""
                 SELECT tablename AS table_name,
                        indexname AS index_name
                 FROM pg_indexes
-                WHERE tablename = ANY($1::text[])
+                WHERE tablename IN ({in_clause})
                   AND schemaname NOT IN (
                       'pg_catalog', 'information_schema'
                   )
                 ORDER BY tablename, indexname
-            """, tables)
+            """
+            rows = await DB.fetchall(query, tuple(params))
             for row in rows or []:
                 table = row.get("table_name")
                 index = row.get("index_name")
@@ -1108,7 +1159,7 @@ def _autovacuum_enabled(settings: Dict[str, Any]) -> bool:
 
 
 # =============================================================================
-# AUTOVACUUM THRESHOLD CALCULATION
+# THRESHOLD CALCULATION
 # =============================================================================
 
 def _autovacuum_vacuum_trigger(
@@ -1148,11 +1199,10 @@ def _autovacuum_analyze_trigger(
 
 
 # =============================================================================
-# PROJECT CONFIG CHECK (v7.7.37)
+# PROJECT CHECK
 # =============================================================================
 
 def _check_project_heavy_tables() -> Optional[str]:
-    """يتحقق من أن "users" موجود في HEAVY_TABLES_FOR_AUTOVACUUM."""
     try:
         from database import HEAVY_TABLES_FOR_AUTOVACUUM
     except Exception as exc:
@@ -1171,16 +1221,7 @@ def _check_project_heavy_tables() -> Optional[str]:
     return None
 
 
-# =============================================================================
-# ADMIN_LOGS SIZE CHECK (NEW v6.2.0)
-# =============================================================================
-
 async def _check_admin_logs_size() -> Optional[str]:
-    """
-    🆕 v6.2.0: يتحقق من حجم admin_logs ويحذر إن كان كبيراً.
-
-    admin_logs ينمو باستمرار — يستحق تقليماً دورياً.
-    """
     from database import DB
 
     try:
@@ -1245,7 +1286,6 @@ async def _analyze_root_causes(
         pg_settings.get("autovacuum_naptime")
     )
 
-    # ─── Global state ───
     if not av_enabled:
         general_notes.append(
             "🔴 <b>autovacuum = OFF</b> — "
@@ -1254,7 +1294,6 @@ async def _analyze_root_causes(
     else:
         general_notes.append("🟢 <b>autovacuum = ON</b>.")
 
-    # synchronous_commit
     sc = str(pg_settings.get("synchronous_commit", "")).strip().lower()
     if sc == "off":
         general_notes.append(
@@ -1267,12 +1306,10 @@ async def _analyze_root_causes(
             "v7.7.36 يضبطه على off تلقائياً عبر server_settings."
         )
 
-    # v7.7.37 check
     project_warning = _check_project_heavy_tables()
     if project_warning:
         general_notes.append(project_warning)
 
-    # admin_logs size
     admin_logs_warning = await _check_admin_logs_size()
     if admin_logs_warning:
         general_notes.append(admin_logs_warning)
@@ -1284,7 +1321,6 @@ async def _analyze_root_causes(
             "وهو أعلى من 5 دقائق."
         )
 
-    # ─── Running VACUUM ───
     if running_vacuum:
         for item in running_vacuum:
             general_notes.append(
@@ -1294,7 +1330,6 @@ async def _analyze_root_causes(
                 f"({_escape_html(item.get('progress'))})"
             )
 
-    # ─── xmin ───
     current_xmin = await _get_current_xmin_horizon()
     xmin_candidates = _detect_xmin_blockers(long_tx, current_xmin)
 
@@ -1326,7 +1361,6 @@ async def _analyze_root_causes(
             "لم يظهر دليل كافٍ لإثبات أنها تحجز VACUUM."
         )
 
-    # ─── Idle transactions ───
     if idle_tx:
         severe_idle = [
             item for item in idle_tx
@@ -1343,7 +1377,6 @@ async def _analyze_root_causes(
                 "idle-in-transaction؛ قد تحتفظ بـ snapshot."
             )
 
-    # ─── Per table ───
     for row in dead_rows:
         table = row.get("table_name")
         if not table:
@@ -1352,7 +1385,6 @@ async def _analyze_root_causes(
         live = _safe_int(row.get("live_tup"))
         dead = _safe_int(row.get("dead_tup"))
 
-        # 🆕 v6.2.0: تخطي الجداول الصغيرة تماماً
         if not _is_significant_table(dead, live):
             continue
 
@@ -1386,7 +1418,6 @@ async def _analyze_root_causes(
             for item in blockers
         )
 
-        # ─── Causes ───
         causes_list: List[CauseItem] = []
 
         if active_vacuum:
@@ -1442,7 +1473,6 @@ async def _analyze_root_causes(
                 ],
             ))
 
-        # xmin
         if xmin_candidates:
             candidate = next(
                 (c for c in xmin_candidates
@@ -1544,7 +1574,6 @@ async def _analyze_root_causes(
                 evidence=[f"dead/live={pct:.1f}%"],
             ))
 
-        # ─── Solutions ───
         solutions: List[Tuple[int, str, str]] = []
         priority = 1
         safe_table = _quote_pg_identifier(table)
@@ -1682,7 +1711,6 @@ async def _analyze_root_causes(
             ),
         ))
 
-        # ─── Expected ───
         expected: List[str] = []
 
         if active_vacuum:
@@ -1740,7 +1768,7 @@ async def _analyze_root_causes(
 
 
 # =============================================================================
-# 🆕 v6.2.0: HEALTH SCORE (NEW ALGORITHM)
+# HEALTH SCORE
 # =============================================================================
 
 def _calculate_pg_health(
@@ -1748,13 +1776,6 @@ def _calculate_pg_health(
     blockers: List[Dict[str, Any]],
     pg_settings: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    🆕 v6.2.0: خوارزمية متدرجة تأخذ في الحسبان:
-      - dead tuples المطلقة (المؤشر الأهم)
-      - الجداول المهمة فقط (تجاهل < MIN_TABLE_SIZE_FOR_ALERT)
-      - long/idle transactions
-      - autovacuum on/off
-    """
     critical = 0
     warning = 0
     total_dead = 0
@@ -1766,7 +1787,6 @@ def _calculate_pg_health(
 
         total_dead += dead
 
-        # 🆕 v6.2.0: تجاهل الجداول الصغيرة
         if not _is_significant_table(dead, live):
             continue
 
@@ -1787,7 +1807,6 @@ def _calculate_pg_health(
         if item.get("type") == "idle_in_transaction"
     )
 
-    # ─── العقوبة الأساسية: dead tuples المطلقة ───
     score = 100
 
     if total_dead >= 50_000:
@@ -1801,15 +1820,12 @@ def _calculate_pg_health(
     elif total_dead >= 500:
         score -= 3
 
-    # ─── عقوبة على الجداول المهمة فقط ───
     score -= critical * 8
     score -= warning * 3
 
-    # ─── عقوبة على long/idle tx ───
     score -= long_tx_count * 4
     score -= idle_count * 3
 
-    # ─── autovacuum off = عقوبة كبيرة ───
     if not _autovacuum_enabled(pg_settings):
         score -= 30
 
@@ -1831,8 +1847,6 @@ def _calculate_pg_health(
 # =============================================================================
 
 class _ReportBuilder:
-    """باني تقرير يحترم حدّ Telegram (4096 حرف)."""
-
     def __init__(self, max_chars: int = REPORT_MAX_CHARS):
         self._lines: List[str] = []
         self._total_chars = 0
@@ -1865,7 +1879,6 @@ def _split_for_telegram(
     text: str,
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
-    """يقسم النص إلى أجزاء آمنة لـ Telegram."""
     if not text:
         return [""]
     if len(text) <= limit:
@@ -1902,7 +1915,6 @@ async def _build_diagnose_lines() -> List[str]:
 
     db_type = _db_type()
 
-    # ─── Header ───
     lines.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🗄️ <b>النوع:</b> <code>{_escape_html(db_type)}</code>")
@@ -1913,7 +1925,7 @@ async def _build_diagnose_lines() -> List[str]:
     except Exception as exc:
         logger.debug("get_db_size_kb failed: %s", exc)
 
-    # 🆕 v6.2.0: schema info للتشخيص
+    # Schema info
     if USE_POSTGRES:
         schema_info = await _get_schema_info()
         if schema_info.get("current_schema"):
@@ -1921,13 +1933,20 @@ async def _build_diagnose_lines() -> List[str]:
                 f"📋 <b>Schema:</b> "
                 f"<code>{_escape_html(schema_info['current_schema'])}</code>"
             )
+        if schema_info.get("current_schemas"):
+            schemas_list = ", ".join(
+                _escape_html(s) for s in schema_info["current_schemas"]
+            )
+            lines.append(
+                f"📋 <b>Schemas المتاحة:</b> "
+                f"<code>{schemas_list}</code>"
+            )
         if schema_info.get("database"):
             lines.append(
                 f"🗃️ <b>Database:</b> "
                 f"<code>{_escape_html(schema_info['database'])}</code>"
             )
 
-    # ─── جمع البيانات ───
     dead_rows = await _get_dead_tuples()
     per_table = (
         await _get_per_table_autovacuum() if USE_POSTGRES else {}
@@ -1941,7 +1960,6 @@ async def _build_diagnose_lines() -> List[str]:
     sizes = await _get_table_sizes()
     indexes = await _get_indexes(list(_CRITICAL_INDEXES.keys()))
 
-    # ─── PostgreSQL summary ───
     if USE_POSTGRES:
         health = _calculate_pg_health(dead_rows, blockers, pg_settings)
         lines.append("")
@@ -1975,7 +1993,6 @@ async def _build_diagnose_lines() -> List[str]:
             f"<b>{health['score']}/100</b>"
         )
 
-    # ─── Analysis ───
     causes: List[RootCause] = []
     general_notes: List[str] = []
 
@@ -2048,12 +2065,10 @@ async def _build_diagnose_lines() -> List[str]:
 
             lines.append("")
 
-    # ─── Full details ───
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("📊 <b>التفاصيل الكاملة</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
 
-    # PG dead tuples
     if USE_POSTGRES:
         lines.append("")
         lines.append("<b>1. Dead Tuples + نشاط التنظيف</b>")
@@ -2083,7 +2098,6 @@ async def _build_diagnose_lines() -> List[str]:
         if shown == 0:
             lines.append("✅ لا توجد بيانات.")
 
-    # Per-table AV
     if USE_POSTGRES and per_table:
         lines.append("")
         lines.append("<b>2. Autovacuum لكل جدول حرج</b>")
@@ -2091,7 +2105,6 @@ async def _build_diagnose_lines() -> List[str]:
         for table in HEAVY_TABLES_FOR_AUTOVACUUM:
             info = per_table.get(table, {})
             if not info.get("exists"):
-                # 🆕 v6.2.0: رسالة أوضح
                 lines.append(
                     f"❓ <code>{_escape_html(table)}</code> — "
                     f"غير مرئي في schema الحالي"
@@ -2120,7 +2133,6 @@ async def _build_diagnose_lines() -> List[str]:
                     f"القيم الافتراضية"
                 )
 
-    # Blockers
     if USE_POSTGRES and blockers:
         lines.append("")
         lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
@@ -2149,7 +2161,6 @@ async def _build_diagnose_lines() -> List[str]:
                     f"({_escape_html(item.get('progress'))})"
                 )
 
-    # Sizes
     if sizes:
         lines.append("")
         lines.append("<b>4. أحجام الجداول — Top 10</b>")
@@ -2162,7 +2173,6 @@ async def _build_diagnose_lines() -> List[str]:
                 f"{_fmt_size_bytes(total)}"
             )
 
-    # Indexes
     lines.append("")
     lines.append("<b>5. الفهارس الحرجة</b>")
     for table, expected_indexes in _CRITICAL_INDEXES.items():
@@ -2185,7 +2195,6 @@ async def _build_diagnose_lines() -> List[str]:
                 f"✅ <b>{_escape_html(table)}</b> ({len(actual)})"
             )
 
-    # PG settings
     if USE_POSTGRES and pg_settings:
         lines.append("")
         lines.append("<b>6. إعدادات PostgreSQL</b>")
@@ -2213,7 +2222,6 @@ async def _build_diagnose_lines() -> List[str]:
                 f"{_escape_html(value)}</code>"
             )
 
-    # MySQL notes
     if USE_MYSQL:
         lines.append("")
         lines.append("<b>7. ملاحظة MySQL</b>")
@@ -2222,7 +2230,6 @@ async def _build_diagnose_lines() -> List[str]:
             "يتم عرض DATA_FREE كإشارة تقريبية للمساحة الحرة/المجزأة."
         )
 
-    # SQLite notes
     if not USE_POSTGRES and not USE_MYSQL:
         lines.append("")
         lines.append("<b>7. ملاحظة SQLite</b>")
@@ -2231,7 +2238,6 @@ async def _build_diagnose_lines() -> List[str]:
             "VACUUM يعيد بناء قاعدة البيانات."
         )
 
-    # Footer
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("✅ <b>اكتمل التشخيص</b>")
@@ -2240,7 +2246,6 @@ async def _build_diagnose_lines() -> List[str]:
 
 
 async def diagnose_db() -> str:
-    """يعيد تقريراً مقتصراً على REPORT_MAX_CHARS حرف."""
     lines = await _build_diagnose_lines()
 
     builder = _ReportBuilder(max_chars=REPORT_MAX_CHARS)
@@ -2259,7 +2264,6 @@ async def diagnose_db() -> str:
 async def diagnose_db_split(
     max_chars_per_part: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
-    """يعيد قائمة أجزاء جاهزة للإرسال."""
     lines = await _build_diagnose_lines()
     full_text = "\n".join(lines)
     return _split_for_telegram(full_text, limit=max_chars_per_part)
@@ -2270,7 +2274,6 @@ async def diagnose_db_split(
 # =============================================================================
 
 async def vacuum_analyze_tables() -> str:
-    """تنظيف الجداول الحرجة."""
     from database import (
         DB, USE_POSTGRES, USE_MYSQL,
         HEAVY_TABLES_FOR_AUTOVACUUM,
@@ -2399,9 +2402,13 @@ __all__ = [
     "_split_for_telegram",
     "_ReportBuilder",
     "_is_significant_table",
+    "_build_pg_in_clause",
     "REPORT_MAX_CHARS",
     "TELEGRAM_MESSAGE_LIMIT",
     "MIN_TABLE_SIZE_FOR_ALERT",
+    "SMALL_TABLE_THRESHOLD",
+    "SMALL_TABLE_MIN_DEAD_CRIT",
+    "SMALL_TABLE_MIN_DEAD_WARN",
     "ADMIN_LOGS_WARN_ROWS",
     "ADMIN_LOGS_CRIT_ROWS",
 ]
