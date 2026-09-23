@@ -2,38 +2,28 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.0)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.1)
 ================================================================================
+🆕 v5.5.1 (COLLECT-ADMIN-FIX):
+    ✅ _collect_admin_ids: يجرّب عدة أسماء دوال للحصول على قائمة الأدمن:
+        • get_admin_list  ← الصحيح في المشروع
+        • get_all_admins  ← fallback
+        • get_admins      ← fallback
+    ✅ يحل مشكلة: الأدمن من DB لم يُسجَّلوا عند restart
+
 🆕 v5.5.0 (COMMAND SCOPING — إخفاء الأوامر الإدارية عن المستخدم العادي):
-    ✅ تقسيم private_commands إلى:
-        • public_commands  → تظهر لكل المستخدمين (17 أمراً)
-        • admin_commands   → تظهر للأدمن/المالك/المطورين فقط (15 أمراً)
-    ✅ الأوامر العامة تُسجَّل على BotCommandScopeAllPrivateChats
-    ✅ الأوامر الإدارية تُسجَّل على BotCommandScopeChat لكل أدمن
-    ✅ حذف Default Scope القديم لمنع تسرّب قائمة قديمة
-    ✅ refresh_admin_commands() — دالة عامة لتحديث أوامر أدمن بلا restart
-       (تُستدعى من handlers add_admin/remove_admin)
-    ✅ قوائم الأوامر أصبحت module-level constants لتُستدعى من أي مكان
+    ✅ تقسيم private_commands إلى public_commands + admin_commands
+    ✅ الأوامر العامة → BotCommandScopeAllPrivateChats
+    ✅ الأوامر الإدارية → BotCommandScopeChat لكل أدمن
+    ✅ حذف Default Scope القديم
+    ✅ refresh_admin_commands() — تحديث أدمن بلا restart
+    ✅ _collect_admin_ids() — جمع أدمن من CONFIG + DB
 
-🆕 v5.4.3 (Maintenance integration):
-    ✅ integration مع maintenance.py — صيانة دورية كل 24 ساعة
-    ✅ حذف admin_logs/penalty_archive/user_violations القديمة
-    ✅ VACUUM ANALYZE تلقائي على الجداول الحرجة
-    ✅ تقرير HTML يُرسل للمالك عبر Telegram بعد كل صيانة
-
-🆕 v5.4.2 (DB Diagnostics):
-    ✅ db_diag: /db_diag — تشخيص قاعدة البيانات (للمطور)
-    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE (للمطور)
-
-🔍 v5.4.1 (Analytics check):
-    ✅ فحص تحميل AnalyticsMixin بعد logging.basicConfig
-
-🔍 v5.4.0 (Pool Monitor integration):
-    ✅ استيراد BackgroundTasks.monitor_pool + monitor_pool_alert
-
-🆕 v5.3.1 (group_log integration كامل):
-    ✅ استيراد init_group_log + إغلاق لطيف
-
+🆕 v5.4.3 (Maintenance integration)
+🆕 v5.4.2 (DB Diagnostics)
+🔍 v5.4.1 (Analytics check)
+🔍 v5.4.0 (Pool Monitor integration)
+🆕 v5.3.1 (group_log integration كامل)
 🆕 v5.3.0 (group_log integration أساسي)
 🆕 v5.2.0 (periodic cleanup + تحسينات)
 🆕 v5.1.0 (Warmup + فحص دوال)
@@ -279,7 +269,7 @@ GROUP_COMMANDS = [
 
 
 # =====================================================================
-# 🆕 v5.5.0: جمع معرّفات الأدمن
+# 🆕 v5.5.1: جمع معرّفات الأدمن — يجرّب عدة أسماء دوال
 # =====================================================================
 
 async def _collect_admin_ids() -> list:
@@ -289,13 +279,19 @@ async def _collect_admin_ids() -> list:
     المصادر:
       • CONFIG.PRIMARY_OWNER_ID (المالك)
       • CONFIG.DEVELOPER_IDS (المطورون)
-      • DB.get_all_admins() (إن وُجد)
+      • DB.get_admin_list() / get_all_admins() / get_admins() — أول اسم متاح
 
-    يرجع قائمة أعداد صحيحة بدون تكرار.
+    🆕 v5.5.1:
+      يحاول ثلاث أسماء دوال مختلفة بترتيب الأولوية. أول واحدة تنجح
+      تُستخدم، والبقية تُتجاهَل. هذا يحل مشكلة عدم قراءة الأدمن من DB
+      عند اختلاف اسم الدالة بين الإصدارات.
+
+    Returns:
+        قائمة أعداد صحيحة مرتّبة بدون تكرار.
     """
     admin_ids = set()
 
-    # المالك
+    # ─── المالك ───
     try:
         owner = int(getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0)
         if owner:
@@ -303,7 +299,7 @@ async def _collect_admin_ids() -> list:
     except (TypeError, ValueError):
         pass
 
-    # المطورون
+    # ─── المطورون ───
     try:
         devs = getattr(CONFIG, "DEVELOPER_IDS", []) or []
         for dev in devs:
@@ -316,23 +312,51 @@ async def _collect_admin_ids() -> list:
     except Exception:
         pass
 
-    # الأدمن من DB (إن وُجدت الدالة)
-    try:
-        if hasattr(DB, "get_all_admins"):
-            result = DB.get_all_admins()
+    # ─── الأدمن من DB — نحاول عدة أسماء محتملة ───
+    admin_list_getters = (
+        "get_admin_list",   # ← المستخدم فعلياً في المشروع
+        "get_all_admins",   # ← احتياطي
+        "get_admins",       # ← احتياطي
+    )
+
+    for method_name in admin_list_getters:
+        if not hasattr(DB, method_name):
+            continue
+        try:
+            method = getattr(DB, method_name)
+            result = method()
             if asyncio.iscoroutine(result):
-                db_admins = await result
-            else:
-                db_admins = result
-            for a in (db_admins or []):
-                uid = a.get("user_id") if isinstance(a, dict) else a
-                if uid:
-                    try:
-                        admin_ids.add(int(uid))
-                    except (TypeError, ValueError):
-                        continue
-    except Exception as _e:
-        logger.debug(f"get_all_admins: {_e}")
+                result = await result
+            if not result:
+                continue
+
+            added_from_db = 0
+            for a in result:
+                uid = None
+                if isinstance(a, dict):
+                    uid = a.get("user_id") or a.get("id")
+                elif isinstance(a, (int, str)):
+                    uid = a
+                if uid is None:
+                    continue
+                try:
+                    admin_ids.add(int(uid))
+                    added_from_db += 1
+                except (TypeError, ValueError):
+                    continue
+
+            if added_from_db > 0:
+                logger.debug(
+                    f"✅ _collect_admin_ids: قرأ {added_from_db} "
+                    f"أدمن من DB.{method_name}()"
+                )
+                # نجحنا — لا داعي لتجربة الأسماء الأخرى
+                break
+        except Exception as _e:
+            logger.debug(
+                f"_collect_admin_ids → DB.{method_name}(): {_e}"
+            )
+            continue
 
     return sorted(admin_ids)
 
@@ -1007,6 +1031,10 @@ async def main():
     _registered_admins = 0
     _failed_admins = 0
     _admin_full_list = PUBLIC_COMMANDS + ADMIN_COMMANDS
+
+    logger.info(
+        f"👥 عدد الأدمن المُكتشفين: {len(_admin_ids)}"
+    )
 
     for _admin_id in _admin_ids:
         try:
