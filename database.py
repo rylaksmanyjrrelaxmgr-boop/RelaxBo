@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.35 — FAST-COMMIT)
+database.py - قاعدة البيانات المتكاملة (v7.7.36 — PG-SERVER-SETTINGS-FIX)
 ================================================================================
+🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX — إصلاح فشل الاتصال بـ PostgreSQL):
+  ✅ _pg_factory: إزالة "wal_writer_delay" و "commit_delay" من server_settings
+     — كلاهما sighup/postmaster context، لا يمكن تغييرهما per-session عبر
+     asyncpg (يرفع CantChangeRuntimeParamError عند فتح أي اتصال).
+     — بعد synchronous_commit=off لم يعد لهما تأثير على الأداء أصلاً.
+  ✅ _pg_factory: اكتشاف CantChangeRuntimeParamError → لا إعادة محاولة
+     (خطأ دائم، إعادة المحاولة تطيل وقت الإقلاع بلا فائدة).
+  ✅ الرأس: تحديث الإصدار.
+
 🆕 v7.7.35 (FAST-COMMIT — إصلاح بطء النشر 1s+):
   ✅ _pg_factory: synchronous_commit=off (commit من ~1s → ~10ms)
-  ✅ _pg_factory: wal_writer_delay=10ms + commit_delay=0
   ✅ _pg_factory: min_size=max(5, ...) — تقليل إعادة إنشاء الاتصال
   ✅ _pg_factory: max_inactive_connection_lifetime=0 — لا تُغلق خاملاً
   ✅ mark_published_and_advance: دمج 3 معاملات في واحدة
@@ -2659,28 +2667,46 @@ class Database(
         try:
             if USE_POSTGRES:
                 async def _pg_factory():
-                    # 🆕 v7.7.35: FAST-COMMIT — تقليل زمن كل commit
-                    # من ~1s إلى ~10ms على أقراص بطيئة (EBS/سحابة).
-                    # المخاطرة: قد تُفقد آخر ~200ms من المعاملات عند
-                    # crash مفاجئ للـ PostgreSQL. مقبول لهذا النوع.
-                    pool = await asyncpg.create_pool(
-                        dsn=DATABASE_URL,
-                        min_size=max(5, self._min_connections),
-                        max_size=self._max_connections,
-                        timeout=self._connection_timeout,
-                        command_timeout=self._connection_timeout,
-                        statement_cache_size=500,
-                        max_inactive_connection_lifetime=0,
-                        server_settings={
-                            "application_name": "RelaxManager",
-                            "statement_timeout": "30s",
-                            "timezone": "UTC",
-                            # 🆕 v7.7.35: المفتاح الأهم — من ~1s إلى ~10ms
-                            "synchronous_commit": "off",
-                            "wal_writer_delay": "10ms",
-                            "commit_delay": "0",
-                        },
-                    )
+                    # 🆕 v7.7.36: إصلاح — إزالة "wal_writer_delay" و
+                    # "commit_delay" من server_settings.
+                    #
+                    # السبب: كلاهما sighup/postmaster context في PostgreSQL،
+                    # لا يمكن تغييرهما per-session عبر asyncpg.
+                    # asyncpg يرفع CantChangeRuntimeParamError عند فتح أي
+                    # اتصال جديد → فشل كامل في create_pool → فشل bootstrap.
+                    #
+                    # بعد synchronous_commit=off، لم يعد لهذين الإعدادين
+                    # تأثير على أداء الـ commit أصلاً. الإبقاء عليهما كان
+                    # زيادة ضارة.
+                    #
+                    # المخاطرة المتبقية من synchronous_commit=off:
+                    #   قد تُفقد آخر ~200ms من المعاملات عند crash مفاجئ
+                    #   للـ PostgreSQL. مقبول لهذا النوع من التطبيقات.
+                    try:
+                        pool = await asyncpg.create_pool(
+                            dsn=DATABASE_URL,
+                            min_size=max(5, self._min_connections),
+                            max_size=self._max_connections,
+                            timeout=self._connection_timeout,
+                            command_timeout=self._connection_timeout,
+                            statement_cache_size=500,
+                            max_inactive_connection_lifetime=0,
+                            server_settings={
+                                "application_name": "RelaxManager",
+                                "statement_timeout": "30s",
+                                "timezone": "UTC",
+                                # المفتاح الوحيد المسموح per-session:
+                                "synchronous_commit": "off",
+                            },
+                        )
+                    except asyncpg.exceptions.CantChangeRuntimeParamError as _cfg_e:
+                        # خطأ في server_settings دائم — لا فائدة من إعادة
+                        # المحاولة، نرفع فوراً لتفادي إطالة الإقلاع.
+                        logger.error(
+                            f"❌ PG: server_settings غير صالح "
+                            f"(لا إعادة محاولة): {_cfg_e}"
+                        )
+                        raise
                     try:
                         async with pool.acquire() as _c:
                             await _c.fetchval("SELECT 1")
