@@ -2,40 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.20)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.21)
 ================================================================================
+🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN — إصلاح جذري):
+  ✅ CURRENT_SCHEMA_VERSION: 19 → 20
+       - السبب: database.py يستخدم tables_hash (يشمل schema_version)
+         لتفادي إعادة create_tables.
+       - المشكلة: v7.6.18/v7.6.19/v7.6.20 لم تُحدّث الرقم → tables_hash
+         لم يتغيّر → create_tables_postgres لم يُستدعى أصلاً.
+       - النتيجة: الفهارس الزائدة (idx_posts_channel) لم تُحذف،
+         admin_logs لم يُنظَّف، autovacuum لم يُضبط.
+       - الحل: رفع الرقم → tables_hash يتغيّر → create_tables يعمل
+         مرة واحدة → كل الإصلاحات السابقة تُطبَّق.
+       - المتوقع: UPDATE posts من 2.07s → <100ms
+
 🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS):
-  ✅ إصلاح جوهري: إضافة _drop_deprecated_indexes_* إلى fast-path
-       - السبب: كان يُستدعى فقط عند رفع schema_version
-       - النتيجة: الفهارس الزائدة (idx_posts_channel...) لا تُحذف أبداً
-       - الأثر: UPDATE posts = 3.14s → المتوقع <100ms بعد النشر
-  ✅ إضافة: ADMIN_LOGS_MAX_ROWS = 5000
-       - حتى لو كل الصفوف أحدث من 30 يوم، يحذف الأقدم للوصول للحد
-       - السبب: admin_logs وصل 11,184 صف ثابت
-  ✅ ADMIN_LOGS_RETENTION_DAYS: 60 → 30 (تنظيف أكثر شدة)
-  ✅ CURRENT_SCHEMA_VERSION: 18 → 19
+  ✅ إضافة _drop_deprecated_indexes_* إلى fast-path
+  ✅ إضافة ADMIN_LOGS_MAX_ROWS = 5000
+  ✅ ADMIN_LOGS_RETENTION_DAYS: 60 → 30
 
 🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX — تغطية الجداول المتبقية):
-  ✅ إضافة 3 جداول لـ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
-      • schedule              → كان 46 dead / 24 live (65.7%)
-      • user_reminder_settings → كان 9 dead / 2 live (81.8%)
-      • support_tickets       → كان 1 dead / 0 live
-  ✅ CURRENT_SCHEMA_VERSION: 17 → 18
+  ✅ +3 جداول لـ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
 
-🚀 v7.6.18 (DIAGNOSIS-FIXES — تنظيف admin_logs + autovacuum للجداول الصغيرة):
-  ✅ إضافة: ADMIN_LOGS_RETENTION_DAYS (سياسة احتفاظ تلقائية)
-  ✅ إضافة: _cleanup_old_admin_logs_* (PG/SQLite/MySQL)
-  ✅ إضافة: SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
-  ✅ إضافة: _tune_autovacuum_postgres
+🚀 v7.6.18 (DIAGNOSIS-FIXES — تنظيف admin_logs + autovacuum):
+  ✅ ADMIN_LOGS_RETENTION_DAYS + SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
+  ✅ _tune_autovacuum_postgres
 
 🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX):
-  ✅ schemaname = ANY(current_schemas(false)) في كل pg_indexes queries
+  ✅ schemaname = ANY(current_schemas(false))
   ✅ _migrate_missing_columns_postgres: إصلاح عداد مضلل
 
-🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES — إصلاح بطء النشر 2s):
+🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES):
   ✅ حُذف 3 فهارس زائدة على جدول posts
 
-🚀 v7.6.15 (SLOW-QUERY-FIX — idx_posts_next_post)
+🚀 v7.6.15 (SLOW-QUERY-FIX)
 🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB)
 🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
 🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX)
@@ -56,8 +56,10 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.20: 18 → 19 (force deprecated index drop + max rows)
-CURRENT_SCHEMA_VERSION = 19
+# ✅ v7.6.21: 19 → 20 (إجبار database.py على إعادة create_tables)
+# السبب: database.py يستخدم tables_hash = f(schema_version, source) لتفادي
+# إعادة create_tables. مع 19 لم يتغيّر الرقم من v7.6.20 → لم يُستدعى.
+CURRENT_SCHEMA_VERSION = 20
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -72,8 +74,6 @@ VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 ADMIN_LOGS_RETENTION_DAYS = 30
 
 # ✅ v7.6.20: حد أقصى لعدد الصفوف في admin_logs
-# السبب: admin_logs كان 11,184 صف ثابت
-# حتى لو كل الصفوف حديثة، يجب حذف الأقدم للوصول للحد
 ADMIN_LOGS_MAX_ROWS = 5000
 
 # ✅ v7.6.12: الجداول التي تحتاج VACUUM دوري
@@ -146,7 +146,7 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (4) ═══
+    # ═══ POSTS (4) — ✅ v7.6.16: حُذف 3 فهارس زائدة
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
@@ -543,14 +543,8 @@ def _is_advanced_index(cols: str) -> bool:
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
-    """
-    ✅ v7.6.20: تنظيف مزدوج:
-      1. حذف الصفوف الأقدم من ADMIN_LOGS_RETENTION_DAYS (30 يوم)
-      2. إذا العدد الكلي > ADMIN_LOGS_MAX_ROWS، احذف الأقدم للوصول للحد
-    """
     total_deleted = 0
 
-    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         result = await conn.execute(
             "DELETE FROM admin_logs "
@@ -572,7 +566,6 @@ async def _cleanup_old_admin_logs_postgres(conn, logger):
         if logger:
             logger.debug(f"⚠️ PG cleanup admin_logs (age): {e}")
 
-    # ─── الخطوة 2: فرض الحد الأقصى للصفوف ───
     try:
         total = await conn.fetchval("SELECT COUNT(*) FROM admin_logs")
         if total and total > ADMIN_LOGS_MAX_ROWS:
@@ -604,10 +597,8 @@ async def _cleanup_old_admin_logs_postgres(conn, logger):
 
 
 async def _cleanup_old_admin_logs_sqlite(conn, logger):
-    """✅ v7.6.20: تنظيف مزدوج لـ SQLite."""
     total_deleted = 0
 
-    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         cutoff = (
             datetime.now(timezone.utc)
@@ -638,7 +629,6 @@ async def _cleanup_old_admin_logs_sqlite(conn, logger):
         if logger:
             logger.debug(f"⚠️ SQLite cleanup admin_logs (age): {e}")
 
-    # ─── الخطوة 2: فرض الحد ───
     try:
         cursor = await conn.execute("SELECT COUNT(*) FROM admin_logs")
         try:
@@ -686,10 +676,8 @@ async def _cleanup_old_admin_logs_sqlite(conn, logger):
 
 
 async def _cleanup_old_admin_logs_mysql(conn, logger):
-    """✅ v7.6.20: تنظيف مزدوج لـ MySQL."""
     total_deleted = 0
 
-    # ─── الخطوة 1: حذف حسب العمر ───
     try:
         cursor = await conn.cursor()
         try:
@@ -718,7 +706,6 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
         if logger:
             logger.debug(f"⚠️ MySQL cleanup admin_logs (age): {e}")
 
-    # ─── الخطوة 2: فرض الحد ───
     try:
         cursor = await conn.cursor()
         try:
@@ -768,7 +755,6 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
-    """✅ v7.6.18/v7.6.19: PostgreSQL — autovacuum عدواني للجداول الصغيرة."""
     tuned = 0
     failed = 0
     for tbl in SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
@@ -806,7 +792,7 @@ async def _tune_autovacuum_postgres(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.6.17: فحص جماعي للفهارس (SCHEMA-AWARE)
+# فحص جماعي للفهارس (SCHEMA-AWARE)
 # =====================================================================
 
 async def _ensure_all_indexes_exist_postgres(conn, logger):
@@ -1963,8 +1949,7 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.6.20: حذف الفهارس القديمة (SCHEMA-AWARE)
-# ⚠️ مهم: يُستدعى الآن من الـ fast-path + الإنشاء الأولي
+# حذف الفهارس القديمة (SCHEMA-AWARE)
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
@@ -2197,10 +2182,9 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
         await _verify_critical_indexes_sqlite(conn, logger)
         await _ensure_all_indexes_exist_sqlite(conn, logger)
-        await _drop_deprecated_indexes_sqlite(conn, logger)  # ✅ جديد
+        await _drop_deprecated_indexes_sqlite(conn, logger)
         await _cleanup_stale_links_sqlite(conn, logger)
         await _cleanup_old_admin_logs_sqlite(conn, logger)
         await _migrate_missing_columns_sqlite(conn, logger)
@@ -2805,7 +2789,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "force-deprecated-index-drop"),
+             "force-bootstrap-rerun"),
         )
         await conn.commit()
     except Exception as e:
@@ -2823,7 +2807,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
 async def create_tables_postgres(conn, logger, TimeUtils):
     current = await _get_current_schema_version_postgres(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
         if logger:
             logger.info(
                 f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
@@ -2831,7 +2814,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
         await _ensure_index_definitions_match_postgres(conn, logger)
-        await _drop_deprecated_indexes_postgres(conn, logger)  # ✅ جديد
+        await _drop_deprecated_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
         await _tune_autovacuum_postgres(conn, logger)
@@ -3445,7 +3428,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "force-deprecated-index-drop",
+            "force-bootstrap-rerun",
         )
     except Exception as e:
         if logger:
@@ -3462,11 +3445,10 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
-        # ✅ v7.6.20: fast-path محسّن (يحتوي على deprecated drop)
         await _verify_critical_indexes_mysql(conn, logger)
         await _ensure_all_indexes_exist_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
-        await _drop_deprecated_indexes_mysql(conn, logger)  # ✅ جديد
+        await _drop_deprecated_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
         await _migrate_missing_columns_mysql(conn, logger)
@@ -4088,7 +4070,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "force-deprecated-index-drop",
+                    "force-bootstrap-rerun",
                 ),
             )
         except Exception as e:
