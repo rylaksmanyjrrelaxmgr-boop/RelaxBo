@@ -2,30 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.11 - Auto-Delete Penalty)
+handlers_message.py - معالجات الرسائل (v7.9.12 - Refresh admin commands)
 =====================================================================
+🆕 v7.9.12 (تحديث أوامر الأدمن عند إضافة/إزالة):
+    ✅ _handle_admin_add_input: بعد نجاح الإضافة → refresh_admin_commands(True)
+    ✅ _handle_admin_rem_input: بعد نجاح الإزالة → refresh_admin_commands(False)
+    ✅ _refresh_admin_commands_safe: lazy import آمن (لا circular import)
+    ✅ فشل التحديث لا يُفشل العملية الأساسية (try/except)
+
 🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني):
     ✅ _delete_and_warn: رسالة العقوبة (🚨) تُحذف بعد 10 ثواني
-       - كانت تبقى في المجموعة
-       - الآن تختفي مثل رسالة التحذير (⚠️)
 
 🆕 v7.9.10 (إصلاح _fmt TypeError):
     ✅ _fmt: اسم البارامتر `template` بدل `text`
 
-🆕 v7.9.9:
-    ✅ apply_penalty: بدون سطر @username (utils.py)
-
-🆕 v7.9.8:
-    ✅ apply_violation_penalty: يقبل lang ويعيد رسالة كاملة
-
-🆕 v7.9.3:
-    ✅ _handle_redeem_gift_input: send_code_empty
-
-🆕 v7.9.2:
-    ✅ handle_log_group_input
-    ✅ _handle_update_ch_input: تحقق من الصحة
-    ✅ _handle_penalty_input: needs_duration
-    ✅ _do_db_restore: حذف WAL/SHM
+🆕 v7.9.9: apply_penalty: بدون سطر @username (utils.py)
+🆕 v7.9.8: apply_violation_penalty: يقبل lang ويعيد رسالة كاملة
+🆕 v7.9.3: _handle_redeem_gift_input: send_code_empty
+🆕 v7.9.2: handle_log_group_input + _do_db_restore: حذف WAL/SHM
 =====================================================================
 """
 
@@ -215,6 +209,54 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 
 # =====================================================================
+# 🆕 v7.9.12: تحديث أوامر الأدمن (lazy import — لا circular)
+# =====================================================================
+
+async def _refresh_admin_commands_safe(bot, user_id: int, is_admin: bool) -> bool:
+    """
+    🆕 v7.9.12: يستدعي main.refresh_admin_commands بشكل آمن.
+
+    السبب:
+      - main.py يستورد من handlers_message.py
+      - استيراد main في الأعلى = circular import
+      - الحل: lazy import داخل الدالة
+
+    السلوك:
+      - فشل الاستيراد أو الاستدعاء → تحذير بسيط، لا يُفشل العملية
+      - النجاح → True | الفشل → False
+    """
+    if not user_id:
+        return False
+    try:
+        from main import refresh_admin_commands
+    except ImportError as e:
+        logger.debug(f"refresh_admin_commands import: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"⚠️ refresh_admin_commands import: {e}")
+        return False
+
+    try:
+        result = await refresh_admin_commands(bot, user_id, is_admin)
+        if result:
+            logger.info(
+                f"✅ أوامر الأدمن حُدِّثت: user={user_id} "
+                f"is_admin={is_admin}"
+            )
+        else:
+            logger.warning(
+                f"⚠️ refresh_admin_commands أعاد False: "
+                f"user={user_id} is_admin={is_admin}"
+            )
+        return bool(result)
+    except Exception as e:
+        logger.warning(
+            f"⚠️ refresh_admin_commands({user_id}, {is_admin}): {e}"
+        )
+        return False
+
+
+# =====================================================================
 # إبطال الكاش
 # =====================================================================
 
@@ -338,10 +380,6 @@ def _fmt(template: str, **kwargs) -> str:
       def _fmt(text: str, **kwargs):
       _fmt(await _trans('set_success', lang, "✅ {text}"), text=escape(text))
       → TypeError: _fmt() got multiple values for argument 'text'
-
-    الإصلاح:
-      def _fmt(template: str, **kwargs):
-      ↑ يُستخدَم `text` كـ kwarg بحرية
     """
     try:
         return template.format(**kwargs)
@@ -422,10 +460,6 @@ async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
     """
     ✅ حذف رسالة بعد تأخير محدد (افتراضياً 10 ثواني).
-    يُستخدم لحذف:
-      - رسالة التحذير (⚠️)
-      - رسالة العقوبة (🚨) — v7.9.11
-      - رسالة الترجمة
     """
     await asyncio.sleep(delay)
     await _safe_delete_message(bot, chat_id, message_id)
@@ -1664,10 +1698,6 @@ class MessageHandlers:
     async def _handle_update_ch_input(update, context):
         """
         ✅ v7.9.10: يحفظ في settings.updates_channel فقط.
-        - لا add_channel
-        - لا active_channel
-        - لا user_channels
-        - _fmt مُصلَح (يعمل بلا TypeError)
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -1830,11 +1860,14 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # المشرفين
+    # المشرفين — 🆕 v7.9.12: +refresh_admin_commands
     # =================================================================
 
     @staticmethod
     async def _handle_admin_add_input(update, context):
+        """
+        🆕 v7.9.12: بعد نجاح DB.add_admin، يُحدَّث scope أوامر الأدمن فوراً.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -1852,6 +1885,10 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
             success = await DB.add_admin(admin_id, user_id)
             if success:
+                # 🆕 v7.9.12: تحديث scope أوامر الأدمن فوراً
+                await _refresh_admin_commands_safe(
+                    context.bot, admin_id, is_admin=True
+                )
                 msg = await _trans('added_success', lang, "✅")
                 await safe_send(context.bot, user_id, msg)
             else:
@@ -1872,6 +1909,9 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_admin_rem_input(update, context):
+        """
+        🆕 v7.9.12: بعد نجاح DB.remove_admin، يُعاد scope المستخدم للعام فقط.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -1884,6 +1924,10 @@ class MessageHandlers:
                 raise ValueError
             success = await DB.remove_admin(admin_id)
             if success:
+                # 🆕 v7.9.12: إعادة scope المستخدم للعام
+                await _refresh_admin_commands_safe(
+                    context.bot, admin_id, is_admin=False
+                )
                 msg = await _trans('removed_success', lang, "✅")
                 await safe_send(context.bot, user_id, msg)
             else:
