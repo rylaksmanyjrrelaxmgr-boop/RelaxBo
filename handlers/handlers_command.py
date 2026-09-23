@@ -2,16 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.26
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.27
 ===================================================================================
+🆕 v7.5.27 (MOOD IMPORT FIX):
+    ✅ mood(): تصحيح مسار الاستيراد
+       - كان: from handlers_message import analyze_sentiment  ❌
+       - صار: from handlers.handlers_message import ...        ✅
+       - مع fallback للتوافق مع أي هيكل قديم
+       - النتيجة: /mood يعمل الآن
+
 🆕 v7.5.26 (FIX /start STATE):
     ✅ start() يُصفِّر StateManager + user_data keys المعلقة
-    ✅ حل مشكلة: /start بعد "تعيين قناة التحديثات" كان يبقي الحالة
-       معلقة → الرسالة التالية تُفسَّر كإضافة قناة
 
 🆕 v7.5.25 (DB-DIAGNOSTICS):
-    ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
-    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
+    ✅ db_diag + db_vacuum
 
 🆕 v7.5.24 (RENDER-READY):
     ✅ _trans: fallback آمن لكل المفاتيح
@@ -49,6 +53,19 @@ logger = logging.getLogger(__name__)
 ANONYMOUS_BOT_ID = 1087968824   # GroupAnonymousBot
 CHANNEL_BOT_ID = 136817688      # ChannelBot
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.27: import دالة تحليل المشاعر مع fallback
+# ═══════════════════════════════════════════════════════════════════
+try:
+    from handlers.handlers_message import analyze_sentiment
+    _MOOD_AVAILABLE = True
+except ImportError:
+    try:
+        from handlers_message import analyze_sentiment
+        _MOOD_AVAILABLE = True
+    except ImportError:
+        analyze_sentiment = None
+        _MOOD_AVAILABLE = False
 
 # ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.26: مفاتيح user_data المعلقة التي تُمسح عند /start
@@ -730,11 +747,16 @@ class CommandHandlers:
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML'
         )
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v7.5.27: mood — إصلاح مسار import
+    # ═══════════════════════════════════════════════════════════════════
+
     @staticmethod
     async def mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         args = context.args or []
+
         if not args:
             StateManager.set(user_id, UserState.WAIT_MOOD)
             await _safe_edit_or_send(
@@ -743,19 +765,39 @@ class CommandHandlers:
                 parse_mode=None,
             )
             return
+
         text = " ".join(args)
-        try:
-            from handlers_message import analyze_sentiment
-        except ImportError:
-            analyze_sentiment = None
+
+        # ✅ v7.5.27: analyze_sentiment محمّلة على مستوى module
         if analyze_sentiment is None:
             await _safe_edit_or_send(
                 update, context,
-                await _trans('mood_unavailable', lang, "❌ خدمة تحليل المشاعر غير متاحة"),
+                await _trans('mood_unavailable', lang,
+                             "❌ خدمة تحليل المشاعر غير متاحة"),
                 parse_mode=None,
             )
             return
-        result = analyze_sentiment(text)
+
+        try:
+            result = analyze_sentiment(text)
+        except Exception as e:
+            logger.error(f"analyze_sentiment فشل: {e}", exc_info=True)
+            await _safe_edit_or_send(
+                update, context,
+                await _trans('mood_unavailable', lang,
+                             "❌ خدمة تحليل المشاعر غير متاحة"),
+                parse_mode=None,
+            )
+            return
+
+        if not isinstance(result, dict):
+            await _safe_edit_or_send(
+                update, context,
+                await _trans('mood_unavailable', lang,
+                             "❌ خدمة تحليل المشاعر غير متاحة"),
+                parse_mode=None,
+            )
+            return
 
         mood_analysis = await _trans('mood_analysis', lang, 'تحليل المشاعر')
         mood_text_l = await _trans('mood_text', lang, 'النص')
@@ -765,12 +807,12 @@ class CommandHandlers:
         mood_words = await _trans('mood_words', lang, 'الكلمات')
 
         response = (
-            f"{result['emoji']} <b>{mood_analysis}</b>\n\n"
+            f"{result.get('emoji', '🎭')} <b>{mood_analysis}</b>\n\n"
             f"📝 {mood_text_l}: <code>{escape(text[:100])}</code>\n"
-            f"🎯 {mood_result}: <b>{escape(result['sentiment'])}</b>\n\n"
-            f"😊 {mood_positive}: {result['positive_percent']:.0f}%\n"
-            f"😔 {mood_negative}: {result['negative_percent']:.0f}%\n"
-            f"📊 {mood_words}: {result['total_words']}"
+            f"🎯 {mood_result}: <b>{escape(str(result.get('sentiment', '?')))}</b>\n\n"
+            f"😊 {mood_positive}: {result.get('positive_percent', 0):.0f}%\n"
+            f"😔 {mood_negative}: {result.get('negative_percent', 0):.0f}%\n"
+            f"📊 {mood_words}: {result.get('total_words', 0)}"
         )
         await _safe_edit_or_send(update, context, response, parse_mode='HTML')
 
@@ -853,6 +895,12 @@ class CommandHandlers:
 
     @staticmethod
     async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ⚠️ ملاحظة v5.5.0:
+        هذا المعالج يضبط الحالة فقط. العملية الفعلية (إضافة الأدمن إلى DB)
+        تحدث في handlers_message.py → handle_private → WAIT_ADMIN_ADD.
+        استدعاء refresh_admin_commands يتم هناك بعد نجاح الإضافة.
+        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         if not CONFIG.is_developer(user_id):
@@ -866,6 +914,10 @@ class CommandHandlers:
 
     @staticmethod
     async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ⚠️ ملاحظة v5.5.0:
+        نفس ما ورد في add_admin — العملية الفعلية في handlers_message.py.
+        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         if not CONFIG.is_developer(user_id):
