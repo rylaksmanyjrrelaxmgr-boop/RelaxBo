@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.38 — STRICTER-AUTOVACUUM)
+database.py - قاعدة البيانات المتكاملة (v7.7.39 — SMALL-TABLES-AUTOVACUUM)
 ================================================================================
+🆕 v7.7.39 (SMALL-TABLES-AUTOVACUUM — إصلاح الجداول الصغيرة):
+  ✅ SMALL_TABLES_FOR_AUTOVACUUM: ثابت جديد (22 جدول)
+     - plans, settings, user_reminder_settings, group_security,
+       user_points, user_violations, auto_replies, bot_groups,
+       anonymous_admins, user_warnings, referral_rewards, group_admins,
+       hidden_owner_groups, hidden_admins, user_groups_link,
+       auto_reply_settings, last_publish, schedule, support_tickets,
+       bot_admins, chat_locks, group_rules
+     - السبب: threshold الافتراضي (50) يمنع AV من التفعّل
+       → dead tuples تتراكم: plans (7/7)، user_reminder_settings (9/2)
+     - الحل: threshold = 5 + scale_factor = 0.0
+     - التوقع: AV يبدأ بعد 5 dead tuple فقط
+
+  ✅ _tune_heavy_tables_autovacuum: يستخدم قيمتين مختلفتين
+     - HEAVY_TABLES: 0.02 / 0.01 / 2ms / 2000
+     - SMALL_TABLES: 0.0 / 5 threshold / 2ms / 2000
+
+  ✅ logger.info: يعرض عدد الجداول المصغّرة أيضاً
+
 🆕 v7.7.38 (STRICTER-AUTOVACUUM — إصلاح تراكم dead tuples على posts):
   ✅ _tune_heavy_tables_autovacuum: قيم أكثر شدة
      - scale_factor: 0.05 → 0.02 (يبدأ بعد ~19 بدل ~33)
      - analyze_scale: 0.02 → 0.01
      - cost_delay: 10ms → 2ms (أسرع 5x)
      - cost_limit: 1000 → 2000
-     - السبب: posts تراكمت 68 dead tuple (12.8%) خلال ساعة
-       → get_next_post تضرر (2.27s بدل <100ms)
-     - النتيجة: autovacuum ينظّف أسرع وأكثر تكراراً
-     - التوقع: dead tuples تبقى <20 دائماً، get_next_post <100ms
 
 🆕 v7.7.37 (USERS-AUTOVACUUM):
   ✅ HEAVY_TABLES_FOR_AUTOVACUUM: أُضيف "users"
@@ -574,6 +589,35 @@ HEAVY_TABLES_FOR_AUTOVACUUM = (
     "subscriptions",
     "user_penalties",
     "users",
+)
+
+# 🆕 v7.7.39: جداول صغيرة تحتاج autovacuum عدواني
+# السبب: threshold الافتراضي (50) يمنع AV من التفعّل
+#       → dead tuples تتراكم: plans (7/7)، user_reminder_settings (9/2)
+# الحل: threshold = 5 + scale_factor = 0.0
+SMALL_TABLES_FOR_AUTOVACUUM = (
+    "plans",
+    "settings",
+    "user_reminder_settings",
+    "group_security",
+    "user_points",
+    "user_violations",
+    "auto_replies",
+    "bot_groups",
+    "anonymous_admins",
+    "user_warnings",
+    "referral_rewards",
+    "group_admins",
+    "hidden_owner_groups",
+    "hidden_admins",
+    "user_groups_link",
+    "auto_reply_settings",
+    "last_publish",
+    "schedule",
+    "support_tickets",
+    "bot_admins",
+    "chat_locks",
+    "group_rules",
 )
 
 SLOW_QUERY_FULL_STACK = (
@@ -2391,7 +2435,7 @@ class Database(
                 )
 
     # =================================================================
-    # 🆕 v7.7.32 + v7.7.38: ضبط autovacuum للجداول الثقيلة
+    # 🆕 v7.7.32 + v7.7.38 + v7.7.39: ضبط autovacuum
     # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
@@ -2404,12 +2448,18 @@ class Database(
           - cost_delay: 10ms → 2ms (أسرع 5x)
           - cost_limit: 1000 → 2000
 
+        🆕 v7.7.39: إضافة ضبط الجداول الصغيرة (SMALL_TABLES_FOR_AUTOVACUUM):
+          - threshold: 50 → 5 (يبدأ بعد 5 dead tuple فقط)
+          - scale_factor: 0.05 → 0.0 (لا يعتمد على حجم الجدول)
+          - analyze_threshold: 50 → 5
+
         السبب:
           • posts وصل 68 dead tuple (12.8%) خلال ساعة
           • get_next_post تأثر (2.27s بدل <100ms)
-          • autovacuum الافتراضي لا يلحق بمعدل UPDATE
+          • الجداول الصغيرة (plans, settings) لا يتفعّل عليها AV أصلاً
+            بسبب threshold الافتراضي (50 + 0.2 × N)
 
-        الهدف: dead tuples تبقى دائمة <20، get_next_post <100ms.
+        الهدف: dead tuples تبقى دائمة <20.
 
         ملاحظات:
           - يعمل مرة واحدة فقط (علم _autovacuum_tuned)
@@ -2422,7 +2472,11 @@ class Database(
             return 0
 
         tuned = 0
+        failed = 0
         try:
+            # ═══════════════════════════════════════════════════════════
+            # 1) الجداول الثقيلة: قيم متوازنة
+            # ═══════════════════════════════════════════════════════════
             for table in HEAVY_TABLES_FOR_AUTOVACUUM:
                 try:
                     exists = await conn.fetchval(
@@ -2444,14 +2498,49 @@ class Database(
                     )
                     tuned += 1
                 except Exception as te:
+                    failed += 1
                     logger.debug(
-                        f"⚠️ autovacuum tune {table}: {te}"
+                        f"⚠️ autovacuum tune heavy {table}: {te}"
+                    )
+
+            # ═══════════════════════════════════════════════════════════
+            # 2) الجداول الصغيرة: threshold منخفض جداً
+            #    (تُفعّل بعد 5 dead tuple فقط، لا تعتمد على الحجم)
+            # ═══════════════════════════════════════════════════════════
+            for table in SMALL_TABLES_FOR_AUTOVACUUM:
+                try:
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = $1 "
+                        "AND table_schema = current_schema()",
+                        table,
+                    )
+                    if not exists:
+                        continue
+
+                    await conn.execute(
+                        f"ALTER TABLE {table} SET ("
+                        f"autovacuum_vacuum_scale_factor = 0.0, "
+                        f"autovacuum_vacuum_threshold = 5, "
+                        f"autovacuum_analyze_scale_factor = 0.0, "
+                        f"autovacuum_analyze_threshold = 5, "
+                        f"autovacuum_vacuum_cost_delay = 2, "
+                        f"autovacuum_vacuum_cost_limit = 2000"
+                        f")"
+                    )
+                    tuned += 1
+                except Exception as te:
+                    failed += 1
+                    logger.debug(
+                        f"⚠️ autovacuum tune small {table}: {te}"
                     )
 
             if tuned:
                 logger.info(
-                    f"✅ v7.7.38: ضُبِط autovacuum على {tuned} جدول "
-                    f"({', '.join(HEAVY_TABLES_FOR_AUTOVACUUM[:tuned])})"
+                    f"✅ v7.7.39: ضُبِط autovacuum على {tuned} جدول "
+                    f"({len(HEAVY_TABLES_FOR_AUTOVACUUM)} heavy + "
+                    f"{len(SMALL_TABLES_FOR_AUTOVACUUM)} small) — "
+                    f"{failed} فشل"
                 )
             self._autovacuum_tuned = True
         except Exception as e:
@@ -2463,26 +2552,38 @@ class Database(
         """
         🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
         🆕 v7.7.33: تبسيط — لا فحص وجود مكرر.
+        🆕 v7.7.39: يمتد ليشمل الجداول الصغيرة أيضاً.
         """
         if not USE_POSTGRES:
             return 0
 
+        all_tables = list(HEAVY_TABLES_FOR_AUTOVACUUM) + list(
+            SMALL_TABLES_FOR_AUTOVACUUM
+        )
+        # إزالة التكرار (لو وُجد) مع الحفاظ على الترتيب
+        seen = set()
+        tables_unique: List[str] = []
+        for t in all_tables:
+            if t not in seen:
+                seen.add(t)
+                tables_unique.append(t)
+
         async def _do_analyze():
             try:
                 async with self.connection() as c:
-                    tables_csv = ", ".join(HEAVY_TABLES_FOR_AUTOVACUUM)
+                    tables_csv = ", ".join(tables_unique)
                     try:
                         await c.execute(f"ANALYZE {tables_csv}")
                         logger.info(
-                            f"📊 v7.7.33: ANALYZE على "
-                            f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول "
+                            f"📊 v7.7.39: ANALYZE على "
+                            f"{len(tables_unique)} جدول "
                             f"في أمر واحد"
                         )
                     except Exception as bulk_e:
                         logger.debug(
                             f"bulk ANALYZE فشل، fallback فردي: {bulk_e}"
                         )
-                        for table in HEAVY_TABLES_FOR_AUTOVACUUM:
+                        for table in tables_unique:
                             try:
                                 await c.execute(f"ANALYZE {table}")
                             except Exception as ae:
@@ -2490,14 +2591,14 @@ class Database(
                                     f"ANALYZE {table}: {ae}"
                                 )
                         logger.info(
-                            f"📊 v7.7.33: ANALYZE فردي على "
-                            f"{len(HEAVY_TABLES_FOR_AUTOVACUUM)} جدول"
+                            f"📊 v7.7.39: ANALYZE فردي على "
+                            f"{len(tables_unique)} جدول"
                         )
             except Exception as ae:
                 logger.debug(f"_do_analyze: {ae}")
 
         self._spawn_bg_task(_do_analyze())
-        return len(HEAVY_TABLES_FOR_AUTOVACUUM)
+        return len(tables_unique)
 
     async def _ensure_materialized_views_postgres(self, conn) -> bool:
         if not USE_POSTGRES:
@@ -5523,6 +5624,7 @@ class Database(
             "bootstrap_data": self.BOOTSTRAP_DATA_VERSION,
             "migrations": _compute_migrations_signature(),
             "heavy_tables": list(HEAVY_TABLES_FOR_AUTOVACUUM),
+            "small_tables": list(SMALL_TABLES_FOR_AUTOVACUUM),
         }
         return hashlib.sha256(
             json.dumps(data, sort_keys=True).encode("utf-8")
@@ -7630,7 +7732,7 @@ __all__ = [
     "PUBLISH_POLLING_COMPENSATION_SECONDS",
     "MAX_POST_FAIL_COUNT", "PENALTY_ARCHIVE_RETENTION_DAYS",
     "SUB_CACHE_TTL", "EXPIRED_PENALTIES_BATCH",
-    "HEAVY_TABLES_FOR_AUTOVACUUM",
+    "HEAVY_TABLES_FOR_AUTOVACUUM", "SMALL_TABLES_FOR_AUTOVACUUM",
     "internal_cache", "InternalQueryCache", "SimpleCache",
     "SettingsCache",
     "user_cache", "banned_words_cache", "settings_cache",
@@ -7649,4 +7751,3 @@ __all__ = [
     "_adapt_params", "_table_exists",
     "_MIGRATIONS_TYPES", "_compute_migrations_signature",
 ]
-
