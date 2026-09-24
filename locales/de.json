@@ -61,7 +61,7 @@
   "subscription_active": "✅ Aktiv",
   "subscription_inactive": "❌ Inaktiv",
   "subscription_expired": "❌ Dein Abo ist abgelaufen!",
-  "reminder_subscription_expires": "⚠️ Dein Abo läuft bald ab!\n\n📅 Verbleibend: {days_left} Tage",
+  "reminder_subscription_expires": "⚠️ Dein Abo läuft bald ab!\n\n📅 Verbleibend: {days} Tage",
   "reminder_subscription_expires_generic": "⚠️ Dein Abo läuft in {days} Tagen ab",
   "subscribe_btn": "📢 Abonnieren",
   "check_sub_btn": "✅ Prüfen",
@@ -269,7 +269,8 @@
   "reply_to_pin": "❌ Antworte auf eine Nachricht zum Anheften",
   "bot_no_pin_perm": "❌ Bot darf keine Nachrichten anheften.",
 
-  "send_code": "❌ Sende den Code",
+  "send_code": "📝 Sende den Code: /redeem_gift <code>",
+  "send_code_empty": "❌ Kein Code erhalten, bitte als Text erneut senden",
   "gift_redeemed": "🎁 Geschenk eingelöst! Dauer: {days} Tage",
   "own_code": "❌ Du kannst deinen eigenen Code nicht nutzen",
   "invalid_code": "❌ Ungültiger oder bereits verwendeter Code",
@@ -892,8 +893,9 @@
   "pen_mute": "🔇 Stummschalten",
   "pen_kick": "👢 Kicken",
   "pen_warn": "⚠️ Verwarnen",
+  "penalty": "⚖️ Strafen",
+
   "updates_channel_btn": "📢 Update-Kanal",
   "updates_channel_title": "📢 Update-Kanal",
-  "open_channel_btn": "📢 Kanal öffnen",
-  "channel_link_unavailable": "⚠️ Link für diesen Kanal kann nicht erstellt werden"
+  "open_channel_btn": "📢 Kanal öffnen"
 }
