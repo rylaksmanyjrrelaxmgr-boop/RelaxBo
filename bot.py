@@ -2,8 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.2)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.3)
 ================================================================================
+🆕 v5.5.3 (GIFT-CODE-FLOW-FIX):
+    ✅ إصلاح ترتيب معالجة كود الهدية في successful_payment:
+       • كان: create_gift_code → mark_invoice_paid
+       • صار: mark_invoice_paid → create_gift_code
+       • السبب: لو فشل mark_invoice_paid بعد إنشاء الكود،
+         يبقى الكود "يتيم" + الفاتورة معلقة
+       • الآن: نضمن توثيق الدفع أولاً، ثم إنشاء الكود
+       • معالجة أفضل لـ create_gift_code فشل (رسالة واضحة للمستخدم)
+    ✅ إصلاح تنسيق رسالة كود الهدية:
+       • كان: `{code}` مع backticks (تظهر ظاهرة)
+       • صار: <code>{code}</code> مع parse_mode='HTML'
+       • الآن: الكود يظهر monospace نظيف + عناوين bold
+
 🆕 v5.5.2 (STATS-COMMAND-FIX):
     ✅ نقل "stats" من PUBLIC_COMMANDS → ADMIN_COMMANDS
     ✅ السبب: CommandHandlers.stats يرفض غير المطورين، فوجوده في
@@ -798,7 +811,25 @@ async def successful_payment(update, context):
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
 
     elif payment_type == 'gift':
+        # 🆕 v5.5.3: ترتيب آمن + رسالة HTML نظيفة
         try:
+            # ─── 1) توثيق الدفع أولاً (لا نترك كود "يتيم") ───
+            paid = await DB.mark_invoice_paid(
+                invoice['number'], payment_id
+            )
+            if not paid:
+                logger.error(
+                    f"❌ mark_invoice_paid فشل: {invoice['number']}"
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    "❌ <b>فشل توثيق الدفع</b>\n\n"
+                    "لم يُصدر كود الهدية. يرجى التواصل مع الدعم.",
+                    parse_mode='HTML',
+                )
+                return
+
+            # ─── 2) إنشاء الكود ───
             code = await DB.create_gift_code(
                 plan_id=plan['id'], creator_id=user_id
             )
@@ -808,20 +839,38 @@ async def successful_payment(update, context):
                     or plan.get('days')
                     or 0
                 )
-                await DB.mark_invoice_paid(invoice['number'], payment_id)
+                # ─── 3) إرسال برسالة HTML جميلة ───
                 await safe_send(
                     context.bot, user_id,
-                    f"🎉 تم شراء كود الهدية!\n"
-                    f"🎁 الكود: `{code}`\n"
-                    f"📅 المدة: {duration} يوم"
+                    f"🎉 <b>تم شراء كود الهدية بنجاح!</b>\n\n"
+                    f"🎁 <b>الكود:</b>\n"
+                    f"<code>{code}</code>\n\n"
+                    f"📅 <b>المدة:</b> {duration} يوم\n\n"
+                    f"<i>شارك هذا الكود مع من تحب 💝</i>",
+                    parse_mode='HTML',
                 )
-                logger.info(f"✅ Gift code created: user={user_id}")
+                logger.info(
+                    f"✅ Gift code created: user={user_id} "
+                    f"(code={code[:8]}...)"
+                )
             else:
-                await safe_send(context.bot, user_id, "❌ حدث خطأ في توليد كود الهدية.")
-                logger.error(f"❌ Failed to create gift code: {user_id}")
+                logger.error(
+                    f"❌ create_gift_code فشل: user={user_id} "
+                    f"invoice={invoice['number']}"
+                )
+                await safe_send(
+                    context.bot, user_id,
+                    "⚠️ <b>تم توثيق الدفع لكن فشل توليد الكود</b>\n\n"
+                    "يرجى التواصل مع الدعم لإصدار الكود يدوياً.\n"
+                    f"رقم الفاتورة: <code>{invoice['number']}</code>",
+                    parse_mode='HTML',
+                )
         except Exception as e:
             logger.exception(f"❌ Exception in gift payment: {e}")
-            await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
+            await safe_send(
+                context.bot, user_id,
+                "❌ حدث خطأ غير متوقع أثناء معالجة كود الهدية."
+            )
 
 
 # =====================================================================
