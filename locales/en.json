@@ -61,7 +61,7 @@
   "subscription_active": "✅ Active",
   "subscription_inactive": "❌ Inactive",
   "subscription_expired": "❌ Your subscription expired!",
-  "reminder_subscription_expires": "⚠️ Your subscription expires soon!\n\n📅 Remaining: {days_left} days",
+  "reminder_subscription_expires": "⚠️ Your subscription expires soon!\n\n📅 Remaining: {days} days",
   "reminder_subscription_expires_generic": "⚠️ Your subscription expires in {days} days",
   "subscribe_btn": "📢 Subscribe",
   "check_sub_btn": "✅ Check",
@@ -969,6 +969,5 @@
   "send_hours_btn": "📅 Send hours:",
   "send_days_btn_short": "📅 Send days:",
   "send_time_btn": "🕐 Send time HH:MM:",
-  "channel_schedule_title": "📅 Channel schedule",
-  "channel_not_specified": "❌ Channel not specified"
+  "channel_schedule_title": "📅 Channel schedule"
 }
