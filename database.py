@@ -1,40 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.37 — USERS-AUTOVACUUM)
+database.py - قاعدة البيانات المتكاملة (v7.7.38 — STRICTER-AUTOVACUUM)
 ================================================================================
+🆕 v7.7.38 (STRICTER-AUTOVACUUM — إصلاح تراكم dead tuples على posts):
+  ✅ _tune_heavy_tables_autovacuum: قيم أكثر شدة
+     - scale_factor: 0.05 → 0.02 (يبدأ بعد ~19 بدل ~33)
+     - analyze_scale: 0.02 → 0.01
+     - cost_delay: 10ms → 2ms (أسرع 5x)
+     - cost_limit: 1000 → 2000
+     - السبب: posts تراكمت 68 dead tuple (12.8%) خلال ساعة
+       → get_next_post تضرر (2.27s بدل <100ms)
+     - النتيجة: autovacuum ينظّف أسرع وأكثر تكراراً
+     - التوقع: dead tuples تبقى <20 دائماً، get_next_post <100ms
+
 🆕 v7.7.37 (USERS-AUTOVACUUM):
   ✅ HEAVY_TABLES_FOR_AUTOVACUUM: أُضيف "users"
-     - السبب: users من أكثر الجداول عرضة للتحديثات (كل /start)
-     - النتيجة: autovacuum يبدأ عند 5% بدل 20%
-     - يمنع تراكم dead tuples (شوهدت 106 dead / 22.6%)
 
-🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX — إصلاح فشل الاتصال بـ PostgreSQL):
-  ✅ _pg_factory: إزالة "wal_writer_delay" و "commit_delay" من server_settings
-     — كلاهما sighup/postmaster context، لا يمكن تغييرهما per-session عبر
-     asyncpg (يرفع CantChangeRuntimeParamError عند فتح أي اتصال).
-  ✅ _pg_factory: اكتشاف CantChangeRuntimeParamError → لا إعادة محاولة.
+🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX):
+  ✅ _pg_factory: إزالة "wal_writer_delay" و "commit_delay"
 
 🆕 v7.7.35 (FAST-COMMIT — إصلاح بطء النشر 1s+):
-  ✅ _pg_factory: synchronous_commit=off (commit من ~1s → ~10ms)
-  ✅ _pg_factory: min_size=max(5, ...) — تقليل إعادة إنشاء الاتصال
-  ✅ _pg_factory: max_inactive_connection_lifetime=0
+  ✅ _pg_factory: synchronous_commit=off
   ✅ mark_published_and_advance: دمج 3 معاملات في واحدة
-  ✅ _compute_publish_interval: منطق حساب الفاصل (مُستخرج)
 
-🆕 v7.7.34 (VACUUM_METHOD):
-  ✅ async def vacuum(table): VACUUM خارج transaction
+🆕 v7.7.34 (VACUUM_METHOD): async def vacuum(table)
 
-✅ v7.7.33 (DELETE_PENALTY_TYPE_FIX):
-  ✅ _MIGRATIONS_TYPES: delete_penalty → TEXT DEFAULT 'none'
-
-✅ v7.7.32 (PERF-FIX — لحل البطء 1.5-2.5s):
-  ✅ expire_penalties: BATCH 5000 → 500
-  ✅ _tune_heavy_tables_autovacuum
-
-✅ v7.7.31 (PUBLISH-FAST):
-  ✅ has_active_subscription: MV fast path على PG
-
+✅ v7.7.33 (DELETE_PENALTY_TYPE_FIX)
+✅ v7.7.32 (PERF-FIX — expire_penalties BATCH=500)
+✅ v7.7.31 (PUBLISH-FAST — MV fast path)
 ✅ v7.7.30 (PERFORMANCE-HARDENING)
 ✅ v7.7.29 (POST-AUDIT-HARDENING)
 ✅ v7.7.28 (HARDENING-AFTER-AUDIT)
@@ -574,7 +568,7 @@ SETTINGS_BATCH_CACHE_TTL = 120
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
 EXPIRED_PENALTIES_BATCH = int(os.getenv("EXPIRED_PENALTIES_BATCH", "500"))
 
-# 🆕 v7.7.37: أُضيف "users" لتفادي تراكم dead tuples (شوهدت 106/22.6%)
+# ✅ v7.7.37: أُضيف "users" لتفادي تراكم dead tuples (شوهدت 106/22.6%)
 HEAVY_TABLES_FOR_AUTOVACUUM = (
     "posts",
     "subscriptions",
@@ -2397,14 +2391,25 @@ class Database(
                 )
 
     # =================================================================
-    # 🆕 v7.7.32: ضبط autovacuum للجداول الثقيلة
+    # 🆕 v7.7.32 + v7.7.38: ضبط autovacuum للجداول الثقيلة
     # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
         """
         🆕 v7.7.32: ضبط autovacuum على الجداول الثقيلة.
 
-        الهدف: تقليل dead tuples → استعلامات PK أسرع.
+        🆕 v7.7.38: قيم أكثر شدة لمنع تراكم dead tuples على posts:
+          - scale_factor: 0.05 → 0.02 (يبدأ بعد ~19 بدل ~33)
+          - analyze_scale: 0.02 → 0.01
+          - cost_delay: 10ms → 2ms (أسرع 5x)
+          - cost_limit: 1000 → 2000
+
+        السبب:
+          • posts وصل 68 dead tuple (12.8%) خلال ساعة
+          • get_next_post تأثر (2.27s بدل <100ms)
+          • autovacuum الافتراضي لا يلحق بمعدل UPDATE
+
+        الهدف: dead tuples تبقى دائمة <20، get_next_post <100ms.
 
         ملاحظات:
           - يعمل مرة واحدة فقط (علم _autovacuum_tuned)
@@ -2431,10 +2436,10 @@ class Database(
 
                     await conn.execute(
                         f"ALTER TABLE {table} SET ("
-                        f"autovacuum_vacuum_scale_factor = 0.05, "
-                        f"autovacuum_analyze_scale_factor = 0.02, "
-                        f"autovacuum_vacuum_cost_delay = 10, "
-                        f"autovacuum_vacuum_cost_limit = 1000"
+                        f"autovacuum_vacuum_scale_factor = 0.02, "
+                        f"autovacuum_analyze_scale_factor = 0.01, "
+                        f"autovacuum_vacuum_cost_delay = 2, "
+                        f"autovacuum_vacuum_cost_limit = 2000"
                         f")"
                     )
                     tuned += 1
@@ -2445,7 +2450,7 @@ class Database(
 
             if tuned:
                 logger.info(
-                    f"✅ v7.7.32: ضُبِط autovacuum على {tuned} جدول "
+                    f"✅ v7.7.38: ضُبِط autovacuum على {tuned} جدول "
                     f"({', '.join(HEAVY_TABLES_FOR_AUTOVACUUM[:tuned])})"
                 )
             self._autovacuum_tuned = True
@@ -7644,3 +7649,4 @@ __all__ = [
     "_adapt_params", "_table_exists",
     "_MIGRATIONS_TYPES", "_compute_migrations_signature",
 ]
+
