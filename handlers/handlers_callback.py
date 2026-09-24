@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.22)
+handlers_callback.py - معالج الأزرار (v9.4.23)
 =====================================================================
+✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug):
+    ✅ إبطال settings_cache المشترك عند تبديل أي إعداد أمني
+    ✅ إصلاح: أزرار toggle_map (delete_banned_words, delete_links, ...) 
+       كانت تُبطل الكاش المحلي فقط، بينما handlers_message.py يقرأ
+       من settings_cache المشترك → تأخر التأثير حتى انتهاء TTL
+    ✅ _invalidate_security_settings_cache: يُبطل الآن الكاشين معاً
+    ✅ متوافق مع fallback: إن لم يوجد settings_cache لا يتعطل الكود
+
 ✅ v9.4.22 — شاشة إدارة قناة التحديثات:
     ✅ _show_admin_update_channel_menu: عرض + تغيير + حذف قناة التحديثات
     ✅ admin_update_ch_btn: زر فتح الشاشة
@@ -85,8 +93,11 @@ except ImportError:
                 return False
         PUBLISH_RATE_LIMITER = _NullLimiter()
 
+# ✅ v9.4.23: إضافة settings_cache لضمان اتساق الكاش مع handlers_message.py
 try:
-    from cache import user_cache, invalidate_user_cache, posts_cache
+    from cache import (
+        user_cache, invalidate_user_cache, posts_cache, settings_cache,
+    )
 except ImportError:
     class _DummyUserCache:
         async def get(self, user_id):
@@ -103,8 +114,29 @@ except ImportError:
         async def invalidate(self, *a, **k):
             return
 
+    class _DummySettingsCache:
+        """✅ v9.4.23: fallback آمن عند غياب cache.py"""
+        async def get_security(self, chat_id):
+            return None
+
+        async def set_security(self, chat_id, value):
+            return
+
+        async def invalidate_security(self, chat_id=None):
+            return
+
+        async def get_auto_reply_settings(self, chat_id):
+            return None
+
+        async def set_auto_reply_settings(self, chat_id, value):
+            return
+
+        async def invalidate_auto_reply(self, chat_id=None):
+            return
+
     user_cache = _DummyUserCache()
     posts_cache = _DummyPostsCache()
+    settings_cache = _DummySettingsCache()
 
     async def invalidate_user_cache(user_id):
         return
@@ -184,7 +216,6 @@ _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 
 GROUP_NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
-
 # =====================================================================
 # ترجمة موحدة
 # =====================================================================
@@ -208,13 +239,11 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
         logger.debug(f"_trans({key},{lang}) get_text: {e}")
     return default or key
 
-
 def _fmt(text: str, **kwargs) -> str:
     try:
         return text.format(**kwargs)
     except (KeyError, IndexError):
         return text
-
 
 # =====================================================================
 # دوال مساعدة
@@ -225,10 +254,8 @@ def _group_number(index: int) -> str:
         return GROUP_NUMBER_EMOJIS[index - 1]
     return f"{index}."
 
-
 def _is_primary_owner(user_id: int) -> bool:
     return _PRIMARY_OWNER_ID is not None and user_id == _PRIMARY_OWNER_ID
-
 
 def _row_to_dict(row) -> Optional[Dict[str, Any]]:
     if row is None:
@@ -240,13 +267,11 @@ def _row_to_dict(row) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         return None
 
-
 def _coerce_int(value, default=0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
-
 
 def _coerce_float(value, default=0.0) -> float:
     try:
@@ -254,23 +279,19 @@ def _coerce_float(value, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-
 def _safe_str(value, default='?') -> str:
     if value is None:
         return default
     s = str(value)
     return s if s.strip() else default
 
-
 def _md_to_html(text: str) -> str:
     if not text or '**' not in text:
         return text
     return _BOLD_MD_PATTERN.sub(r"<b>\1</b>", text)
 
-
 def _log_channel_cache_key(chat_id: int) -> str:
     return f"log_ch_menu_{chat_id}"
-
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
     try:
@@ -282,14 +303,12 @@ async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
     except Exception:
         pass
 
-
 def _set_sec_chat(context, chat_id: int) -> None:
     try:
         context.user_data['sec_chat'] = chat_id
         context.user_data['security_chat_id'] = chat_id
     except Exception:
         pass
-
 
 def _is_valid_url(url: Optional[str]) -> bool:
     if not url:
@@ -304,7 +323,6 @@ def _is_valid_url(url: Optional[str]) -> bool:
     if not _VALID_URL_PATTERN.match(url_stripped):
         return False
     return True
-
 
 # =====================================================================
 # clear_lang_cache — محلي لتفادي circular import
@@ -335,7 +353,6 @@ def _clear_lang_cache_local(context) -> None:
                     context.user_data.pop(_k, None)
         except Exception as e:
             logger.debug(f"_clear_lang_cache_local fallback: {e}")
-
 
 # =====================================================================
 # تطبيق الحالة على أزرار auto_reply
@@ -368,7 +385,6 @@ def _apply_auto_reply_status_icons(
         return InlineKeyboardMarkup(new_rows)
     except Exception:
         return kb
-
 
 # =====================================================================
 # قناة السجل
@@ -420,7 +436,6 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     await internal_cache.set(cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
     return data
 
-
 async def _safe_answer(query, text=None, show_alert=False) -> bool:
     if not query:
         return False
@@ -434,7 +449,6 @@ async def _safe_answer(query, text=None, show_alert=False) -> bool:
         return False
     except Exception:
         return False
-
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
                     clear_markup=False) -> bool:
@@ -501,7 +515,6 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
     except Exception:
         return False
 
-
 async def safe_delete_message(query_or_message) -> None:
     try:
         if hasattr(query_or_message, 'message') and query_or_message.message:
@@ -511,7 +524,6 @@ async def safe_delete_message(query_or_message) -> None:
     except Exception:
         pass
 
-
 def _mask_id(id_value, prefix=3, suffix=2) -> str:
     if id_value is None:
         return "***"
@@ -520,13 +532,11 @@ def _mask_id(id_value, prefix=3, suffix=2) -> str:
         return "***"
     return s[:prefix] + "***" + s[-suffix:]
 
-
 async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
     try:
         return await DB.is_channel_owner(user_id, channel_db_id)
     except Exception:
         return False
-
 
 async def _is_group_owner(user_id: int, chat_id: int) -> bool:
     try:
@@ -543,7 +553,6 @@ async def _is_group_owner(user_id: int, chat_id: int) -> bool:
         logger.warning(f"_is_group_owner error: {e}")
         return False
 
-
 def _clear_context_keys(context, extra_keys=None) -> None:
     for k in _CONTEXT_KEYS_TO_CLEAR:
         context.user_data.pop(k, None)
@@ -551,11 +560,9 @@ def _clear_context_keys(context, extra_keys=None) -> None:
         for k in extra_keys:
             context.user_data.pop(k, None)
 
-
 def _ensure_bot_start_time(context) -> None:
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
-
 
 async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
     parts = data.split(":")
@@ -572,7 +579,6 @@ async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
             return None
     return None
 
-
 async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     if chat_id is None:
         return False
@@ -588,7 +594,6 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     _sec_auth_cache[key] = (result, now)
     return result
 
-
 def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
     if chat_id is None:
         _sec_auth_cache.clear()
@@ -596,7 +601,6 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
         for k in list(_sec_auth_cache.keys()):
             if k[1] == chat_id:
                 del _sec_auth_cache[k]
-
 
 async def _invalidate_after_channel_change(
     user_id: int,
@@ -623,7 +627,6 @@ async def _invalidate_after_channel_change(
         except Exception as e:
             logger.debug(f"posts_cache invalidate: {e}")
 
-
 def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     published = _coerce_int(ch.get('published'), 0)
     failed = _coerce_int(ch.get('failed'), 0)
@@ -643,7 +646,6 @@ def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
         line += f"   📈 {published}/{total}  ⏳ {pending}  ({completion_rate}%)\n"
     line += "\n"
     return line
-
 
 # =====================================================================
 # CallbackHandlers
@@ -1444,14 +1446,37 @@ class CallbackHandlers:
 
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id: int) -> None:
+        """
+        ✅ v9.4.23: إبطال الكاش المحلي + الكاش المشترك مع handlers_message.py.
+
+        الخلل السابق (v9.4.22 وما قبل):
+          - handlers_callback.py كان يستخدم _security_settings_cache المحلي
+          - handlers_message.py يستخدم settings_cache من cache.py
+          - أزرار toggle_map (delete_banned_words, delete_links, ...) كانت
+            تُبطل الكاش المحلي فقط → الرسائل الجديدة تُقرأ من الكاش المشترك
+            القديم حتى انتهاء TTL → تأخر التأثير الفعلي.
+
+        الإصلاح:
+          - إبطال الكاشين معاً لضمان اتساق فوري.
+        """
+        # 1) الكاش المحلي (handlers_callback.py)
         try:
             await _security_settings_cache.delete(f"sec_set_{chat_id}")
         except Exception:
             pass
+
+        # 2) كاش الإحصائيات المحلي
         try:
             await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
         except Exception:
             pass
+
+        # 3) ✅ v9.4.23: الكاش المشترك (handlers_message.py)
+        if settings_cache is not None:
+            try:
+                await settings_cache.invalidate_security(chat_id)
+            except Exception as e:
+                logger.debug(f"shared settings_cache.invalidate_security({chat_id}): {e}")
 
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings):
@@ -4564,6 +4589,16 @@ class CallbackHandlers:
                     await _security_stats_cache_local.clear()
                 except Exception:
                     pass
+                # ✅ v9.4.23: إبطال settings_cache المشترك أيضاً
+                if settings_cache is not None:
+                    try:
+                        await settings_cache.invalidate_security()
+                    except Exception:
+                        pass
+                    try:
+                        await settings_cache.invalidate_auto_reply()
+                    except Exception:
+                        pass
                 await safe_edit(query,
                     await _trans('cache_refreshed_admin', lang, "🔄"),
                     bot=context.bot)
@@ -6047,7 +6082,6 @@ class CallbackHandlers:
             except Exception:
                 pass
 
-
 __all__ = [
     "CallbackHandlers",
     "_invalidate_sec_auth_cache",
@@ -6061,4 +6095,5 @@ __all__ = [
     "_clear_lang_cache_local",
     "_apply_auto_reply_status_icons",
     "ACTIVE_TASKS",
+    "settings_cache",
 ]
