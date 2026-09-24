@@ -61,7 +61,7 @@
   "subscription_active": "✅ مفعّل",
   "subscription_inactive": "❌ غير مفعّل",
   "subscription_expired": "❌ انتهى اشتراكك!",
-  "reminder_subscription_expires": "⚠️ اشتراكك سينتهي قريباً!\n\n📅 المتبقي: {days_left} يوم",
+  "reminder_subscription_expires": "⚠️ اشتراكك سينتهي قريباً!\n\n📅 المتبقي: {days} يوم",
   "reminder_subscription_expires_generic": "⚠️ اشتراكك سينتهي بعد {days} يوم",
   "subscribe_btn": "📢 اشترك",
   "check_sub_btn": "✅ تحقق",
