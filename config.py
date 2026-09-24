@@ -2,16 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-config.py - إعدادات البوت الأساسية (نسخة نهائية محسّنة)
+config.py - إعدادات البوت الأساسية (نسخة نهائية محسّنة v2)
 ====================================================
 - تحميل .env من المسار الصحيح
-- تحويل آمن للأرقام والمنطقية
+- تحويل آمن للأرقام والمنطقية (مع safe_float)
 - إنشاء المجلدات تلقائياً
 - التحقق من صحة الإعدادات
 - دعم المشرف المجهول افتراضياً
-- تنظيف التوكن من المسافات (إصلاح 1)
-- التحقق من العلاقة بين فترات النشر (إصلاح 2)
+- تنظيف التوكن من المسافات
+- التحقق من العلاقة بين فترات النشر
 - دعم جميع المتغيرات الجديدة (Redis, QStash, Sightengine, 2FA, NSFW, إلخ)
+
+🆕 v2 (2026-09-24):
+  ✅ safe_float() — حماية من القيم غير الصالحة في POLL_INTERVAL و NSFW_THRESHOLD
+  ✅ تحقق من WEB_PASSWORD عند ENVIRONMENT=production
+  ✅ ترتيب التحققات في validate() حسب الأهمية
 """
 
 import os
@@ -31,10 +36,27 @@ load_dotenv(BASE_DIR / ".env")
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# دوال التحويل الآمن
+# ═══════════════════════════════════════════════════════════════════
+
 def safe_int(value: str, default: int = 0) -> int:
     """تحويل قيمة نصية إلى رقم صحيح مع إرجاع القيمة الافتراضية عند الخطأ"""
     try:
         return int(value.strip())
+    except (ValueError, AttributeError, TypeError):
+        return default
+
+
+def safe_float(value: str, default: float = 0.0) -> float:
+    """
+    ✅ v2: تحويل قيمة نصية إلى رقم عشري بأمان.
+
+    بدلاً من `float(os.getenv(...))` الذي يرفع ValueError عند القيمة
+    غير الصالحة (يسبب فشل الاستيراد).
+    """
+    try:
+        return float(value.strip())
     except (ValueError, AttributeError, TypeError):
         return default
 
@@ -52,6 +74,10 @@ def safe_str(value: str, default: str = "") -> str:
         return default
     return str(value).strip()
 
+
+# ═══════════════════════════════════════════════════════════════════
+# الإعدادات
+# ═══════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -136,7 +162,8 @@ class AppConfig:
     READ_TIMEOUT: int = safe_int(os.getenv("READ_TIMEOUT", "60"))
     WRITE_TIMEOUT: int = safe_int(os.getenv("WRITE_TIMEOUT", "30"))
     POOL_TIMEOUT: int = safe_int(os.getenv("POOL_TIMEOUT", "10"))
-    POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "1.0"))
+    # ✅ v2: safe_float بدل float
+    POLL_INTERVAL: float = safe_float(os.getenv("POLL_INTERVAL", "1.0"))
 
     # ========== Redis ==========
     REDIS_AVAILABLE: bool = safe_bool(os.getenv("REDIS_AVAILABLE", "false"))
@@ -148,7 +175,8 @@ class AppConfig:
     SIGHTENGINE_API_USER: str = os.getenv("SIGHTENGINE_API_USER", "")
     SIGHTENGINE_API_SECRET: str = os.getenv("SIGHTENGINE_API_SECRET", "")
     NSFW_ENABLED: bool = safe_bool(os.getenv("NSFW_ENABLED", "false"))
-    NSFW_THRESHOLD: float = float(os.getenv("NSFW_THRESHOLD", "0.7"))
+    # ✅ v2: safe_float بدل float
+    NSFW_THRESHOLD: float = safe_float(os.getenv("NSFW_THRESHOLD", "0.7"))
     NSFW_FRAMES: int = safe_int(os.getenv("NSFW_FRAMES", "5"))
     NSFW_MAX_FILE_SIZE: int = safe_int(os.getenv("NSFW_MAX_FILE_SIZE", "5242880"))
     NSFW_MAX_VIDEO_SIZE: int = safe_int(os.getenv("NSFW_MAX_VIDEO_SIZE", "10485760"))
@@ -184,22 +212,27 @@ class AppConfig:
         """التحقق من القيم المطلوبة مع رسائل خطأ واضحة"""
         errors = []
 
+        # ─── 1. التوكن ───
         if not self.TOKEN:
             errors.append("BOT_TOKEN غير موجود في .env")
         elif len(self.TOKEN) < 20:
             errors.append("BOT_TOKEN يبدو غير صالح (قصير جداً)")
 
+        # ─── 2. المالك ───
         if self.PRIMARY_OWNER_ID == 0:
             errors.append("MAIN_ADMIN_ID غير موجود في .env")
         elif self.PRIMARY_OWNER_ID < 0:
             errors.append("MAIN_ADMIN_ID يجب أن يكون رقماً موجباً")
 
+        # ─── 3. المنفذ ───
         if self.WEB_PORT < 1 or self.WEB_PORT > 65535:
             errors.append(f"WEB_PORT غير صالح: {self.WEB_PORT}")
 
+        # ─── 4. النسخ الاحتياطي ───
         if self.MAX_BACKUPS < 1:
             errors.append("MAX_BACKUPS يجب أن يكون أكبر من 0")
 
+        # ─── 5. فترة النشر ───
         if self.MIN_PUBLISH_INTERVAL < 1:
             errors.append("MIN_PUBLISH_INTERVAL يجب أن يكون أكبر من 0")
 
@@ -209,18 +242,29 @@ class AppConfig:
                 f"يجب أن يكون أكبر من أو يساوي MIN_PUBLISH_INTERVAL ({self.MIN_PUBLISH_INTERVAL})"
             )
 
-        # تحقق من 2FA إذا كانت مفعلة
+        # ─── 6. 2FA ───
         if self.ENABLE_2FA and not self.ADMIN_2FA_SECRET:
             errors.append("ADMIN_2FA_SECRET مطلوب عند تفعيل ENABLE_2FA")
 
-        # تحقق من Sightengine إذا كان NSFW مفعلاً
+        # ─── 7. NSFW ───
         if self.NSFW_ENABLED:
             if not self.SIGHTENGINE_API_USER or not self.SIGHTENGINE_API_SECRET:
-                errors.append("SIGHTENGINE_API_USER و SIGHTENGINE_API_SECRET مطلوبان عند تفعيل NSFW_ENABLED")
+                errors.append(
+                    "SIGHTENGINE_API_USER و SIGHTENGINE_API_SECRET "
+                    "مطلوبان عند تفعيل NSFW_ENABLED"
+                )
 
-        # تحقق من Redis إذا كان مفعلاً
+        # ─── 8. Redis ───
         if self.REDIS_AVAILABLE and not self.REDIS_URL:
             errors.append("REDIS_URL مطلوب عند تفعيل REDIS_AVAILABLE")
+
+        # ─── 9. أمان الويب في الإنتاج ───
+        # ✅ v2: التحقق من WEB_PASSWORD عند production
+        if self.ENVIRONMENT == "production" and not self.WEB_PASSWORD:
+            logger.warning(
+                "⚠️ WEB_PASSWORD فارغ في بيئة الإنتاج — "
+                "لوحة الويب غير محمية! اضبط WEB_PASSWORD في env."
+            )
 
         if errors:
             error_msg = "\n".join(f"  • {e}" for e in errors)
