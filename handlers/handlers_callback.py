@@ -2,23 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.23)
+handlers_callback.py - معالج الأزرار (v9.4.25)
 =====================================================================
-✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug):
-    ✅ إبطال settings_cache المشترك عند تبديل أي إعداد أمني
-    ✅ إصلاح: أزرار toggle_map (delete_banned_words, delete_links, ...) 
-       كانت تُبطل الكاش المحلي فقط، بينما handlers_message.py يقرأ
-       من settings_cache المشترك → تأخر التأثير حتى انتهاء TTL
-    ✅ _invalidate_security_settings_cache: يُبطل الآن الكاشين معاً
-    ✅ متوافق مع fallback: إن لم يوجد settings_cache لا يتعطل الكود
+✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة:
+    ✅ _show_banned_words_menu: الأيقونة تعكس الحالة الحالية (لا الإجراء)
+        - ✅ = الميزة مفعّلة الآن (الحذف يعمل)
+        - ❌ = الميزة معطّلة الآن (الحذف لا يعمل)
+    ✅ النص يوضح ما سيحدث عند الضغط: "(اضغط للتعطيل)" / "(اضغط للتفعيل)"
+    ✅ لا تغيير في منطق toggle_banned_words (كان سليماً)
+    ✅ متوافق مع الترجمات القديمة (banned_words_btn_on/off مع defaults)
 
-✅ v9.4.22 — شاشة إدارة قناة التحديثات:
-    ✅ _show_admin_update_channel_menu: عرض + تغيير + حذف قناة التحديثات
-    ✅ admin_update_ch_btn: زر فتح الشاشة
-    ✅ admin_change_update_ch: زر تغيير القناة
-    ✅ admin_remove_update_ch: زر حذف القناة
-    ✅ متوافق مع buttons_config_ar.json (الزر موجود في admin_panel)
+✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C):
+    ✅ إزالة _security_settings_cache المحلي نهائياً
+    ✅ الاعتماد الحصري على settings_cache المشترك مع handlers_message.py
+    ✅ كاش واحد → اتساق كامل ثنائي الاتجاه (callback ↔ message)
+    ✅ _invalidate_security_settings_cache يُبطل الآن:
+        - settings_cache المشترك (settings)
+        - _security_stats_cache_local (إحصائيات)
+    ✅ _preload_group_security يكتب في الكاش المشترك
+    ✅ CB.ADMIN_REFRESH_CACHE يُبطل كل الكاشات المشتركة
+    ✅ الإحصائيات تبقى في كاش محلي (handlers_message لا يستخدمها)
 
+✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug)
+✅ v9.4.22 — شاشة إدارة قناة التحديثات
 ✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
 ✅ v9.4.20 — إصلاح clear_lang_cache (circular import)
 ✅ v9.4.19 — فحص URL لـ updates_channel
@@ -93,7 +99,7 @@ except ImportError:
                 return False
         PUBLISH_RATE_LIMITER = _NullLimiter()
 
-# ✅ v9.4.23: إضافة settings_cache لضمان اتساق الكاش مع handlers_message.py
+# ✅ v9.4.23: settings_cache المشترك مع handlers_message.py
 try:
     from cache import (
         user_cache, invalidate_user_cache, posts_cache, settings_cache,
@@ -115,7 +121,7 @@ except ImportError:
             return
 
     class _DummySettingsCache:
-        """✅ v9.4.23: fallback آمن عند غياب cache.py"""
+        """✅ v9.4.23/24: fallback آمن عند غياب cache.py"""
         async def get_security(self, chat_id):
             return None
 
@@ -187,6 +193,8 @@ RATE_LIMIT_CLEANUP_EVERY = 100
 ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
+# ⚠️ v9.4.24: لم يعد مستخدماً — TTL الإعدادات الآن تحت سيطرة cache.settings_cache
+#             نُبقيه للرجوع إليه فقط.
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 LOG_CHANNEL_MENU_CACHE_TTL = 30
@@ -205,7 +213,8 @@ except (TypeError, ValueError, AttributeError):
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
-_security_settings_cache: SmartCache = SmartCache(ttl=SEC_SETTINGS_CACHE_TTL, max_size=500)
+# ✅ v9.4.24: أُزيل _security_settings_cache المحلي — نعتمد على settings_cache المشترك
+# ✅ v9.4.24: _security_stats_cache_local يبقى محلياً (handlers_message لا يستخدمه)
 _security_stats_cache_local: SmartCache = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
 _CONTEXT_KEYS_TO_CLEAR = (
@@ -1425,15 +1434,33 @@ class CallbackHandlers:
                         parse_mode='HTML', bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
-    # دوال الأمان
+    # دوال الأمان — ✅ v9.4.24: كاش موحّد
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
-        key = f"sec_set_{chat_id}"
-        cached = await _security_settings_cache.get(key)
+        """
+        ✅ v9.4.24: قراءة الإعدادات من settings_cache المشترك فقط.
+
+        قبل v9.4.24 كان هناك كاشان:
+          - _security_settings_cache (محلي في هذا الملف)
+          - settings_cache (المشترك مع handlers_message.py)
+
+        الآن: كاش واحد → اتساق ثنائي الاتجاه تلقائي.
+        """
+        try:
+            cached = await settings_cache.get_security(chat_id)
+        except Exception as e:
+            logger.debug(f"settings_cache.get_security({chat_id}): {e}")
+            cached = None
+
         if cached is not None:
-            return cached
+            if isinstance(cached, dict):
+                return cached
+            as_dict = _row_to_dict(cached)
+            if as_dict is not None:
+                return as_dict
+
         try:
             settings = await DB.get_security_settings(chat_id) or {}
             if not isinstance(settings, dict):
@@ -1441,42 +1468,37 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"get_security_settings({chat_id}): {e}")
             settings = {}
-        await _security_settings_cache.set(key, settings, ttl=SEC_SETTINGS_CACHE_TTL)
+
+        try:
+            await settings_cache.set_security(chat_id, settings)
+        except Exception as e:
+            logger.debug(f"settings_cache.set_security({chat_id}): {e}")
+
         return settings
 
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id: int) -> None:
         """
-        ✅ v9.4.23: إبطال الكاش المحلي + الكاش المشترك مع handlers_message.py.
+        ✅ v9.4.24: إبطال الكاش الموحّد + كاش الإحصائيات المحلي.
 
-        الخلل السابق (v9.4.22 وما قبل):
-          - handlers_callback.py كان يستخدم _security_settings_cache المحلي
-          - handlers_message.py يستخدم settings_cache من cache.py
-          - أزرار toggle_map (delete_banned_words, delete_links, ...) كانت
-            تُبطل الكاش المحلي فقط → الرسائل الجديدة تُقرأ من الكاش المشترك
-            القديم حتى انتهاء TTL → تأخر التأثير الفعلي.
+        - settings_cache.invalidate_security: الإعدادات (مشترك مع message)
+        - _security_stats_cache_local: الإحصائيات (محلي، خاص بهذا الملف)
 
-        الإصلاح:
-          - إبطال الكاشين معاً لضمان اتساق فوري.
+        ملاحظة: لا يوجد كاش محلي للإعدادات بعد v9.4.24.
         """
-        # 1) الكاش المحلي (handlers_callback.py)
+        # 1) الإعدادات — كاش مشترك
         try:
-            await _security_settings_cache.delete(f"sec_set_{chat_id}")
-        except Exception:
-            pass
+            await settings_cache.invalidate_security(chat_id)
+        except Exception as e:
+            logger.debug(
+                f"settings_cache.invalidate_security({chat_id}): {e}"
+            )
 
-        # 2) كاش الإحصائيات المحلي
+        # 2) الإحصائيات — كاش محلي
         try:
             await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
         except Exception:
             pass
-
-        # 3) ✅ v9.4.23: الكاش المشترك (handlers_message.py)
-        if settings_cache is not None:
-            try:
-                await settings_cache.invalidate_security(chat_id)
-            except Exception as e:
-                logger.debug(f"shared settings_cache.invalidate_security({chat_id}): {e}")
 
     @staticmethod
     async def _load_stats_and_edit(query, context, chat_id, lang, settings):
@@ -2773,15 +2795,28 @@ class CallbackHandlers:
 
     @staticmethod
     async def _preload_group_security(chat_id: int) -> None:
+        """
+        ✅ v9.4.24: يُحمّل مسبقاً في الكاش المشترك (settings_cache).
+        الإحصائيات تبقى في الكاش المحلي.
+        """
         try:
-            key = f"sec_set_{chat_id}"
-            cached = await _security_settings_cache.get(key)
+            # ✅ v9.4.24: الإعدادات — كاش مشترك
+            try:
+                cached = await settings_cache.get_security(chat_id)
+            except Exception:
+                cached = None
             if cached is None:
                 settings = await DB.get_security_settings(chat_id) or {}
                 if not isinstance(settings, dict):
                     settings = _row_to_dict(settings) or {}
-                await _security_settings_cache.set(key, settings,
-                                                   ttl=SEC_SETTINGS_CACHE_TTL)
+                try:
+                    await settings_cache.set_security(chat_id, settings)
+                except Exception as e:
+                    logger.debug(
+                        f"_preload_group_security set_security({chat_id}): {e}"
+                    )
+
+            # الإحصائيات — كاش محلي (لا يُستَخدم في handlers_message)
             stats_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(stats_key)
             if cached_stats is None:
@@ -3777,14 +3812,34 @@ class CallbackHandlers:
             await _trans('choose_warn_penalty', lang, "⚖️"),
             reply_markup=kb, bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.4.25: قائمة الكلمات المحظورة — الأيقونة تعكس الحالة الحالية
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _show_banned_words_menu(update, context, query, chat_id, lang):
+        """
+        ✅ v9.4.25: الأيقونة تعكس الحالة الحالية (وليس الإجراء)
+            - ✅ = الميزة مفعّلة الآن (الحذف يعمل)
+            - ❌ = الميزة معطّلة الآن (الحذف لا يعمل)
+            - النص بين قوسين يوضح ما سيحدث عند الضغط
+        """
         settings = await CallbackHandlers._get_security_settings_cached(chat_id)
         is_enabled = _coerce_int(settings.get('delete_banned_words'), 0)
+
         if is_enabled:
-            toggle_text = await _trans('disable_delete', lang, "❌")
+            # ✅ مفعّلة الآن → الحذف يعمل
+            toggle_text = await _trans(
+                'banned_words_btn_on', lang,
+                "✅ حذف الكلمات المحظورة: مفعّل (اضغط للتعطيل)"
+            )
         else:
-            toggle_text = await _trans('enable_delete', lang, "✅")
+            # ❌ معطّلة الآن → الحذف لا يعمل
+            toggle_text = await _trans(
+                'banned_words_btn_off', lang,
+                "❌ حذف الكلمات المحظورة: معطّل (اضغط للتفعيل)"
+            )
+
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('add_word', lang, "➕"),
@@ -4584,21 +4639,20 @@ class CallbackHandlers:
                     await invalidate_user_cache(user_id)
                 except Exception:
                     pass
+                # ✅ v9.4.24: كاش الإحصائيات محلي
                 try:
-                    await _security_settings_cache.clear()
                     await _security_stats_cache_local.clear()
                 except Exception:
                     pass
-                # ✅ v9.4.23: إبطال settings_cache المشترك أيضاً
-                if settings_cache is not None:
-                    try:
-                        await settings_cache.invalidate_security()
-                    except Exception:
-                        pass
-                    try:
-                        await settings_cache.invalidate_auto_reply()
-                    except Exception:
-                        pass
+                # ✅ v9.4.24: الكاش المشترك (settings + auto_reply) — كامل
+                try:
+                    await settings_cache.invalidate_security()
+                except Exception as e:
+                    logger.debug(f"refresh settings_cache.invalidate_security: {e}")
+                try:
+                    await settings_cache.invalidate_auto_reply()
+                except Exception as e:
+                    logger.debug(f"refresh settings_cache.invalidate_auto_reply: {e}")
                 await safe_edit(query,
                     await _trans('cache_refreshed_admin', lang, "🔄"),
                     bot=context.bot)
