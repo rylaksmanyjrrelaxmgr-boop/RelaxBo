@@ -2,29 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.5)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.6)
 ================================================================================
+🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS):
+    ✅ contest_cleanup يعلن الفائزين تلقائيًا (بدل الإلغاء البسيط):
+       • كل ساعة: DB.auto_declare_expired_contests()
+       • يعلن فائزًا عشوائيًا لكل مسابقة منتهية فيها مشاركون
+       • يُلغي المسابقات المنتهية بدون مشاركين
+       • يُرسل رسالة تهنئة لكل فائز (بمهلة 0.5s بين الإشعارات)
+    ✅ استخدام auto_declare_expired_contests بدل close_expired_contests
+
 🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX):
-    ✅ تصحيح تعليق متناقض في contest_cleanup:
-       • كان التعليق يقول "نرمي الاستثناء" لكن الكود لا يرمي
-       • الآن التعليق يعكس السلوك الفعلي: معالجة داخلية + متابعة
+    ✅ تصحيح تعليق متناقض في contest_cleanup
     ✅ contest_cleanup يُدار مباشرة (create_task) بدل run_task_with_retry
-       • السبب: الدالة تُدير أخطاءها داخليًا
-       • run_task_with_retry كان سيُعيد sleep(300) عند أي فشل عابر
-       • الآن: كل فشل → تسجيل + متابعة بعد ساعة (لا إعادة تهيئة)
-    ✅ تحسين رسالة الخطأ: "سيُعاد بعد ساعة" للوضوح
 
 🆕 v5.5.4 (CONTEST-AUTO-CLEANUP):
-    ✅ مهمة دورية جديدة: contest_cleanup
-       • كل ساعة: DB.close_expired_contests()
-       • تُلغي المسابقات المنتهية (status='active' + end_date<=now)
-       • تمنع تراكم مسابقات ميتة في واجهة المستخدم
-    ✅ انتظار 5 دقائق أولي قبل أول تشغيل
+    ✅ مهمة دورية: contest_cleanup (كل ساعة)
 
 🆕 v5.5.3 (GIFT-CODE-FLOW-FIX):
-    ✅ إصلاح ترتيب معالجة كود الهدية في successful_payment:
-       • كان: create_gift_code → mark_invoice_paid
-       • صار: mark_invoice_paid → create_gift_code
+    ✅ إصلاح ترتيب معالجة كود الهدية في successful_payment
     ✅ إصلاح تنسيق رسالة كود الهدية (HTML بدل backticks)
 
 🆕 v5.5.2 (STATS-COMMAND-FIX):
@@ -219,9 +215,6 @@ _GROUP_LOG_INSTANCE = None
 # =====================================================================
 # 🆕 v5.5.0: قوائم الأوامر — module-level constants
 # =====================================================================
-# يمكن استدعاؤها من أي مكان (handlers, refresh function).
-# تظهر للمستخدم حسب النطاق (Scope) المُسجَّل في Telegram.
-# =====================================================================
 
 # ═══════════════════════════════════════════════════════════════════
 # ✅ الأوامر العامة — تظهر لكل مستخدم في الخاص
@@ -301,11 +294,6 @@ async def _collect_admin_ids() -> list:
       • CONFIG.DEVELOPER_IDS (المطورون)
       • DB.get_admin_list() / get_all_admins() / get_admins() — أول اسم متاح
 
-    🆕 v5.5.1:
-      يحاول ثلاث أسماء دوال مختلفة بترتيب الأولوية. أول واحدة تنجح
-      تُستخدم، والبقية تُتجاهَل. هذا يحل مشكلة عدم قراءة الأدمن من DB
-      عند اختلاف اسم الدالة بين الإصدارات.
-
     Returns:
         قائمة أعداد صحيحة مرتّبة بدون تكرار.
     """
@@ -370,7 +358,6 @@ async def _collect_admin_ids() -> list:
                     f"✅ _collect_admin_ids: قرأ {added_from_db} "
                     f"أدمن من DB.{method_name}()"
                 )
-                # نجحنا — لا داعي لتجربة الأسماء الأخرى
                 break
         except Exception as _e:
             logger.debug(
@@ -415,14 +402,12 @@ async def refresh_admin_commands(bot, user_id: int, is_admin: bool) -> bool:
                 scope=BotCommandScopeChat(chat_id=uid),
             )
         else:
-            # امسح أي scope خاص
             try:
                 await bot.delete_my_commands(
                     scope=BotCommandScopeChat(chat_id=uid)
                 )
             except Exception:
                 pass
-            # أعد المستخدم للـ AllPrivateChats (يرث العامة)
             await bot.set_my_commands(
                 PUBLIC_COMMANDS,
                 scope=BotCommandScopeChat(chat_id=uid),
@@ -477,11 +462,8 @@ def _safe_url(url: str) -> str:
 def _verify_command_handlers() -> bool:
     """
     التحقق من أن كل دالة مطلوبة موجودة في CommandHandlers.
-
-    يُنفَّذ قبل التسجيل — يمنع AttributeError مفاجئ.
     """
     required = [
-        # الأوامر الخاصة
         "start", "help_command", "trial", "subscribe", "support",
         "developer", "stats", "language", "contests", "replies_command",
         "grant", "set_min_interval", "gift_plans", "redeem_gift",
@@ -489,12 +471,9 @@ def _verify_command_handlers() -> bool:
         "set_log_ch", "add_admin", "remove_admin",
         "export_replies", "import_replies", "backup", "restore",
         "auto_publish", "auto_recycle", "channels", "posts",
-        # ✅ v5.4.2: أوامر التشخيص
         "db_diag", "db_vacuum",
-        # أوامر المجموعة
         "syncgroup", "security", "panel", "lock", "unlock",
         "ban", "mute", "warn", "kick", "restrict", "unban", "pin",
-        # أوامر المشرفين المخفيين
         "register_hidden_owner", "remove_hidden_owner",
         "add_hidden_admin", "remove_hidden_admin", "list_hidden_admins",
     ]
@@ -519,11 +498,7 @@ def _verify_command_handlers() -> bool:
 # =====================================================================
 
 def _verify_db_config() -> bool:
-    """
-    التحقق من توافق نوع DB المكتشف مع DATABASE_URL.
-
-    يكشف المشاكل مبكراً قبل محاولة الاتصال.
-    """
+    """التحقق من توافق نوع DB المكتشف مع DATABASE_URL."""
     try:
         db_type = getattr(DB, "DB_TYPE", "unknown")
         db_url = os.getenv("DATABASE_URL", "").strip()
@@ -538,7 +513,6 @@ def _verify_db_config() -> bool:
                 logger.info("✅ DB: SQLite (لا يوجد DATABASE_URL)")
             return True
 
-        # فحص توافق
         url_lower = db_url.lower()
         is_pg_url = "postgres" in url_lower or "postgresql" in url_lower
         is_mysql_url = "mysql" in url_lower or "mariadb" in url_lower
@@ -554,7 +528,7 @@ def _verify_db_config() -> bool:
         return True
     except Exception as e:
         logger.warning(f"⚠️ فشل فحص DB: {e}")
-        return True  # لا نوقف التشغيل بسبب هذا
+        return True
 
 
 # =====================================================================
@@ -562,11 +536,7 @@ def _verify_db_config() -> bool:
 # =====================================================================
 
 def _verify_group_log_handlers() -> bool:
-    """
-    التحقق من توفر معالجات group_log (غير معطِّل).
-
-    يرجع True إذا كانت متوفرة، False إذا لا — لكن لا يوقف التشغيل.
-    """
+    """التحقق من توفر معالجات group_log (غير معطِّل)."""
     if not _GROUP_LOG_AVAILABLE:
         logger.warning(
             f"⚠️ handlers_group_log غير متاح: "
@@ -593,14 +563,7 @@ def _verify_group_log_handlers() -> bool:
 # =====================================================================
 
 def _init_group_log_instance(app) -> bool:
-    """
-    إنشاء وتشغيل GroupLog instance.
-
-    ✅ v5.3.1:
-        - يستدعي init_group_log(DB, app.bot)
-        - يبدأ الـWorker
-        - يخزّن المرجع في _GROUP_LOG_INSTANCE للإغلاق لاحقاً
-    """
+    """إنشاء وتشغيل GroupLog instance."""
     global _GROUP_LOG_INSTANCE
 
     if not _GROUP_LOG_INIT_AVAILABLE:
@@ -633,14 +596,7 @@ def _init_group_log_instance(app) -> bool:
 
 
 async def _shutdown_group_log() -> None:
-    """
-    إغلاق لطيف لـGroupLog عند إيقاف البوت.
-
-    ✅ v5.3.1:
-        - انتظار الطابور (5s كحد أقصى)
-        - إلغاء Worker
-        - تسجيل النتيجة
-    """
+    """إغلاق لطيف لـGroupLog عند إيقاف البوت."""
     global _GROUP_LOG_INSTANCE
 
     if _GROUP_LOG_INSTANCE is None:
@@ -1038,11 +994,6 @@ async def main():
     # =================================================================
     # 🆕 v5.5.0: تسجيل الأوامر بنطاقات صحيحة
     # =================================================================
-    # 1) امسح أي قوائم قديمة (خصوصاً Default لتجنّب تسرّب)
-    # 2) سجّل العامة على AllPrivateChats
-    # 3) سجّل أوامر المجموعات على AllGroupChats
-    # 4) سجّل الإدارية على BotCommandScopeChat لكل أدمن منفرداً
-    # =================================================================
 
     # ─── 1) حذف Scopes القديمة ───
     for _scope_name, _scope in (
@@ -1256,7 +1207,6 @@ async def main():
                     f"(x{consecutive_failures}): {e}",
                     exc_info=True,
                 )
-                # ✅ v5.2.0: backoff متزايد
                 delay = min(5 * consecutive_failures, 60)
                 logger.info(
                     f"🔄 إعادة تشغيل {task_name} بعد {delay} ثانية..."
@@ -1274,22 +1224,25 @@ async def main():
                 logger.error(f"❌ cleanup_locks failed: {e}")
                 await asyncio.sleep(60)
 
-    # ✅ v5.5.5: مهمة إلغاء المسابقات المنتهية (كل ساعة)
+    # ✅ v5.5.6: إعلان فائزين تلقائي (كل ساعة)
     async def contest_cleanup():
         """
-        يُلغي المسابقات التي انتهت مدتها بدون إعلان فائز.
+        يُعلن الفائزين تلقائيًا للمسابقات المنتهية.
 
         السلوك:
-          • انتظار 5 دقائق أولي عند الإقلاع (منح bootstrap فرصة
-            لإكمال إنشاء جداول المسابقات)
-          • حلقة لا نهائية: كل ساعة → DB.close_expired_contests()
+          • انتظار 5 دقائق أولي عند الإقلاع (منح bootstrap فرصة)
+          • كل ساعة:
+              ① DB.auto_declare_expired_contests()
+                  - يعلن فائزين للمسابقات المنتهية التي فيها مشاركون
+                  - يُلغي المسابقات المنتهية بدون مشاركين
+              ② إشعار كل فائز برسالة تهنئة
           • يعالج أخطاءه داخليًا (لا يرمي) → أي فشل عابر لا يُعيد
-            تنفيذ الـ sleep(300) الأولي، فقط يُسجَّل ويُتابع بعد ساعة
+            تنفيذ الـ sleep(300) الأولي
           • يُلغى بشكل نظيف عند إيقاف البوت
 
         يعتمد على:
-          • database_contests.py → close_expired_contests()
-          • يُدار مباشرة عبر asyncio.create_task (لا run_task_with_retry)
+          • database_contests.py → auto_declare_expired_contests()
+          • يُدار مباشرة عبر asyncio.create_task
         """
         # انتظار أولي — يُنفَّذ مرة واحدة فقط عند الإقلاع
         try:
@@ -1299,16 +1252,49 @@ async def main():
 
         while True:
             try:
-                count = await DB.close_expired_contests()
-                if count and count > 0:
+                # ─── 1) الإعلان التلقائي ───
+                winners = await DB.auto_declare_expired_contests()
+
+                if winners:
                     logger.info(
-                        f"✅ contest_cleanup: أُلغيت {count} مسابقة منتهية"
+                        f"🏆 contest_cleanup: أُعلن "
+                        f"{len(winners)} فائزًا تلقائيًا"
                     )
+
+                    # ─── 2) إشعار كل فائز ───
+                    for w in winners:
+                        winner_id = w.get("winner_id")
+                        title = w.get("title") or "مسابقة"
+                        if winner_id is None:
+                            continue
+                        try:
+                            msg = (
+                                f"🎉 <b>مبروك!</b>\n\n"
+                                f"لقد فزت في مسابقة "
+                                f"<b>{title}</b>!\n\n"
+                                f"<i>سيتم التواصل معك قريبًا "
+                                f"لاستلام الجائزة.</i>"
+                            )
+                            await app.bot.send_message(
+                                chat_id=winner_id,
+                                text=msg,
+                                parse_mode="HTML",
+                            )
+                        except Exception as ne:
+                            # المستخدم قد حظر البوت أو chat غير صالح
+                            logger.debug(
+                                f"إشعار الفائز {winner_id} فشل: {ne}"
+                            )
+                        # مهلة صغيرة بين الإشعارات لتجنّب rate limit
+                        try:
+                            await asyncio.sleep(0.5)
+                        except asyncio.CancelledError:
+                            raise
+
             except asyncio.CancelledError:
                 logger.info("🛑 contest_cleanup أُلغيت")
                 raise
             except Exception as e:
-                # نسجّل ونتابع — الخطأ عابر، ولا نُعيد تنفيذ sleep(300)
                 logger.error(
                     f"❌ contest_cleanup (سيُعاد بعد ساعة): {e}",
                     exc_info=True,
@@ -1353,7 +1339,7 @@ async def main():
                 task_name="monitor_pool_alert"
             )
         ),
-        # ✅ v5.5.5: إلغاء المسابقات المنتهية (كل ساعة)
+        # ✅ v5.5.6: إعلان فائزين تلقائي (كل ساعة)
         # ملاحظة: لا نستخدم run_task_with_retry هنا لأن contest_cleanup
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
