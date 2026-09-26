@@ -2,27 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.25)
+handlers_callback.py - معالج الأزرار (v9.4.27)
 =====================================================================
-✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة:
-    ✅ _show_banned_words_menu: الأيقونة تعكس الحالة الحالية (لا الإجراء)
-        - ✅ = الميزة مفعّلة الآن (الحذف يعمل)
-        - ❌ = الميزة معطّلة الآن (الحذف لا يعمل)
-    ✅ النص يوضح ما سيحدث عند الضغط: "(اضغط للتعطيل)" / "(اضغط للتفعيل)"
-    ✅ لا تغيير في منطق toggle_banned_words (كان سليماً)
-    ✅ متوافق مع الترجمات القديمة (banned_words_btn_on/off مع defaults)
+✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب":
+    ✅ _handle_contests: استخدام مفاتيح ترجمة بدل النص المُثبَّت
+        - quiz_question_prompt: {question}
+        - already_joined_contest
+        - no_correct_answerers
+    ✅ _handle_contests: توافق خلفي (fallback) لو get_correct_answerers
+       غير موجودة في database_contests.py
+    ✅ _handle_contests: تمييز "لا مشاركين" عن "لا إجابات صحيحة"
+    ✅ رسالة "مشارك مسبقاً" أوضح (كانت join_contest + " ✅")
 
-✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C):
-    ✅ إزالة _security_settings_cache المحلي نهائياً
-    ✅ الاعتماد الحصري على settings_cache المشترك مع handlers_message.py
-    ✅ كاش واحد → اتساق كامل ثنائي الاتجاه (callback ↔ message)
-    ✅ _invalidate_security_settings_cache يُبطل الآن:
-        - settings_cache المشترك (settings)
-        - _security_stats_cache_local (إحصائيات)
-    ✅ _preload_group_security يكتب في الكاش المشترك
-    ✅ CB.ADMIN_REFRESH_CACHE يُبطل كل الكاشات المشتركة
-    ✅ الإحصائيات تبقى في كاش محلي (handlers_message لا يستخدمها)
+✅ v9.4.26 — دعم مسابقة "سؤال وجواب":
+    ✅ _handle_contests: عرض السؤال عند المشاركة (لو quiz)
+    ✅ _handle_contests: اختيار الفائز من الصحيحين فقط
 
+✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة
+✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C)
 ✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug)
 ✅ v9.4.22 — شاشة إدارة قناة التحديثات
 ✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
@@ -99,7 +96,6 @@ except ImportError:
                 return False
         PUBLISH_RATE_LIMITER = _NullLimiter()
 
-# ✅ v9.4.23: settings_cache المشترك مع handlers_message.py
 try:
     from cache import (
         user_cache, invalidate_user_cache, posts_cache, settings_cache,
@@ -121,7 +117,6 @@ except ImportError:
             return
 
     class _DummySettingsCache:
-        """✅ v9.4.23/24: fallback آمن عند غياب cache.py"""
         async def get_security(self, chat_id):
             return None
 
@@ -193,8 +188,6 @@ RATE_LIMIT_CLEANUP_EVERY = 100
 ADMIN_PAGE_SIZE = 10
 SEC_AUTH_CACHE_TTL = 300
 PUBLISH_ACQUIRE_TIMEOUT = 30
-# ⚠️ v9.4.24: لم يعد مستخدماً — TTL الإعدادات الآن تحت سيطرة cache.settings_cache
-#             نُبقيه للرجوع إليه فقط.
 SEC_SETTINGS_CACHE_TTL = 5
 SEC_STATS_CACHE_TTL = 30
 LOG_CHANNEL_MENU_CACHE_TTL = 30
@@ -213,8 +206,6 @@ except (TypeError, ValueError, AttributeError):
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
-# ✅ v9.4.24: أُزيل _security_settings_cache المحلي — نعتمد على settings_cache المشترك
-# ✅ v9.4.24: _security_stats_cache_local يبقى محلياً (handlers_message لا يستخدمه)
 _security_stats_cache_local: SmartCache = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
 _CONTEXT_KEYS_TO_CLEAR = (
@@ -333,10 +324,6 @@ def _is_valid_url(url: Optional[str]) -> bool:
         return False
     return True
 
-# =====================================================================
-# clear_lang_cache — محلي لتفادي circular import
-# =====================================================================
-
 def _clear_lang_cache_local(context) -> None:
     _cleared = False
     try:
@@ -362,10 +349,6 @@ def _clear_lang_cache_local(context) -> None:
                     context.user_data.pop(_k, None)
         except Exception as e:
             logger.debug(f"_clear_lang_cache_local fallback: {e}")
-
-# =====================================================================
-# تطبيق الحالة على أزرار auto_reply
-# =====================================================================
 
 def _apply_auto_reply_status_icons(
     kb: InlineKeyboardMarkup,
@@ -1245,14 +1228,8 @@ class CallbackHandlers:
         except Exception:
             pass
 
-    # ═════════════════════════════════════════════════════════════
-    # ✅ v9.4.18: قناة التحديثات (للمستخدم العادي)
-    # ✅ v9.4.19: فحص نهائي لصحة URL
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang):
-        """✅ v9.4.18/19: عرض قناة التحديثات."""
         title = await _trans('updates_channel_title', lang, "📢 Updates Channel")
 
         try:
@@ -1342,21 +1319,8 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=kb,
                         parse_mode='HTML', bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # ✅ v9.4.22: شاشة إدارة قناة التحديثات (للمطور)
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_admin_update_channel_menu(query, context, user_id, lang):
-        """
-        ✅ v9.4.22: شاشة إدارة قناة التحديثات.
-
-        تعرض:
-          - القناة الحالية (إن وُجدت)
-          - زر تغيير
-          - زر حذف
-          - زر إرسال تحديث
-        """
         if not CONFIG.is_developer(user_id):
             await safe_edit(query,
                 await _trans('unauthorized', lang, "❌ غير مصرح"),
@@ -1376,7 +1340,6 @@ class CallbackHandlers:
         remove_text = await _trans('remove_update_ch_btn', lang, "🗑️ حذف القناة")
         send_text = await _trans('admin_send_update', lang, "📤 إرسال تحديث")
 
-        # ═══════════════ القناة موجودة ═══════════════
         if ch:
             ch_str = str(ch).strip()
             display = ch_str
@@ -1415,7 +1378,6 @@ class CallbackHandlers:
                 [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)],
             ])
 
-        # ═══════════════ لا توجد قناة ═══════════════
         else:
             text = (
                 f"{title}\n"
@@ -1433,21 +1395,8 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=kb,
                         parse_mode='HTML', bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # دوال الأمان — ✅ v9.4.24: كاش موحّد
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
-        """
-        ✅ v9.4.24: قراءة الإعدادات من settings_cache المشترك فقط.
-
-        قبل v9.4.24 كان هناك كاشان:
-          - _security_settings_cache (محلي في هذا الملف)
-          - settings_cache (المشترك مع handlers_message.py)
-
-        الآن: كاش واحد → اتساق ثنائي الاتجاه تلقائي.
-        """
         try:
             cached = await settings_cache.get_security(chat_id)
         except Exception as e:
@@ -1478,15 +1427,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _invalidate_security_settings_cache(chat_id: int) -> None:
-        """
-        ✅ v9.4.24: إبطال الكاش الموحّد + كاش الإحصائيات المحلي.
-
-        - settings_cache.invalidate_security: الإعدادات (مشترك مع message)
-        - _security_stats_cache_local: الإحصائيات (محلي، خاص بهذا الملف)
-
-        ملاحظة: لا يوجد كاش محلي للإعدادات بعد v9.4.24.
-        """
-        # 1) الإعدادات — كاش مشترك
         try:
             await settings_cache.invalidate_security(chat_id)
         except Exception as e:
@@ -1494,7 +1434,6 @@ class CallbackHandlers:
                 f"settings_cache.invalidate_security({chat_id}): {e}"
             )
 
-        # 2) الإحصائيات — كاش محلي
         try:
             await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
         except Exception:
@@ -1543,10 +1482,6 @@ class CallbackHandlers:
             task.add_done_callback(ACTIVE_TASKS.discard)
         except Exception as e:
             logger.error(f"_render_security_two_phase: {e}", exc_info=True)
-
-    # ═════════════════════════════════════════════════════════════
-    # القائمة الرئيسية
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id) -> bool:
@@ -1629,10 +1564,6 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_show_main_menu_inline: {e}", exc_info=True)
             return False
-
-    # ═════════════════════════════════════════════════════════════
-    # Parameterized
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
@@ -2195,10 +2126,6 @@ class CallbackHandlers:
                 pass
             return True
 
-    # ═════════════════════════════════════════════════════════════
-    # Refresh
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _refresh_security_view(query, context, chat_id, lang):
         try:
@@ -2207,10 +2134,6 @@ class CallbackHandlers:
                 query, context, chat_id, lang, force_refresh_settings=False)
         except Exception as e:
             logger.error(f"_refresh_security_view: {e}", exc_info=True)
-
-    # ═════════════════════════════════════════════════════════════
-    # معالجات صغيرة
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _render_settings(query, context, user_id, lang):
@@ -2307,10 +2230,6 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_handle_reminder_toggle: {e}", exc_info=True)
 
-    # ═════════════════════════════════════════════════════════════
-    # قائمة الترجمة
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _render_translation_menu(query, context, user_id, lang):
         try:
@@ -2386,10 +2305,6 @@ class CallbackHandlers:
             lang = await DB.get_user_language(user_id) or 'ar'
             await safe_edit(query,
                 await _trans('invalid_data', lang, "❌"), bot=context.bot)
-
-    # ═════════════════════════════════════════════════════════════
-    # معالجات فرعية
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_buy_subscription(update, context, query, user_id, data, lang):
@@ -2795,12 +2710,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _preload_group_security(chat_id: int) -> None:
-        """
-        ✅ v9.4.24: يُحمّل مسبقاً في الكاش المشترك (settings_cache).
-        الإحصائيات تبقى في الكاش المحلي.
-        """
         try:
-            # ✅ v9.4.24: الإعدادات — كاش مشترك
             try:
                 cached = await settings_cache.get_security(chat_id)
             except Exception:
@@ -2816,7 +2726,6 @@ class CallbackHandlers:
                         f"_preload_group_security set_security({chat_id}): {e}"
                     )
 
-            # الإحصائيات — كاش محلي (لا يُستَخدم في handlers_message)
             stats_key = f"sec_stats_{chat_id}"
             cached_stats = await _security_stats_cache_local.get(stats_key)
             if cached_stats is None:
@@ -3168,10 +3077,6 @@ class CallbackHandlers:
         display_text = text if posts else await _trans('no_posts', lang, "📭")
         await safe_edit(query, display_text,
                         reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
-
-    # ═════════════════════════════════════════════════════════════
-    # Security handlers
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
@@ -3588,10 +3493,6 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # قناة السجل
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
         data = await _get_log_channel_menu_data(chat_id)
@@ -3758,10 +3659,6 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # دوال عرض الأمان
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
         settings = await CallbackHandlers._get_security_settings_cached(chat_id)
@@ -3812,29 +3709,17 @@ class CallbackHandlers:
             await _trans('choose_warn_penalty', lang, "⚖️"),
             reply_markup=kb, bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # ✅ v9.4.25: قائمة الكلمات المحظورة — الأيقونة تعكس الحالة الحالية
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _show_banned_words_menu(update, context, query, chat_id, lang):
-        """
-        ✅ v9.4.25: الأيقونة تعكس الحالة الحالية (وليس الإجراء)
-            - ✅ = الميزة مفعّلة الآن (الحذف يعمل)
-            - ❌ = الميزة معطّلة الآن (الحذف لا يعمل)
-            - النص بين قوسين يوضح ما سيحدث عند الضغط
-        """
         settings = await CallbackHandlers._get_security_settings_cached(chat_id)
         is_enabled = _coerce_int(settings.get('delete_banned_words'), 0)
 
         if is_enabled:
-            # ✅ مفعّلة الآن → الحذف يعمل
             toggle_text = await _trans(
                 'banned_words_btn_on', lang,
                 "✅ حذف الكلمات المحظورة: مفعّل (اضغط للتعطيل)"
             )
         else:
-            # ❌ معطّلة الآن → الحذف لا يعمل
             toggle_text = await _trans(
                 'banned_words_btn_off', lang,
                 "❌ حذف الكلمات المحظورة: معطّل (اضغط للتفعيل)"
@@ -4109,10 +3994,6 @@ class CallbackHandlers:
             await _trans('choose_penalty_type', lang, "🚫"),
             reply_markup=kb, bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # Admin
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_admin(update, context, query, user_id, lang=None):
         if not CONFIG.is_developer(user_id):
@@ -4125,9 +4006,6 @@ class CallbackHandlers:
         data = query.data
 
         try:
-            # ═══════════════════════════════════════════════════════
-            # ✅ v9.4.22: شاشة إدارة قناة التحديثات
-            # ═══════════════════════════════════════════════════════
             if data == "admin_update_ch_btn":
                 await CallbackHandlers._show_admin_update_channel_menu(
                     query, context, user_id, lang)
@@ -4158,10 +4036,6 @@ class CallbackHandlers:
                         await _trans('save_failed', lang, "❌ فشل الحذف"),
                         bot=context.bot)
                 return
-
-            # ═══════════════════════════════════════════════════════
-            # باقي أزرار الأدمن
-            # ═══════════════════════════════════════════════════════
 
             if data == "admin_grant_free":
                 StateManager.set(user_id, UserState.WAIT_GRANT_FREE)
@@ -4639,12 +4513,10 @@ class CallbackHandlers:
                     await invalidate_user_cache(user_id)
                 except Exception:
                     pass
-                # ✅ v9.4.24: كاش الإحصائيات محلي
                 try:
                     await _security_stats_cache_local.clear()
                 except Exception:
                     pass
-                # ✅ v9.4.24: الكاش المشترك (settings + auto_reply) — كامل
                 try:
                     await settings_cache.invalidate_security()
                 except Exception as e:
@@ -5081,10 +4953,6 @@ class CallbackHandlers:
             logger.error(f"_show_restore_backups: {e}", exc_info=True)
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
-
-    # ═════════════════════════════════════════════════════════════
-    # Analytics
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_analytics_menu(query, context, user_id, lang):
@@ -5526,10 +5394,6 @@ class CallbackHandlers:
         wb.save(file_path)
         return file_path
 
-    # ═════════════════════════════════════════════════════════════
-    # Auto replies — إصلاح bool/int
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_auto_reply(update, context, query, user_id, lang=None):
         if not lang:
@@ -5746,10 +5610,6 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # Schedule
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_schedule(update, context, query, user_id):
         lang = await DB.get_user_language(user_id) or 'ar'
@@ -5813,10 +5673,6 @@ class CallbackHandlers:
         await safe_edit(query,
             await _trans('channel_schedule_title', lang, "📅"),
             reply_markup=kb, bot=context.bot)
-
-    # ═════════════════════════════════════════════════════════════
-    # Advanced actions
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_advanced_actions(update, context, query, user_id):
@@ -5921,10 +5777,6 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # Panel
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_panel(update, context, query, user_id, data, lang='ar'):
         if not update.effective_chat:
@@ -5979,16 +5831,13 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
-    # ═════════════════════════════════════════════════════════════
-    # Contests
-    # ═════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_contests(update, context, query, user_id):
         lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
         declare_sel = getattr(CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
         contest_join = getattr(CB, 'CONTEST_JOIN', 'contest_join')
+
         try:
             if data.startswith(contest_join + ":"):
                 cid = _coerce_int(data.split(":")[-1])
@@ -5996,23 +5845,45 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"), bot=context.bot)
                     return
+
                 contest = await DB.get_contest_by_id(cid)
                 cd = _row_to_dict(contest) or {}
+
                 if not cd or cd.get('status') != 'active':
                     await safe_edit(query,
                         await _trans('no_contests', lang, "❌"), bot=context.bot)
                     StateManager.clear(user_id)
                     return
+
                 already_joined = await DB.check_contest_joined(cid, user_id)
                 if already_joined:
                     await safe_edit(query,
-                        await _trans('join_contest', lang, "❌") + " ✅",
+                        await _trans('already_joined_contest', lang,
+                                     "✅ أنت مشارك بالفعل في هذه المسابقة"),
                         bot=context.bot)
                     return
+
                 StateManager.set(user_id, UserState.WAIT_CONTEST_ANSWER)
                 context.user_data['contest_join'] = cid
-                await safe_edit(query,
-                    await _trans('send_answer_btn', lang, "📝"), bot=context.bot)
+
+                contest_type = (cd.get('contest_type') or 'raffle').lower()
+                question = cd.get('question') or ''
+
+                if contest_type == 'quiz' and question:
+                    prompt_template = await _trans(
+                        'quiz_question_prompt', lang,
+                        "❓ <b>السؤال:</b>\n{question}\n\n📝 <b>أرسل إجابتك الآن:</b>"
+                    )
+                    prompt = _fmt(prompt_template,
+                                  question=_html.escape(question))
+                    await safe_edit(
+                        query, prompt,
+                        parse_mode='HTML', bot=context.bot,
+                    )
+                else:
+                    await safe_edit(query,
+                        await _trans('send_answer_btn', lang, "📝"),
+                        bot=context.bot)
                 return
 
             if data == CB.CONTEST_WINNERS:
@@ -6035,30 +5906,52 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('unauthorized', lang, "❌"), bot=context.bot)
                     return
+
                 cid = _coerce_int(data.split(":")[-1])
                 if cid <= 0:
                     await safe_edit(query,
                         await _trans('invalid_data', lang, "❌"), bot=context.bot)
                     return
-                participants = await DB.fetchall(
-                    "SELECT user_id FROM contest_participants "
-                    "WHERE contest_id=?", (cid,))
-                if not participants:
+
+                if hasattr(DB, 'get_correct_answerers'):
+                    eligible = await DB.get_correct_answerers(cid)
+                else:
+                    logger.warning(
+                        "⚠️ get_correct_answerers غير موجودة — "
+                        "fallback إلى كل المشاركين (سلوك pre-v9.4.26)"
+                    )
+                    eligible = await DB.fetchall(
+                        "SELECT user_id FROM contest_participants "
+                        "WHERE contest_id=?", (cid,))
+
+                if not eligible:
+                    total_participants = await DB.fetchval(
+                        "SELECT COUNT(*) FROM contest_participants "
+                        "WHERE contest_id=?", (cid,), default=0)
+                    if total_participants and total_participants > 0:
+                        msg_key = 'no_correct_answerers'
+                        msg_default = "❌ لا أحد أجاب إجابة صحيحة"
+                    else:
+                        msg_key = 'no_participants_full'
+                        msg_default = "❌ لا يوجد مشاركون"
                     await safe_edit(query,
-                        await _trans('no_participants_full', lang, "❌"),
+                        await _trans(msg_key, lang, msg_default),
                         bot=context.bot)
                     return
+
                 user_ids = []
-                for p in participants:
+                for p in eligible:
                     pd = _row_to_dict(p) or {}
                     uid_val = pd.get('user_id')
                     if uid_val is not None:
                         user_ids.append(uid_val)
+
                 if not user_ids:
                     await safe_edit(query,
                         await _trans('no_participants_full', lang, "❌"),
                         bot=context.bot)
                     return
+
                 winner_id = random.choice(user_ids)
                 if await DB.declare_winner(cid, winner_id):
                     msg = _fmt(await _trans('winner_announced', lang, "✅ {winner_id}"),
@@ -6073,14 +5966,11 @@ class CallbackHandlers:
                     await safe_edit(query,
                         await _trans('declare_failed', lang, "❌"), bot=context.bot)
                 return
+
         except Exception as e:
             logger.error(f"contests: {e}", exc_info=True)
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
-
-    # ═════════════════════════════════════════════════════════════
-    # Backup
-    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _do_backup(context, user_id, lang='ar'):
