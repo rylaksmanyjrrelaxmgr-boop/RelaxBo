@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.40 — BATCH-PUBLISH)
+database.py - قاعدة البيانات المتكاملة (v7.7.41 — POOL-LIFETIME-FIX)
 ================================================================================
+🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام):
+  ✅ إصلاح جذري لبطء ~1 ثانية على كل استعلام (حتى PK lookups)
+  ✅ السبب: max_inactive_connection_lifetime=0 يعني "احتفظ بالاتصال للأبد"
+     → managed DB (DigitalOcean/Aiven/Neon) يقتل الاتصالات الخاملة صامتاً
+     → asyncpg يعيد استخدام اتصال ميت → TCP RTO الأول = 1.0 ثانية انتظار
+     → كل استعلام بسيط يأخذ 1.0-1.9s بدل 5-50ms
+  ✅ الحل:
+     - max_inactive_connection_lifetime: 0 → 60 (أقصر من أي idle timeout)
+     - tcp_keepalives_idle=30, interval=10, count=3 (كشف الميت بسرعة)
+  ✅ الأدلة (من السجل الفعلي):
+     - SELECT 1 FROM users WHERE user_id=$1 (PK) → 1.09s
+     - SELECT * FROM group_security WHERE chat_id=$1 (PK) → 1.04s
+     - UPDATE posts WHERE id=$2 (PK) → 1.19-1.26s
+     - كل الفهارس موجودة، dead tuples=119 فقط، DB=16MB → ليس I/O
+     - التباين 1.03→1.26 = (اتصال ميت) + (استعلام سريع)
+  ✅ التحسين المتوقع: 20x - 40x على كل الاستعلامات
+
 🆕 v7.7.40 (BATCH-PUBLISH — تجميع تحديثات النشر):
   ✅ mark_published_batch: transaction واحد لعدة منشورات
      - يستقبل List[Tuple[channel_db_id, post_id]]
@@ -2748,20 +2765,34 @@ class Database(
         try:
             if USE_POSTGRES:
                 async def _pg_factory():
-                    # 🆕 v7.7.36: إصلاح — إزالة "wal_writer_delay" و
-                    # "commit_delay" من server_settings.
+                    # ✅ v7.7.41: إصلاح جذري لبطء 1s+ لكل استعلام.
                     #
-                    # السبب: كلاهما sighup/postmaster context في PostgreSQL،
-                    # لا يمكن تغييرهما per-session عبر asyncpg.
-                    # asyncpg يرفع CantChangeRuntimeParamError عند فتح أي
-                    # اتصال جديد → فشل كامل في create_pool → فشل bootstrap.
+                    # السبب المُثبَت من التحليل:
+                    #   max_inactive_connection_lifetime=0 تعني
+                    #   "احتفظ بالاتصال للأبد" — لكن managed DB
+                    #   (DigitalOcean / Aiven / Neon / Supabase) يقتل
+                    #   الاتصالات الخاملة صامتاً بعد ~60-90 ثانية.
+                    #   asyncpg لا يعرف ذلك ويعيد الاتصال الميت →
+                    #   TCP RTO الأول = 1.0 ثانية انتظار قبل إعادة
+                    #   الإرسال. كل استعلام بسيط (حتى PK lookup)
+                    #   يصبح 1.0-1.9s بدل 5-50ms.
                     #
-                    # بعد synchronous_commit=off، لم يعد لهذين الإعدادين
-                    # تأثير على أداء الـ commit أصلاً.
+                    # الأدلة من السجل الفعلي:
+                    #   - SELECT 1 FROM users WHERE user_id=$1 → 1.09s
+                    #   - SELECT * FROM group_security WHERE chat_id=$1 → 1.04s
+                    #   - UPDATE posts WHERE id=$2 → 1.19-1.26s
+                    #   - كل الفهارس موجودة، dead tuples=119، DB=16MB
+                    #   - التباين 1.03→1.26 = (اتصال ميت) + (استعلام سريع)
                     #
-                    # المخاطرة المتبقية من synchronous_commit=off:
-                    #   قد تُفقد آخر ~200ms من المعاملات عند crash مفاجئ
-                    #   للـ PostgreSQL. مقبول لهذا النوع من التطبيقات.
+                    # الحل:
+                    #   - max_inactive_connection_lifetime: 0 → 60
+                    #     (أقصر من أي idle timeout على managed services)
+                    #   - tcp_keepalives_idle=30, interval=10, count=3
+                    #     (كشف الميت خلال 30s بدل انتظار RTO)
+                    #
+                    # ملاحظة v7.7.36 (محفوظة): لا "wal_writer_delay" ولا
+                    # "commit_delay" — كلاهما sighup context، غير قابل
+                    # للتغيير per-session. synchronous_commit=off كافٍ.
                     try:
                         pool = await asyncpg.create_pool(
                             dsn=DATABASE_URL,
@@ -2770,13 +2801,18 @@ class Database(
                             timeout=self._connection_timeout,
                             command_timeout=self._connection_timeout,
                             statement_cache_size=500,
-                            max_inactive_connection_lifetime=0,
+                            # ✅ v7.7.41: 0 → 60
+                            max_inactive_connection_lifetime=60,
                             server_settings={
                                 "application_name": "RelaxManager",
                                 "statement_timeout": "30s",
                                 "timezone": "UTC",
                                 # المفتاح الوحيد المسموح per-session:
                                 "synchronous_commit": "off",
+                                # ✅ v7.7.41: TCP keepalives
+                                "tcp_keepalives_idle": "30",
+                                "tcp_keepalives_interval": "10",
+                                "tcp_keepalives_count": "3",
                             },
                         )
                     except asyncpg.exceptions.CantChangeRuntimeParamError as _cfg_e:
@@ -2810,7 +2846,8 @@ class Database(
                     f"✅ Pool PostgreSQL جاهز "
                     f"(min={max(5, self._min_connections)}, "
                     f"max={self._max_connections}) "
-                    f"[synchronous_commit=off]"
+                    f"[synchronous_commit=off, "
+                    f"max_inactive_lifetime=60s, TCP-keepalive=30s]"
                 )
             elif USE_MYSQL:
                 try:
