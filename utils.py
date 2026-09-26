@@ -2,23 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.15 - Batch Publish)
+utils.py - الأدوات المساعدة للبوت (v7.9.16 - Batch Publish + Semaphore Fix)
 =================================================================================
-🆕 v7.9.15 (BATCH-PUBLISH-FIX — إصلاح بطء النشر):
-    ✅ السبب الفعلي لبطء النشر (1.23s لكل UPDATE):
-       - auto_publish كانت تُشغّل transaction كامل لكل قناة:
-         BEGIN → UPDATE posts → INSERT last_publish → SELECT schedule
-         → INSERT schedule → COMMIT  = 6 round-trips × N قناة
-       - مع 8 قنوات = 48 round-trip × ~150ms شبكة = ~7s إجمالية
-    ✅ الحل: استخدام DB.mark_published_batch() الموجود في database.py v7.7.40
-       - N قناة × 6 round-trips → 5 round-trips إجمالية
-       - توفير ~9x في زمن النشر
-    ✅ متوافق مع DB قديم (fallback تلقائي إلى mark_published_and_advance)
-    ✅ _publish_channels_batch() جديدة: transaction واحد لكل القنوات
-    ✅ auto_publish(): BATCH mode عندما mark_published_batch متاح
-    ✅ لا تغيير على أي منطق آخر — كل السلوك محفوظ 100%
+🆕 v7.9.16 (CONNECTION-EXPLOSION-FIX):
+    ✅ إصلاح خطأ v7.9.15 الذي سبّب TooManyConnectionsError:
+       - v7.9.15 استخدم asyncio.gather بدون semaphore
+       - 20 قناة = 20 استعلام متزامن = تجاوز pool
+       - النتيجة: asyncpg.exceptions.TooManyConnectionsError
+    ✅ الحل: semaphore(4) حول استعلامات DB المتوازية
+       - في auto_publish: فلترة الاشتراكات بحد 4 متزامن
+       - في _publish_channels_batch: جلب المنشورات بحد 4 متزامن
+    ✅ الفائدة:
+       - DB_POOL_SIZE=20 يعمل بشكل آمن
+       - لا TooManyConnectionsError
+       - السرعة محفوظة (v7.9.15 كانت سريعة)
+    ✅ كل شيء آخر محفوظ 100%
 
-🆕 v7.9.14 (أزرار مدة المسابقة بدل التاريخ النصي)
+🆕 v7.9.15 (BATCH-PUBLISH)
+🆕 v7.9.14 (أزرار مدة المسابقة)
 🆕 v7.9.13 (استعادة سلوك النشر الفوري)
 🆕 v7.9.11 (دمج معاملات النشر)
 🆕 v7.9.10 (إصلاح Forbidden في safe_send)
@@ -3104,7 +3105,7 @@ def reload_replies_from_file() -> dict:
 
 
 # =====================================================================
-# 16.1 ✅ v7.9.15: helper لـ batch publish
+# 16.1 ✅ v7.9.16: helper لـ batch publish
 # =====================================================================
 
 async def _immediate_false() -> bool:
@@ -3124,6 +3125,9 @@ class BackgroundTasks:
     POOL_MONITOR_INTERVAL = 60
     POOL_ALERT_THRESHOLD = 85.0
     POOL_ALERT_COOLDOWN = 600
+
+    # ✅ v7.9.16: حد التزامن لاستعلامات النشر (يمنع TooManyConnections)
+    PUBLISH_DB_CONCURRENCY = 4
 
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
@@ -3344,7 +3348,7 @@ class BackgroundTasks:
         """
         ✅ v7.9.13: السلوك مطابق 100% لـ v7.9.11.
 
-        ملاحظة v7.9.15: تبقى كما هي — تُستخدم فقط في LEGACY PATH
+        ملاحظة v7.9.16: تبقى كما هي — تُستخدم فقط في LEGACY PATH
                         عندما mark_published_batch غير متاح.
         """
         user_id = None
@@ -3378,25 +3382,24 @@ class BackgroundTasks:
             return False
 
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v7.9.15: BATCH PATH — نشر عدة قنوات في transaction واحد
+    # 🆕 v7.9.16: BATCH PATH مع semaphore (يمنع TooManyConnections)
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _publish_channels_batch(bot, channels: List[Dict]) -> int:
         """
-        🆕 v7.9.15: نشر مجموعة قنوات في transaction واحد.
+        🆕 v7.9.16: نشر مجموعة قنوات في transaction واحد.
 
-        المشكلة قبل:
-          - لكل قناة: BEGIN → UPDATE → INSERT → SELECT → INSERT → COMMIT
-          - 6 round-trips × N قناة × ~150ms شبكة = 7s لـ 8 قنوات
+        إصلاح v7.9.16:
+          - v7.9.15 استخدم asyncio.gather بدون semaphore
+          - 20 قناة = 20 استعلام متزامن = تجاوز pool
+          - النتيجة: TooManyConnectionsError
+          - الحل: semaphore(4) حول استعلامات DB
 
-        بعد:
-          - SELECT منشور لكل قناة (متوازي)
-          - إرسال Telegram (متوازي)
-          - mark_published_batch() = 5 round-trips إجمالية
-          - 8 قنوات = ~750ms
-
-        متوافق مع DB قديم: fallback إلى mark_published_and_advance.
+        الفائدة:
+          - DB_POOL_SIZE=20 يعمل بشكل آمن
+          - لا TooManyConnectionsError
+          - السرعة محفوظة
 
         Returns:
             عدد المنشورات المنشورة بنجاح (المُحدَّثة في DB).
@@ -3405,14 +3408,29 @@ class BackgroundTasks:
             return 0
 
         # ═══════════════════════════════════════════════════════════
-        # 1) جلب المنشور لكل قناة (بالتوازي)
+        # 🔧 v7.9.16: semaphore لمنع انفجار الاتصالات
+        # بدون هذا، 20 قناة = 20 استعلام متزامن = تجاوز pool
         # ═══════════════════════════════════════════════════════════
-        fetch_tasks = [
-            DB.get_next_post(ch['id'])
-            for ch in channels
-        ]
+        conn_sem = asyncio.Semaphore(
+            BackgroundTasks.PUBLISH_DB_CONCURRENCY
+        )
+
+        async def _fetch_post_safe(ch):
+            async with conn_sem:
+                try:
+                    return await DB.get_next_post(ch['id'])
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ fetch_post {ch.get('id')}: {e}"
+                    )
+                    return None
+
+        # ═══════════════════════════════════════════════════════════
+        # 1) جلب المنشور لكل قناة (بحد 4 متزامن)
+        # ═══════════════════════════════════════════════════════════
         fetch_results = await asyncio.gather(
-            *fetch_tasks, return_exceptions=True
+            *[_fetch_post_safe(ch) for ch in channels],
+            return_exceptions=True
         )
 
         candidates: List[Tuple[Dict, Dict, bool]] = []
@@ -3428,7 +3446,7 @@ class BackgroundTasks:
             return 0
 
         # ═══════════════════════════════════════════════════════════
-        # 2) إرسال إلى Telegram (بالتوازي)
+        # 2) إرسال إلى Telegram (بالتوازي — لا يستهلك DB pool)
         # ═══════════════════════════════════════════════════════════
         send_tasks = [
             BackgroundTasks._publish_post(bot, ch['channel_id'], post)
@@ -3468,6 +3486,13 @@ class BackgroundTasks:
                         await DB.mark_published_and_advance(ch_id, post_id)
             except Exception as e:
                 logger.error(f"❌ mark_published_batch: {e}")
+                # ⚠️ fallback إجباري لمنع إعادة النشر (منشورات مكررة)
+                logger.warning(
+                    f"⚠️ fallback فردي لـ {len(pairs)} قناة..."
+                )
+                for ch_id, post_id in pairs:
+                    with suppress(Exception):
+                        await DB.mark_published_and_advance(ch_id, post_id)
 
         # ═══════════════════════════════════════════════════════════
         # 5) تحديث فشل المنشورات
@@ -3492,7 +3517,7 @@ class BackgroundTasks:
     @staticmethod
     async def auto_publish(bot) -> None:
         """
-        ✅ v7.9.15: BATCH mode افتراضياً (mark_published_batch).
+        ✅ v7.9.16: BATCH mode مع semaphore (يمنع TooManyConnections).
 
         قبل: N × 6 round-trips = ~7s لـ 8 قنوات.
         بعد: 5 round-trips إجمالية = ~750ms لـ 8 قنوات.
@@ -3526,22 +3551,28 @@ class BackgroundTasks:
                     continue
 
                 # ═══════════════════════════════════════════════════
-                # 🆕 v7.9.15: BATCH PATH
+                # 🆕 v7.9.16: BATCH PATH مع semaphore
                 # ═══════════════════════════════════════════════════
                 if use_batch:
-                    # تصفية حسب الاشتراك (بالتوازي)
-                    sub_tasks = []
-                    for ch in channels:
-                        uid = ch.get('user_id')
-                        if uid:
-                            sub_tasks.append(
-                                DB.has_active_subscription(uid)
-                            )
-                        else:
-                            sub_tasks.append(_immediate_false())
+                    # 🔧 v7.9.16: semaphore لمنع انفجار الاتصالات
+                    # بدون هذا، 20 قناة = 20 استعلام متزامن = تجاوز pool
+                    sub_sem = asyncio.Semaphore(
+                        BackgroundTasks.PUBLISH_DB_CONCURRENCY
+                    )
+
+                    async def _check_sub(ch):
+                        async with sub_sem:
+                            uid = ch.get('user_id')
+                            if not uid:
+                                return False
+                            try:
+                                return await DB.has_active_subscription(uid)
+                            except Exception:
+                                return False
 
                     sub_results = await asyncio.gather(
-                        *sub_tasks, return_exceptions=True
+                        *[_check_sub(ch) for ch in channels],
+                        return_exceptions=True
                     )
 
                     active: List[Dict] = []
