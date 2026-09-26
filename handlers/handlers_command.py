@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.28
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.29
 ===================================================================================
+🆕 v7.5.29 (CONTEST DESCRIPTION DISPLAY):
+    ✅ contests(): عرض الوصف 📝 (كان لا يظهر)
+    ✅ contests(): عرض نوع المسابقة 🎲/❓
+    ✅ contests(): عرض السؤال للـ quiz (اختصار 60 حرف)
+    ✅ contests(): تخطيط multi-line منظم مع فواصل
+
 🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن):
     ✅ db_diag: يستخدم diagnose_db_split() بدل القصّ اليدوي
        - يتجنب فشل Telegram عند > 4096 حرف
@@ -69,6 +75,13 @@ CHANNEL_BOT_ID = 136817688      # ChannelBot
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 DB_DIAG_SPLIT_DELAY = 0.35      # ثوانٍ بين أجزاء /db_diag
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.29: طول الوصف المعروض في قائمة المسابقات
+# ═══════════════════════════════════════════════════════════════════
+
+CONTEST_DESC_DISPLAY_MAX = 80
+CONTEST_QUESTION_DISPLAY_MAX = 60
 
 # ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.27: import دالة تحليل المشاعر مع fallback
@@ -856,6 +869,10 @@ class CommandHandlers:
             parse_mode=None,
         )
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ✅ v7.5.29: contests — يعرض الوصف الآن
+    # ═══════════════════════════════════════════════════════════════════
+
     @staticmethod
     async def contests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -875,28 +892,70 @@ class CommandHandlers:
 
         text = f"🏆 <b>{active_label}</b>\n\n"
         kb = []
+
         for c in contests:
             c_d = _row_to_dict(c)
-            end_date = c_d.get('end_date') or ''
-            title = escape(str(c_d.get('title', '')))
-            prize = escape(str(c_d.get('prize', '')))
-            participants = c_d.get('participants', 0)
+            if not c_d:
+                continue
+
             c_id = c_d.get('id')
             if c_id is None:
                 continue
-            text += (
-                f"• <b>{title}</b>\n"
-                f"  🎁 {prize}\n"
-                f"  📅 {escape(str(end_date)[:10])}\n"
-                f"  👥 {participants_label}: {participants}\n\n"
-            )
+
+            title = escape(str(c_d.get('title') or '—'))
+            prize = escape(str(c_d.get('prize') or '—'))
+            description = str(c_d.get('description') or '').strip()
+            question = str(c_d.get('question') or '').strip()
+            contest_type = (str(c_d.get('contest_type') or 'raffle')).lower()
+            end_date = str(c_d.get('end_date') or '')
+            participants = c_d.get('participants', 0)
+
+            # ── نوع المسابقة ──
+            if contest_type == 'quiz':
+                type_icon = "❓"
+                type_label = "سؤال وجواب"
+            else:
+                type_icon = "🎲"
+                type_label = "سحب عشوائي"
+
+            # ── سطر العنوان ──
+            text += f"• <b>{title}</b>\n"
+
+            # ── سطر الوصف (جديد v7.5.29) ──
+            if description:
+                if len(description) > CONTEST_DESC_DISPLAY_MAX:
+                    description = description[:CONTEST_DESC_DISPLAY_MAX].rstrip() + "…"
+                text += f"  📝 {escape(description)}\n"
+
+            # ── سطر السؤال (للـ quiz فقط) ──
+            if contest_type == 'quiz' and question:
+                if len(question) > CONTEST_QUESTION_DISPLAY_MAX:
+                    question_disp = question[:CONTEST_QUESTION_DISPLAY_MAX].rstrip() + "…"
+                else:
+                    question_disp = question
+                text += f"  ❓ السؤال: {escape(question_disp)}\n"
+
+            # ── السطر الرئيسي: الجائزة + النوع ──
+            text += f"  🎁 {prize}  |  {type_icon} {type_label}\n"
+
+            # ── سطر التاريخ ──
+            if end_date:
+                text += f"  📅 {escape(end_date[:16])}\n"
+
+            # ── سطر المشاركين ──
+            text += f"  👥 {participants_label}: {participants}\n\n"
+
+            # ── زر المشاركة ──
+            button_label = f"{join_text} {title[:20]}"
             kb.append([InlineKeyboardButton(
-                f"{join_text} {title[:20]}",
+                button_label,
                 callback_data=f"{CB.CONTEST_JOIN}:{c_id}"
             )])
+
         kb.append([InlineKeyboardButton(
             KeyboardFactory.get_text("back", lang), callback_data=CB.BACK
         )])
+
         await _safe_edit_or_send(
             update, context, text,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML'
