@@ -2,42 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.3)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.5)
 ================================================================================
+🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX):
+    ✅ تصحيح تعليق متناقض في contest_cleanup:
+       • كان التعليق يقول "نرمي الاستثناء" لكن الكود لا يرمي
+       • الآن التعليق يعكس السلوك الفعلي: معالجة داخلية + متابعة
+    ✅ contest_cleanup يُدار مباشرة (create_task) بدل run_task_with_retry
+       • السبب: الدالة تُدير أخطاءها داخليًا
+       • run_task_with_retry كان سيُعيد sleep(300) عند أي فشل عابر
+       • الآن: كل فشل → تسجيل + متابعة بعد ساعة (لا إعادة تهيئة)
+    ✅ تحسين رسالة الخطأ: "سيُعاد بعد ساعة" للوضوح
+
+🆕 v5.5.4 (CONTEST-AUTO-CLEANUP):
+    ✅ مهمة دورية جديدة: contest_cleanup
+       • كل ساعة: DB.close_expired_contests()
+       • تُلغي المسابقات المنتهية (status='active' + end_date<=now)
+       • تمنع تراكم مسابقات ميتة في واجهة المستخدم
+    ✅ انتظار 5 دقائق أولي قبل أول تشغيل
+
 🆕 v5.5.3 (GIFT-CODE-FLOW-FIX):
     ✅ إصلاح ترتيب معالجة كود الهدية في successful_payment:
        • كان: create_gift_code → mark_invoice_paid
        • صار: mark_invoice_paid → create_gift_code
-       • السبب: لو فشل mark_invoice_paid بعد إنشاء الكود،
-         يبقى الكود "يتيم" + الفاتورة معلقة
-       • الآن: نضمن توثيق الدفع أولاً، ثم إنشاء الكود
-       • معالجة أفضل لـ create_gift_code فشل (رسالة واضحة للمستخدم)
-    ✅ إصلاح تنسيق رسالة كود الهدية:
-       • كان: `{code}` مع backticks (تظهر ظاهرة)
-       • صار: <code>{code}</code> مع parse_mode='HTML'
-       • الآن: الكود يظهر monospace نظيف + عناوين bold
+    ✅ إصلاح تنسيق رسالة كود الهدية (HTML بدل backticks)
 
 🆕 v5.5.2 (STATS-COMMAND-FIX):
     ✅ نقل "stats" من PUBLIC_COMMANDS → ADMIN_COMMANDS
-    ✅ السبب: CommandHandlers.stats يرفض غير المطورين، فوجوده في
-       القائمة العامة كان يعطي تجربة UX سيئة ("❌ غير مصرح")
-    ✅ الآن لا يرى المستخدم العادي الأمر إلا إذا كان أدمن
-    ✅ لا تغيير في كود المعالج — فقط في الـ scoping
 
 🆕 v5.5.1 (COLLECT-ADMIN-FIX):
-    ✅ _collect_admin_ids: يجرّب عدة أسماء دوال للحصول على قائمة الأدمن
-        • get_admin_list  ← الصحيح في المشروع
-        • get_all_admins  ← fallback
-        • get_admins      ← fallback
-    ✅ يحل مشكلة: الأدمن من DB لم يُسجَّلوا عند restart
+    ✅ _collect_admin_ids: يجرّب عدة أسماء دوال
 
-🆕 v5.5.0 (COMMAND SCOPING — إخفاء الأوامر الإدارية عن المستخدم العادي):
-    ✅ تقسيم private_commands إلى public_commands + admin_commands
-    ✅ الأوامر العامة → BotCommandScopeAllPrivateChats
-    ✅ الأوامر الإدارية → BotCommandScopeChat لكل أدمن
-    ✅ حذف Default Scope القديم
+🆕 v5.5.0 (COMMAND SCOPING):
+    ✅ تقسيم الأوامر إلى public + admin + group scopes
     ✅ refresh_admin_commands() — تحديث أدمن بلا restart
-    ✅ _collect_admin_ids() — جمع أدمن من CONFIG + DB
 
 🆕 v5.4.3 (Maintenance integration)
 🆕 v5.4.2 (DB Diagnostics)
@@ -1239,6 +1237,9 @@ async def main():
     async def run_task_with_retry(task_func, *args, task_name=""):
         """
         ✅ v5.2.0: تشغيل المهمة مع إعادة محاولة + تقرير دوري.
+
+        يُستخدم للمهام التي لا تُدير أخطاءها داخليًا.
+        أي استثناء → تسجيل + إعادة تشغيل بعد backoff متزايد.
         """
         consecutive_failures = 0
         while True:
@@ -1272,6 +1273,51 @@ async def main():
             except Exception as e:
                 logger.error(f"❌ cleanup_locks failed: {e}")
                 await asyncio.sleep(60)
+
+    # ✅ v5.5.5: مهمة إلغاء المسابقات المنتهية (كل ساعة)
+    async def contest_cleanup():
+        """
+        يُلغي المسابقات التي انتهت مدتها بدون إعلان فائز.
+
+        السلوك:
+          • انتظار 5 دقائق أولي عند الإقلاع (منح bootstrap فرصة
+            لإكمال إنشاء جداول المسابقات)
+          • حلقة لا نهائية: كل ساعة → DB.close_expired_contests()
+          • يعالج أخطاءه داخليًا (لا يرمي) → أي فشل عابر لا يُعيد
+            تنفيذ الـ sleep(300) الأولي، فقط يُسجَّل ويُتابع بعد ساعة
+          • يُلغى بشكل نظيف عند إيقاف البوت
+
+        يعتمد على:
+          • database_contests.py → close_expired_contests()
+          • يُدار مباشرة عبر asyncio.create_task (لا run_task_with_retry)
+        """
+        # انتظار أولي — يُنفَّذ مرة واحدة فقط عند الإقلاع
+        try:
+            await asyncio.sleep(300)
+        except asyncio.CancelledError:
+            raise
+
+        while True:
+            try:
+                count = await DB.close_expired_contests()
+                if count and count > 0:
+                    logger.info(
+                        f"✅ contest_cleanup: أُلغيت {count} مسابقة منتهية"
+                    )
+            except asyncio.CancelledError:
+                logger.info("🛑 contest_cleanup أُلغيت")
+                raise
+            except Exception as e:
+                # نسجّل ونتابع — الخطأ عابر، ولا نُعيد تنفيذ sleep(300)
+                logger.error(
+                    f"❌ contest_cleanup (سيُعاد بعد ساعة): {e}",
+                    exc_info=True,
+                )
+
+            try:
+                await asyncio.sleep(3600)  # كل ساعة
+            except asyncio.CancelledError:
+                raise
 
     tasks = [
         asyncio.create_task(run_task_with_retry(keep_alive, task_name="keep_alive")),
@@ -1307,6 +1353,10 @@ async def main():
                 task_name="monitor_pool_alert"
             )
         ),
+        # ✅ v5.5.5: إلغاء المسابقات المنتهية (كل ساعة)
+        # ملاحظة: لا نستخدم run_task_with_retry هنا لأن contest_cleanup
+        # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
+        asyncio.create_task(contest_cleanup()),
     ]
 
     # ✅ v5.4.3: الصيانة الدورية لقاعدة البيانات (كل 24 ساعة)
