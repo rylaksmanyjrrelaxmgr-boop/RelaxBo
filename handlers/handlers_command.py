@@ -4,11 +4,11 @@
 """
 handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.29
 ===================================================================================
-🆕 v7.5.29 (CONTEST DESCRIPTION DISPLAY):
+🆕 v7.5.29 (CONTEST DISPLAY I18N + DESCRIPTION):
     ✅ contests(): عرض الوصف 📝 (كان لا يظهر)
-    ✅ contests(): عرض نوع المسابقة 🎲/❓
+    ✅ contests(): عرض نوع المسابقة 🎲/❓ من الترجمة
     ✅ contests(): عرض السؤال للـ quiz (اختصار 60 حرف)
-    ✅ contests(): تخطيط multi-line منظم مع فواصل
+    ✅ contests(): كل النصوص مترجَمة عبر _trans()
 
 🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن):
     ✅ db_diag: يستخدم diagnose_db_split() بدل القصّ اليدوي
@@ -77,7 +77,7 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 DB_DIAG_SPLIT_DELAY = 0.35      # ثوانٍ بين أجزاء /db_diag
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.29: طول الوصف المعروض في قائمة المسابقات
+# ✅ v7.5.29: حدود عرض الوصف والسؤال في قائمة المسابقات
 # ═══════════════════════════════════════════════════════════════════
 
 CONTEST_DESC_DISPLAY_MAX = 80
@@ -870,7 +870,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════════
-    # ✅ v7.5.29: contests — يعرض الوصف الآن
+    # ✅ v7.5.29: contests — يعرض الوصف والسؤال والنوع من الترجمة
     # ═══════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -889,6 +889,13 @@ class CommandHandlers:
         active_label = await _trans('active_contests', lang, "المسابقات النشطة")
         participants_label = await _trans('participants', lang, "المشاركون")
         join_text = await _trans('join_contest', lang, "✍️ المشاركة")
+
+        # 🌐 تسميات النوع + السؤال
+        type_name_raffle = await _trans('contest_type_raffle_name', lang,
+                                        "سحب عشوائي")
+        type_name_quiz = await _trans('contest_type_quiz_name', lang,
+                                      "سؤال وجواب")
+        q_label = await _trans('contest_question_label', lang, "❓ السؤال:")
 
         text = f"🏆 <b>{active_label}</b>\n\n"
         kb = []
@@ -910,18 +917,18 @@ class CommandHandlers:
             end_date = str(c_d.get('end_date') or '')
             participants = c_d.get('participants', 0)
 
-            # ── نوع المسابقة ──
+            # 🌐 نوع المسابقة
             if contest_type == 'quiz':
                 type_icon = "❓"
-                type_label = "سؤال وجواب"
+                type_label = type_name_quiz
             else:
                 type_icon = "🎲"
-                type_label = "سحب عشوائي"
+                type_label = type_name_raffle
 
             # ── سطر العنوان ──
             text += f"• <b>{title}</b>\n"
 
-            # ── سطر الوصف (جديد v7.5.29) ──
+            # ── سطر الوصف ──
             if description:
                 if len(description) > CONTEST_DESC_DISPLAY_MAX:
                     description = description[:CONTEST_DESC_DISPLAY_MAX].rstrip() + "…"
@@ -933,9 +940,9 @@ class CommandHandlers:
                     question_disp = question[:CONTEST_QUESTION_DISPLAY_MAX].rstrip() + "…"
                 else:
                     question_disp = question
-                text += f"  ❓ السؤال: {escape(question_disp)}\n"
+                text += f"  {q_label} {escape(question_disp)}\n"
 
-            # ── السطر الرئيسي: الجائزة + النوع ──
+            # ── السطر الرئيسي ──
             text += f"  🎁 {prize}  |  {type_icon} {type_label}\n"
 
             # ── سطر التاريخ ──
