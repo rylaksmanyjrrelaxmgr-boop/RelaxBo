@@ -2,22 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.27)
+handlers_callback.py - معالج الأزرار (v9.4.28)
 =====================================================================
+🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي):
+    ✅ CONTEST_DURATIONS: 11 مدة جاهزة (ساعة → سنة)
+    ✅ handle(): معالج جديد `contest_duration:*`
+       - يحسب end_date تلقائياً (now + seconds)
+       - يحفظ في context.user_data
+       - ينتقل إلى اختيار النوع
+    ✅ handle(): معالج `contest_type_raffle`
+       - يُنشئ المسابقة فوراً
+    ✅ handle(): معالج `contest_type_quiz`
+       - يطلب السؤال (StateManager.WAIT_CONTEST_QUESTION)
+    ✅ لا تغيير على أي دالة أخرى — كل السلوك محفوظ 100%
+
 ✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب":
-    ✅ _handle_contests: استخدام مفاتيح ترجمة بدل النص المُثبَّت
-        - quiz_question_prompt: {question}
-        - already_joined_contest
-        - no_correct_answerers
-    ✅ _handle_contests: توافق خلفي (fallback) لو get_correct_answerers
-       غير موجودة في database_contests.py
-    ✅ _handle_contests: تمييز "لا مشاركين" عن "لا إجابات صحيحة"
-    ✅ رسالة "مشارك مسبقاً" أوضح (كانت join_contest + " ✅")
+    ✅ _handle_contests: استخدام مفاتيح ترجمة
+    ✅ fallback لو get_correct_answerers غابت
+    ✅ تمييز "لا مشاركين" عن "لا إجابات صحيحة"
+    ✅ رسالة "مشارك مسبقاً" أوضح
 
-✅ v9.4.26 — دعم مسابقة "سؤال وجواب":
-    ✅ _handle_contests: عرض السؤال عند المشاركة (لو quiz)
-    ✅ _handle_contests: اختيار الفائز من الصحيحين فقط
-
+✅ v9.4.26 — دعم مسابقة "سؤال وجواب"
 ✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة
 ✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C)
 ✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug)
@@ -173,6 +178,24 @@ _ANALYTICS_ALIASES: Dict[str, str] = {
 }
 
 # =====================================================================
+# ✅ v9.4.28: مدد المسابقات الجاهزة
+# =====================================================================
+
+CONTEST_DURATIONS: Dict[str, Tuple[str, int]] = {
+    "1h":  ("⏰ ساعة واحدة",  1 * 3600),
+    "6h":  ("🕐 6 ساعات",     6 * 3600),
+    "1d":  ("📅 يوم واحد",    1 * 86400),
+    "3d":  ("📅 3 أيام",      3 * 86400),
+    "1w":  ("📅 أسبوع",       7 * 86400),
+    "2w":  ("📅 أسبوعان",     14 * 86400),
+    "1mo": ("📅 شهر",         30 * 86400),
+    "2mo": ("📅 شهران",       60 * 86400),
+    "3mo": ("📅 3 أشهر",      90 * 86400),
+    "6mo": ("📅 6 أشهر",      180 * 86400),
+    "1y":  ("📅 سنة",         365 * 86400),
+}
+
+# =====================================================================
 # ثوابت
 # =====================================================================
 
@@ -324,6 +347,10 @@ def _is_valid_url(url: Optional[str]) -> bool:
         return False
     return True
 
+# =====================================================================
+# clear_lang_cache — محلي لتفادي circular import
+# =====================================================================
+
 def _clear_lang_cache_local(context) -> None:
     _cleared = False
     try:
@@ -349,6 +376,10 @@ def _clear_lang_cache_local(context) -> None:
                     context.user_data.pop(_k, None)
         except Exception as e:
             logger.debug(f"_clear_lang_cache_local fallback: {e}")
+
+# =====================================================================
+# تطبيق الحالة على أزرار auto_reply
+# =====================================================================
 
 def _apply_auto_reply_status_icons(
     kb: InlineKeyboardMarkup,
@@ -1143,6 +1174,87 @@ class CallbackHandlers:
                     update, context, query, user_id)
                 return
 
+            # ═══════════════════════════════════════════════════════════════
+            # ✅ v9.4.28: أزرار مدة المسابقة + نوع المسابقة
+            # ═══════════════════════════════════════════════════════════════
+            if data.startswith("contest_duration:"):
+                duration_key = data.split(":", 1)[1]
+
+                if duration_key not in CONTEST_DURATIONS:
+                    await safe_edit(query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
+                    return
+
+                label, seconds = CONTEST_DURATIONS[duration_key]
+                end_dt = TimeUtils.utc_now() + timedelta(seconds=seconds)
+
+                context.user_data['contest_end_date'] = end_dt.isoformat()
+                context.user_data['contest_duration_label'] = label
+                context.user_data['contest_duration_seconds'] = seconds
+
+                StateManager.set(user_id, UserState.WAIT_CONTEST_TYPE)
+
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🎲 سحب عشوائي",
+                        callback_data="contest_type_raffle")],
+                    [InlineKeyboardButton(
+                        "❓ سؤال وجواب",
+                        callback_data="contest_type_quiz")],
+                    [InlineKeyboardButton(
+                        KeyboardFactory.get_text("back", lang),
+                        callback_data=CB.ADMIN)],
+                ])
+
+                text = (
+                    f"📅 <b>المدة:</b> {label}\n"
+                    f"🕐 <b>ينتهي:</b> "
+                    f"<code>{end_dt.strftime('%Y-%m-%d %H:%M')}</code>\n\n"
+                    f"🎯 <b>اختر نوع المسابقة:</b>"
+                )
+                await safe_edit(query, text, reply_markup=kb,
+                                parse_mode='HTML', bot=context.bot)
+                return
+
+            if data == "contest_type_raffle":
+                cid = await DB.create_contest(
+                    creator_id=user_id,
+                    title=context.user_data.get('contest_title', ''),
+                    description=context.user_data.get('contest_desc', ''),
+                    prize=context.user_data.get('contest_prize', ''),
+                    end_date=context.user_data.get('contest_end_date', ''),
+                    contest_type='raffle',
+                )
+
+                duration_label = context.user_data.get('contest_duration_label', '')
+                StateManager.clear(user_id)
+                _clear_context_keys(context)
+
+                if cid:
+                    await safe_edit(
+                        query,
+                        f"✅ <b>أُنشئت المسابقة!</b>\n\n"
+                        f"🆔 <code>#{cid}</code>\n"
+                        f"🎲 النوع: سحب عشوائي\n"
+                        f"⏱️ المدة: {duration_label}\n"
+                        f"👥 المشاركون: 0",
+                        parse_mode='HTML', bot=context.bot)
+                else:
+                    await safe_edit(query,
+                        await _trans('contest_create_failed', lang,
+                                     "❌ فشل إنشاء المسابقة"),
+                        bot=context.bot)
+                return
+
+            if data == "contest_type_quiz":
+                StateManager.set(user_id, UserState.WAIT_CONTEST_QUESTION)
+                await safe_edit(query,
+                    "❓ <b>أرسل السؤال الآن:</b>",
+                    parse_mode='HTML', bot=context.bot)
+                return
+            # ═══════════════════════════════════════════════════════════════
+
             declare_sel = getattr(CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
             if data.startswith("contest_") or data.startswith(declare_sel + ":"):
                 await CallbackHandlers._handle_contests(
@@ -1227,6 +1339,10 @@ class CallbackHandlers:
                 context.user_data.pop(k, None)
         except Exception:
             pass
+
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.4.18/19: قناة التحديثات
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang):
@@ -1395,6 +1511,10 @@ class CallbackHandlers:
         await safe_edit(query, text, reply_markup=kb,
                         parse_mode='HTML', bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # دوال الأمان — v9.4.24: كاش موحّد
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _get_security_settings_cached(chat_id: int) -> Dict:
         try:
@@ -1483,6 +1603,10 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_render_security_two_phase: {e}", exc_info=True)
 
+    # ═════════════════════════════════════════════════════════════
+    # القائمة الرئيسية
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id) -> bool:
         try:
@@ -1564,6 +1688,10 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_show_main_menu_inline: {e}", exc_info=True)
             return False
+
+    # ═════════════════════════════════════════════════════════════
+    # Parameterized
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
@@ -3078,6 +3206,10 @@ class CallbackHandlers:
         await safe_edit(query, display_text,
                         reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # Security handlers
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_security(update, context, query, user_id, lang=None):
         if not lang:
@@ -3493,6 +3625,10 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # قناة السجل
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
         data = await _get_log_channel_menu_data(chat_id)
@@ -3658,6 +3794,10 @@ class CallbackHandlers:
             logger.error(f"_handle_log_channel: {e}", exc_info=True)
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # دوال عرض الأمان
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_warn_count_buttons(update, context, query, chat_id, lang):
@@ -3993,6 +4133,10 @@ class CallbackHandlers:
         await safe_edit(query,
             await _trans('choose_penalty_type', lang, "🚫"),
             reply_markup=kb, bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # Admin
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_admin(update, context, query, user_id, lang=None):
@@ -4954,6 +5098,10 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # Analytics
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _show_analytics_menu(query, context, user_id, lang):
         text = await _trans('analytics_title', lang, "📊")
@@ -5394,6 +5542,10 @@ class CallbackHandlers:
         wb.save(file_path)
         return file_path
 
+    # ═════════════════════════════════════════════════════════════
+    # Auto replies
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_auto_reply(update, context, query, user_id, lang=None):
         if not lang:
@@ -5609,6 +5761,10 @@ class CallbackHandlers:
             logger.error(f"auto_reply error: {e}", exc_info=True)
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # Schedule
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_schedule(update, context, query, user_id):
@@ -5831,6 +5987,10 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # Contests — v9.4.27
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_contests(update, context, query, user_id):
         lang = await DB.get_user_language(user_id) or 'ar'
@@ -5972,6 +6132,10 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('error_occurred', lang, "❌"), bot=context.bot)
 
+    # ═════════════════════════════════════════════════════════════
+    # Backup
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _do_backup(context, user_id, lang='ar'):
         try:
@@ -6036,6 +6200,7 @@ __all__ = [
     "_get_log_channel_menu_data",
     "_invalidate_log_channel_menu_cache",
     "_ANALYTICS_ALIASES",
+    "CONTEST_DURATIONS",
     "_clear_lang_cache_local",
     "_apply_auto_reply_status_icons",
     "ACTIVE_TASKS",
