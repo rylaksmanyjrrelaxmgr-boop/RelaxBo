@@ -928,7 +928,7 @@
   "sec_reject_join": "❌ Reject join",
   "sec_nsfw": "🔞 NSFW",
   "sec_maxlen": "📏 Max length",
-  "sec_warn": "⚠️ Warns",
+  "sec_warn": "⚠️ Warnings",
   "sec_warn_count": "🔢 Warn count",
   "sec_warn_penalty": "⚖️ Warn penalty",
   "sec_warn_penalty_duration": "⏱️ Penalty duration",
