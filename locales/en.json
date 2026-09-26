@@ -917,6 +917,8 @@
   "sec_videonote": "🎥 Video-note",
   "sec_banned_words": "🚫 Banned words",
   "sec_toggle_banned_words": "✅ Delete on / ❌ off",
+  "banned_words_btn_on": "✅ Delete banned words: ON (tap to disable)",
+  "banned_words_btn_off": "❌ Delete banned words: OFF (tap to enable)",
   "sec_welcome": "🎯 Welcome",
   "sec_welcome_text": "📝 Welcome text",
   "sec_goodbye": "👋 Goodbye",
