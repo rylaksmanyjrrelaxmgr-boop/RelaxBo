@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.13 - Log channel permission check)
+handlers_message.py - معالجات الرسائل (v7.9.14 - Contest Duration Buttons)
 =====================================================================
-🆕 v7.9.13 (فحص صلاحيات البوت في قناة السجل):
-    ✅ handle_log_group_input: التحقق من أن البوت مشرف في القناة قبل الحفظ
-       - يستخدم bot.get_chat_member(channel_id, bot.id)
-       - يرفض الحفظ إذا لم يكن البوت administrator/creator
-       - يرفض إذا فشل الوصول للقناة (get_chat errors)
-       - يمنع مشاكل "قناة سجل لا يعمل فيها البوت"
+🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow):
+    ✅ _handle_contest_prize: يعرض أزرار مدة بدل طلب تاريخ نصي
+       - 11 زر مدة (ساعة → سنة)
+       - يُحسب end_date تلقائياً
+    ✅ _handle_contest_question: جديد — استقبال السؤال (quiz)
+    ✅ _handle_contest_correct_answer: جديد — استقبال الإجابة + إنشاء
+    ✅ _PRIVATE_HANDLERS_MAP: تحديث حالات المسابقة
+       - WAIT_CONTEST_DURATION → button-only (يُعالج في callback)
+       - WAIT_CONTEST_TYPE → button-only
+       - WAIT_CONTEST_QUESTION → _handle_contest_question
+       - WAIT_CONTEST_CORRECT_ANSWER → _handle_contest_correct_answer
+    ✅ WAIT_CONTEST_DATE يبقى للتوافق الخلفي
 
-🆕 v7.9.12 (تحديث أوامر الأدمن عند إضافة/إزالة):
-    ✅ _handle_admin_add_input: بعد نجاح الإضافة → refresh_admin_commands(True)
-    ✅ _handle_admin_rem_input: بعد نجاح الإزالة → refresh_admin_commands(False)
-    ✅ _refresh_admin_commands_safe: lazy import آمن (لا circular import)
-
+🆕 v7.9.13 (فحص صلاحيات البوت في قناة السجل)
+🆕 v7.9.12 (تحديث أوامر الأدمن عند إضافة/إزالة)
 🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني)
 🆕 v7.9.10 (إصلاح _fmt TypeError)
 🆕 v7.9.9 (apply_penalty: بدون سطر @username)
@@ -39,7 +42,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from urllib.parse import urlparse
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, TimedOut
 
@@ -215,18 +218,6 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 # =====================================================================
 
 async def _refresh_admin_commands_safe(bot, user_id: int, is_admin: bool) -> bool:
-    """
-    🆕 v7.9.12: يستدعي main.refresh_admin_commands بشكل آمن.
-
-    السبب:
-      - main.py يستورد من handlers_message.py
-      - استيراد main في الأعلى = circular import
-      - الحل: lazy import داخل الدالة
-
-    السلوك:
-      - فشل الاستيراد أو الاستدعاء → تحذير بسيط، لا يُفشل العملية
-      - النجاح → True | الفشل → False
-    """
     if not user_id:
         return False
     try:
@@ -351,7 +342,6 @@ class GroupRateLimiterManager:
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
-    """ترجمة آمنة"""
     if not key:
         return default or ""
     try:
@@ -371,18 +361,8 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     return default or key
 
 
-# ═══════════════════════════════════════════════════════════════════
 # ✅ v7.9.10: _fmt مُصلَح — اسم البارامتر template بدل text
-# ═══════════════════════════════════════════════════════════════════
 def _fmt(template: str, **kwargs) -> str:
-    """
-    ✅ v7.9.10: اسم البارامتر `template` بدل `text`.
-
-    كان الخطأ:
-      def _fmt(text: str, **kwargs):
-      _fmt(await _trans('set_success', lang, "✅ {text}"), text=escape(text))
-      → TypeError: _fmt() got multiple values for argument 'text'
-    """
     try:
         return template.format(**kwargs)
     except (KeyError, IndexError):
@@ -419,7 +399,6 @@ async def _ensure_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
 
 
 def clear_lang_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يمسح كاش اللغة"""
     try:
         context.user_data.pop('lang', None)
         context.user_data.pop('translation_cache', None)
@@ -460,13 +439,6 @@ async def invalidate_auto_reply_cache(chat_id: int = None) -> None:
 
 
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int = 10):
-    """
-    ✅ حذف رسالة بعد تأخير محدد (افتراضياً 10 ثواني).
-    يُستخدم لحذف:
-      - رسالة التحذير (⚠️)
-      - رسالة العقوبة (🚨) — v7.9.11
-      - رسالة الترجمة
-    """
     await asyncio.sleep(delay)
     await _safe_delete_message(bot, chat_id, message_id)
 
@@ -632,22 +604,6 @@ async def _is_mysql_db() -> bool:
 # =====================================================================
 
 async def _verify_bot_in_log_channel(context, channel_id: int) -> Tuple[bool, str]:
-    """
-    🆕 v7.9.13: التحقق من أن البوت مشرف في القناة المستهدفة.
-
-    لماذا هذا مهم:
-      - النظام السابق كان يحفظ المعرّف دون التحقق
-      - النتيجة: قناة سجل "لا يعمل فيها البوت" → فشل صامت عند الإرسال
-      - الآن: رفض الحفظ فوراً مع سبب واضح
-
-    Args:
-        context: ContextTypes.DEFAULT_TYPE
-        channel_id: معرّف رقمي للقناة (int)
-
-    Returns:
-        (True, "") — إذا البوت مشرف
-        (False, "سبب الفشل") — خلاف ذلك
-    """
     if not channel_id:
         return False, "invalid_channel_id"
 
@@ -669,7 +625,6 @@ async def _verify_bot_in_log_channel(context, channel_id: int) -> Tuple[bool, st
         return False, "timeout"
     except BadRequest as e:
         err = str(e).lower()
-        # البوت ليس عضواً / القناة غير موجودة / لا وصول
         if ("chat not found" in err
                 or "bot is not a member" in err
                 or "member not found" in err
@@ -688,8 +643,6 @@ async def _verify_bot_in_log_channel(context, channel_id: int) -> Tuple[bool, st
     if status not in ("administrator", "creator"):
         return False, "not_admin"
 
-    # اختياري: التحقق من صلاحية النشر (can_post_messages)
-    # في القنوات، يمكن للمشرف أن يكون "administrator" لكن بلا حق النشر
     can_post = getattr(member, "can_post_messages", None)
     if can_post is False:
         return False, "no_post_permission"
@@ -698,9 +651,6 @@ async def _verify_bot_in_log_channel(context, channel_id: int) -> Tuple[bool, st
 
 
 def _verify_bot_in_log_channel_error_text(reason: str, lang: str) -> str:
-    """
-    🆕 v7.9.13: رسالة خطأ مترجمة لأسباب فشل التحقق.
-    """
     mapping = {
         "invalid_channel_id": "❌ معرّف القناة غير صالح.",
         "bot_id_unavailable": "❌ لا يمكن تحديد معرّف البوت.",
@@ -739,11 +689,22 @@ class MessageHandlers:
         UserState.WAIT_REM_GLOBAL_BAN: "_handle_rem_global_ban_input",
         UserState.WAIT_GROUP_BAN: "_handle_group_ban_input",
         UserState.WAIT_REM_GROUP_BAN: "_handle_rem_group_ban_input",
+
+        # ══════════════════════════════════════════════════════════════
+        # ✅ v7.9.14: مسابقات — تسلسل جديد مع quiz
+        # ══════════════════════════════════════════════════════════════
         UserState.WAIT_CONTEST_TITLE: "_handle_contest_title",
         UserState.WAIT_CONTEST_DESC: "_handle_contest_desc",
         UserState.WAIT_CONTEST_PRIZE: "_handle_contest_prize",
+        # ✅ WAIT_CONTEST_DURATION و WAIT_CONTEST_TYPE:
+        #    button-only → يُعالَجان في handlers_callback.py
+        UserState.WAIT_CONTEST_QUESTION: "_handle_contest_question",
+        UserState.WAIT_CONTEST_CORRECT_ANSWER: "_handle_contest_correct_answer",
+        # ⚠️ قديم — للتوافق الخلفي
         UserState.WAIT_CONTEST_DATE: "_handle_contest_date",
         UserState.WAIT_CONTEST_ANSWER: "_handle_contest_answer",
+        # ══════════════════════════════════════════════════════════════
+
         UserState.WAIT_AUTO_KEY: "_handle_auto_key",
         UserState.WAIT_AUTO_REPLY: "_handle_auto_reply_input",
         UserState.WAIT_AUTO_DEL: "_handle_auto_del",
@@ -870,17 +831,6 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_log_group_input(update, context) -> bool:
-        """
-        🆕 v7.9.2: معالج إدخال قناة سجل لمجموعة معيّنة.
-        🆕 v7.9.13: يتحقق من أن البوت مشرف في القناة قبل الحفظ.
-
-        التسلسل:
-          1. التحقق من أن المستخدم مشرف في المجموعة
-          2. التحقق من صيغة الإدخال
-          3. تحويل الإدخال إلى channel_id رقمي
-          4. 🆕 التحقق من أن البوت مشرف في القناة (جديد v7.9.13)
-          5. الحفظ في DB
-        """
         user_id = update.effective_user.id
         log_group_id = context.user_data.get('log_group_id')
         if not log_group_id:
@@ -888,7 +838,6 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
-        # ─── 1) التحقق من صلاحيات المستخدم في المجموعة ───
         if not await _check_admin_in_chat(context, log_group_id, user_id):
             msg = await _trans('no_permission', lang, "❌")
             await safe_send(context.bot, user_id, msg)
@@ -898,7 +847,6 @@ class MessageHandlers:
 
         text = (update.effective_message.text or "").strip()
 
-        # ─── حالة الإزالة ───
         if text.lower() in ('none', 'cancel', 'remove', '-'):
             try:
                 ok = await DB.remove_group_log_channel(log_group_id)
@@ -912,7 +860,6 @@ class MessageHandlers:
             context.user_data.pop('log_group_id', None)
             return True
 
-        # ─── 2) التحقق من صيغة الإدخال ───
         if not _is_valid_channel_ref(text):
             preview = text[:50] if text else ""
             logger.warning(
@@ -931,7 +878,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
             return True
 
-        # ─── 3) تحويل الإدخال إلى معرّف رقمي ───
         channel_int = None
         try:
             if text.lstrip('-').isdigit():
@@ -949,9 +895,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             return True
 
-        # ═══════════════════════════════════════════════════════════
-        # 🆕 v7.9.13: التحقق من أن البوت مشرف في القناة
-        # ═══════════════════════════════════════════════════════════
         try:
             verified, reason = await _verify_bot_in_log_channel(
                 context, channel_int
@@ -978,11 +921,8 @@ class MessageHandlers:
                 f"للمجموعة {log_group_id} — السبب: {reason}"
             )
             await safe_send(context.bot, user_id, full_msg, parse_mode='HTML')
-            # ⚠️ لا نمسح الحالة — نُتيح للمستخدم إعادة المحاولة
-            # ⚠️ لا نمسح log_group_id — ليبقى السياق
             return True
 
-        # ─── 5) الحفظ في DB ───
         try:
             ok = await DB.set_group_log_channel(log_group_id, channel_int)
         except Exception as e:
@@ -1370,13 +1310,8 @@ class MessageHandlers:
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id,
                                 violation_type, settings):
-        """
-        ✅ v7.9.11: كلتا الرسالتين (⚠️ التحذير و 🚨 العقوبة)
-                    تُحذفان تلقائياً بعد 10 ثواني.
-        """
         lang = await _ensure_lang(update, context)
 
-        # ═══ حذف رسالة المخالفة الأصلية ═══
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
@@ -1385,13 +1320,11 @@ class MessageHandlers:
             if not _is_delete_ignore_error(e):
                 logger.warning(f"delete failed: {e}")
 
-        # ═══ عدّاد المخالفات ═══
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
         except Exception:
             violation_count = 1
 
-        # ═══ قراءة قاعدة العقوبة ═══
         penalty_rule = None
         try:
             penalty_rule = await DB.get_violation_penalty(chat_id, violation_type)
@@ -1427,9 +1360,6 @@ class MessageHandlers:
         violation_message = await MessageHandlers._get_violation_message(
             violation_type, lang)
 
-        # ═══════════════════════════════════════════════════════════════
-        # ⚠️ رسالة التحذير — تُحذف بعد 10 ثواني
-        # ═══════════════════════════════════════════════════════════════
         try:
             user_name = escape(update.effective_user.first_name or "User")
             warn_title = await _trans('violation_warning_title', lang, "⚠️")
@@ -1448,9 +1378,6 @@ class MessageHandlers:
         except Exception as e:
             logger.warning(f"violation message: {e}")
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🚨 رسالة العقوبة — تُحذف بعد 10 ثواني (v7.9.11)
-        # ═══════════════════════════════════════════════════════════════
         if penalty_type:
             max_strikes = (settings.get('violation_strikes')
                            or settings.get('max_warnings') or 3)
@@ -1467,7 +1394,6 @@ class MessageHandlers:
                             context.bot, chat_id,
                             _fmt(msg_prefix, msg=msg),
                             parse_mode='HTML')
-                        # ✅ v7.9.11: حذف تلقائي بعد 10 ثواني
                         if sent_penalty is not None and getattr(
                                 sent_penalty, 'message_id', None):
                             asyncio.create_task(_delete_after_delay(
@@ -1835,18 +1761,8 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.9.10: _handle_update_ch_input — يحفظ فقط في settings
-    # ═════════════════════════════════════════════════════════════════
     @staticmethod
     async def _handle_update_ch_input(update, context):
-        """
-        ✅ v7.9.10: يحفظ في settings.updates_channel فقط.
-        - لا add_channel
-        - لا active_channel
-        - لا user_channels
-        - _fmt مُصلَح (يعمل بلا TypeError)
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -1855,7 +1771,6 @@ class MessageHandlers:
 
         text = (update.effective_message.text or "").strip()
 
-        # ═══════ حذف القناة ═══════
         if not text or text.lower() in ('none', 'cancel', 'remove', '-'):
             try:
                 ok = await DB.set_setting('updates_channel', '')
@@ -1870,7 +1785,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # ═══════ تحقق من الصيغة ═══════
         if not _is_valid_channel_ref(text):
             preview = text[:50]
             logger.warning(
@@ -1889,7 +1803,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg, parse_mode='HTML')
             return
 
-        # ═══════ حفظ في settings.updates_channel فقط ═══════
         try:
             ok = await DB.set_setting('updates_channel', text)
         except Exception as e:
@@ -1950,7 +1863,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_log_ch_input(update, context):
-        """يتحقق من صحة الإدخال قبل الحفظ."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -2008,14 +1920,11 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # المشرفين — 🆕 v7.9.12: +refresh_admin_commands
+    # المشرفين — v7.9.12
     # =================================================================
 
     @staticmethod
     async def _handle_admin_add_input(update, context):
-        """
-        🆕 v7.9.12: بعد نجاح DB.add_admin، يُحدَّث scope أوامر الأدمن فوراً.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -2033,7 +1942,6 @@ class MessageHandlers:
                 await safe_send(context.bot, user_id, msg)
             success = await DB.add_admin(admin_id, user_id)
             if success:
-                # 🆕 v7.9.12: تحديث scope أوامر الأدمن فوراً
                 await _refresh_admin_commands_safe(
                     context.bot, admin_id, is_admin=True
                 )
@@ -2057,9 +1965,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_admin_rem_input(update, context):
-        """
-        🆕 v7.9.12: بعد نجاح DB.remove_admin، يُعاد scope المستخدم للعام فقط.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         if not CONFIG.is_developer(user_id):
@@ -2072,7 +1977,6 @@ class MessageHandlers:
                 raise ValueError
             success = await DB.remove_admin(admin_id)
             if success:
-                # 🆕 v7.9.12: إعادة scope المستخدم للعام
                 await _refresh_admin_commands_safe(
                     context.bot, admin_id, is_admin=False
                 )
@@ -2278,9 +2182,9 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # =================================================================
-    # المسابقات
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.9.14: المسابقات — quiz flow مع أزرار مدة
+    # ═════════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_contest_title(update, context):
@@ -2302,15 +2206,131 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_prize(update, context):
+        """
+        ✅ v7.9.14: بعد استقبال الجائزة → يعرض أزرار المدة بدل طلب تاريخ.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         context.user_data['contest_prize'] = update.effective_message.text or ""
-        StateManager.set(user_id, UserState.WAIT_CONTEST_DATE)
-        msg = await _trans('send_date_prompt', lang, "📅")
-        await safe_send(context.bot, user_id, msg)
+
+        StateManager.set(user_id, UserState.WAIT_CONTEST_DURATION)
+
+        durations = [
+            ("1h",  "⏰ ساعة"),
+            ("6h",  "🕐 6 ساعات"),
+            ("1d",  "📅 يوم"),
+            ("3d",  "📅 3 أيام"),
+            ("1w",  "📅 أسبوع"),
+            ("2w",  "📅 أسبوعان"),
+            ("1mo", "📅 شهر"),
+            ("2mo", "📅 شهران"),
+            ("3mo", "📅 3 أشهر"),
+            ("6mo", "📅 6 أشهر"),
+            ("1y",  "📅 سنة"),
+        ]
+
+        kb_rows = []
+        row = []
+        for key, label in durations:
+            row.append(InlineKeyboardButton(
+                label, callback_data=f"contest_duration:{key}"))
+            if len(row) == 2:
+                kb_rows.append(row)
+                row = []
+        if row:
+            kb_rows.append(row)
+
+        await safe_send(
+            context.bot, user_id,
+            "📅 <b>اختر مدة المسابقة:</b>\n"
+            "<i>سيُحسب تاريخ الانتهاء تلقائياً.</i>",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+            parse_mode='HTML',
+        )
+
+    @staticmethod
+    async def _handle_contest_question(update, context):
+        """
+        ✅ v7.9.14: جديد — يستقبل السؤال (لو النوع quiz).
+        ثم يطلب الإجابة الصحيحة.
+        """
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+
+        question = (update.effective_message.text or "").strip()[:1000]
+        if not question:
+            await safe_send(context.bot, user_id,
+                            await _trans('empty_message', lang, "❌"))
+            return
+
+        context.user_data['contest_question'] = question
+        StateManager.set(user_id, UserState.WAIT_CONTEST_CORRECT_ANSWER)
+
+        await safe_send(
+            context.bot, user_id,
+            "✅ <b>الإجابة الصحيحة؟</b>\n"
+            "<i>ستُقارَن بإجابات المشاركين (غير حساسة لحالة الأحرف).</i>",
+            parse_mode='HTML',
+        )
+
+    @staticmethod
+    async def _handle_contest_correct_answer(update, context):
+        """
+        ✅ v7.9.14: جديد — يستقبل الإجابة الصحيحة، ثم يُنشئ مسابقة quiz.
+        """
+        user_id = update.effective_user.id
+        lang = await _ensure_lang(update, context)
+
+        correct_answer = (update.effective_message.text or "").strip()[:500]
+        if not correct_answer:
+            await safe_send(context.bot, user_id,
+                            await _trans('empty_message', lang, "❌"))
+            return
+
+        title = context.user_data.get('contest_title', '')
+        description = context.user_data.get('contest_desc', '')
+        prize = context.user_data.get('contest_prize', '')
+        end_date = context.user_data.get('contest_end_date', '')
+        question = context.user_data.get('contest_question', '')
+        duration_label = context.user_data.get('contest_duration_label', '')
+
+        try:
+            cid = await DB.create_contest(
+                creator_id=user_id,
+                title=title,
+                description=description,
+                prize=prize,
+                end_date=end_date,
+                contest_type='quiz',
+                question=question,
+                correct_answer=correct_answer,
+            )
+        except Exception as e:
+            logger.error(f"❌ create quiz contest: {e}", exc_info=True)
+            cid = 0
+
+        if cid:
+            await safe_send(
+                context.bot, user_id,
+                f"✅ <b>أُنشئت المسابقة!</b>\n\n"
+                f"🆔 <code>#{cid}</code>\n"
+                f"❓ النوع: سؤال وجواب\n"
+                f"⏱️ المدة: {duration_label}\n"
+                f"📝 السؤال: {escape(question)}\n"
+                f"✅ الإجابة: <tg-spoiler>{escape(correct_answer)}</tg-spoiler>",
+                parse_mode='HTML',
+            )
+        else:
+            await safe_send(
+                context.bot, user_id,
+                await _trans('execution_failed', lang, "❌ فشل الإنشاء"),
+            )
+
+        StateManager.clear(user_id)
 
     @staticmethod
     async def _handle_contest_date(update, context):
+        """⚠️ قديم — يبقى للتوافق الخلفي."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         title = context.user_data.get('contest_title', '')
@@ -2333,6 +2353,7 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_answer(update, context):
+        """✅ حالة المشارك العادي — تبقى كما هي."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         contest_id = context.user_data.get('contest_join')
