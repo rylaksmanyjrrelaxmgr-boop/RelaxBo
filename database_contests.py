@@ -1,52 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_contests.py - دوال المسابقات (v7.4.4)
+database_contests.py - دوال المسابقات (v7.4.5)
 ================================================================================
-ContestsMixin:
-  - create_contest                 : إنشاء مسابقة جديدة
-  - get_active_contests            : جلب المسابقات النشطة
-  - join_contest                   : مشاركة في مسابقة
-  - declare_winner                 : إعلان الفائز (يدوي/ذرّي)
-  - get_contest_winners            : جلب الفائزين السابقين
-  - delete_contest                 : حذف مسابقة
-  - cancel_contest                 : إلغاء مسابقة
-  - auto_declare_expired_contests  : إعلان فائزين تلقائي (جديد v7.4.4)
-  - check_contest_joined           : التحقق من المشاركة
-  - get_contest_by_id              : جلب مسابقة بالمعرف
-  - get_contest_participants       : جلب قائمة المشاركين
-  - get_contest_stats              : إحصائيات سريعة
+🆕 v7.4.5 — مسابقة سؤال وجواب:
+  ✅ create_contest() — params جديدة: question, correct_answer
+  ✅ _normalize_answer() — تطبيع الإجابة للمقارنة (trim + lowercase)
+  ✅ get_correct_answerers() — جلب من أجاب صحيحًا فقط
+  ✅ auto_declare_expired_contests() — يختار من الإجابات الصحيحة
+  ✅ أنواع المسابقات:
+       - raffle: جميع المشاركين مؤهلون
+       - quiz:   فقط من أجاب صحيحًا مؤهل
+       - other:  مثل raffle
 
-🆕 v7.4.4 — إعلان الفائز تلقائيًا:
-  ✅ auto_declare_expired_contests() — دالة جديدة
-       • تجلب المسابقات المنتهية (status='active' AND end_date<=now)
-       • لكل مسابقة:
-           - إذا فيها مشاركون → random.choice → declare_winner → 'closed'
-           - إذا لا مشاركون  → cancel_contest → 'cancelled'
-       • تُرجع قائمة الفائزين للإشعار من main.py
-       • تعتمد على declare_winner الذرّي (v7.4.3) لمنع race
-  ✅ أُزيلت close_expired_contests (استُبدِلت)
-  ✅ import random أعلى الملف
+🆕 v7.4.4:
+  ✅ auto_declare_expired_contests() — إعلان تلقائي كل ساعة
+  ✅ import random
 
-🆕 v7.4.3 — إصلاحات جذرية:
-  ✅ declare_winner() — UPDATE ذرّي (WHERE status='active')
-       • يمنع race condition عند ضغطتين متزامنتين
-       • لا تسجيل فائزين متعددين على PostgreSQL/SQLite/MySQL
-  ✅ join_contest() — end_date <= now (اتساق مع get_active_contests)
-  ✅ VALID_CONTEST_TYPES — توحيد القيم المسموحة للأنواع
-  ✅ توثيق أن quiz غير مُتحقق منه (يحتاج correct_answer — مؤجل)
+🆕 v7.4.3:
+  ✅ declare_winner() — UPDATE ذرّي (ضد race)
+  ✅ join_contest() — end_date <= now
+  ✅ VALID_CONTEST_TYPES — توحيد القيم
 
-🆕 v7.4.2 — إصلاحات سابقة:
+🆕 v7.4.2:
   ✅ declare_winner() يستخدم _fetchval_with_conn
   ✅ MySQL created_at بصيغة صحيحة
-  ✅ get_contest_winners() يستخدم LEFT JOIN
-  ✅ join_contest() يستخدم INSERT OR IGNORE
-  ✅ join_contest() يعالج NULL end_date
+  ✅ get_contest_winners() LEFT JOIN
+  ✅ join_contest() INSERT OR IGNORE
   ✅ create_contest() يتحقق من end_date > now
   ✅ delete_contest() يدعم is_admin
   ✅ get_contest_by_id() يُرجع عدد المشاركين
   ✅ answer محدود بـ 2000 حرف
-  ✅ get_active_contests() مع try/except
   ✅ _normalize_datetime() مساعدة
   ✅ check_contest_joined() يدعم include_finished
   ✅ cancel_contest() و get_contest_participants()
@@ -67,16 +51,13 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
-# ✅ v7.4.2: حد أقصى لطول الإجابة
 MAX_ANSWER_LENGTH = 2000
-
-# ✅ v7.4.2: القيم المسموحة لحالة المسابقة
 VALID_CONTEST_STATUSES = {"active", "closed", "cancelled"}
 
-# ✅ v7.4.3: أنواع المسابقات المسموحة
-# ملاحظة: 'quiz' مدعوم في المخطط لكن التحقق من الإجابة
-# لم يُنفَّذ بعد (يحتاج عمود correct_answer). يُستخدم حاليًا
-# كـ 'raffle' فعليًا (اختيار عشوائي).
+# ✅ v7.4.5: أنواع المسابقات
+# - raffle: عشوائي من الجميع
+# - quiz:   عشوائي من من أجاب صحيحًا
+# - other:  مثل raffle
 VALID_CONTEST_TYPES = ("raffle", "quiz", "other")
 
 
@@ -84,15 +65,11 @@ class ContestsMixin:
     """Mixin يحتوي كل دوال المسابقات"""
 
     # =====================================================================
-    # دوال مساعدة داخلية
+    # دوال مساعدة
     # =====================================================================
 
     def _normalize_datetime(self, dt) -> Any:
-        """
-        ✅ v7.4.2: تحويل datetime إلى صيغة مناسبة للمحرك الحالي.
-        - PostgreSQL: يُرجع datetime كما هو
-        - MySQL/SQLite: يُرجع str بالصيغة "YYYY-MM-DD HH:MM:SS"
-        """
+        """✅ v7.4.2: تحويل datetime حسب المحرك."""
         if dt is None:
             return None
         if hasattr(dt, "strftime"):
@@ -102,7 +79,7 @@ class ContestsMixin:
         return dt
 
     def _truncate_answer(self, answer: str) -> str:
-        """✅ v7.4.2: قص الإجابة إلى الحد الأقصى"""
+        """✅ v7.4.2: قص الإجابة إلى الحد الأقصى."""
         if not answer:
             return ""
         if len(answer) > MAX_ANSWER_LENGTH:
@@ -111,6 +88,22 @@ class ContestsMixin:
             )
             return answer[:MAX_ANSWER_LENGTH]
         return answer
+
+    def _normalize_answer(self, text: str) -> str:
+        """
+        ✅ v7.4.5: تطبيع الإجابة للمقارنة.
+
+        - trim
+        - lowercase
+        - تصغير المسافات المتعددة إلى واحدة
+        - إزالة التشكيل العربي (اختياري)
+        """
+        if not text:
+            return ""
+        s = str(text).strip().lower()
+        # تصغير المسافات
+        s = " ".join(s.split())
+        return s
 
     # =====================================================================
     # 1) إنشاء مسابقة
@@ -124,21 +117,25 @@ class ContestsMixin:
         prize: str,
         end_date: str,
         contest_type: str = "raffle",
+        question: str = "",
+        correct_answer: str = "",
     ) -> int:
         """
-        ✅ v7.4.2: إنشاء مسابقة جديدة.
+        ✅ v7.4.5: إنشاء مسابقة.
+
+        Args:
+            question:       السؤال (فقط لـ quiz — يمكن أن يكون فارغًا)
+            correct_answer: الإجابة الصحيحة (فقط لـ quiz)
 
         Returns:
             معرف المسابقة (int) عند النجاح، 0 عند الفشل.
         """
         try:
-            # التحقق من صحة end_date
             dt = self.TimeUtils.safe_parse_iso(end_date)
             if dt is None:
                 logger.error(f"❌ Invalid end_date format: {end_date}")
                 return 0
 
-            # ✅ v7.4.2: التحقق من أن end_date في المستقبل
             now = self.TimeUtils.utc_now()
             if dt <= now:
                 logger.error(
@@ -146,7 +143,6 @@ class ContestsMixin:
                 )
                 return 0
 
-            # تنظيف المدخلات
             title = (title or "").strip()
             if not title:
                 logger.error("❌ title فارغ")
@@ -156,66 +152,96 @@ class ContestsMixin:
             description = (description or "").strip()[:2000]
             prize = (prize or "").strip()[:200]
 
-            # ✅ v7.4.3: استخدام VALID_CONTEST_TYPES الموحّد
             if contest_type not in VALID_CONTEST_TYPES:
                 contest_type = "raffle"
 
+            # ✅ v7.4.5: معالجة question/correct_answer
+            question = (question or "").strip()[:1000]
+            correct_answer = (correct_answer or "").strip()[:500]
+
+            # لو quiz بلا سؤال/إجابة → نعتبره raffle بأمان
+            if contest_type == "quiz" and (
+                not question or not correct_answer
+            ):
+                logger.warning(
+                    "⚠️ quiz بدون question أو correct_answer → تحويل إلى raffle"
+                )
+                contest_type = "raffle"
+                question = ""
+                correct_answer = ""
+
             async with self.transaction() as conn:
-                # PostgreSQL: RETURNING id
+                # PostgreSQL
                 if self.USE_POSTGRES:
                     row = await self._fetchone_with_conn(
                         conn,
                         "INSERT INTO contests "
-                        "(creator_id, title, description, prize, end_date, status, contest_type, created_at) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                        "(creator_id, title, description, prize, end_date, "
+                        " status, contest_type, question, correct_answer, created_at) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+                        "RETURNING id",
                         creator_id, title, description, prize,
-                        dt, "active", contest_type, now,
+                        dt, "active", contest_type,
+                        question, correct_answer, now,
                     )
                     if row:
                         cid = row.get("id", 0)
-                        logger.info(f"✅ أنشئت مسابقة جديدة #{cid} بواسطة {creator_id}")
+                        logger.info(
+                            f"✅ أنشئت مسابقة جديدة #{cid} "
+                            f"(type={contest_type}) بواسطة {creator_id}"
+                        )
                         return cid
                     logger.error("❌ فشل RETURNING id في PostgreSQL")
                     return 0
 
-                # MySQL: lastrowid
+                # MySQL
                 elif self.USE_MYSQL:
                     cursor = await conn.cursor()
                     await cursor.execute(
                         "INSERT INTO contests "
-                        "(creator_id, title, description, prize, end_date, status, contest_type, created_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        "(creator_id, title, description, prize, end_date, "
+                        " status, contest_type, question, correct_answer, created_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             creator_id, title, description, prize,
                             self._normalize_datetime(dt),
                             "active", contest_type,
+                            question, correct_answer,
                             self._normalize_datetime(now),
                         ),
                     )
                     cid = cursor.lastrowid
                     await cursor.close()
                     if cid:
-                        logger.info(f"✅ أنشئت مسابقة جديدة #{cid} بواسطة {creator_id}")
+                        logger.info(
+                            f"✅ أنشئت مسابقة جديدة #{cid} "
+                            f"(type={contest_type}) بواسطة {creator_id}"
+                        )
                         return cid
                     logger.error("❌ فشل lastrowid في MySQL")
                     return 0
 
-                # SQLite: lastrowid
+                # SQLite
                 else:
                     cursor = await conn.execute(
                         "INSERT INTO contests "
-                        "(creator_id, title, description, prize, end_date, status, contest_type, created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
+                        "(creator_id, title, description, prize, end_date, "
+                        " status, contest_type, question, correct_answer, created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             creator_id, title, description, prize,
                             self._normalize_datetime(dt),
                             "active", contest_type,
+                            question, correct_answer,
                             self._normalize_datetime(now),
                         ),
                     )
                     cid = cursor.lastrowid if cursor and cursor.lastrowid else 0
                     if cid:
-                        logger.info(f"✅ أنشئت مسابقة جديدة #{cid} بواسطة {creator_id}")
+                        logger.info(
+                            f"✅ أنشئت مسابقة جديدة #{cid} "
+                            f"(type={contest_type}) بواسطة {creator_id}"
+                        )
                         return cid
                     logger.error("❌ فشل lastrowid في SQLite")
                     return 0
@@ -229,12 +255,10 @@ class ContestsMixin:
     # =====================================================================
 
     async def get_active_contests(self, limit: int = 10) -> List[Dict]:
-        """
-        ✅ v7.4.2: جلب المسابقات النشطة مع عدد المشاركين.
-        """
+        """✅ v7.4.2: جلب المسابقات النشطة مع عدد المشاركين."""
         try:
             now = self.TimeUtils.utc_now()
-            limit = max(1, min(limit, 100))  # حد أقصى 100
+            limit = max(1, min(limit, 100))
 
             return await self.fetchall(
                 """SELECT c.*,
@@ -257,18 +281,11 @@ class ContestsMixin:
     async def join_contest(
         self, contest_id: int, user_id: int, answer: str = ""
     ) -> bool:
-        """
-        ✅ v7.4.3: مشاركة في مسابقة.
-
-        Returns:
-            True عند النجاح، False عند الفشل أو التكرار.
-        """
+        """✅ v7.4.3: مشاركة في مسابقة."""
         try:
-            # ✅ قص الإجابة
             answer = self._truncate_answer(answer or "")
 
             async with self.transaction() as conn:
-                # جلب حالة المسابقة
                 contest = await self._fetchone_with_conn(
                     conn,
                     "SELECT status, end_date FROM contests WHERE id = ?",
@@ -278,30 +295,23 @@ class ContestsMixin:
                     logger.debug(f"المسابقة {contest_id} غير موجودة")
                     return False
 
-                # ✅ v7.4.2: التحقق من الحالة
                 if contest.get("status") != "active":
                     logger.debug(f"المسابقة {contest_id} ليست نشطة")
                     return False
 
-                # ✅ v7.4.2: التحقق من end_date بحذر
                 end_date = self.TimeUtils.safe_parse_iso(contest.get("end_date"))
                 now = self.TimeUtils.utc_now()
 
                 if end_date is None:
-                    # لا يمكن قراءة التاريخ → نرفض بحذر
                     logger.warning(
-                        f"⚠️ لا يمكن قراءة end_date للمسابقة {contest_id} — رفض المشاركة"
+                        f"⚠️ لا يمكن قراءة end_date للمسابقة {contest_id}"
                     )
                     return False
 
-                # ✅ v7.4.3: <= بدل < للاتساق مع get_active_contests
-                # get_active_contests يستخدم end_date > now
-                # لذا end_date == now يعني "منتهية" في الحالتين
                 if end_date <= now:
-                    logger.debug(f"المسابقة {contest_id} انتهت في {end_date}")
+                    logger.debug(f"المسابقة {contest_id} انتهت")
                     return False
 
-                # ✅ v7.4.2: INSERT OR IGNORE (يعمل على 3 محركات عبر الإطار)
                 inserted = await self._execute_with_conn(
                     conn,
                     "INSERT OR IGNORE INTO contest_participants "
@@ -316,7 +326,6 @@ class ContestsMixin:
                     )
                     return True
 
-                # rowcount = 0 يعني موجود مسبقًا
                 logger.debug(
                     f"المستخدم {user_id} شارك مسبقًا في المسابقة {contest_id}"
                 )
@@ -330,30 +339,90 @@ class ContestsMixin:
             return False
 
     # =====================================================================
+    # 3.1) جلب من أجابوا صحيحًا (جديد v7.4.5)
+    # =====================================================================
+
+    async def get_correct_answerers(
+        self, contest_id: int, limit: int = 1000
+    ) -> List[Dict]:
+        """
+        ✅ v7.4.5: جلب المشاركين الذين أجابوا إجابة صحيحة.
+
+        - يجلب correct_answer من جدول contests
+        - يُطبّع الإجابات للمقارنة (trim + lowercase)
+        - يُرجع قائمة المشاركين المُطابقين
+        - لو المسابقة غير quiz → يُرجع كل المشاركين (fallback)
+        """
+        try:
+            limit = max(1, min(limit, 5000))
+
+            # 1) جلب المسابقة
+            contest = await self.fetchone(
+                "SELECT contest_type, correct_answer "
+                "FROM contests WHERE id = ?",
+                (contest_id,),
+            )
+            if not contest:
+                return []
+
+            c = dict(contest) if not isinstance(contest, dict) else contest
+            ctype = (c.get("contest_type") or "raffle").lower()
+            correct_raw = c.get("correct_answer") or ""
+
+            # 2) لو ليست quiz → كل المشاركين مؤهلون
+            if ctype != "quiz" or not correct_raw:
+                return await self.fetchall(
+                    """SELECT cp.user_id, cp.answer, cp.joined_at
+                       FROM contest_participants cp
+                       WHERE cp.contest_id = ?
+                       ORDER BY cp.joined_at ASC
+                       LIMIT ?""",
+                    (contest_id, limit),
+                )
+
+            # 3) quiz حقيقي — فلترة في Python (يعمل على 3 محركات)
+            correct_norm = self._normalize_answer(correct_raw)
+            all_participants = await self.fetchall(
+                """SELECT cp.user_id, cp.answer, cp.joined_at
+                   FROM contest_participants cp
+                   WHERE cp.contest_id = ?
+                   ORDER BY cp.joined_at ASC
+                   LIMIT ?""",
+                (contest_id, limit),
+            )
+
+            matched: List[Dict] = []
+            for p in (all_participants or []):
+                pd = dict(p) if not isinstance(p, dict) else p
+                user_ans_norm = self._normalize_answer(
+                    pd.get("answer") or ""
+                )
+                if user_ans_norm and user_ans_norm == correct_norm:
+                    matched.append(pd)
+
+            logger.info(
+                f"🎯 get_correct_answerers(#{contest_id}): "
+                f"{len(matched)}/{len(all_participants or [])} "
+                f"أجابوا صحيحًا"
+            )
+            return matched
+
+        except Exception as e:
+            logger.error(
+                f"❌ Error in get_correct_answerers: {e}", exc_info=True
+            )
+            return []
+
+    # =====================================================================
     # 4) إعلان الفائز (يدوي)
     # =====================================================================
 
     async def declare_winner(self, contest_id: int, winner_id: int) -> bool:
         """
         ✅ v7.4.3: إعلان الفائز — UPDATE ذرّي لمنع race condition.
-
-        المشكلة السابقة:
-          SELECT status → فحص Python → UPDATE
-          فجوة زمنية تسمح لطلبين متزامنين بالنجاح معًا.
-
-        الحل الحالي:
-          التحقق من المشاركة (لا يعدّل حالة) →
-          UPDATE ذرّي مع WHERE status='active' →
-          INSERT winners (نحن الوحيدون داخل transaction).
-
-        على PostgreSQL/SQLite/MySQL: UPDATE مع WHERE ذرّي بشكل مضمون.
-
-        Returns:
-            True عند النجاح، False عند الفشل أو إذا أُغلقت المسابقة بالفعل.
         """
         try:
             async with self.transaction() as conn:
-                # 1) التحقق من أن الفائز مشارك (لا يعدّل الحالة)
                 joined = await self._fetchval_with_conn(
                     conn,
                     "SELECT 1 FROM contest_participants "
@@ -366,9 +435,6 @@ class ContestsMixin:
                     )
                     return False
 
-                # 2) ✅ v7.4.3: UPDATE ذرّي — الحجر الأساس لمنع race
-                #    - rowcount > 0 → نحن الفائزون بالسباق
-                #    - rowcount = 0 → طلب آخر أغلق المسابقة قبلاً
                 updated = await self._execute_with_conn(
                     conn,
                     "UPDATE contests SET status = 'closed', winner_id = ? "
@@ -377,12 +443,10 @@ class ContestsMixin:
                 )
                 if not updated:
                     logger.debug(
-                        f"المسابقة {contest_id}: أُغلقت بالفعل أو غير نشطة "
-                        f"(race condition محجوب)"
+                        f"المسابقة {contest_id}: أُغلقت بالفعل أو غير نشطة"
                     )
                     return False
 
-                # 3) تسجيل الفائز — آمن الآن (نحن الوحيدون)
                 await self._execute_with_conn(
                     conn,
                     "INSERT INTO contest_winners "
@@ -404,9 +468,7 @@ class ContestsMixin:
     # =====================================================================
 
     async def get_contest_winners(self, limit: int = 10) -> List[Dict]:
-        """
-        ✅ v7.4.2: LEFT JOIN لتجنب فقد الفائزين عند حذف المستخدمين/المسابقات.
-        """
+        """✅ v7.4.2: LEFT JOIN لتجنب فقد الفائزين."""
         try:
             limit = max(1, min(limit, 100))
             return await self.fetchall(
@@ -434,11 +496,7 @@ class ContestsMixin:
     async def delete_contest(
         self, contest_id: int, user_id: int, is_admin: bool = False
     ) -> bool:
-        """
-        ✅ v7.4.2: حذف مسابقة.
-        - إذا is_admin=True، يمكن للمشرف العام الحذف.
-        - وإلا، فقط المنشئ.
-        """
+        """✅ v7.4.2: حذف مسابقة."""
         try:
             async with self.transaction() as conn:
                 contest = await self._fetchone_with_conn(
@@ -447,17 +505,11 @@ class ContestsMixin:
                     contest_id,
                 )
                 if not contest:
-                    logger.debug(f"المسابقة {contest_id} غير موجودة")
                     return False
 
                 if not is_admin and contest.get("creator_id") != user_id:
-                    logger.debug(
-                        f"المستخدم {user_id} ليس منشئ المسابقة {contest_id} "
-                        f"(المنشئ: {contest.get('creator_id')})"
-                    )
                     return False
 
-                # حذف بالترتيب (المشاركون ← الفائزون ← المسابقة)
                 await self._execute_with_conn(
                     conn,
                     "DELETE FROM contest_participants WHERE contest_id = ?",
@@ -475,8 +527,7 @@ class ContestsMixin:
                 )
 
                 logger.info(
-                    f"🗑️ تم حذف المسابقة {contest_id} بواسطة {user_id} "
-                    f"(is_admin={is_admin})"
+                    f"🗑️ تم حذف المسابقة {contest_id} بواسطة {user_id}"
                 )
                 return True
 
@@ -491,9 +542,7 @@ class ContestsMixin:
     async def cancel_contest(
         self, contest_id: int, user_id: int, is_admin: bool = False
     ) -> bool:
-        """
-        ✅ v7.4.2: إلغاء مسابقة (تغيير الحالة بدل الحذف).
-        """
+        """✅ v7.4.2: إلغاء مسابقة."""
         try:
             async with self.transaction() as conn:
                 contest = await self._fetchone_with_conn(
@@ -508,9 +557,6 @@ class ContestsMixin:
                     return False
 
                 if contest.get("status") != "active":
-                    logger.debug(
-                        f"المسابقة {contest_id} ليست نشطة (الحالة: {contest.get('status')})"
-                    )
                     return False
 
                 await self._execute_with_conn(
@@ -518,9 +564,7 @@ class ContestsMixin:
                     "UPDATE contests SET status = 'cancelled' WHERE id = ?",
                     contest_id,
                 )
-                logger.info(
-                    f"❌ تم إلغاء المسابقة {contest_id} بواسطة {user_id}"
-                )
+                logger.info(f"❌ تم إلغاء المسابقة {contest_id}")
                 return True
 
         except Exception as e:
@@ -528,40 +572,33 @@ class ContestsMixin:
             return False
 
     # =====================================================================
-    # 6.2) إعلان فائزين تلقائي (جديد v7.4.4)
+    # 6.2) إعلان فائزين تلقائي (v7.4.5)
     # =====================================================================
 
     async def auto_declare_expired_contests(self) -> List[Dict]:
         """
-        ✅ v7.4.4: يعلن الفائزين تلقائيًا للمسابقات المنتهية.
+        ✅ v7.4.5: يعلن الفائزين تلقائيًا للمسابقات المنتهية.
 
         المنطق:
           1. جلب كل المسابقات (status='active' AND end_date <= now)
           2. لكل مسابقة:
-             ├─ إذا فيها مشاركون → random.choice → declare_winner → 'closed'
-             └─ إذا لا مشاركون   → cancel_contest → 'cancelled'
-          3. تجميع نتائج الإعلانات الناجحة للإشعار
-
-        المميزات:
-          - يستخدم declare_winner (ذرّي) → آمن ضد race مع الأدمن اليدوي
-          - random.choice على مجموعة user_ids (لا FK issues)
-          - يتجاهل أي فشل فردي ويكمل الباقي
-          - آمن عند التنفيذ المتكرر (المسابقات المُعلنة تُصبح 'closed'
-            فلا تُلتقط في الدورة التالية)
+             ├─ quiz: فقط من أجاب صحيحًا مؤهل
+             │   └─ لو لا أحد أجاب صحيحًا → يُلغى (cancelled)
+             └─ raffle/other: كل المشاركين مؤهلون
+          3. random.choice من المؤهلين
+          4. declare_winner (ذرّي)
+          5. تجميع النتائج للإشعار من main.py
 
         Returns:
-            قائمة من dict:
-              [{'contest_id': int, 'winner_id': int, 'title': str}, ...]
-            للإشعار من main.py (نحن لا نُرسل رسائل من هنا).
+            [{'contest_id': int, 'winner_id': int, 'title': str}, ...]
         """
         results: List[Dict] = []
 
         try:
             now = self.TimeUtils.utc_now()
 
-            # 1) جلب المسابقات المنتهية
             expired_rows = await self.fetchall(
-                """SELECT id, creator_id, title
+                """SELECT id, creator_id, title, contest_type
                    FROM contests
                    WHERE status = 'active' AND end_date <= ?
                    ORDER BY end_date ASC""",
@@ -575,25 +612,23 @@ class ContestsMixin:
                 f"🔍 auto_declare: وجدت {len(expired_rows)} مسابقة منتهية"
             )
 
-            # 2) لكل مسابقة
             for row in expired_rows:
                 row_d = dict(row) if not isinstance(row, dict) else row
                 cid = row_d.get("id")
                 title = row_d.get("title") or ""
+                ctype = (row_d.get("contest_type") or "raffle").lower()
 
                 if cid is None:
                     continue
 
                 try:
-                    # جلب المشاركين
-                    participants = await self.fetchall(
-                        "SELECT user_id FROM contest_participants "
-                        "WHERE contest_id = ?",
-                        (cid,),
-                    )
+                    # ✅ v7.4.5: استخدام get_correct_answerers
+                    #    - quiz: يُرجع فقط من أجاب صحيحًا
+                    #    - raffle/other: يُرجع الجميع
+                    eligible = await self.get_correct_answerers(cid)
 
                     user_ids: List[int] = []
-                    for p in (participants or []):
+                    for p in (eligible or []):
                         pd = dict(p) if not isinstance(p, dict) else p
                         uid = pd.get("user_id")
                         if uid is not None:
@@ -602,19 +637,24 @@ class ContestsMixin:
                             except (TypeError, ValueError):
                                 continue
 
-                    # ─── لا مشاركون → إلغاء ───
+                    # ─── لا مؤهلين → إلغاء ───
                     if not user_ids:
                         await self.cancel_contest(cid, 0, is_admin=True)
-                        logger.info(
-                            f"❌ auto_declare: أُلغيت المسابقة #{cid} "
-                            f"(بلا مشاركين)"
-                        )
+                        if ctype == "quiz":
+                            logger.info(
+                                f"❌ auto_declare: أُلغيت المسابقة #{cid} "
+                                f"(quiz — لا إجابات صحيحة)"
+                            )
+                        else:
+                            logger.info(
+                                f"❌ auto_declare: أُلغيت المسابقة #{cid} "
+                                f"(بلا مشاركين)"
+                            )
                         continue
 
-                    # ─── اختيار فائز عشوائي ───
+                    # ─── اختيار فائز عشوائي من المؤهلين ───
                     winner_id = random.choice(user_ids)
 
-                    # ─── إعلان الفائز (ذرّي) ───
                     success = await self.declare_winner(cid, winner_id)
 
                     if success:
@@ -622,21 +662,20 @@ class ContestsMixin:
                             "contest_id": cid,
                             "winner_id": winner_id,
                             "title": title,
+                            "contest_type": ctype,
                         })
                         logger.info(
-                            f"🏆 auto_declare: مسابقة #{cid} "
-                            f"→ فائز {winner_id} (من {len(user_ids)} مشارك)"
+                            f"🏆 auto_declare: مسابقة #{cid} ({ctype}) "
+                            f"→ فائز {winner_id} "
+                            f"(من {len(user_ids)} مؤهل)"
                         )
                     else:
-                        # فشل الإعلان — قد يكون race مع إعلان يدوي، أو
-                        # خطأ مؤقت. نترك المسابقة للدورة القادمة.
                         logger.warning(
                             f"⚠️ auto_declare: فشل إعلان الفائز "
-                            f"للمسابقة #{cid} — ستُعالج في الدورة القادمة"
+                            f"للمسابقة #{cid}"
                         )
 
                 except Exception as inner_e:
-                    # نتجاهل الفشل الفردي ونكمل المسابقات الأخرى
                     logger.error(
                         f"❌ auto_declare: فشل معالجة المسابقة #{cid}: "
                         f"{inner_e}",
@@ -660,12 +699,7 @@ class ContestsMixin:
     async def check_contest_joined(
         self, contest_id: int, user_id: int, include_finished: bool = False
     ) -> bool:
-        """
-        ✅ v7.4.2: التحقق من مشاركة المستخدم.
-
-        Args:
-            include_finished: إذا True، يُرجع True حتى لو انتهت المسابقة.
-        """
+        """✅ v7.4.2: التحقق من مشاركة المستخدم."""
         try:
             if include_finished:
                 result = await self.fetchval(
@@ -675,7 +709,6 @@ class ContestsMixin:
                 )
                 return result is not None
 
-            # التحقق مع حالة المسابقة
             result = await self.fetchval(
                 """SELECT 1 FROM contest_participants cp
                    JOIN contests c ON cp.contest_id = c.id
@@ -695,9 +728,7 @@ class ContestsMixin:
     # =====================================================================
 
     async def get_contest_by_id(self, contest_id: int) -> Optional[Dict]:
-        """
-        ✅ v7.4.2: يُرجع بيانات المسابقة مع عدد المشاركين.
-        """
+        """✅ v7.4.2: يُرجع بيانات المسابقة مع عدد المشاركين."""
         try:
             return await self.fetchone(
                 """SELECT c.*,
@@ -718,9 +749,7 @@ class ContestsMixin:
     async def get_contest_participants(
         self, contest_id: int, limit: int = 100
     ) -> List[Dict]:
-        """
-        ✅ v7.4.2: جلب قائمة المشاركين في مسابقة.
-        """
+        """✅ v7.4.2: جلب قائمة المشاركين في مسابقة."""
         try:
             limit = max(1, min(limit, 1000))
             return await self.fetchall(
@@ -739,19 +768,17 @@ class ContestsMixin:
             return []
 
     # =====================================================================
-    # 10) إحصائيات سريعة
+    # 10) إحصائيات
     # =====================================================================
 
     async def get_contest_stats(self, contest_id: int) -> Dict[str, Any]:
-        """
-        ✅ v7.4.2: إحصائيات سريعة عن المسابقة.
-        """
+        """✅ v7.4.2: إحصائيات سريعة."""
         try:
             stats = await self.fetchone(
                 """SELECT
                        (SELECT COUNT(*) FROM contest_participants WHERE contest_id = ?) AS participants,
                        (SELECT COUNT(*) FROM contest_winners WHERE contest_id = ?) AS winners,
-                       c.status, c.end_date, c.winner_id
+                       c.status, c.end_date, c.winner_id, c.contest_type
                    FROM contests c
                    WHERE c.id = ?""",
                 (contest_id, contest_id, contest_id),
