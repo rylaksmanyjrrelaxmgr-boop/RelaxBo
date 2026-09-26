@@ -659,6 +659,8 @@
   "delete_word": "🗑️ Kelime sil",
   "enable_delete": "✅ Silmeyi etkinleştir",
   "disable_delete": "❌ Silmeyi devre dışı",
+  "banned_words_btn_on": "✅ Yasaklı kelimeleri sil: AÇIK (kapatmak için dokun)",
+  "banned_words_btn_off": "❌ Yasaklı kelimeleri sil: KAPALI (açmak için dokun)",
   "manage_banned_words": "🚫 Yasaklı kelime yönetimi:",
   "banned_words_management": "🚫 Yasaklı kelime yönetimi:",
 
