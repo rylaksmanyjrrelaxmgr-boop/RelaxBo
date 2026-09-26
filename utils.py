@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.11 - Fast Commit)
+utils.py - الأدوات المساعدة للبوت (v7.9.13 - Restore Immediate Publish)
 =================================================================================
+🆕 v7.9.13 (استعادة سلوك النشر الفوري):
+    ✅ _publish_single_channel: يعود إلى mark_published_and_advance مباشرة
+       - السلوك مطابق 100% لـ v7.9.11
+       - التحديث في DB يحصل فوراً بعد كل نشرة (لا تأجيل)
+       - لا buffer (0 نافذة فقدان)
+       - يُستخدم transaction واحد بدل 3 → 1 fsync لكل نشرة
+
 🆕 v7.9.11 (دمج معاملات النشر):
     ✅ _publish_single_channel: استبدال 3 استدعاءات DB بـ 1
        - mark_post_published + update_last_publish + update_next_publish
@@ -1569,7 +1576,6 @@ class KeyboardFactory:
         except Exception as e:
             logger.debug(f"_get_security_stats: {e}")
 
-        # ✅ v7.9.11: TTL=60 عبر SmartCache المُعرَّف أعلى الملف
         await _security_stats_cache.set(cache_key, stats, ttl=60)
         return stats
 
@@ -2148,9 +2154,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                 continue
             return None
         except Forbidden as e:
-            # ═══════════════════════════════════════════════════════
             # ✅ v7.9.10: Forbidden = خطأ دائم → لا retry
-            # ═══════════════════════════════════════════════════════
             err_lower = str(e).lower()
             if ("bot was blocked" in err_lower or
                     "bot can't initiate" in err_lower or
@@ -2161,7 +2165,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     "bot is not a member" in err_lower):
                 logger.debug(f"⏭️ Forbidden دائم: {e} (chat={chat_id})")
                 return None
-            # غير ذلك — قد يكون خطأ مؤقت
             logger.warning(f"⚠️ Forbidden (attempt {attempt+1}): {e}")
             if attempt < max_attempts - 1:
                 await asyncio.sleep(1 * (attempt + 1))
@@ -3334,6 +3337,18 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
+        """
+        ✅ v7.9.13: السلوك مطابق 100% لـ v7.9.11.
+
+        يستخدم mark_published_and_advance مباشرة:
+          - transaction واحد (update posts + last_publish + schedule)
+          - التحديث في DB يحصل فوراً بعد كل نشرة (لا تأجيل)
+          - لا نافذة فقدان (لا buffer)
+
+        الفائدة مقارنة بالكود الأصلي (قبل v7.9.11):
+          - 3 transactions → 1 transaction = 1 fsync لكل نشرة
+          - على القرص الشبكي: 3s → 1s لكل نشرة
+        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -3351,9 +3366,9 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                # ✅ v7.9.11: transaction واحد بدل 3 معاملات منفصلة
-                # كان: mark_post_published + update_last_publish + update_next_publish
-                # صار: mark_published_and_advance (3 fsync → 1 fsync)
+                # ✅ v7.9.13: transaction واحد، تحديث فوري (سلوك v7.9.11)
+                # بدلاً من 3 استدعاءات منفصلة:
+                #   mark_post_published + update_last_publish + update_next_publish
                 await DB.mark_published_and_advance(ch['id'], post['id'])
                 if published_count == 0 or recycled:
                     if user_id:
