@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.15 - Contest Title Display Fix)
+handlers_message.py - معالجات الرسائل (v7.9.16 - Contest i18n)
 =====================================================================
+🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات):
+    ✅ _handle_contest_prize: أزرار المدة تقرأ من الترجمة
+    ✅ _handle_contest_question: نص الطلب من الترجمة
+    ✅ _handle_contest_correct_answer: رسالة quiz مترجَمة
+    ✅ _handle_contest_date: رسالة raffle مترجَمة
+    ✅ fallback عربي مضمّن عند غياب أي مفتاح
+
 🆕 v7.9.15 (إصلاح عرض عنوان المسابقة):
     ✅ _handle_contest_date: يعرض 🏆 العنوان + 🎁 الجائزة + 🕐 التاريخ
     ✅ _handle_contest_correct_answer: يعرض 🏆 العنوان + 🎁 الجائزة
@@ -12,8 +19,6 @@ handlers_message.py - معالجات الرسائل (v7.9.15 - Contest Title Dis
 
 🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow):
     ✅ _handle_contest_prize: يعرض أزرار مدة بدل طلب تاريخ نصي
-       - 11 زر مدة (ساعة → سنة)
-       - يُحسب end_date تلقائياً
     ✅ _handle_contest_question: جديد — استقبال السؤال (quiz)
     ✅ _handle_contest_correct_answer: جديد — استقبال الإجابة + إنشاء
     ✅ _PRIVATE_HANDLERS_MAP: تحديث حالات المسابقة
@@ -2185,7 +2190,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.9.14: المسابقات — quiz flow مع أزرار مدة
+    # ✅ v7.9.16: المسابقات — quiz flow مع أزرار مدة (i18n)
     # ═════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2209,7 +2214,8 @@ class MessageHandlers:
     @staticmethod
     async def _handle_contest_prize(update, context):
         """
-        ✅ v7.9.14: بعد استقبال الجائزة → يعرض أزرار المدة بدل طلب تاريخ.
+        ✅ v7.9.16: بعد استقبال الجائزة → يعرض أزرار المدة.
+        🌐 الأزرار + النص مترجَمون.
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -2217,23 +2223,25 @@ class MessageHandlers:
 
         StateManager.set(user_id, UserState.WAIT_CONTEST_DURATION)
 
-        durations = [
-            ("1h",  "⏰ ساعة"),
-            ("6h",  "🕐 6 ساعات"),
-            ("1d",  "📅 يوم"),
-            ("3d",  "📅 3 أيام"),
-            ("1w",  "📅 أسبوع"),
-            ("2w",  "📅 أسبوعان"),
-            ("1mo", "📅 شهر"),
-            ("2mo", "📅 شهران"),
-            ("3mo", "📅 3 أشهر"),
-            ("6mo", "📅 6 أشهر"),
-            ("1y",  "📅 سنة"),
+        # 🌐 مفاتيح المدد + fallback عربي
+        duration_keys = [
+            ("1h",  "contest_duration_1h",  "⏰ ساعة"),
+            ("6h",  "contest_duration_6h",  "🕐 6 ساعات"),
+            ("1d",  "contest_duration_1d",  "📅 يوم"),
+            ("3d",  "contest_duration_3d",  "📅 3 أيام"),
+            ("1w",  "contest_duration_1w",  "📅 أسبوع"),
+            ("2w",  "contest_duration_2w",  "📅 أسبوعان"),
+            ("1mo", "contest_duration_1mo", "📅 شهر"),
+            ("2mo", "contest_duration_2mo", "📅 شهران"),
+            ("3mo", "contest_duration_3mo", "📅 3 أشهر"),
+            ("6mo", "contest_duration_6mo", "📅 6 أشهر"),
+            ("1y",  "contest_duration_1y",  "📅 سنة"),
         ]
 
         kb_rows = []
         row = []
-        for key, label in durations:
+        for key, trans_key, fallback in duration_keys:
+            label = await _trans(trans_key, lang, fallback)
             row.append(InlineKeyboardButton(
                 label, callback_data=f"contest_duration:{key}"))
             if len(row) == 2:
@@ -2242,10 +2250,15 @@ class MessageHandlers:
         if row:
             kb_rows.append(row)
 
+        prompt = await _trans(
+            'contest_duration_pick', lang,
+            "📅 <b>اختر مدة المسابقة:</b>\n"
+            "<i>سيُحسب تاريخ الانتهاء تلقائياً.</i>"
+        )
+
         await safe_send(
             context.bot, user_id,
-            "📅 <b>اختر مدة المسابقة:</b>\n"
-            "<i>سيُحسب تاريخ الانتهاء تلقائياً.</i>",
+            prompt,
             reply_markup=InlineKeyboardMarkup(kb_rows),
             parse_mode='HTML',
         )
@@ -2253,8 +2266,8 @@ class MessageHandlers:
     @staticmethod
     async def _handle_contest_question(update, context):
         """
-        ✅ v7.9.14: جديد — يستقبل السؤال (لو النوع quiz).
-        ثم يطلب الإجابة الصحيحة.
+        ✅ v7.9.16: يستقبل السؤال، ثم يطلب الإجابة الصحيحة.
+        🌐 النصوص مترجَمة.
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -2268,17 +2281,17 @@ class MessageHandlers:
         context.user_data['contest_question'] = question
         StateManager.set(user_id, UserState.WAIT_CONTEST_CORRECT_ANSWER)
 
-        await safe_send(
-            context.bot, user_id,
+        prompt = await _trans(
+            'contest_correct_answer_prompt', lang,
             "✅ <b>الإجابة الصحيحة؟</b>\n"
-            "<i>ستُقارَن بإجابات المشاركين (غير حساسة لحالة الأحرف).</i>",
-            parse_mode='HTML',
+            "<i>ستُقارَن بإجابات المشاركين (غير حساسة لحالة الأحرف).</i>"
         )
+        await safe_send(context.bot, user_id, prompt, parse_mode='HTML')
 
     @staticmethod
     async def _handle_contest_correct_answer(update, context):
         """
-        ✅ v7.9.15: يعرض 🏆 العنوان + 🎁 الجائزة (إصلاح v7.9.15).
+        ✅ v7.9.16: quiz. النصوص مترجَمة.
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -2312,27 +2325,33 @@ class MessageHandlers:
             cid = 0
 
         if cid:
-            # ✅ v7.9.15: عرض العنوان والجائزة
             title_line = escape(title) if title else "—"
             prize_line = escape(prize) if prize else "—"
             duration_line = duration_label if duration_label else "—"
 
-            await safe_send(
-                context.bot, user_id,
-                f"✅ <b>أُنشئت المسابقة!</b>\n\n"
-                f"🏆 <b>{title_line}</b>\n"
-                f"🆔 <code>#{cid}</code>\n"
-                f"🎁 الجائزة: {prize_line}\n"
-                f"❓ النوع: سؤال وجواب\n"
-                f"⏱️ المدة: {duration_line}\n"
-                f"📝 السؤال: {escape(question)}\n"
-                f"✅ الإجابة: <tg-spoiler>{escape(correct_answer)}</tg-spoiler>",
-                parse_mode='HTML',
+            text = _fmt(
+                await _trans('contest_created_quiz', lang,
+                    "✅ <b>أُنشئت المسابقة!</b>\n\n"
+                    "🏆 <b>{title}</b>\n"
+                    "🆔 <code>#{id}</code>\n"
+                    "🎁 الجائزة: {prize}\n"
+                    "❓ النوع: سؤال وجواب\n"
+                    "⏱️ المدة: {duration}\n"
+                    "📝 السؤال: {question}\n"
+                    "✅ الإجابة: <tg-spoiler>{answer}</tg-spoiler>"),
+                title=title_line,
+                id=cid,
+                prize=prize_line,
+                duration=duration_line,
+                question=escape(question),
+                answer=escape(correct_answer),
             )
+            await safe_send(context.bot, user_id, text, parse_mode='HTML')
         else:
             await safe_send(
                 context.bot, user_id,
-                await _trans('execution_failed', lang, "❌ فشل الإنشاء"),
+                await _trans('contest_create_failed', lang,
+                             "❌ فشل الإنشاء"),
             )
 
         StateManager.clear(user_id)
@@ -2340,8 +2359,8 @@ class MessageHandlers:
     @staticmethod
     async def _handle_contest_date(update, context):
         """
-        ⚠️ قديم — يبقى للتوافق الخلفي.
-        ✅ v7.9.15: يعرض 🏆 العنوان + 🎁 الجائزة (إصلاح).
+        ⚠️ قديم — للتوافق الخلفي.
+        ✅ v7.9.16: النصوص مترجَمة.
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -2353,8 +2372,8 @@ class MessageHandlers:
 
         parsed = _parse_contest_date(date)
         if not parsed:
-            msg = await _trans('invalid_date', lang, "❌")
-            await safe_send(context.bot, user_id, msg)
+            await safe_send(context.bot, user_id,
+                            await _trans('invalid_date', lang, "❌"))
             StateManager.clear(user_id)
             return
 
@@ -2372,24 +2391,37 @@ class MessageHandlers:
             contest_id = 0
 
         if contest_id:
-            # ✅ v7.9.15: عرض العنوان والجائزة
             title_line = escape(title) if title else "—"
             prize_line = escape(prize) if prize else "—"
 
-            await safe_send(
-                context.bot, user_id,
-                f"✅ <b>أُنشئت المسابقة!</b>\n\n"
-                f"🏆 <b>{title_line}</b>\n"
-                f"🆔 <code>#{contest_id}</code>\n"
-                f"🎁 الجائزة: {prize_line}\n"
-                f"🎲 النوع: سحب عشوائي\n"
-                f"🕐 ينتهي: <code>{escape(date)}</code>\n"
-                f"👥 المشاركون: 0",
-                parse_mode='HTML',
+            end_line = _fmt(
+                await _trans('contest_end_line', lang,
+                             "🕐 <b>ينتهي:</b> <code>{end}</code>\n"),
+                end=escape(date))
+            type_line = await _trans('contest_type_raffle_label', lang,
+                                     "🎲 النوع: سحب عشوائي")
+
+            text = _fmt(
+                await _trans('contest_created_raffle', lang,
+                    "✅ <b>أُنشئت المسابقة!</b>\n\n"
+                    "🏆 <b>{title}</b>\n"
+                    "🆔 <code>#{id}</code>\n"
+                    "🎁 الجائزة: {prize}\n"
+                    "{type_line}\n"
+                    "⏱️ المدة: {duration}\n"
+                    "{end_line}"
+                    "👥 المشاركون: 0"),
+                title=title_line,
+                id=contest_id,
+                prize=prize_line,
+                type_line=type_line,
+                duration="—",
+                end_line=end_line,
             )
+            await safe_send(context.bot, user_id, text, parse_mode='HTML')
         else:
-            msg = await _trans('execution_failed', lang, "❌")
-            await safe_send(context.bot, user_id, msg)
+            await safe_send(context.bot, user_id,
+                            await _trans('execution_failed', lang, "❌"))
 
         StateManager.clear(user_id)
 
