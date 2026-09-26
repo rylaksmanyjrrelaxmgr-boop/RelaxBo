@@ -2,32 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.28.1)
+handlers_callback.py - معالج الأزرار (v9.4.29)
 =====================================================================
-🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة:
-    ✅ contest_type_raffle: التقاط العنوان/الوصف/الجائزة/التاريخ
-       قبل تنظيف الـ context وعرضها في رسالة النجاح
-    ✅ fallback "—" للقيم الناقصة
-    ✅ عدم مسح context عند فشل إنشاء المسابقة (للسماح بإعادة المحاولة)
+🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة:
+    ✅ contest_duration:* → يستخدم _trans() لكل النصوص
+    ✅ contest_type_raffle → رسالة نجاح مترجَمة بالكامل
+    ✅ contest_type_quiz → نص مترجَم
+    ✅ مفاتيح جديدة:
+       - contest_duration_prompt
+       - contest_type_raffle_btn / contest_type_quiz_btn
+       - contest_ask_question
+       - contest_created_raffle
+       - contest_create_failed
+       - contest_end_line
 
-🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي):
-    ✅ CONTEST_DURATIONS: 11 مدة جاهزة (ساعة → سنة)
-    ✅ handle(): معالج جديد `contest_duration:*`
-       - يحسب end_date تلقائياً (now + seconds)
-       - يحفظ في context.user_data
-       - ينتقل إلى اختيار النوع
-    ✅ handle(): معالج `contest_type_raffle`
-       - يُنشئ المسابقة فوراً
-    ✅ handle(): معالج `contest_type_quiz`
-       - يطلب السؤال (StateManager.WAIT_CONTEST_QUESTION)
-    ✅ لا تغيير على أي دالة أخرى — كل السلوك محفوظ 100%
+🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة
 
-✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب":
-    ✅ _handle_contests: استخدام مفاتيح ترجمة
-    ✅ fallback لو get_correct_answerers غابت
-    ✅ تمييز "لا مشاركين" عن "لا إجابات صحيحة"
-    ✅ رسالة "مشارك مسبقاً" أوضح
+🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي)
 
+✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب"
 ✅ v9.4.26 — دعم مسابقة "سؤال وجواب"
 ✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة
 ✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C)
@@ -184,7 +177,7 @@ _ANALYTICS_ALIASES: Dict[str, str] = {
 }
 
 # =====================================================================
-# ✅ v9.4.28: مدد المسابقات الجاهزة
+# ✅ v9.4.28: مدد المسابقات الجاهزة (key, fallback_label, seconds)
 # =====================================================================
 
 CONTEST_DURATIONS: Dict[str, Tuple[str, int]] = {
@@ -1181,7 +1174,7 @@ class CallbackHandlers:
                 return
 
             # ═══════════════════════════════════════════════════════════════
-            # ✅ v9.4.28: أزرار مدة المسابقة + نوع المسابقة
+            # ✅ v9.4.29: أزرار مدة المسابقة + نوع المسابقة (كل النصوص مترجمة)
             # ═══════════════════════════════════════════════════════════════
             if data.startswith("contest_duration:"):
                 duration_key = data.split(":", 1)[1]
@@ -1192,8 +1185,12 @@ class CallbackHandlers:
                         bot=context.bot)
                     return
 
-                label, seconds = CONTEST_DURATIONS[duration_key]
+                _fallback_label, seconds = CONTEST_DURATIONS[duration_key]
                 end_dt = TimeUtils.utc_now() + timedelta(seconds=seconds)
+
+                # 🌐 عنوان المدة من الترجمة (fallback → العربي)
+                label = await _trans(f"contest_duration_{duration_key}",
+                                     lang, _fallback_label)
 
                 context.user_data['contest_end_date'] = end_dt.isoformat()
                 context.user_data['contest_duration_label'] = label
@@ -1201,29 +1198,38 @@ class CallbackHandlers:
 
                 StateManager.set(user_id, UserState.WAIT_CONTEST_TYPE)
 
+                # 🌐 نصوص الأزرار من الترجمة
+                raffle_btn = await _trans('contest_type_raffle_btn', lang,
+                                          "🎲 سحب عشوائي")
+                quiz_btn = await _trans('contest_type_quiz_btn', lang,
+                                        "❓ سؤال وجواب")
+
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        "🎲 سحب عشوائي",
+                        raffle_btn,
                         callback_data="contest_type_raffle")],
                     [InlineKeyboardButton(
-                        "❓ سؤال وجواب",
+                        quiz_btn,
                         callback_data="contest_type_quiz")],
                     [InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
 
-                text = (
-                    f"📅 <b>المدة:</b> {label}\n"
-                    f"🕐 <b>ينتهي:</b> "
-                    f"<code>{end_dt.strftime('%Y-%m-%d %H:%M')}</code>\n\n"
-                    f"🎯 <b>اختر نوع المسابقة:</b>"
+                # 🌐 قالب النص من الترجمة
+                text_template = await _trans(
+                    'contest_duration_prompt', lang,
+                    "📅 <b>المدة:</b> {label}\n"
+                    "🕐 <b>ينتهي:</b> <code>{end}</code>\n\n"
+                    "🎯 <b>اختر نوع المسابقة:</b>"
                 )
+                text = _fmt(text_template,
+                            label=label,
+                            end=end_dt.strftime('%Y-%m-%d %H:%M'))
                 await safe_edit(query, text, reply_markup=kb,
                                 parse_mode='HTML', bot=context.bot)
                 return
 
-            # ✅ v9.4.28.1 — التقاط كل الحقول قبل مسح الـ context
             if data == "contest_type_raffle":
                 c_title = (context.user_data.get('contest_title') or '').strip()
                 c_desc  = (context.user_data.get('contest_desc') or '').strip()
@@ -1241,7 +1247,6 @@ class CallbackHandlers:
                 )
 
                 if cid:
-                    # لا نمسح الـ context إلا بعد نجاح الإنشاء
                     StateManager.clear(user_id)
                     _clear_context_keys(context)
 
@@ -1249,28 +1254,43 @@ class CallbackHandlers:
                     prize_line = _html.escape(c_prize) if c_prize else "—"
                     label_line = _html.escape(c_label) if c_label else "—"
 
+                    # 🌐 سطر النهاية
                     end_line = ""
                     if c_end:
                         try:
-                            # end_date محفوظ كـ ISO؛ نعرضه بشكل مقروء
                             display_end = c_end.replace('T', ' ')[:16]
-                            end_line = f"🕐 ينتهي: <code>{display_end}</code>\n"
+                            end_line = _fmt(
+                                await _trans('contest_end_line', lang,
+                                             "🕐 <b>ينتهي:</b> <code>{end}</code>\n"),
+                                end=display_end)
                         except Exception:
-                            pass
+                            end_line = ""
 
-                    await safe_edit(
-                        query,
-                        f"✅ <b>أُنشئت المسابقة!</b>\n\n"
-                        f"🏆 <b>{title_line}</b>\n"
-                        f"🆔 <code>#{cid}</code>\n"
-                        f"🎁 الجائزة: {prize_line}\n"
-                        f"🎲 النوع: سحب عشوائي\n"
-                        f"⏱️ المدة: {label_line}\n"
-                        f"{end_line}"
-                        f"👥 المشاركون: 0",
-                        parse_mode='HTML', bot=context.bot)
+                    # 🌐 نص النوع
+                    type_line = await _trans('contest_type_raffle_label', lang,
+                                             "🎲 النوع: سحب عشوائي")
+
+                    # 🌐 قالب الرسالة النهائية
+                    text = _fmt(
+                        await _trans('contest_created_raffle', lang,
+                            "✅ <b>أُنشئت المسابقة!</b>\n\n"
+                            "🏆 <b>{title}</b>\n"
+                            "🆔 <code>#{id}</code>\n"
+                            "🎁 الجائزة: {prize}\n"
+                            "{type_line}\n"
+                            "⏱️ المدة: {duration}\n"
+                            "{end_line}"
+                            "👥 المشاركون: 0"),
+                        title=title_line,
+                        id=cid,
+                        prize=prize_line,
+                        type_line=type_line,
+                        duration=label_line,
+                        end_line=end_line,
+                    )
+                    await safe_edit(query, text,
+                                    parse_mode='HTML', bot=context.bot)
                 else:
-                    # فشل الإنشاء — نبقي البيانات ليتمكن من إعادة المحاولة
                     await safe_edit(query,
                         await _trans('contest_create_failed', lang,
                                      "❌ فشل إنشاء المسابقة"),
@@ -1278,10 +1298,10 @@ class CallbackHandlers:
                 return
 
             if data == "contest_type_quiz":
-                # لا نمسح الـ context — نحتاج title/desc/prize/end لاحقاً
                 StateManager.set(user_id, UserState.WAIT_CONTEST_QUESTION)
                 await safe_edit(query,
-                    "❓ <b>أرسل السؤال الآن:</b>",
+                    await _trans('contest_ask_question', lang,
+                                 "❓ <b>أرسل السؤال الآن:</b>"),
                     parse_mode='HTML', bot=context.bot)
                 return
             # ═══════════════════════════════════════════════════════════════
