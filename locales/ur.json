@@ -529,6 +529,8 @@
   "delete_word": "🗑️ لفظ حذف",
   "enable_delete": "✅ حذف فعال",
   "disable_delete": "❌ حذف بند",
+  "banned_words_btn_on": "✅ ممنوع الفاظ حذف کریں: فعال (بند کرنے کے لیے دبائیں)",
+  "banned_words_btn_off": "❌ ممنوع الفاظ حذف کریں: غیر فعال (فعال کرنے کے لیے دبائیں)",
   "manage_banned_words": "🚫 ممنوع الفاظ کا انتظام:",
   "banned_words_management": "🚫 ممنوع الفاظ کا انتظام:",
 
