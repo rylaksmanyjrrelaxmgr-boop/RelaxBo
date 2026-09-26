@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.14 - Contest Duration Buttons)
+handlers_message.py - معالجات الرسائل (v7.9.15 - Contest Title Display Fix)
 =====================================================================
+🆕 v7.9.15 (إصلاح عرض عنوان المسابقة):
+    ✅ _handle_contest_date: يعرض 🏆 العنوان + 🎁 الجائزة + 🕐 التاريخ
+    ✅ _handle_contest_correct_answer: يعرض 🏆 العنوان + 🎁 الجائزة
+    ✅ fallback "—" للقيم الفارغة (بدل None أو فراغ)
+    ✅ escape على العنوان والجائزة لتفادي كسر HTML
+
 🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow):
     ✅ _handle_contest_prize: يعرض أزرار مدة بدل طلب تاريخ نصي
        - 11 زر مدة (ساعة → سنة)
@@ -11,10 +17,6 @@ handlers_message.py - معالجات الرسائل (v7.9.14 - Contest Duration 
     ✅ _handle_contest_question: جديد — استقبال السؤال (quiz)
     ✅ _handle_contest_correct_answer: جديد — استقبال الإجابة + إنشاء
     ✅ _PRIVATE_HANDLERS_MAP: تحديث حالات المسابقة
-       - WAIT_CONTEST_DURATION → button-only (يُعالج في callback)
-       - WAIT_CONTEST_TYPE → button-only
-       - WAIT_CONTEST_QUESTION → _handle_contest_question
-       - WAIT_CONTEST_CORRECT_ANSWER → _handle_contest_correct_answer
     ✅ WAIT_CONTEST_DATE يبقى للتوافق الخلفي
 
 🆕 v7.9.13 (فحص صلاحيات البوت في قناة السجل)
@@ -2276,7 +2278,7 @@ class MessageHandlers:
     @staticmethod
     async def _handle_contest_correct_answer(update, context):
         """
-        ✅ v7.9.14: جديد — يستقبل الإجابة الصحيحة، ثم يُنشئ مسابقة quiz.
+        ✅ v7.9.15: يعرض 🏆 العنوان + 🎁 الجائزة (إصلاح v7.9.15).
         """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
@@ -2287,12 +2289,12 @@ class MessageHandlers:
                             await _trans('empty_message', lang, "❌"))
             return
 
-        title = context.user_data.get('contest_title', '')
-        description = context.user_data.get('contest_desc', '')
-        prize = context.user_data.get('contest_prize', '')
+        title = (context.user_data.get('contest_title') or '').strip()
+        description = (context.user_data.get('contest_desc') or '').strip()
+        prize = (context.user_data.get('contest_prize') or '').strip()
         end_date = context.user_data.get('contest_end_date', '')
-        question = context.user_data.get('contest_question', '')
-        duration_label = context.user_data.get('contest_duration_label', '')
+        question = (context.user_data.get('contest_question') or '').strip()
+        duration_label = (context.user_data.get('contest_duration_label') or '').strip()
 
         try:
             cid = await DB.create_contest(
@@ -2310,12 +2312,19 @@ class MessageHandlers:
             cid = 0
 
         if cid:
+            # ✅ v7.9.15: عرض العنوان والجائزة
+            title_line = escape(title) if title else "—"
+            prize_line = escape(prize) if prize else "—"
+            duration_line = duration_label if duration_label else "—"
+
             await safe_send(
                 context.bot, user_id,
                 f"✅ <b>أُنشئت المسابقة!</b>\n\n"
+                f"🏆 <b>{title_line}</b>\n"
                 f"🆔 <code>#{cid}</code>\n"
+                f"🎁 الجائزة: {prize_line}\n"
                 f"❓ النوع: سؤال وجواب\n"
-                f"⏱️ المدة: {duration_label}\n"
+                f"⏱️ المدة: {duration_line}\n"
                 f"📝 السؤال: {escape(question)}\n"
                 f"✅ الإجابة: <tg-spoiler>{escape(correct_answer)}</tg-spoiler>",
                 parse_mode='HTML',
@@ -2330,25 +2339,58 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_date(update, context):
-        """⚠️ قديم — يبقى للتوافق الخلفي."""
+        """
+        ⚠️ قديم — يبقى للتوافق الخلفي.
+        ✅ v7.9.15: يعرض 🏆 العنوان + 🎁 الجائزة (إصلاح).
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
-        title = context.user_data.get('contest_title', '')
-        desc = context.user_data.get('contest_desc', '')
-        prize = context.user_data.get('contest_prize', '')
-        date = update.effective_message.text or ""
+
+        title = (context.user_data.get('contest_title') or '').strip()
+        desc = (context.user_data.get('contest_desc') or '').strip()
+        prize = (context.user_data.get('contest_prize') or '').strip()
+        date = (update.effective_message.text or "").strip()
+
         parsed = _parse_contest_date(date)
         if not parsed:
             msg = await _trans('invalid_date', lang, "❌")
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
-        contest_id = await DB.create_contest(user_id, title, desc, prize, date)
+
+        try:
+            contest_id = await DB.create_contest(
+                creator_id=user_id,
+                title=title,
+                description=desc,
+                prize=prize,
+                end_date=date,
+                contest_type='raffle',
+            )
+        except Exception as e:
+            logger.error(f"❌ create raffle contest: {e}", exc_info=True)
+            contest_id = 0
+
         if contest_id:
-            await safe_send(context.bot, user_id, f"✅ #{contest_id}")
+            # ✅ v7.9.15: عرض العنوان والجائزة
+            title_line = escape(title) if title else "—"
+            prize_line = escape(prize) if prize else "—"
+
+            await safe_send(
+                context.bot, user_id,
+                f"✅ <b>أُنشئت المسابقة!</b>\n\n"
+                f"🏆 <b>{title_line}</b>\n"
+                f"🆔 <code>#{contest_id}</code>\n"
+                f"🎁 الجائزة: {prize_line}\n"
+                f"🎲 النوع: سحب عشوائي\n"
+                f"🕐 ينتهي: <code>{escape(date)}</code>\n"
+                f"👥 المشاركون: 0",
+                parse_mode='HTML',
+            )
         else:
             msg = await _trans('execution_failed', lang, "❌")
             await safe_send(context.bot, user_id, msg)
+
         StateManager.clear(user_id)
 
     @staticmethod
