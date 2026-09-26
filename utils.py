@@ -2,43 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.13 - Restore Immediate Publish)
+utils.py - الأدوات المساعدة للبوت (v7.9.14 - Contest Duration Buttons)
 =================================================================================
-🆕 v7.9.13 (استعادة سلوك النشر الفوري):
-    ✅ _publish_single_channel: يعود إلى mark_published_and_advance مباشرة
-       - السلوك مطابق 100% لـ v7.9.11
-       - التحديث في DB يحصل فوراً بعد كل نشرة (لا تأجيل)
-       - لا buffer (0 نافذة فقدان)
-       - يُستخدم transaction واحد بدل 3 → 1 fsync لكل نشرة
+🆕 v7.9.14 (أزرار مدة المسابقة بدل التاريخ النصي):
+    ✅ UserState: 4 حالات جديدة لدعم quiz بأزرار
+       - WAIT_CONTEST_DURATION:   🎯 اختيار المدة بالأزرار
+       - WAIT_CONTEST_TYPE:       🎯 اختيار النوع (raffle/quiz)
+       - WAIT_CONTEST_QUESTION:   ❓ استقبال السؤال (quiz فقط)
+       - WAIT_CONTEST_CORRECT_ANSWER: ✅ استقبال الإجابة الصحيحة
+    ✅ WAIT_CONTEST_DATE يبقى للتوافق الخلفي (يمكن حذفه لاحقاً)
+    ✅ لا تغيير على أي منطق آخر — كل السلوك محفوظ 100%
 
-🆕 v7.9.11 (دمج معاملات النشر):
-    ✅ _publish_single_channel: استبدال 3 استدعاءات DB بـ 1
-       - mark_post_published + update_last_publish + update_next_publish
-       → mark_published_and_advance (tx واحد)
-    ✅ _security_stats_cache TTL: 5s → 60s (تقليل الضغط 12x)
-
-🆕 v7.9.10 (إصلاح Forbidden في safe_send):
-    ✅ التعامل مع Forbidden كخطأ دائم (بدون retry)
-    ✅ يمنع 3 محاولات فاشلة لكل مستخدم محظور
-    ✅ يختصر وقت البث الجماعي إلى الثلث
-    ✅ يقلل عدد السطور في اللوق بنسبة 66%
-
-🆕 v7.9.9:
-    ✅ apply_penalty: بدون سطر @username
-
-🆕 v7.9.8:
-    ✅ TranslationManager.get_text: لا يستبدل placeholders بلا kwargs
-
-🆕 v7.9.7:
-    ✅ apply_penalty: رسالة كاملة بـ 17 لغة
-    ✅ _PENALTY_I18N: كل الترجمات مدمجة
-
-🔴 v7.9.6: _COMMON_PHRASES + TranslationManager.translate()
-🔴 v7.9.4: KeyboardFactory مسار buttons_config_{lang}.json
-🔴 v7.9.3: TranslationManager سجل عند النجاح/الفشل
-🔴 v7.9.2: إصلاحات ما بعد التدقيق
-🔴 v7.9.1: get_reply_from_file: قائمة أنماط مُسبَق تصريفها
-🔴 v7.9.0: تحميل خارج القفل + إصلاحات حرجة
+🆕 v7.9.13 (استعادة سلوك النشر الفوري)
+🆕 v7.9.11 (دمج معاملات النشر)
+🆕 v7.9.10 (إصلاح Forbidden في safe_send)
+🆕 v7.9.9 (apply_penalty: بدون سطر @username)
+🆕 v7.9.8 (TranslationManager.get_text)
+🆕 v7.9.7 (apply_penalty: 17 لغة)
+🆕 v7.9.6 (_COMMON_PHRASES + translate())
+🆕 v7.9.4 (KeyboardFactory مسار buttons_config_{lang}.json)
+🆕 v7.9.3 (TranslationManager سجل عند النجاح/الفشل)
+🆕 v7.9.2 (إصلاحات ما بعد التدقيق)
+🆕 v7.9.1 (get_reply_from_file: قائمة أنماط مُسبَق تصريفها)
+🆕 v7.9.0 (تحميل خارج القفل + إصلاحات حرجة)
 =================================================================================
 """
 
@@ -165,8 +151,6 @@ _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 
 # ✅ v7.9.11: TTL من 5 → 60 (تقليل الضغط 12x)
-# السبب: _get_security_stats يُنفّذ 6 استعلامات متوازية، وTTL=5s
-# كان يولّدها كل 5 ثوانٍ لكل مجموعة.
 _security_stats_cache = SmartCache(ttl=60, max_size=500)
 
 # =====================================================================
@@ -704,11 +688,24 @@ class UserState(Enum):
     WAIT_KEYWORD = auto()
     WAIT_REPLY = auto()
     WAIT_LOG_CH = auto()
+
+    # ══════════════════════════════════════════════════════════════
+    # ✅ v7.9.14: مسابقات — أزرار مدة + نوع + quiz
+    # ══════════════════════════════════════════════════════════════
     WAIT_CONTEST_TITLE = auto()
     WAIT_CONTEST_DESC = auto()
     WAIT_CONTEST_PRIZE = auto()
+    # ✅ جديد — يُعالَج في handlers_callback.py عبر أزرار
+    WAIT_CONTEST_DURATION = auto()          # 🎯 أزرار المدة
+    WAIT_CONTEST_TYPE = auto()              # 🎯 أزرار النوع (raffle/quiz)
+    # ✅ جديد — quiz flow
+    WAIT_CONTEST_QUESTION = auto()          # ❓ استقبال السؤال
+    WAIT_CONTEST_CORRECT_ANSWER = auto()    # ✅ استقبال الإجابة الصحيحة
+    # ⚠️ قديم — للتوافق الخلفي (يمكن حذفه لاحقاً)
     WAIT_CONTEST_DATE = auto()
-    WAIT_CONTEST_ANSWER = auto()
+    WAIT_CONTEST_ANSWER = auto()            # يستخدمه المشارك العادي
+    # ══════════════════════════════════════════════════════════════
+
     WAIT_MAX_LEN = auto()
     WAIT_WARN_COUNT = auto()
     WAIT_AUTO_KEY = auto()
@@ -2094,12 +2091,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
     """
     ✅ v7.9.10: التعامل مع Forbidden كخطأ دائم (بدون retry).
-
-    الفائدة:
-      • المستخدم المحظور (bot blocked) → لا نعيد المحاولة
-      • المستخدم الذي لم يبدأ البوت → لا نعيد المحاولة
-      • الحساب المحذوف → لا نعيد المحاولة
-      → يوفّر 66% من وقت البث + 66% من سطور اللوق
     """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
@@ -2154,7 +2145,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                 continue
             return None
         except Forbidden as e:
-            # ✅ v7.9.10: Forbidden = خطأ دائم → لا retry
             err_lower = str(e).lower()
             if ("bot was blocked" in err_lower or
                     "bot can't initiate" in err_lower or
@@ -2871,7 +2861,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         except Exception:
             pass
 
-    # ✅ v7.9.9: بدون سطر @username
     lines = [T(penalty), ""]
     lines.append(f"{T('user')} {first_name or T('unknown_user')}")
     lines.append(f"{T('id')} <code>{user_id}</code>")
@@ -3339,15 +3328,6 @@ class BackgroundTasks:
                                        has_sub: bool = None) -> bool:
         """
         ✅ v7.9.13: السلوك مطابق 100% لـ v7.9.11.
-
-        يستخدم mark_published_and_advance مباشرة:
-          - transaction واحد (update posts + last_publish + schedule)
-          - التحديث في DB يحصل فوراً بعد كل نشرة (لا تأجيل)
-          - لا نافذة فقدان (لا buffer)
-
-        الفائدة مقارنة بالكود الأصلي (قبل v7.9.11):
-          - 3 transactions → 1 transaction = 1 fsync لكل نشرة
-          - على القرص الشبكي: 3s → 1s لكل نشرة
         """
         user_id = None
         try:
@@ -3366,9 +3346,6 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                # ✅ v7.9.13: transaction واحد، تحديث فوري (سلوك v7.9.11)
-                # بدلاً من 3 استدعاءات منفصلة:
-                #   mark_post_published + update_last_publish + update_next_publish
                 await DB.mark_published_and_advance(ch['id'], post['id'])
                 if published_count == 0 or recycled:
                     if user_id:
