@@ -2,39 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.21)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.22)
 ================================================================================
-🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN — إصلاح جذري):
-  ✅ CURRENT_SCHEMA_VERSION: 19 → 20
-       - السبب: database.py يستخدم tables_hash (يشمل schema_version)
-         لتفادي إعادة create_tables.
-       - المشكلة: v7.6.18/v7.6.19/v7.6.20 لم تُحدّث الرقم → tables_hash
-         لم يتغيّر → create_tables_postgres لم يُستدعى أصلاً.
-       - النتيجة: الفهارس الزائدة (idx_posts_channel) لم تُحذف،
-         admin_logs لم يُنظَّف، autovacuum لم يُضبط.
-       - الحل: رفع الرقم → tables_hash يتغيّر → create_tables يعمل
-         مرة واحدة → كل الإصلاحات السابقة تُطبَّق.
-       - المتوقع: UPDATE posts من 2.07s → <100ms
+🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS):
+  ✅ CURRENT_SCHEMA_VERSION: 20 → 21
+       - السبب: إضافة أعمدة لجدول contests لمسابقات quiz:
+            • contest_type   (كان موجوداً، نُبقيه للتوافق)
+            • question       (جديد — لمسابقات quiz)
+            • correct_answer (جديد — لمسابقات quiz)
+       - الإصلاح: migration تلقائي يُضيف الأعمدة للقواعد القديمة
+       - المتوقع: مسابقات quiz تعمل بعد إعادة التشغيل
 
-🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS):
-  ✅ إضافة _drop_deprecated_indexes_* إلى fast-path
-  ✅ إضافة ADMIN_LOGS_MAX_ROWS = 5000
-  ✅ ADMIN_LOGS_RETENTION_DAYS: 60 → 30
-
-🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX — تغطية الجداول المتبقية):
-  ✅ +3 جداول لـ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
-
-🚀 v7.6.18 (DIAGNOSIS-FIXES — تنظيف admin_logs + autovacuum):
-  ✅ ADMIN_LOGS_RETENTION_DAYS + SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM
-  ✅ _tune_autovacuum_postgres
-
-🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX):
-  ✅ schemaname = ANY(current_schemas(false))
-  ✅ _migrate_missing_columns_postgres: إصلاح عداد مضلل
-
-🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES):
-  ✅ حُذف 3 فهارس زائدة على جدول posts
-
+🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN — إصلاح جذري)
+🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
+🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX)
+🚀 v7.6.18 (DIAGNOSIS-FIXES)
+🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX)
+🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES)
 🚀 v7.6.15 (SLOW-QUERY-FIX)
 🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB)
 🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
@@ -56,10 +40,9 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.21: 19 → 20 (إجبار database.py على إعادة create_tables)
-# السبب: database.py يستخدم tables_hash = f(schema_version, source) لتفادي
-# إعادة create_tables. مع 19 لم يتغيّر الرقم من v7.6.20 → لم يُستدعى.
-CURRENT_SCHEMA_VERSION = 20
+# ✅ v7.6.22: 20 → 21 (إجبار database.py على إعادة create_tables)
+# السبب: إضافة أعمدة لجدول contests لمسابقات quiz
+CURRENT_SCHEMA_VERSION = 21
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -1243,15 +1226,25 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
+# ✅ v7.6.22: group_security — أعمدة إضافية
 _GROUP_SECURITY_NEW_COLUMNS = [
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+]
+
+# ✅ v7.6.22: contests — أعمدة مسابقات quiz
+_CONTESTS_NEW_COLUMNS = [
+    ("contest_type", "TEXT DEFAULT 'raffle'"),
+    ("question", "TEXT DEFAULT ''"),
+    ("correct_answer", "TEXT DEFAULT ''"),
 ]
 
 
 async def _migrate_missing_columns_sqlite(conn, logger):
     checked = 0
     added = 0
+
+    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
         try:
@@ -1261,13 +1254,38 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             )
             added += 1
             if logger:
-                logger.info(f"✅ SQLite: أُضيف عمود {col_name}")
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (group_security)"
+                )
         except Exception as e:
             err = str(e).lower()
             if "duplicate" in err or "already exists" in err:
                 continue
             if logger:
                 logger.debug(f"⚠️ SQLite migration {col_name}: {e}")
+
+    # ─── contests ─── (v7.6.22)
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration contests.{col_name}: {e}"
+                )
+
     if added:
         await conn.commit()
     return added
@@ -1277,6 +1295,8 @@ async def _migrate_missing_columns_postgres(conn, logger):
     checked = 0
     added = 0
     skipped = 0
+
+    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1297,10 +1317,42 @@ async def _migrate_missing_columns_postgres(conn, logger):
             )
             added += 1
             if logger:
-                logger.info(f"✅ PG: أُضيف عمود {col_name}")
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (group_security)"
+                )
         except Exception as e:
             if logger:
                 logger.debug(f"⚠️ PG migration {col_name}: {e}")
+
+    # ─── contests ─── (v7.6.22)
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'contests' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration contests.{col_name}: {e}"
+                )
 
     if logger and checked:
         logger.debug(
@@ -1314,6 +1366,8 @@ async def _migrate_missing_columns_mysql(conn, logger):
     checked = 0
     added = 0
     skipped = 0
+
+    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
         try:
@@ -1344,10 +1398,52 @@ async def _migrate_missing_columns_mysql(conn, logger):
             )
             added += 1
             if logger:
-                logger.info(f"✅ MySQL: أُضيف عمود {col_name}")
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (group_security)"
+                )
         except Exception as e:
             if logger:
                 logger.debug(f"⚠️ MySQL migration {col_name}: {e}")
+
+    # ─── contests ─── (v7.6.22)
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'contests' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration contests.{col_name}: {e}"
+                )
 
     if logger and checked:
         logger.debug(
@@ -2537,6 +2633,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2548,7 +2645,9 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             status TEXT DEFAULT 'active',
             winner_id INTEGER,
             created_at TEXT,
-            contest_type TEXT DEFAULT 'raffle'
+            contest_type TEXT DEFAULT 'raffle',
+            question TEXT DEFAULT '',
+            correct_answer TEXT DEFAULT ''
         )
     """)
     await conn.execute("""
@@ -2789,7 +2888,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "force-bootstrap-rerun"),
+             "v7.6.22-contest-quiz-columns"),
         )
         await conn.commit()
     except Exception as e:
@@ -3169,6 +3268,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id SERIAL PRIMARY KEY,
@@ -3180,7 +3280,9 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             status TEXT DEFAULT 'active',
             winner_id BIGINT,
             created_at TIMESTAMP,
-            contest_type TEXT DEFAULT 'raffle'
+            contest_type TEXT DEFAULT 'raffle',
+            question TEXT DEFAULT '',
+            correct_answer TEXT DEFAULT ''
         )
     """)
     await conn.execute("""
@@ -3428,7 +3530,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "force-bootstrap-rerun",
+            "v7.6.22-contest-quiz-columns",
         )
     except Exception as e:
         if logger:
@@ -3815,6 +3917,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -3826,7 +3929,9 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 status VARCHAR(50) DEFAULT 'active',
                 winner_id BIGINT,
                 created_at DATETIME,
-                contest_type VARCHAR(50) DEFAULT 'raffle'
+                contest_type VARCHAR(50) DEFAULT 'raffle',
+                question TEXT,
+                correct_answer TEXT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         await conn.execute("""
@@ -4070,7 +4175,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "force-bootstrap-rerun",
+                    "v7.6.22-contest-quiz-columns",
                 ),
             )
         except Exception as e:
