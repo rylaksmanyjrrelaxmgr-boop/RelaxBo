@@ -564,6 +564,9 @@ HEAVY_TABLES_FOR_AUTOVACUUM = (
 )
 
 # 🆕 v7.7.39: جداول صغيرة تحتاج autovacuum عدواني
+# السبب: threshold الافتراضي (50) يمنع AV من التفعّل
+#       → dead tuples تتراكم: plans (7/7)، user_reminder_settings (9/2)
+# الحل: threshold = 5 + scale_factor = 0.0
 SMALL_TABLES_FOR_AUTOVACUUM = (
     "plans",
     "settings",
@@ -2325,7 +2328,25 @@ class Database(
     async def vacuum(self, table: str) -> None:
         """
         🧹 VACUUM (ANALYZE) خارج transaction — PostgreSQL فقط.
+
+        السبب: VACUUM لا يعمل داخل BEGIN/COMMIT. نستخدم pool.acquire()
+        مباشر لتجنّب asynccontextmanager connection() الذي قد يفتح
+        transaction تلقائياً.
+
+        الفائدة على DB.execute():
+          - timeout خاص (300s بدل 60s)
+          - بدون إعادة محاولة عند الفشل (فشل VACUUM = فشل نهائي غالباً)
+          - بدون overhead من _convert_placeholders/_adapt_params
+          - رسائل خطأ أوضح
+
+        Args:
+            table: اسم الجدول (يُتحقّق منه بـ regex لمنع injection)
+
+        Raises:
+            RuntimeError: إذا pool غير متاح
+            asyncio.TimeoutError: إذا تجاوز VACUUM الـ timeout
         """
+        # SQLite: VACUUM على كامل القاعدة — لا يقبل اسم جدول
         if DB_TYPE == "sqlite":
             try:
                 await self.execute("VACUUM")
@@ -2334,6 +2355,7 @@ class Database(
                 logger.debug(f"⚠️ SQLite VACUUM: {e}")
             return
 
+        # MySQL: VACUUM غير مدعوم (OPTIMIZE TABLE بدلاً منه)
         if USE_MYSQL:
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
                 logger.error(
@@ -2347,6 +2369,7 @@ class Database(
                 logger.debug(f"⚠️ MySQL OPTIMIZE {table}: {e}")
             return
 
+        # PostgreSQL: VACUUM ANALYZE خارج transaction
         if not USE_POSTGRES:
             return
 
@@ -2369,6 +2392,7 @@ class Database(
             timeout=self._connection_timeout,
         )
         try:
+            # ⚠️ لا نستدعي _execute_with_conn — نريد autocommit مباشر
             await asyncio.wait_for(
                 conn.execute(f"VACUUM (ANALYZE) {table}"),
                 timeout=vacuum_timeout,
@@ -2383,12 +2407,36 @@ class Database(
                 )
 
     # =================================================================
-    # 🆕 v7.7.32/38/39: ضبط autovacuum
+    # 🆕 v7.7.32 + v7.7.38 + v7.7.39: ضبط autovacuum
     # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
         """
-        🆕 v7.7.32/38/39: ضبط autovacuum على الجداول الثقيلة والصغيرة.
+        🆕 v7.7.32: ضبط autovacuum على الجداول الثقيلة.
+
+        🆕 v7.7.38: قيم أكثر شدة لمنع تراكم dead tuples على posts:
+          - scale_factor: 0.05 → 0.02 (يبدأ بعد ~19 بدل ~33)
+          - analyze_scale: 0.02 → 0.01
+          - cost_delay: 10ms → 2ms (أسرع 5x)
+          - cost_limit: 1000 → 2000
+
+        🆕 v7.7.39: إضافة ضبط الجداول الصغيرة (SMALL_TABLES_FOR_AUTOVACUUM):
+          - threshold: 50 → 5 (يبدأ بعد 5 dead tuple فقط)
+          - scale_factor: 0.05 → 0.0 (لا يعتمد على حجم الجدول)
+          - analyze_threshold: 50 → 5
+
+        السبب:
+          • posts وصل 68 dead tuple (12.8%) خلال ساعة
+          • get_next_post تأثر (2.27s بدل <100ms)
+          • الجداول الصغيرة (plans, settings) لا يتفعّل عليها AV أصلاً
+            بسبب threshold الافتراضي (50 + 0.2 × N)
+
+        الهدف: dead tuples تبقى دائمة <20.
+
+        ملاحظات:
+          - يعمل مرة واحدة فقط (علم _autovacuum_tuned)
+          - لا يفشل bootstrap إذا فشل
+          - PG فقط
         """
         if not USE_POSTGRES:
             return 0
@@ -2398,6 +2446,9 @@ class Database(
         tuned = 0
         failed = 0
         try:
+            # ═══════════════════════════════════════════════════════════
+            # 1) الجداول الثقيلة: قيم متوازنة
+            # ═══════════════════════════════════════════════════════════
             for table in HEAVY_TABLES_FOR_AUTOVACUUM:
                 try:
                     exists = await conn.fetchval(
@@ -2424,6 +2475,10 @@ class Database(
                         f"⚠️ autovacuum tune heavy {table}: {te}"
                     )
 
+            # ═══════════════════════════════════════════════════════════
+            # 2) الجداول الصغيرة: threshold منخفض جداً
+            #    (تُفعّل بعد 5 dead tuple فقط، لا تعتمد على الحجم)
+            # ═══════════════════════════════════════════════════════════
             for table in SMALL_TABLES_FOR_AUTOVACUUM:
                 try:
                     exists = await conn.fetchval(
@@ -2468,6 +2523,8 @@ class Database(
     async def _analyze_after_tune(self, conn) -> int:
         """
         🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
+        🆕 v7.7.33: تبسيط — لا فحص وجود مكرر.
+        🆕 v7.7.39: يمتد ليشمل الجداول الصغيرة أيضاً.
         """
         if not USE_POSTGRES:
             return 0
@@ -2475,6 +2532,7 @@ class Database(
         all_tables = list(HEAVY_TABLES_FOR_AUTOVACUUM) + list(
             SMALL_TABLES_FOR_AUTOVACUUM
         )
+        # إزالة التكرار (لو وُجد) مع الحفاظ على الترتيب
         seen = set()
         tables_unique: List[str] = []
         for t in all_tables:
@@ -2690,6 +2748,20 @@ class Database(
         try:
             if USE_POSTGRES:
                 async def _pg_factory():
+                    # 🆕 v7.7.36: إصلاح — إزالة "wal_writer_delay" و
+                    # "commit_delay" من server_settings.
+                    #
+                    # السبب: كلاهما sighup/postmaster context في PostgreSQL،
+                    # لا يمكن تغييرهما per-session عبر asyncpg.
+                    # asyncpg يرفع CantChangeRuntimeParamError عند فتح أي
+                    # اتصال جديد → فشل كامل في create_pool → فشل bootstrap.
+                    #
+                    # بعد synchronous_commit=off، لم يعد لهذين الإعدادين
+                    # تأثير على أداء الـ commit أصلاً.
+                    #
+                    # المخاطرة المتبقية من synchronous_commit=off:
+                    #   قد تُفقد آخر ~200ms من المعاملات عند crash مفاجئ
+                    #   للـ PostgreSQL. مقبول لهذا النوع من التطبيقات.
                     try:
                         pool = await asyncpg.create_pool(
                             dsn=DATABASE_URL,
@@ -2703,10 +2775,13 @@ class Database(
                                 "application_name": "RelaxManager",
                                 "statement_timeout": "30s",
                                 "timezone": "UTC",
+                                # المفتاح الوحيد المسموح per-session:
                                 "synchronous_commit": "off",
                             },
                         )
                     except asyncpg.exceptions.CantChangeRuntimeParamError as _cfg_e:
+                        # خطأ في server_settings دائم — لا فائدة من إعادة
+                        # المحاولة، نرفع فوراً لتفادي إطالة الإقلاع.
                         logger.error(
                             f"❌ PG: server_settings غير صالح "
                             f"(لا إعادة محاولة): {_cfg_e}"
@@ -4382,7 +4457,18 @@ class Database(
         except Exception:
             return False
 
+    # =================================================================
+    # 🆕 v7.7.33: ترحيل نوع delete_penalty
+    # =================================================================
+
     async def _migrate_delete_penalty_type(self, conn) -> bool:
+        """
+        🆕 v7.7.33: ترحيل delete_penalty من INTEGER إلى TEXT.
+
+        - SQLite: type affinity يسمح بالمزج — لا حاجة لتغيير.
+        - PostgreSQL: ALTER COLUMN TYPE TEXT (مع USING).
+        - MySQL: MODIFY COLUMN VARCHAR(20) (مع UPDATE أولاً).
+        """
         if DB_TYPE == "sqlite":
             return True
 
@@ -6976,9 +7062,6 @@ class Database(
 
         Returns:
             True إذا نجحت المعاملة، False خلاف ذلك.
-            ملاحظة: even مع True، قد يكون بعض المنشورات غير موجودة
-            (UPDATE يؤثر على أقل من N). لا نُرجع False في هذه الحالة
-            للحفاظ على سلوك mark_published_and_advance في التيار.
         """
         if not updates:
             return True
@@ -6991,7 +7074,10 @@ class Database(
             ch_id, post_id = item
             if ch_id is None or post_id is None:
                 continue
-            valid_updates.append((int(ch_id), int(post_id)))
+            try:
+                valid_updates.append((int(ch_id), int(post_id)))
+            except (TypeError, ValueError):
+                continue
 
         if not valid_updates:
             return True
