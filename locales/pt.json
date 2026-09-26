@@ -385,6 +385,8 @@
   "group_unlocked_simple": "🔓 Desbloqueado",
   "security_settings": "🔐 Configurações de segurança",
   "banned_words_manage": "🚫 Gerenciar palavras proibidas",
+  "banned_words_btn_on": "✅ Excluir palavras proibidas: ATIVADO (toque para desativar)",
+  "banned_words_btn_off": "❌ Excluir palavras proibidas: DESATIVADO (toque para ativar)",
   "warn_manage": "⚠️ Gerenciar avisos",
   "antiflood_settings": "🌊 Configurações anti-flood",
   "night_settings": "🌙 Configurações modo noturno",
