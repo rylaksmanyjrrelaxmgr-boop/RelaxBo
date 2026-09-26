@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.28)
+handlers_callback.py - معالج الأزرار (v9.4.28.1)
 =====================================================================
+🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة:
+    ✅ contest_type_raffle: التقاط العنوان/الوصف/الجائزة/التاريخ
+       قبل تنظيف الـ context وعرضها في رسالة النجاح
+    ✅ fallback "—" للقيم الناقصة
+    ✅ عدم مسح context عند فشل إنشاء المسابقة (للسماح بإعادة المحاولة)
+
 🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي):
     ✅ CONTEST_DURATIONS: 11 مدة جاهزة (ساعة → سنة)
     ✅ handle(): معالج جديد `contest_duration:*`
@@ -1217,30 +1223,54 @@ class CallbackHandlers:
                                 parse_mode='HTML', bot=context.bot)
                 return
 
+            # ✅ v9.4.28.1 — التقاط كل الحقول قبل مسح الـ context
             if data == "contest_type_raffle":
+                c_title = (context.user_data.get('contest_title') or '').strip()
+                c_desc  = (context.user_data.get('contest_desc') or '').strip()
+                c_prize = (context.user_data.get('contest_prize') or '').strip()
+                c_end   = (context.user_data.get('contest_end_date') or '').strip()
+                c_label = (context.user_data.get('contest_duration_label') or '').strip()
+
                 cid = await DB.create_contest(
                     creator_id=user_id,
-                    title=context.user_data.get('contest_title', ''),
-                    description=context.user_data.get('contest_desc', ''),
-                    prize=context.user_data.get('contest_prize', ''),
-                    end_date=context.user_data.get('contest_end_date', ''),
+                    title=c_title,
+                    description=c_desc,
+                    prize=c_prize,
+                    end_date=c_end,
                     contest_type='raffle',
                 )
 
-                duration_label = context.user_data.get('contest_duration_label', '')
-                StateManager.clear(user_id)
-                _clear_context_keys(context)
-
                 if cid:
+                    # لا نمسح الـ context إلا بعد نجاح الإنشاء
+                    StateManager.clear(user_id)
+                    _clear_context_keys(context)
+
+                    title_line = _html.escape(c_title) if c_title else "—"
+                    prize_line = _html.escape(c_prize) if c_prize else "—"
+                    label_line = _html.escape(c_label) if c_label else "—"
+
+                    end_line = ""
+                    if c_end:
+                        try:
+                            # end_date محفوظ كـ ISO؛ نعرضه بشكل مقروء
+                            display_end = c_end.replace('T', ' ')[:16]
+                            end_line = f"🕐 ينتهي: <code>{display_end}</code>\n"
+                        except Exception:
+                            pass
+
                     await safe_edit(
                         query,
                         f"✅ <b>أُنشئت المسابقة!</b>\n\n"
+                        f"🏆 <b>{title_line}</b>\n"
                         f"🆔 <code>#{cid}</code>\n"
+                        f"🎁 الجائزة: {prize_line}\n"
                         f"🎲 النوع: سحب عشوائي\n"
-                        f"⏱️ المدة: {duration_label}\n"
+                        f"⏱️ المدة: {label_line}\n"
+                        f"{end_line}"
                         f"👥 المشاركون: 0",
                         parse_mode='HTML', bot=context.bot)
                 else:
+                    # فشل الإنشاء — نبقي البيانات ليتمكن من إعادة المحاولة
                     await safe_edit(query,
                         await _trans('contest_create_failed', lang,
                                      "❌ فشل إنشاء المسابقة"),
@@ -1248,6 +1278,7 @@ class CallbackHandlers:
                 return
 
             if data == "contest_type_quiz":
+                # لا نمسح الـ context — نحتاج title/desc/prize/end لاحقاً
                 StateManager.set(user_id, UserState.WAIT_CONTEST_QUESTION)
                 await safe_edit(query,
                     "❓ <b>أرسل السؤال الآن:</b>",
