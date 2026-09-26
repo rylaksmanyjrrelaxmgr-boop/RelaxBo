@@ -1,3 +1,4 @@
+
 {
   "main_menu": "🌿 <b>Relax Manager</b>\n\n👤 <b>用户:</b> {user_name}\n👥 <b>群组:</b> {groups_count}\n📡 <b>活跃频道:</b> {active_channel}\n📥 <b>草稿:</b> {unpublished_posts}\n📤 <b>自动发布:</b> {auto_publish}\n♻️ <b>回收:</b> {auto_recycle}\n💎 <b>订阅:</b> {subscription_status}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<b>请从菜单选择:</b>",
   "help_text": "📚 <b>帮助</b>\n\n🏠 /start - 主菜单\n💳 /subscribe - 订阅\n🎁 /trial - 免费试用\n📞 /support - 客服",
@@ -658,6 +659,8 @@
   "delete_word": "🗑️ 删除词语",
   "enable_delete": "✅ 启用删除",
   "disable_delete": "❌ 禁用删除",
+  "banned_words_btn_on": "✅ 删除违禁词：已启用（点击禁用）",
+  "banned_words_btn_off": "❌ 删除违禁词：已禁用（点击启用）",
   "manage_banned_words": "🚫 违禁词管理:",
   "banned_words_management": "🚫 违禁词管理:",
 
