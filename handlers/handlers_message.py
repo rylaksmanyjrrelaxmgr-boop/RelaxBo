@@ -2,13 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.17 - Dev Log Notifications)
+handlers_message.py - معالجات الرسائل (v7.9.18 - Dev Log Diagnostic)
 =====================================================================
+🆕 v7.9.18 (DEV LOG DIAGNOSTIC):
+    ✅ إضافة تتبّع تشخيصي كامل في _notify_dev_log (علامة 🔔)
+    ✅ warning بدل debug عند فشل الإرسال (ليظهر في اللوغ)
+    ✅ كل السطور التشخيصية عليها علامة 🔔 (لحذفها لاحقاً)
+
 🆕 v7.9.17 (إشعار قناة سجل المطور):
     ✅ _notify_dev_log: دالة مساعدة جديدة (محلية — بدون circular import)
     ✅ _handle_redeem_gift_input: إشعار عند استخدام كود هدية
        - يُعرض @username + الرقم التعريفي + الكود + المدة
-    ✅ لا تغيير على أي دالة أخرى
 
 🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات)
 🆕 v7.9.15 (إصلاح عرض عنوان المسابقة)
@@ -145,20 +149,32 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # =====================================================================
-# 🆕 v7.9.17: إشعار قناة سجل المطور
+# ✅ v7.9.18: إشعار قناة سجل المطور (مع تتبّع تشخيصي 🔔)
 # =====================================================================
 
 async def _notify_dev_log(context, text: str) -> None:
     """
     ✅ v7.9.17: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
     لا يفشل أبداً — يتجاهل الأخطاء بصمت.
+
+    ✅ v7.9.18: أُضيف تتبّع تشخيصي كامل (علامة 🔔).
     """
+    # 🔔 تتبّع: بداية الاستدعاء
+    logger.info("🔔 _notify_dev_log CALLED (from message handler)")
+
     try:
         log_ch = await DB.get_log_channel()
+
+        # 🔔 تتبّع: قيمة قناة السجل
+        logger.info(f"🔔 log_ch from DB = {log_ch!r}")
+
         if not log_ch:
+            logger.warning("🔔 log_ch EMPTY → abort")
             return
+
         ch_str = str(log_ch).strip()
         if not ch_str:
+            logger.warning("🔔 log_ch is whitespace → abort")
             return
 
         # تحديد الهدف: رقمي أو @username
@@ -174,14 +190,25 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
+        # 🔔 تتبّع: الهدف المُحدَّد
+        logger.info(f"🔔 target = {target!r} → sending...")
+
         await context.bot.send_message(
             chat_id=target,
             text=text,
             parse_mode='HTML',
             disable_web_page_preview=True,
         )
+
+        # 🔔 تتبّع: نجاح
+        logger.info(f"🔔 _notify_dev_log SUCCESS → {target}")
+
     except Exception as e:
-        logger.debug(f"_notify_dev_log: {e}")
+        # 🔔 v7.9.18: warning بدل debug — ليظهر في اللوغ
+        logger.warning(
+            f"🔔 _notify_dev_log FAILED: {e}",
+            exc_info=True,
+        )
 
 
 # =====================================================================
@@ -3090,7 +3117,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.9.17: redemption + إشعار قناة سجل المطور
+    # ✅ v7.9.17/18: redemption + إشعار قناة سجل المطور (تشخيص 🔔)
     # ═════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -3110,6 +3137,10 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
             StateManager.clear(user_id)
             return
+
+        # 🔔 تتبّع: نتيجة redeem_gift_code
+        logger.info(f"🔔 redeem_gift_code (msg) result={result!r} user={user_id}")
+
         if isinstance(result, tuple):
             success, days = result
         elif isinstance(result, bool):
@@ -3122,7 +3153,7 @@ class MessageHandlers:
                        days=days)
             await safe_send(context.bot, user_id, msg)
 
-            # ✅ v7.9.17: إشعار قناة سجل المطور
+            # ✅ v7.9.17/18: إشعار قناة سجل المطور
             try:
                 uname = update.effective_user.username or ""
                 fname = update.effective_user.first_name or ""
@@ -3140,7 +3171,10 @@ class MessageHandlers:
                     f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
                 )
             except Exception as e:
-                logger.debug(f"notify dev log (gift input): {e}")
+                logger.warning(
+                    f"🔔 notify dev log (gift input) raised: {e}",
+                    exc_info=True,
+                )
 
         elif days == -1:
             msg = await _trans('own_code', lang, "❌")
