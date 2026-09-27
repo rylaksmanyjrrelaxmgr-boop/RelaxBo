@@ -14,12 +14,16 @@ handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.31
     ✅ كل السطور التشخيصية عليها علامة 🔔 (لحذفها لاحقاً)
 
 🆕 v7.5.30 (DEV LOG NOTIFICATIONS):
-    ✅ _notify_dev_log: دالة مساعدة — إشعار قناة سجل المطور
+    ✅ _notify_dev_log: دالة مساعدة جديدة — إشعار قناة سجل المطور
     ✅ start(): إشعار عند دخول بكود إحالة
     ✅ redeem_gift(): إشعار عند استخدام كود هدية
+    ✅ قابل للاستيراد من handlers_message.py
 
 🆕 v7.5.29 (CONTEST DISPLAY I18N + DESCRIPTION):
-    ✅ contests(): عرض الوصف + النوع + السؤال من الترجمة
+    ✅ contests(): عرض الوصف 📝 (كان لا يظهر)
+    ✅ contests(): عرض نوع المسابقة 🎲/❓ من الترجمة
+    ✅ contests(): عرض السؤال للـ quiz (اختصار 60 حرف)
+    ✅ contests(): كل النصوص مترجَمة عبر _trans()
 
 🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن)
 
@@ -65,7 +69,7 @@ CHANNEL_BOT_ID = 136817688      # ChannelBot
 # ═══════════════════════════════════════════════════════════════════
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-DB_DIAG_SPLIT_DELAY = 0.35      # ثوانٍ بين أجزاء /db_diag
+DB_DIAG_SPLIT_DELAY = 0.35
 
 # ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.29: حدود عرض الوصف والسؤال في قائمة المسابقات
@@ -104,14 +108,6 @@ _STALE_KEYS_ON_START = (
 def _clear_stale_state(user_id: int, context) -> None:
     """
     ✅ v7.5.26: يمسح أي حالة معلقة عند /start.
-
-    المشكلة المُصلَحة:
-      المستخدم يضغط "تعيين قناة التحديثات" (WAIT_UPDATE_CH)
-      → يرسل /start (لا يمسح الحالة)
-      → يرسل @channel
-      → handle_private يعالجها كـ WAIT_UPDATE_CH أو WAIT_CHANNEL
-
-    هذا يُصلح بمسح الحالة عند كل /start.
     """
     try:
         StateManager.clear(user_id)
@@ -124,7 +120,6 @@ def _clear_stale_state(user_id: int, context) -> None:
                 context.user_data.pop(k, None)
             except Exception:
                 pass
-        # مسح إضافي لأي key يبدأ بـ last_cb_
         for k in list(context.user_data.keys()):
             if isinstance(k, str) and k.startswith('last_cb_'):
                 context.user_data.pop(k, None)
@@ -211,7 +206,6 @@ async def _notify_dev_log(context, text: str) -> None:
         logger.info(f"🔔 log_ch from DB = {log_ch!r}")
 
         if not log_ch:
-            # 🔔 تتبّع: خروج بسبب قناة فارغة
             logger.warning("🔔 log_ch EMPTY → abort")
             return
 
@@ -247,7 +241,7 @@ async def _notify_dev_log(context, text: str) -> None:
         logger.info(f"🔔 _notify_dev_log SUCCESS → {target}")
 
     except Exception as e:
-        # 🔔 v7.5.31: warning بدل debug — ليظهر في اللوغ
+        # 🔔 v7.5.31: warning بدل debug
         logger.warning(
             f"🔔 _notify_dev_log FAILED: {e}",
             exc_info=True,
@@ -265,7 +259,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     if not key:
         return default or ""
 
-    # 1) من TranslationManager (locales/*.json)
     try:
         if lang and lang != 'off':
             text = TranslationManager.get_text(lang, key)
@@ -274,7 +267,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     except Exception as e:
         logger.debug(f"_trans({key}, {lang}) TranslationManager: {e}")
 
-    # 2) من get_text (قديم)
     try:
         if lang and lang != 'off':
             text = await get_text(lang, key)
@@ -283,7 +275,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     except Exception as e:
         logger.debug(f"_trans({key}, {lang}) get_text: {e}")
 
-    # 3) fallback
     return default or key
 
 
@@ -475,7 +466,6 @@ async def _send_long_report(
     if not text:
         return 0
 
-    # ─── قصير: رسالة واحدة ───
     if len(text) <= limit:
         try:
             await context.bot.send_message(
@@ -496,7 +486,6 @@ async def _send_long_report(
         except Exception:
             return 0
 
-    # ─── طويل: تقسيم آمن ───
     parts = _split_text_for_telegram(text, limit=limit)
     total = len(parts)
     sent = 0
@@ -1199,12 +1188,6 @@ class CommandHandlers:
 
     @staticmethod
     async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ⚠️ ملاحظة v5.5.0:
-        هذا المعالج يضبط الحالة فقط. العملية الفعلية (إضافة الأدمن إلى DB)
-        تحدث في handlers_message.py → handle_private → WAIT_ADMIN_ADD.
-        استدعاء refresh_admin_commands يتم هناك بعد نجاح الإضافة.
-        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         if not CONFIG.is_developer(user_id):
@@ -1218,10 +1201,6 @@ class CommandHandlers:
 
     @staticmethod
     async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ⚠️ ملاحظة v5.5.0:
-        نفس ما ورد في add_admin — العملية الفعلية في handlers_message.py.
-        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         if not CONFIG.is_developer(user_id):
