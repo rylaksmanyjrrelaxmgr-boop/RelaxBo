@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.8)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.9)
 ================================================================================
+🆕 v5.5.9 (AUTO POOL HEALTH MONITOR):
+    ✅ pool_health_monitor(): مراقبة تلقائية لحالة PostgreSQL Pool
+       - كل 5 دقائق → يسجّل في اللوغ
+       - يقرأ pg_stat_activity + DB.get_pool_live()
+       - 🟢 pool HEALTH (طبيعي) أو ⚠️ pool DIAG (ضغط)
+       - يُظهر: total, active, idle_tx, lock_waits, waiting, util%
+    ✅ إضافة تلقائية إلى tasks
+    ✅ لا يحتاج أي اختبار يدوي
+
 🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT):
     ✅ successful_payment: إشعار قناة سجل المطور عند كل اشتراك مدفوع
        - يُعرض @username + الرقم التعريفي + الباقة + المبلغ
@@ -14,35 +23,13 @@
 🆕 v5.5.7 (DEV LOG NOTIFICATIONS):
     ✅ يدعم إشعار قناة السجل من handlers_command و handlers_message
 
-🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS):
-    ✅ contest_cleanup يعلن الفائزين تلقائيًا (بدل الإلغاء البسيط):
-       • كل ساعة: DB.auto_declare_expired_contests()
-       • يعلن فائزًا عشوائيًا لكل مسابقة منتهية فيها مشاركون
-       • يُلغي المسابقات المنتهية بدون مشاركين
-       • يُرسل رسالة تهنئة لكل فائز (بمهلة 0.5s بين الإشعارات)
-    ✅ استخدام auto_declare_expired_contests بدل close_expired_contests
-
-🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX):
-    ✅ تصحيح تعليق متناقض في contest_cleanup
-    ✅ contest_cleanup يُدار مباشرة (create_task) بدل run_task_with_retry
-
-🆕 v5.5.4 (CONTEST-AUTO-CLEANUP):
-    ✅ مهمة دورية: contest_cleanup (كل ساعة)
-
-🆕 v5.5.3 (GIFT-CODE-FLOW-FIX):
-    ✅ إصلاح ترتيب معالجة كود الهدية في successful_payment
-    ✅ إصلاح تنسيق رسالة كود الهدية (HTML بدل backticks)
-
-🆕 v5.5.2 (STATS-COMMAND-FIX):
-    ✅ نقل "stats" من PUBLIC_COMMANDS → ADMIN_COMMANDS
-
-🆕 v5.5.1 (COLLECT-ADMIN-FIX):
-    ✅ _collect_admin_ids: يجرّب عدة أسماء دوال
-
-🆕 v5.5.0 (COMMAND SCOPING):
-    ✅ تقسيم الأوامر إلى public + admin + group scopes
-    ✅ refresh_admin_commands() — تحديث أدمن بلا restart
-
+🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS)
+🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX)
+🆕 v5.5.4 (CONTEST-AUTO-CLEANUP)
+🆕 v5.5.3 (GIFT-CODE-FLOW-FIX)
+🆕 v5.5.2 (STATS-COMMAND-FIX)
+🆕 v5.5.1 (COLLECT-ADMIN-FIX)
+🆕 v5.5.0 (COMMAND SCOPING)
 🆕 v5.4.3 (Maintenance integration)
 🆕 v5.4.2 (DB Diagnostics)
 🔍 v5.4.1 (Analytics check)
@@ -935,6 +922,121 @@ async def keep_alive():
 
 
 # =====================================================================
+# ✅ v5.5.9: مراقبة تلقائية لحالة PostgreSQL Pool
+# =====================================================================
+
+async def pool_health_monitor() -> None:
+    """
+    ✅ v5.5.9: يراقب حالة Pool + الاتصالات كل 5 دقائق.
+
+    يسجّل في اللوغ:
+      🟢 pool HEALTH: total=N active=N idle_tx=N waiting=N
+      ⚠️ pool DIAG  : نفس المعلومات عند ذروة/مشكلة
+
+    الهدف: عند ظهور استعلام بطيء، افتح اللوغ وقارن التوقيتات
+    لمعرفة السبب (Pool ممتلئ، قفل، idle-in-transaction...).
+    """
+    # تأخير أولي — لا نبدأ فوراً (نعطي bootstrap فرصة)
+    try:
+        await asyncio.sleep(120)
+    except asyncio.CancelledError:
+        raise
+
+    while True:
+        try:
+            # تخطّي إذا ليس PostgreSQL
+            db_type = getattr(DB, "DB_TYPE", "sqlite")
+            if db_type != "postgres":
+                # نستمر لكن نطبع مرة كل 30 دقيقة فقط
+                await asyncio.sleep(1800)
+                continue
+
+            # ═══ قراءة pg_stat_activity ═══
+            row = await DB.fetchone(
+                """
+                SELECT 
+                    count(*) AS total,
+                    count(*) FILTER (WHERE state = 'active') AS active,
+                    count(*) FILTER (WHERE state = 'idle') AS idle,
+                    count(*) FILTER (WHERE state = 'idle in transaction') 
+                        AS idle_in_tx,
+                    count(*) FILTER (WHERE wait_event_type = 'Lock') 
+                        AS lock_waits,
+                    count(*) FILTER (WHERE wait_event_type IS NOT NULL) 
+                        AS waiting
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                """
+            )
+
+            # استخراج آمن للقيم (row قد يكون dict أو tuple)
+            if isinstance(row, dict):
+                data = row
+            elif row is None:
+                data = {}
+            else:
+                try:
+                    data = dict(row)
+                except (TypeError, ValueError):
+                    data = {}
+
+            total = int(data.get("total") or 0)
+            active = int(data.get("active") or 0)
+            idle = int(data.get("idle") or 0)
+            idle_in_tx = int(data.get("idle_in_tx") or 0)
+            lock_waits = int(data.get("lock_waits") or 0)
+            waiting = int(data.get("waiting") or 0)
+
+            # ═══ قراءة pool من DB.get_pool_live إن توفرت ═══
+            pool_max = 20
+            pool_current = total
+            pool_in_use = active
+            try:
+                if hasattr(DB, "get_pool_live"):
+                    pool_data = await DB.get_pool_live()
+                    if isinstance(pool_data, dict) and pool_data.get("available"):
+                        pool_max = int(pool_data.get("max_size") or 20)
+                        pool_current = int(pool_data.get("current_size") or total)
+                        pool_in_use = int(pool_data.get("in_use") or active)
+            except Exception:
+                pass
+
+            util_pct = (pool_current / pool_max * 100) if pool_max else 0
+
+            # ═══ تحديد المستوى ═══
+            is_stressed = (
+                lock_waits > 0
+                or idle_in_tx >= 3
+                or util_pct >= 80
+                or waiting >= 3
+            )
+
+            msg = (
+                f"total={total}/{pool_max} active={active} idle={idle} "
+                f"idle_tx={idle_in_tx} lock_waits={lock_waits} "
+                f"waiting={waiting} util={util_pct:.0f}%"
+            )
+
+            if is_stressed:
+                logger.warning(f"⚠️ pool DIAG  : {msg}")
+            else:
+                logger.info(f"🟢 pool HEALTH: {msg}")
+
+        except asyncio.CancelledError:
+            logger.info("🛑 pool_health_monitor أُلغيت")
+            raise
+        except Exception as e:
+            # لا نطبع stack trace — فقط سطر بسيط
+            logger.debug(f"pool_health_monitor: {e}")
+
+        # ═══ الانتظار 5 دقائق ═══
+        try:
+            await asyncio.sleep(300)
+        except asyncio.CancelledError:
+            raise
+
+
+# =====================================================================
 # المهمة الرئيسية
 # =====================================================================
 
@@ -1405,6 +1507,10 @@ async def main():
         # ملاحظة: لا نستخدم run_task_with_retry هنا لأن contest_cleanup
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
+
+        # ✅ v5.5.9: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
+        # نفس المنطق — تُدير أخطاءها داخليًا.
+        asyncio.create_task(pool_health_monitor()),
     ]
 
     # ✅ v5.4.3: الصيانة الدورية لقاعدة البيانات (كل 24 ساعة)
