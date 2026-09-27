@@ -2,24 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.32
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.34
 ===================================================================================
-🆕 v7.5.32 (FIX TIMED OUT + DEV LOG):
-    ✅ _safe_edit_or_send: retry تلقائي (3 محاولات) + timeout مطوّل
-    ✅ _send_and_auto_delete: retry تلقائي
-    ✅ _notify_dev_log: timeout مطوّل (30s) + إيموجي 🎯
-    ✅ تغيير 🔔 → 🎯 لتمييز تتبّعنا عن handlers_nav_fix
-    ✅ كل السطور التشخيصية عليها علامة 🎯 (لحذفها لاحقاً)
+🆕 v7.5.34 (DEV LOG — GRANT + TRIAL):
+    ✅ grant(): إشعار قناة سجل المطور عند منح اشتراك يدوي
+    ✅ trial(): إشعار قناة سجل المطور عند تفعيل تجربة مجانية
+    ✅ الحفاظ على إصلاح Timed out (retry + timeout)
+    ✅ كل الإشعارات نظيفة بدون سطور تشخيص
 
-🆕 v7.5.31 (DEV LOG DIAGNOSTIC):
-    ✅ تتبّع تشخيصي في _notify_dev_log
-    ✅ تتبّع في start() و redeem_gift()
+📊 قائمة الإشعارات الكاملة:
+    ✅ /start ref_XXX       → إحالة
+    ✅ /redeem_gift CODE    → كود هدية
+    ✅ /grant USERID DAYS   → منح يدوي
+    ✅ /trial               → تجربة مجانية
+    ✅ اشتراك مدفوع (في main.py)
 
-🆕 v7.5.30 (DEV LOG NOTIFICATIONS):
-    ✅ _notify_dev_log: دالة مساعدة جديدة
-    ✅ start(): إشعار عند دخول بكود إحالة
-    ✅ redeem_gift(): إشعار عند استخدام كود هدية
-
+🆕 v7.5.33 (CLEAN FINAL)
+🆕 v7.5.32 (FIX TIMED OUT)
+🆕 v7.5.30 (DEV LOG NOTIFICATIONS)
 🆕 v7.5.29 (CONTEST DISPLAY I18N + DESCRIPTION)
 🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن)
 ✅ v7.5.27 (MOOD IMPORT FIX)
@@ -56,37 +56,25 @@ logger = logging.getLogger(__name__)
 # ثوابت بوتات تليجرام الرسمية
 # ═══════════════════════════════════════════════════════════════════
 
-ANONYMOUS_BOT_ID = 1087968824   # GroupAnonymousBot
-CHANNEL_BOT_ID = 136817688      # ChannelBot
-
-# ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.28: حدود Telegram
-# ═══════════════════════════════════════════════════════════════════
+ANONYMOUS_BOT_ID = 1087968824
+CHANNEL_BOT_ID = 136817688
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 DB_DIAG_SPLIT_DELAY = 0.35
 
-# ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.32: إعدادات الشبكة (timeout + retry)
-# ═══════════════════════════════════════════════════════════════════
+SEND_READ_TIMEOUT = 20.0
+SEND_WRITE_TIMEOUT = 20.0
+SEND_CONNECT_TIMEOUT = 15.0
+SEND_POOL_TIMEOUT = 10.0
+SEND_MAX_RETRIES = 2
+SEND_RETRY_DELAY = 1.5
 
-SEND_READ_TIMEOUT = 20.0     # ثانية — قراءة الرد من Telegram
-SEND_WRITE_TIMEOUT = 20.0    # ثانية — إرسال الطلب
-SEND_CONNECT_TIMEOUT = 15.0  # ثانية — إنشاء الاتصال
-SEND_POOL_TIMEOUT = 10.0     # ثانية — انتظار من الـ pool
-SEND_MAX_RETRIES = 2         # محاولات إضافية (المجموع = 3)
-SEND_RETRY_DELAY = 1.5       # ثوانٍ بين المحاولات
-
-# ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.29: حدود عرض الوصف والسؤال في قائمة المسابقات
-# ═══════════════════════════════════════════════════════════════════
-
+# ✅ v7.5.29: حدود عرض المسابقات
 CONTEST_DESC_DISPLAY_MAX = 80
 CONTEST_QUESTION_DISPLAY_MAX = 60
 
-# ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.27: import دالة تحليل المشاعر مع fallback
-# ═══════════════════════════════════════════════════════════════════
 try:
     from handlers.handlers_message import analyze_sentiment
     _MOOD_AVAILABLE = True
@@ -98,10 +86,7 @@ except ImportError:
         analyze_sentiment = None
         _MOOD_AVAILABLE = False
 
-# ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.26: مفاتيح user_data المعلقة التي تُمسح عند /start
-# ═══════════════════════════════════════════════════════════════════
-
+# ✅ v7.5.26: مفاتيح user_data المعلقة
 _STALE_KEYS_ON_START = (
     'sec_chat', 'security_chat_id', 'adv_chat', 'auto_chat',
     'schedule_ch', 'ban_chat', 'contest_join', 'log_group_id',
@@ -189,7 +174,7 @@ def _is_anonymous_sender(update: Update) -> bool:
 
 
 def _send_kwargs() -> dict:
-    """✅ v7.5.32: kwargs موحّدة لـ send_message مع timeouts مطوّلة."""
+    """✅ v7.5.32: kwargs موحّدة مع timeouts مطوّلة."""
     return {
         "read_timeout": SEND_READ_TIMEOUT,
         "write_timeout": SEND_WRITE_TIMEOUT,
@@ -199,22 +184,11 @@ def _send_kwargs() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.32: إرسال آمن مع retry (لتفادي Timed out)
+# ✅ v7.5.32: إرسال آمن مع retry
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_send_message(bot, chat_id, text, **extra):
-    """
-    ✅ v7.5.32: إرسال رسالة مع retry + timeout مطوّل.
-
-    Args:
-        bot: البوت
-        chat_id: الهدف
-        text: النص
-        **extra: kwargs إضافية (reply_markup, parse_mode, ...)
-
-    Returns:
-        Message object أو None عند الفشل الكامل.
-    """
+    """إرسال رسالة مع retry + timeout مطوّل."""
     last_err = None
     for attempt in range(SEND_MAX_RETRIES + 1):
         try:
@@ -228,45 +202,38 @@ async def _safe_send_message(bot, chat_id, text, **extra):
             if attempt < SEND_MAX_RETRIES:
                 wait = SEND_RETRY_DELAY * (attempt + 1)
                 logger.warning(
-                    f"⏱️ send_message timed out (attempt {attempt+1}/{SEND_MAX_RETRIES+1}), "
+                    f"⏱️ send_message timed out "
+                    f"(attempt {attempt+1}/{SEND_MAX_RETRIES+1}), "
                     f"retrying in {wait:.1f}s..."
                 )
                 await asyncio.sleep(wait)
             else:
                 logger.error(
-                    f"❌ send_message FAILED after {SEND_MAX_RETRIES+1} attempts: {e}"
+                    f"❌ send_message FAILED after "
+                    f"{SEND_MAX_RETRIES+1} attempts: {e}"
                 )
         except Exception as e:
-            # أخطاء أخرى — لا داعي للـ retry
             logger.error(f"❌ send_message error (non-timeout): {e}")
             return None
     return None
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.32: إشعار قناة سجل المطور (إيموجي 🎯 + timeout)
+# ✅ إشعار قناة سجل المطور
 # ═══════════════════════════════════════════════════════════════════
 
 async def _notify_dev_log(context, text: str) -> None:
     """
-    ✅ v7.5.30: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
+    ✅ يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
     لا يفشل أبداً — يتجاهل الأخطاء بصمت.
-
-    ✅ v7.5.32: timeout مطوّل + إيموجي 🎯 (لتمييزه عن NAV_FIX).
     """
-    logger.info("🎯 _notify_dev_log CALLED")
-
     try:
         log_ch = await DB.get_log_channel()
-        logger.info(f"🎯 log_ch from DB = {log_ch!r}")
-
         if not log_ch:
-            logger.warning("🎯 log_ch EMPTY → abort")
             return
 
         ch_str = str(log_ch).strip()
         if not ch_str:
-            logger.warning("🎯 log_ch is whitespace → abort")
             return
 
         if ch_str.lstrip('-').isdigit():
@@ -281,21 +248,13 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
-        logger.info(f"🎯 target = {target!r} → sending...")
-
-        result = await _safe_send_message(
+        await _safe_send_message(
             context.bot, target, text,
             parse_mode='HTML',
             disable_web_page_preview=True,
         )
-
-        if result:
-            logger.info(f"🎯 _notify_dev_log SUCCESS → {target}")
-        else:
-            logger.warning(f"🎯 _notify_dev_log returned None for {target}")
-
     except Exception as e:
-        logger.warning(f"🎯 _notify_dev_log FAILED: {e}", exc_info=True)
+        logger.warning(f"notify_dev_log FAILED: {e}", exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -303,7 +262,7 @@ async def _notify_dev_log(context, text: str) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
-    """✅ v7.5.24: ترجمة آمنة مع fallback عربي."""
+    """ترجمة آمنة مع fallback عربي."""
     if not key:
         return default or ""
 
@@ -334,7 +293,7 @@ async def _get_lang(user_id: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# حذف تلقائي للرسائل
+# حذف تلقائي
 # ═══════════════════════════════════════════════════════════════════
 
 async def _delete_message_after(bot, chat_id: int, message_id: int, delay: int = 10):
@@ -349,7 +308,7 @@ async def _send_and_auto_delete(
     context, chat_id: int, text: str,
     reply_markup=None, parse_mode=None, delay: int = 10,
 ):
-    """✅ v7.5.32: إرسال مع auto-delete + retry."""
+    """إرسال مع auto-delete + retry."""
     try:
         msg = await _safe_send_message(
             context.bot, chat_id, text,
@@ -372,7 +331,9 @@ async def _send_and_auto_delete(
                 )
                 if msg:
                     asyncio.create_task(
-                        _delete_message_after(context.bot, chat_id, msg.message_id, delay)
+                        _delete_message_after(
+                            context.bot, chat_id, msg.message_id, delay
+                        )
                     )
                 return msg
             except Exception as e2:
@@ -385,16 +346,16 @@ async def _send_and_auto_delete(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.32: الرد في المكان الصحيح — مع retry + timeout مطوّل
+# ✅ v7.5.32: الرد في المكان الصحيح مع retry
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
     """
-    ✅ v7.5.32: إرسال/تعديل رسالة مع:
+    إرسال/تعديل مع:
     - timeout مطوّل (20s)
     - retry تلقائي حتى 3 محاولات
-    - fallback: إذا تعديل فشل → إرسال جديدة
-    - fallback: إذا HTML فشل → إرسال بدون parse_mode
+    - fallback: تعديل → إرسال جديدة
+    - fallback: HTML → بدون parse_mode
     """
     query = update.callback_query
     chat = update.effective_chat if update else None
@@ -433,17 +394,18 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
                     wait = SEND_RETRY_DELAY * (attempt + 1)
                     logger.warning(
                         f"⏱️ edit_message_text timed out "
-                        f"(attempt {attempt+1}/{SEND_MAX_RETRIES+1}), retry in {wait:.1f}s"
+                        f"(attempt {attempt+1}/{SEND_MAX_RETRIES+1}), "
+                        f"retry in {wait:.1f}s"
                     )
                     await asyncio.sleep(wait)
                     continue
-                logger.warning("⏱️ edit_message_text timed out — fallback to send")
+                logger.warning("⏱️ edit timed out — fallback to send")
                 break
             except Exception as e:
                 logger.debug(f"edit error: {e}")
                 break
 
-    # ═══ محاولة 2: إرسال رسالة جديدة (مع retry) ═══
+    # ═══ محاولة 2: إرسال رسالة جديدة ═══
     msg = await _safe_send_message(
         context.bot, target, text,
         reply_markup=reply_markup, parse_mode=parse_mode,
@@ -451,7 +413,7 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
     if msg:
         return True
 
-    # ═══ محاولة 3: إرسال بدون parse_mode (احتياطي) ═══
+    # ═══ محاولة 3: بدون parse_mode ═══
     if parse_mode:
         msg = await _safe_send_message(
             context.bot, target, text,
@@ -460,7 +422,6 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
         if msg:
             return True
 
-    # ═══ فشل كامل ═══
     logger.error(f"❌ _safe_edit_or_send: فشل كامل target={target}")
     return False
 
@@ -537,7 +498,7 @@ async def _send_long_report(
     limit: int = TELEGRAM_MESSAGE_LIMIT,
     split_delay: float = DB_DIAG_SPLIT_DELAY,
 ) -> int:
-    """✅ v7.5.28: يرسل تقريراً طويلاً على أجزاء."""
+    """يرسل تقريراً طويلاً على أجزاء."""
     if not text:
         return 0
 
@@ -547,7 +508,6 @@ async def _send_long_report(
         )
         if msg:
             return 1
-        # fallback: بدون parse_mode
         if parse_mode:
             msg = await _safe_send_message(
                 context.bot, chat_id, text, parse_mode=None,
@@ -576,7 +536,6 @@ async def _send_long_report(
         if msg:
             sent += 1
         else:
-            # fallback: بدون parse_mode
             if parse_mode:
                 msg = await _safe_send_message(
                     context.bot, chat_id, full, parse_mode=None,
@@ -594,7 +553,7 @@ def _split_text_for_telegram(
     text: str,
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
-    """✅ v7.5.28: يقسم نصاً طويلاً إلى أجزاء آمنة."""
+    """يقسم نصاً طويلاً إلى أجزاء آمنة."""
     if not text:
         return [""]
 
@@ -631,7 +590,7 @@ def _split_text_for_telegram(
 class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.32: start — يمسح الحالة + إشعار الإحالة (تشخيص 🎯)
+    # start
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -656,31 +615,15 @@ class CommandHandlers:
                 pass
 
         args = context.args or []
-
-        if args:
-            logger.info(f"🎯 /start args={args!r} user={user_id}")
-
         if args and args[0].startswith('ref_'):
             ref_code = args[0][4:]
-            logger.info(f"🎯 ref_code extracted = {ref_code!r}")
-
             referrer = await DB.get_user_by_referral_code(ref_code)
-            logger.info(f"🎯 referrer = {referrer!r}")
-
             if referrer and referrer != user_id and not await DB.is_user_banned(referrer):
                 existing = await DB.fetchone(
                     "SELECT 1 FROM referrals WHERE referred_id=?", (user_id,)
                 )
-                logger.info(
-                    f"🎯 existing referral for user={user_id}: "
-                    f"{existing is not None}"
-                )
-
                 if not existing:
-                    added = await DB.add_referral(referrer, user_id)
-                    logger.info(f"🎯 add_referral returned: {added!r}")
-
-                    if added:
+                    if await DB.add_referral(referrer, user_id):
                         reward = await DB.get_referral_stats(referrer)
                         try:
                             ref_lang = await _get_lang(referrer)
@@ -698,7 +641,7 @@ class CommandHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
 
-                        # ✅ v7.5.30/32: إشعار قناة سجل المطور
+                        # ✅ إشعار قناة سجل المطور
                         try:
                             username_display = (
                                 f"@{username}" if username else "❌ لا يوجد"
@@ -718,16 +661,9 @@ class CommandHandlers:
                             )
                         except Exception as e:
                             logger.warning(
-                                f"🎯 notify dev log (ref) raised: {e}",
+                                f"notify dev log (ref) raised: {e}",
                                 exc_info=True,
                             )
-            else:
-                if not referrer:
-                    logger.info(f"🎯 reject: referrer not found for code={ref_code!r}")
-                elif referrer == user_id:
-                    logger.info(f"🎯 reject: referrer == user_id ({user_id})")
-                else:
-                    logger.info(f"🎯 reject: referrer banned ({referrer})")
 
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
@@ -836,9 +772,15 @@ class CommandHandlers:
         help_text = await _trans('help_text', lang, "❓ المساعدة")
         await _safe_edit_or_send(update, context, help_text, parse_mode=None)
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.34: trial — مع إشعار قناة السجل
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def trial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
+        username = update.effective_user.username or ""
+        first_name = update.effective_user.first_name or ""
         lang = await _get_lang(user_id)
 
         if await DB.has_used_trial(user_id):
@@ -871,6 +813,26 @@ class CommandHandlers:
 
         await _safe_edit_or_send(update, context, msg, parse_mode=None)
 
+        # ✅ v7.5.34: إشعار قناة السجل عند نجاح التجربة
+        if days > 0:
+            try:
+                username_display = (
+                    f"@{username}" if username else "❌ لا يوجد"
+                )
+                await _notify_dev_log(
+                    context,
+                    f"🎁 <b>تفعيل تجربة مجانية</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>الاسم:</b> {escape(str(first_name or '—'))}\n"
+                    f"🔗 <b>المعرف:</b> {escape(username_display)}\n"
+                    f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱️ <b>المدة:</b> {days} يوم\n"
+                    f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                )
+            except Exception as e:
+                logger.warning(f"notify dev log (trial): {e}", exc_info=True)
+
     @staticmethod
     async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -893,9 +855,9 @@ class CommandHandlers:
             reply_markup=kb, parse_mode=None,
         )
 
-    # ═══════════════════════════════════════════════════════════════════
-    # developer — مترجم
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
+    # developer
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def developer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1002,9 +964,9 @@ class CommandHandlers:
             parse_mode=None,
         )
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ✅ v7.5.29: contests — يعرض الوصف والسؤال والنوع من الترجمة
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
+    # contests
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def contests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1092,9 +1054,9 @@ class CommandHandlers:
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML'
         )
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ✅ v7.5.27: mood — إصلاح مسار import
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
+    # mood
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2019,6 +1981,10 @@ class CommandHandlers:
             await _safe_edit_or_send(update, context,
                                      "❌ قيمة غير صالحة", parse_mode=None)
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.34: grant — مع إشعار قناة السجل
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def grant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -2083,6 +2049,21 @@ class CommandHandlers:
                 pass
             await _safe_edit_or_send(update, context, msg, parse_mode='HTML')
             await user_cache.invalidate(target_id)
+
+            # ✅ v7.5.34: إشعار قناة السجل
+            try:
+                await _notify_dev_log(
+                    context,
+                    f"🎁 <b>منح اشتراك يدوي</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>المستلم:</b> <code>{target_id}</code>\n"
+                    f"🛡️ <b>المُنِح:</b> <code>{user_id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱️ <b>المدة:</b> {days} يوم\n"
+                    f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                )
+            except Exception as e:
+                logger.warning(f"notify dev log (grant): {e}", exc_info=True)
         else:
             await _safe_edit_or_send(
                 update, context,
@@ -2123,7 +2104,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.32: redeem_gift — مع إشعار قناة سجل المطور (تشخيص 🎯)
+    # redeem_gift
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2148,8 +2129,6 @@ class CommandHandlers:
             )
             return
         result = await DB.redeem_gift_code(user_id, code)
-        logger.info(f"🎯 redeem_gift_code result={result!r} user={user_id}")
-
         if isinstance(result, tuple):
             success, days = result
         else:
@@ -2185,10 +2164,7 @@ class CommandHandlers:
                     f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
                 )
             except Exception as e:
-                logger.warning(
-                    f"🎯 notify dev log (gift) raised: {e}",
-                    exc_info=True,
-                )
+                logger.warning(f"notify dev log (gift): {e}", exc_info=True)
         elif days == -1:
             await _safe_edit_or_send(
                 update, context,
@@ -2203,12 +2179,12 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.28: db_diag — يستخدم diagnose_db_split() إن توفر
+    # db_diag
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.28: /db_diag — تشخيص قاعدة البيانات."""
+        """✅ /db_diag — تشخيص قاعدة البيانات."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -2251,8 +2227,6 @@ class CommandHandlers:
                     )
                     if msg:
                         sent += 1
-                    elif 'parse' in str(msg).lower() if False else False:
-                        pass
 
                     if i < total:
                         await asyncio.sleep(DB_DIAG_SPLIT_DELAY)
@@ -2308,12 +2282,12 @@ class CommandHandlers:
             )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.28: db_vacuum
+    # db_vacuum
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def db_vacuum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ v7.5.28: /db_vacuum — VACUUM ANALYZE."""
+        """✅ /db_vacuum — VACUUM ANALYZE."""
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
