@@ -2,47 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.30
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.31
 ===================================================================================
+🆕 v7.5.31 (DEV LOG DIAGNOSTIC):
+    ✅ إضافة تتبّع تشخيصي في _notify_dev_log:
+       - log عند كل استدعاء
+       - log لقيمة log_ch من DB
+       - log warning عند فشل الإرسال (بدل debug)
+    ✅ إضافة تتبّع في start() عند قسم الإحالة
+    ✅ إضافة تتبّع في redeem_gift()
+    ✅ كل السطور التشخيصية عليها علامة 🔔 (لحذفها لاحقاً)
+
 🆕 v7.5.30 (DEV LOG NOTIFICATIONS):
-    ✅ _notify_dev_log: دالة مساعدة جديدة — إشعار قناة سجل المطور
+    ✅ _notify_dev_log: دالة مساعدة — إشعار قناة سجل المطور
     ✅ start(): إشعار عند دخول بكود إحالة
-       - يُعرض @username + الرقم التعريفي + الكود + المُحيل
     ✅ redeem_gift(): إشعار عند استخدام كود هدية
-    ✅ قابل للاستيراد من handlers_message.py
 
 🆕 v7.5.29 (CONTEST DISPLAY I18N + DESCRIPTION):
-    ✅ contests(): عرض الوصف 📝 (كان لا يظهر)
-    ✅ contests(): عرض نوع المسابقة 🎲/❓ من الترجمة
-    ✅ contests(): عرض السؤال للـ quiz (اختصار 60 حرف)
-    ✅ contests(): كل النصوص مترجَمة عبر _trans()
+    ✅ contests(): عرض الوصف + النوع + السؤال من الترجمة
 
-🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن):
-    ✅ db_diag: يستخدم diagnose_db_split() بدل القصّ اليدوي
-       - يتجنب فشل Telegram عند > 4096 حرف
-       - يحافظ على HTML tags في الأجزاء
-       - يعرض رقم الجزء في كل رسالة (i/N)
-    ✅ fallback تلقائي إلى diagnose_db() إن لم تتوفر الواجهة الجديدة
+🆕 v7.5.28 (DB_DIAG_SPLIT — دعم التقسيم الآمن)
 
-✅ v7.5.27 (MOOD IMPORT FIX):
-    ✅ mood(): تصحيح مسار الاستيراد
-       - كان: from handlers_message import analyze_sentiment  ❌
-       - صار: from handlers.handlers_message import ...        ✅
-       - مع fallback للتوافق مع أي هيكل قديم
-       - النتيجة: /mood يعمل الآن
-
-✅ v7.5.26 (FIX /start STATE):
-    ✅ start() يُصفِّر StateManager + user_data keys المعلقة
-    ✅ حل مشكلة: /start بعد "تعيين قناة التحديثات" كان يبقي الحالة
-       معلقة → الرسالة التالية تُفسَّر كإضافة قناة
-
-✅ v7.5.25 (DB-DIAGNOSTICS):
-    ✅ db_diag: /db_diag — تشخيص شامل لقاعدة البيانات
-    ✅ db_vacuum: /db_vacuum — تنظيف VACUUM ANALYZE
-
-✅ v7.5.24 (RENDER-READY):
-    ✅ _trans: fallback آمن لكل المفاتيح
-    ✅ HTML بدل Markdown في كل الرسائل
+✅ v7.5.27 (MOOD IMPORT FIX)
+✅ v7.5.26 (FIX /start STATE)
+✅ v7.5.25 (DB-DIAGNOSTICS)
+✅ v7.5.24 (RENDER-READY)
 ===================================================================================
 """
 
@@ -206,7 +190,7 @@ def _is_anonymous_sender(update: Update) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.30: إشعار قناة سجل المطور
+# ✅ v7.5.31: إشعار قناة سجل المطور (مع تتبّع تشخيصي 🔔)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _notify_dev_log(context, text: str) -> None:
@@ -214,13 +198,26 @@ async def _notify_dev_log(context, text: str) -> None:
     ✅ v7.5.30: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
     لا يفشل أبداً — يتجاهل الأخطاء بصمت.
     قابل للاستيراد من handlers_message.py.
+
+    ✅ v7.5.31: أُضيف تتبّع تشخيصي كامل (علامة 🔔).
     """
+    # 🔔 تتبّع: بداية الاستدعاء
+    logger.info("🔔 _notify_dev_log CALLED")
+
     try:
         log_ch = await DB.get_log_channel()
+
+        # 🔔 تتبّع: قيمة قناة السجل
+        logger.info(f"🔔 log_ch from DB = {log_ch!r}")
+
         if not log_ch:
+            # 🔔 تتبّع: خروج بسبب قناة فارغة
+            logger.warning("🔔 log_ch EMPTY → abort")
             return
+
         ch_str = str(log_ch).strip()
         if not ch_str:
+            logger.warning("🔔 log_ch is whitespace → abort")
             return
 
         # تحديد الهدف: رقمي أو @username
@@ -236,14 +233,25 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
+        # 🔔 تتبّع: الهدف المُحدَّد
+        logger.info(f"🔔 target = {target!r} → sending...")
+
         await context.bot.send_message(
             chat_id=target,
             text=text,
             parse_mode='HTML',
             disable_web_page_preview=True,
         )
+
+        # 🔔 تتبّع: نجاح
+        logger.info(f"🔔 _notify_dev_log SUCCESS → {target}")
+
     except Exception as e:
-        logger.debug(f"_notify_dev_log: {e}")
+        # 🔔 v7.5.31: warning بدل debug — ليظهر في اللوغ
+        logger.warning(
+            f"🔔 _notify_dev_log FAILED: {e}",
+            exc_info=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -463,17 +471,6 @@ async def _send_long_report(
 ) -> int:
     """
     ✅ v7.5.28: يرسل تقريراً طويلاً على أجزاء.
-
-    Args:
-        context: ContextTypes
-        chat_id: الوجهة
-        text: النص الكامل
-        parse_mode: HTML / None
-        limit: حدّ كل رسالة (افتراضياً 4096)
-        split_delay: تأخير بين الأجزاء
-
-    Returns:
-        عدد الأجزاء المُرسَلة.
     """
     if not text:
         return 0
@@ -508,7 +505,6 @@ async def _send_long_report(
         header = f"<i>({i}/{total})</i>\n"
         body = part
 
-        # لو أضفنا header سيصبح النص أطول
         max_body_len = limit - len(header) - 10
         if len(body) > max_body_len:
             body = body[:max_body_len]
@@ -547,10 +543,6 @@ def _split_text_for_telegram(
 ) -> List[str]:
     """
     ✅ v7.5.28: يقسم نصاً طويلاً إلى أجزاء آمنة.
-
-    - يُفضّل القسمة عند newline
-    - يترك هامشاً أمان للأحرف
-    - يتفادى كسر HTML tags كلياً قدر الإمكان
     """
     if not text:
         return [""]
@@ -558,21 +550,17 @@ def _split_text_for_telegram(
     if len(text) <= limit:
         return [text]
 
-    # هامش للأحرف الخاصة بـ HTML tags + header (i/N)
     safe_limit = max(1, limit - 200)
 
     parts: List[str] = []
     remaining = text
 
     while len(remaining) > safe_limit:
-        # أفضل موضع: آخر newline قبل الحدّ
         cut = remaining.rfind("\n", 0, safe_limit)
 
-        # لا newline مناسب → جرّب مسافة
         if cut < safe_limit // 2:
             cut = remaining.rfind(" ", 0, safe_limit)
 
-        # لا شيء مناسب → قطع قسري
         if cut < safe_limit // 2:
             cut = safe_limit
 
@@ -594,7 +582,7 @@ def _split_text_for_telegram(
 class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.26 + v7.5.30: start — يمسح الحالة + إشعار الإحالة
+    # ✅ v7.5.31: start — يمسح الحالة + إشعار الإحالة (مع تشخيص 🔔)
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -620,15 +608,40 @@ class CommandHandlers:
                 pass
 
         args = context.args or []
+
+        # 🔔 تتبّع: قيم args
+        if args:
+            logger.info(f"🔔 /start args={args!r} user={user_id}")
+
         if args and args[0].startswith('ref_'):
             ref_code = args[0][4:]
+
+            # 🔔 تتبّع: كود الإحالة مُقتَطع
+            logger.info(f"🔔 ref_code extracted = {ref_code!r}")
+
             referrer = await DB.get_user_by_referral_code(ref_code)
+
+            # 🔔 تتبّع: المُحيل
+            logger.info(f"🔔 referrer = {referrer!r}")
+
             if referrer and referrer != user_id and not await DB.is_user_banned(referrer):
                 existing = await DB.fetchone(
                     "SELECT 1 FROM referrals WHERE referred_id=?", (user_id,)
                 )
+
+                # 🔔 تتبّع: هل سبق أن أُحيل؟
+                logger.info(
+                    f"🔔 existing referral for user={user_id}: "
+                    f"{existing is not None}"
+                )
+
                 if not existing:
-                    if await DB.add_referral(referrer, user_id):
+                    added = await DB.add_referral(referrer, user_id)
+
+                    # 🔔 تتبّع: نتيجة add_referral
+                    logger.info(f"🔔 add_referral returned: {added!r}")
+
+                    if added:
                         reward = await DB.get_referral_stats(referrer)
                         try:
                             ref_lang = await _get_lang(referrer)
@@ -644,7 +657,7 @@ class CommandHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
 
-                        # ✅ v7.5.30: إشعار قناة سجل المطور
+                        # ✅ v7.5.30/31: إشعار قناة سجل المطور
                         try:
                             username_display = (
                                 f"@{username}" if username else "❌ لا يوجد"
@@ -663,7 +676,18 @@ class CommandHandlers:
                                 f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
                             )
                         except Exception as e:
-                            logger.debug(f"notify dev log (ref): {e}")
+                            logger.warning(
+                                f"🔔 notify dev log (ref) raised: {e}",
+                                exc_info=True,
+                            )
+            else:
+                # 🔔 تتبّع: سبب رفض الإحالة
+                if not referrer:
+                    logger.info(f"🔔 reject: referrer not found for code={ref_code!r}")
+                elif referrer == user_id:
+                    logger.info(f"🔔 reject: referrer == user_id ({user_id})")
+                else:
+                    logger.info(f"🔔 reject: referrer banned ({referrer})")
 
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
@@ -959,7 +983,6 @@ class CommandHandlers:
         participants_label = await _trans('participants', lang, "المشاركون")
         join_text = await _trans('join_contest', lang, "✍️ المشاركة")
 
-        # 🌐 تسميات النوع + السؤال
         type_name_raffle = await _trans('contest_type_raffle_name', lang,
                                         "سحب عشوائي")
         type_name_quiz = await _trans('contest_type_quiz_name', lang,
@@ -986,7 +1009,6 @@ class CommandHandlers:
             end_date = str(c_d.get('end_date') or '')
             participants = c_d.get('participants', 0)
 
-            # 🌐 نوع المسابقة
             if contest_type == 'quiz':
                 type_icon = "❓"
                 type_label = type_name_quiz
@@ -994,16 +1016,13 @@ class CommandHandlers:
                 type_icon = "🎲"
                 type_label = type_name_raffle
 
-            # ── سطر العنوان ──
             text += f"• <b>{title}</b>\n"
 
-            # ── سطر الوصف ──
             if description:
                 if len(description) > CONTEST_DESC_DISPLAY_MAX:
                     description = description[:CONTEST_DESC_DISPLAY_MAX].rstrip() + "…"
                 text += f"  📝 {escape(description)}\n"
 
-            # ── سطر السؤال (للـ quiz فقط) ──
             if contest_type == 'quiz' and question:
                 if len(question) > CONTEST_QUESTION_DISPLAY_MAX:
                     question_disp = question[:CONTEST_QUESTION_DISPLAY_MAX].rstrip() + "…"
@@ -1011,17 +1030,13 @@ class CommandHandlers:
                     question_disp = question
                 text += f"  {q_label} {escape(question_disp)}\n"
 
-            # ── السطر الرئيسي ──
             text += f"  🎁 {prize}  |  {type_icon} {type_label}\n"
 
-            # ── سطر التاريخ ──
             if end_date:
                 text += f"  📅 {escape(end_date[:16])}\n"
 
-            # ── سطر المشاركين ──
             text += f"  👥 {participants_label}: {participants}\n\n"
 
-            # ── زر المشاركة ──
             button_label = f"{join_text} {title[:20]}"
             kb.append([InlineKeyboardButton(
                 button_label,
@@ -1058,7 +1073,6 @@ class CommandHandlers:
 
         text = " ".join(args)
 
-        # ✅ v7.5.27: analyze_sentiment محمّلة على مستوى module
         if analyze_sentiment is None:
             await _safe_edit_or_send(
                 update, context,
@@ -2080,7 +2094,7 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.30: redeem_gift — مع إشعار قناة سجل المطور
+    # ✅ v7.5.31: redeem_gift — مع إشعار قناة سجل المطور (تشخيص 🔔)
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2105,6 +2119,10 @@ class CommandHandlers:
             )
             return
         result = await DB.redeem_gift_code(user_id, code)
+
+        # 🔔 تتبّع: نتيجة redeem_gift_code
+        logger.info(f"🔔 redeem_gift_code result={result!r} user={user_id}")
+
         if isinstance(result, tuple):
             success, days = result
         else:
@@ -2123,7 +2141,7 @@ class CommandHandlers:
             await _safe_edit_or_send(update, context, msg, parse_mode=None)
             await user_cache.invalidate(user_id)
 
-            # ✅ v7.5.30: إشعار قناة سجل المطور
+            # ✅ v7.5.30/31: إشعار قناة سجل المطور
             try:
                 uname = update.effective_user.username or ""
                 fname = update.effective_user.first_name or ""
@@ -2141,7 +2159,10 @@ class CommandHandlers:
                     f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
                 )
             except Exception as e:
-                logger.debug(f"notify dev log (gift): {e}")
+                logger.warning(
+                    f"🔔 notify dev log (gift) raised: {e}",
+                    exc_info=True,
+                )
         elif days == -1:
             await _safe_edit_or_send(
                 update, context,
@@ -2163,15 +2184,11 @@ class CommandHandlers:
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         ✅ v7.5.28: /db_diag — تشخيص قاعدة البيانات.
-
-        - يحاول استخدام diagnose_db_split() أولاً (تقسيم آمن)
-        - fallback إلى diagnose_db() إن لم تتوفر الواجهة الجديدة
         """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
 
-        # إشعار البدء
         await _safe_edit_or_send(
             update, context,
             "⏳ <b>جاري التشخيص...</b>\n\n"
@@ -2179,7 +2196,6 @@ class CommandHandlers:
             parse_mode='HTML',
         )
 
-        # ─── محاولة الواجهة الجديدة أولاً ───
         try:
             from db_diagnostics import diagnose_db_split
             _has_split = True
@@ -2216,7 +2232,6 @@ class CommandHandlers:
                     except BadRequest as e:
                         err = str(e).lower()
                         if "can't parse" in err or "parse" in err:
-                            # fallback: بلا HTML
                             try:
                                 await context.bot.send_message(
                                     chat_id=user_id,
@@ -2250,9 +2265,7 @@ class CommandHandlers:
                     f"db_diag split فشل، fallback: {e}",
                     exc_info=True,
                 )
-                # نكمل إلى fallback
 
-        # ─── fallback: diagnose_db() ───
         try:
             from db_diagnostics import diagnose_db
         except ImportError:
@@ -2280,7 +2293,6 @@ class CommandHandlers:
             )
             return
 
-        # إرسال
         try:
             sent = await _send_long_report(
                 context, user_id, result,
@@ -2345,7 +2357,6 @@ class CommandHandlers:
             )
             return
 
-        # إرسال (عادةً قصير، لكن نستخدم نفس الأسلوب)
         await _send_long_report(
             context, user_id, result,
             parse_mode='HTML',
