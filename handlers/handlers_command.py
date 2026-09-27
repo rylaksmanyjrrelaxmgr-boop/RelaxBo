@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.29
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.30
 ===================================================================================
+🆕 v7.5.30 (DEV LOG NOTIFICATIONS):
+    ✅ _notify_dev_log: دالة مساعدة جديدة — إشعار قناة سجل المطور
+    ✅ start(): إشعار عند دخول بكود إحالة
+       - يُعرض @username + الرقم التعريفي + الكود + المُحيل
+    ✅ redeem_gift(): إشعار عند استخدام كود هدية
+    ✅ قابل للاستيراد من handlers_message.py
+
 🆕 v7.5.29 (CONTEST DISPLAY I18N + DESCRIPTION):
     ✅ contests(): عرض الوصف 📝 (كان لا يظهر)
     ✅ contests(): عرض نوع المسابقة 🎲/❓ من الترجمة
@@ -196,6 +203,47 @@ def _is_anonymous_sender(update: Update) -> bool:
         update.effective_user.id == ANONYMOUS_BOT_ID
         and getattr(update.effective_user, 'is_bot', False)
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.5.30: إشعار قناة سجل المطور
+# ═══════════════════════════════════════════════════════════════════
+
+async def _notify_dev_log(context, text: str) -> None:
+    """
+    ✅ v7.5.30: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
+    لا يفشل أبداً — يتجاهل الأخطاء بصمت.
+    قابل للاستيراد من handlers_message.py.
+    """
+    try:
+        log_ch = await DB.get_log_channel()
+        if not log_ch:
+            return
+        ch_str = str(log_ch).strip()
+        if not ch_str:
+            return
+
+        # تحديد الهدف: رقمي أو @username
+        if ch_str.lstrip('-').isdigit():
+            target = int(ch_str)
+        elif ch_str.startswith('@'):
+            target = ch_str
+        elif ch_str.startswith(('https://', 'http://')):
+            tail = ch_str.rstrip('/').split('/')[-1]
+            if tail.startswith('@'):
+                tail = tail[1:]
+            target = f"@{tail}" if not tail.lstrip('-').isdigit() else int(tail)
+        else:
+            target = f"@{ch_str}"
+
+        await context.bot.send_message(
+            chat_id=target,
+            text=text,
+            parse_mode='HTML',
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.debug(f"_notify_dev_log: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -546,7 +594,7 @@ def _split_text_for_telegram(
 class CommandHandlers:
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.5.26: start — يمسح الحالة المعلقة أولاً
+    # ✅ v7.5.26 + v7.5.30: start — يمسح الحالة + إشعار الإحالة
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -595,6 +643,27 @@ class CommandHandlers:
                             await context.bot.send_message(referrer, ref_msg)
                         except Exception as e:
                             logger.warning(f"⚠️ فشل إرسال إشعار الإحالة: {e}")
+
+                        # ✅ v7.5.30: إشعار قناة سجل المطور
+                        try:
+                            username_display = (
+                                f"@{username}" if username else "❌ لا يوجد"
+                            )
+                            await _notify_dev_log(
+                                context,
+                                f"🔗 <b>دخول بكود إحالة</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"👤 <b>الاسم:</b> {escape(str(first_name or '—'))}\n"
+                                f"🔗 <b>المعرف:</b> {escape(username_display)}\n"
+                                f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🎟️ <b>الكود:</b> <code>{escape(ref_code)}</code>\n"
+                                f"👥 <b>المُحيل:</b> <code>{referrer}</code>\n"
+                                f"🎁 <b>مكافآت المُحيل:</b> {reward.get('available', 0)} يوم\n"
+                                f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                            )
+                        except Exception as e:
+                            logger.debug(f"notify dev log (ref): {e}")
 
         force_ch = await DB.get_force_subscribe_channel()
         if force_ch and user_id != CONFIG.PRIMARY_OWNER_ID:
@@ -2010,6 +2079,10 @@ class CommandHandlers:
             reply_markup=InlineKeyboardMarkup(kb), parse_mode=None,
         )
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.5.30: redeem_gift — مع إشعار قناة سجل المطور
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def redeem_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -2049,6 +2122,26 @@ class CommandHandlers:
                 pass
             await _safe_edit_or_send(update, context, msg, parse_mode=None)
             await user_cache.invalidate(user_id)
+
+            # ✅ v7.5.30: إشعار قناة سجل المطور
+            try:
+                uname = update.effective_user.username or ""
+                fname = update.effective_user.first_name or ""
+                username_display = f"@{uname}" if uname else "❌ لا يوجد"
+                await _notify_dev_log(
+                    context,
+                    f"🎁 <b>استخدام كود هدية</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>الاسم:</b> {escape(str(fname or '—'))}\n"
+                    f"🔗 <b>المعرف:</b> {escape(username_display)}\n"
+                    f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎟️ <b>الكود:</b> <code>{escape(code)}</code>\n"
+                    f"⏱️ <b>المدة المُمنوحة:</b> {days} يوم\n"
+                    f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                )
+            except Exception as e:
+                logger.debug(f"notify dev log (gift): {e}")
         elif days == -1:
             await _safe_edit_or_send(
                 update, context,
@@ -2261,4 +2354,7 @@ class CommandHandlers:
         )
 
 
-__all__ = ['CommandHandlers']
+__all__ = [
+    'CommandHandlers',
+    '_notify_dev_log',
+]
