@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.6)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.7)
 ================================================================================
+🆕 v5.5.7 (DEV LOG NOTIFICATIONS — لا يحتاج تعديل):
+    ✅ ميزة إشعار قناة سجل المطور عند:
+       • دخول بكود إحالة (/start ref_XXX)
+       • استخدام كود هدية (/redeem_gift أو عبر الرسالة)
+    ✅ كل المعالجات المطلوبة مسجَّلة مسبقاً:
+       - CommandHandler("start", ...) → CommandHandlers.start
+       - CommandHandler("redeem_gift", ...) → CommandHandlers.redeem_gift
+       - MessageHandler PRIVATE → MessageHandlers.handle_private
+       - WAIT_REDEEM_GIFT في _PRIVATE_HANDLERS_MAP
+    ✅ لا حاجة لأي ربط إضافي — البوت يعمل مباشرة بعد restart
+
 🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS):
     ✅ contest_cleanup يعلن الفائزين تلقائيًا (بدل الإلغاء البسيط):
        • كل ساعة: DB.auto_declare_expired_contests()
