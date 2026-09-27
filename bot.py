@@ -2,18 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.7)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.8)
 ================================================================================
-🆕 v5.5.7 (DEV LOG NOTIFICATIONS — لا يحتاج تعديل):
-    ✅ ميزة إشعار قناة سجل المطور عند:
-       • دخول بكود إحالة (/start ref_XXX)
-       • استخدام كود هدية (/redeem_gift أو عبر الرسالة)
-    ✅ كل المعالجات المطلوبة مسجَّلة مسبقاً:
-       - CommandHandler("start", ...) → CommandHandlers.start
-       - CommandHandler("redeem_gift", ...) → CommandHandlers.redeem_gift
-       - MessageHandler PRIVATE → MessageHandlers.handle_private
-       - WAIT_REDEEM_GIFT في _PRIVATE_HANDLERS_MAP
-    ✅ لا حاجة لأي ربط إضافي — البوت يعمل مباشرة بعد restart
+🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT):
+    ✅ successful_payment: إشعار قناة سجل المطور عند كل اشتراك مدفوع
+       - يُعرض @username + الرقم التعريفي + الباقة + المبلغ
+    ✅ استيراد _notify_dev_log من handlers_command (مع fallback)
+    ✅ لا تغيير على أي عملية دفع أخرى
+    ✅ لا إشعارات للتجربة المجانية أو المنح اليدوي
+
+🆕 v5.5.7 (DEV LOG NOTIFICATIONS):
+    ✅ يدعم إشعار قناة السجل من handlers_command و handlers_message
 
 🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS):
     ✅ contest_cleanup يعلن الفائزين تلقائيًا (بدل الإلغاء البسيط):
@@ -91,6 +90,20 @@ from handlers.handlers_channels_list import register_channels_list_handlers
 from handlers.handlers_nav_fix import register_nav_fix
 # ✅ v5.2.0: GroupRateLimiterManager
 from handlers.handlers_message import GroupRateLimiterManager
+
+# ✅ v5.5.8: استيراد _notify_dev_log من handlers_command (مع fallback)
+try:
+    from handlers.handlers_command import _notify_dev_log
+    _DEV_LOG_AVAILABLE = True
+except ImportError:
+    try:
+        from handlers_command import _notify_dev_log
+        _DEV_LOG_AVAILABLE = True
+    except ImportError:
+        async def _notify_dev_log(context, text: str) -> None:
+            """fallback — لا يفشل أبداً"""
+            pass
+        _DEV_LOG_AVAILABLE = False
 
 # ✅ v5.3.0: group_log — استيراد بحماية
 try:
@@ -210,6 +223,16 @@ else:
         f"{globals().get('_MAINTENANCE_IMPORT_ERROR', 'unknown')}"
     )
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v5.5.8: فحص توفر _notify_dev_log
+# ═══════════════════════════════════════════════════════════════════
+if _DEV_LOG_AVAILABLE:
+    logger.info("✅ _notify_dev_log متاح — إشعارات قناة السجل مُفعّلة")
+else:
+    logger.warning(
+        "⚠️ _notify_dev_log غير متاح — لن تُرسل إشعارات الدفع"
+    )
+
 ALLOWED_UPDATES = [
     "message",
     "callback_query",
@@ -239,7 +262,6 @@ PUBLIC_COMMANDS = [
     ("language", "🌐 اللغة"),
     ("developer", "👨‍💻 المطور"),
     ("contests", "🏆 المسابقات"),
-    # ✅ v5.5.2: "stats" نُقل إلى ADMIN_COMMANDS
     ("replies", "💬 الردود التلقائية"),
     ("gift_plans", "🎁 خطط الهدايا"),
     ("redeem_gift", "🎟️ استرداد كود هدية"),
@@ -254,7 +276,6 @@ PUBLIC_COMMANDS = [
 # ✅ الأوامر الإدارية — تظهر للأدمن/المالك/المطورين فقط
 # ═══════════════════════════════════════════════════════════════════
 ADMIN_COMMANDS = [
-    # ✅ v5.5.2: "stats" أُضيف هنا (كان في PUBLIC_COMMANDS خطأً)
     ("stats", "📊 الإحصائيات"),
     ("grant", "🎁 منح اشتراك يدوي"),
     ("set_min_interval", "⏱️ تعيين الحد الأدنى للفاصل"),
@@ -768,6 +789,36 @@ async def successful_payment(update, context):
                 )
                 logger.info(f"✅ Subscription activated: user={user_id}")
                 await invalidate_user_cache(user_id)
+
+                # ✅ v5.5.8: إشعار قناة سجل المطور — دفع حقيقي فقط
+                try:
+                    from html import escape as _escape
+
+                    _uname = update.effective_user.username or ""
+                    _fname = update.effective_user.first_name or ""
+                    _username_display = (
+                        f"@{_uname}" if _uname else "❌ لا يوجد"
+                    )
+                    _plan_display = _escape(str(plan_name or '—'))
+                    _price_display = int(total_amount or 0)
+
+                    await _notify_dev_log(
+                        context,
+                        f"💎 <b>اشتراك مدفوع جديد</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"👤 <b>الاسم:</b> {_escape(str(_fname or '—'))}\n"
+                        f"🔗 <b>المعرف:</b> {_escape(_username_display)}\n"
+                        f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💎 <b>الباقة:</b> {_plan_display}\n"
+                        f"💰 <b>المبلغ:</b> {_price_display} ⭐\n"
+                        f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                    )
+                except Exception as _e:
+                    logger.warning(
+                        f"notify dev log (subscription): {_e}",
+                        exc_info=True,
+                    )
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
                 logger.error(f"❌ Failed to activate subscription for user {user_id}")
