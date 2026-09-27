@@ -2,23 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.9)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.10)
 ================================================================================
+🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS):
+    ✅ pool_health_monitor: إصلاح الإنذارات الكاذبة
+       - waiting الآن يحسب الأقفال الحقيقية فقط (Lock, LWLock, BufferPin)
+       - إزالة waiting>=3 من شروط التحذير
+       - waiting أصبح معلومة تشخيصية فقط (لا يفعّل ⚠️)
+    ✅ تقليل الضجيج في اللوغ
+
 🆕 v5.5.9 (AUTO POOL HEALTH MONITOR):
     ✅ pool_health_monitor(): مراقبة تلقائية لحالة PostgreSQL Pool
        - كل 5 دقائق → يسجّل في اللوغ
        - يقرأ pg_stat_activity + DB.get_pool_live()
        - 🟢 pool HEALTH (طبيعي) أو ⚠️ pool DIAG (ضغط)
-       - يُظهر: total, active, idle_tx, lock_waits, waiting, util%
-    ✅ إضافة تلقائية إلى tasks
-    ✅ لا يحتاج أي اختبار يدوي
 
 🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT):
     ✅ successful_payment: إشعار قناة سجل المطور عند كل اشتراك مدفوع
-       - يُعرض @username + الرقم التعريفي + الباقة + المبلغ
     ✅ استيراد _notify_dev_log من handlers_command (مع fallback)
-    ✅ لا تغيير على أي عملية دفع أخرى
-    ✅ لا إشعارات للتجربة المجانية أو المنح اليدوي
 
 🆕 v5.5.7 (DEV LOG NOTIFICATIONS):
     ✅ يدعم إشعار قناة السجل من handlers_command و handlers_message
@@ -922,19 +923,22 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.9: مراقبة تلقائية لحالة PostgreSQL Pool
+# ✅ v5.5.10: مراقبة تلقائية لحالة PostgreSQL Pool (بدون إنذارات كاذبة)
 # =====================================================================
 
 async def pool_health_monitor() -> None:
     """
-    ✅ v5.5.9: يراقب حالة Pool + الاتصالات كل 5 دقائق.
+    ✅ v5.5.9/10: يراقب حالة Pool + الاتصالات كل 5 دقائق.
 
     يسجّل في اللوغ:
-      🟢 pool HEALTH: total=N active=N idle_tx=N waiting=N
-      ⚠️ pool DIAG  : نفس المعلومات عند ذروة/مشكلة
+      🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
+      ⚠️ pool DIAG  : نفس المعلومات عند ضغط حقيقي
 
-    الهدف: عند ظهور استعلام بطيء، افتح اللوغ وقارن التوقيتات
-    لمعرفة السبب (Pool ممتلئ، قفل، idle-in-transaction...).
+    ✅ v5.5.10: 
+      - waiting الآن يحسب الأقفال الحقيقية فقط
+        (Lock, LWLock, BufferPin) — لا ClientRead/IO
+      - waiting لم يعد يفعّل ⚠️ (معلومة فقط)
+      - ⚠️ يفعّل فقط عند: lock_waits>0 أو idle_tx>=3 أو util>=80%
     """
     # تأخير أولي — لا نبدأ فوراً (نعطي bootstrap فرصة)
     try:
@@ -952,6 +956,7 @@ async def pool_health_monitor() -> None:
                 continue
 
             # ═══ قراءة pg_stat_activity ═══
+            # ✅ v5.5.10: waiting يحسب الأقفال الحقيقية فقط
             row = await DB.fetchone(
                 """
                 SELECT 
@@ -962,8 +967,9 @@ async def pool_health_monitor() -> None:
                         AS idle_in_tx,
                     count(*) FILTER (WHERE wait_event_type = 'Lock') 
                         AS lock_waits,
-                    count(*) FILTER (WHERE wait_event_type IS NOT NULL) 
-                        AS waiting
+                    count(*) FILTER (
+                        WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
+                    ) AS waiting
                 FROM pg_stat_activity
                 WHERE datname = current_database()
                 """
@@ -1004,11 +1010,11 @@ async def pool_health_monitor() -> None:
             util_pct = (pool_current / pool_max * 100) if pool_max else 0
 
             # ═══ تحديد المستوى ═══
+            # ✅ v5.5.10: أزلنا waiting>=3 — waiting معلومة فقط
             is_stressed = (
                 lock_waits > 0
                 or idle_in_tx >= 3
                 or util_pct >= 80
-                or waiting >= 3
             )
 
             msg = (
@@ -1508,7 +1514,7 @@ async def main():
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
 
-        # ✅ v5.5.9: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
+        # ✅ v5.5.9/10: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
         # نفس المنطق — تُدير أخطاءها داخليًا.
         asyncio.create_task(pool_health_monitor()),
     ]
