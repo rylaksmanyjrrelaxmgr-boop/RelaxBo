@@ -2,28 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.16 - Contest i18n)
+handlers_message.py - معالجات الرسائل (v7.9.17 - Dev Log Notifications)
 =====================================================================
-🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات):
-    ✅ _handle_contest_prize: أزرار المدة تقرأ من الترجمة
-    ✅ _handle_contest_question: نص الطلب من الترجمة
-    ✅ _handle_contest_correct_answer: رسالة quiz مترجَمة
-    ✅ _handle_contest_date: رسالة raffle مترجَمة
-    ✅ fallback عربي مضمّن عند غياب أي مفتاح
+🆕 v7.9.17 (إشعار قناة سجل المطور):
+    ✅ _notify_dev_log: دالة مساعدة جديدة (محلية — بدون circular import)
+    ✅ _handle_redeem_gift_input: إشعار عند استخدام كود هدية
+       - يُعرض @username + الرقم التعريفي + الكود + المدة
+    ✅ لا تغيير على أي دالة أخرى
 
-🆕 v7.9.15 (إصلاح عرض عنوان المسابقة):
-    ✅ _handle_contest_date: يعرض 🏆 العنوان + 🎁 الجائزة + 🕐 التاريخ
-    ✅ _handle_contest_correct_answer: يعرض 🏆 العنوان + 🎁 الجائزة
-    ✅ fallback "—" للقيم الفارغة (بدل None أو فراغ)
-    ✅ escape على العنوان والجائزة لتفادي كسر HTML
-
-🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow):
-    ✅ _handle_contest_prize: يعرض أزرار مدة بدل طلب تاريخ نصي
-    ✅ _handle_contest_question: جديد — استقبال السؤال (quiz)
-    ✅ _handle_contest_correct_answer: جديد — استقبال الإجابة + إنشاء
-    ✅ _PRIVATE_HANDLERS_MAP: تحديث حالات المسابقة
-    ✅ WAIT_CONTEST_DATE يبقى للتوافق الخلفي
-
+🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات)
+🆕 v7.9.15 (إصلاح عرض عنوان المسابقة)
+🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow)
 🆕 v7.9.13 (فحص صلاحيات البوت في قناة السجل)
 🆕 v7.9.12 (تحديث أوامر الأدمن عند إضافة/إزالة)
 🆕 v7.9.11 (حذف رسالة العقوبة تلقائياً بعد 10 ثواني)
@@ -153,6 +142,46 @@ TRANSLATION_MIN_TEXT_LENGTH = 2
 
 # ✅ v7.9.11: مدة بقاء رسالة العقوبة قبل الحذف
 PENALTY_MESSAGE_DELETE_DELAY = 10
+
+
+# =====================================================================
+# 🆕 v7.9.17: إشعار قناة سجل المطور
+# =====================================================================
+
+async def _notify_dev_log(context, text: str) -> None:
+    """
+    ✅ v7.9.17: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
+    لا يفشل أبداً — يتجاهل الأخطاء بصمت.
+    """
+    try:
+        log_ch = await DB.get_log_channel()
+        if not log_ch:
+            return
+        ch_str = str(log_ch).strip()
+        if not ch_str:
+            return
+
+        # تحديد الهدف: رقمي أو @username
+        if ch_str.lstrip('-').isdigit():
+            target = int(ch_str)
+        elif ch_str.startswith('@'):
+            target = ch_str
+        elif ch_str.startswith(('https://', 'http://')):
+            tail = ch_str.rstrip('/').split('/')[-1]
+            if tail.startswith('@'):
+                tail = tail[1:]
+            target = f"@{tail}" if not tail.lstrip('-').isdigit() else int(tail)
+        else:
+            target = f"@{ch_str}"
+
+        await context.bot.send_message(
+            chat_id=target,
+            text=text,
+            parse_mode='HTML',
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.debug(f"_notify_dev_log: {e}")
 
 
 # =====================================================================
@@ -3060,6 +3089,10 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.9.17: redemption + إشعار قناة سجل المطور
+    # ═════════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
@@ -3083,10 +3116,32 @@ class MessageHandlers:
             success, days = result, 0
         else:
             success, days = bool(result), 0
+
         if success and days > 0:
             msg = _fmt(await _trans('gift_redeemed', lang, "🎁 {days}"),
                        days=days)
             await safe_send(context.bot, user_id, msg)
+
+            # ✅ v7.9.17: إشعار قناة سجل المطور
+            try:
+                uname = update.effective_user.username or ""
+                fname = update.effective_user.first_name or ""
+                username_display = f"@{uname}" if uname else "❌ لا يوجد"
+                await _notify_dev_log(
+                    context,
+                    f"🎁 <b>استخدام كود هدية</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>الاسم:</b> {escape(str(fname or '—'))}\n"
+                    f"🔗 <b>المعرف:</b> {escape(username_display)}\n"
+                    f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎟️ <b>الكود:</b> <code>{escape(code)}</code>\n"
+                    f"⏱️ <b>المدة المُمنوحة:</b> {days} يوم\n"
+                    f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
+                )
+            except Exception as e:
+                logger.debug(f"notify dev log (gift input): {e}")
+
         elif days == -1:
             msg = await _trans('own_code', lang, "❌")
             await safe_send(context.bot, user_id, msg)
@@ -3310,4 +3365,5 @@ __all__ = [
     "_send_translation_reply",
     "apply_violation_penalty",
     "_verify_bot_in_log_channel",
+    "_notify_dev_log",
 ]
