@@ -2,8 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.10)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.11)
 ================================================================================
+🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES):
+    ✅ ensure_performance_indexes(): إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
+       - PostgreSQL فقط (SQLite/MySQL → تخطّي)
+       - CONCURRENTLY + IF NOT EXISTS → آمن للتكرار
+       - لا يفشل الإقلاع عند الخطأ
+    ✅ إصلاح حرج: استيراد TimeUtils من database
+       (كان يُسبب NameError صامت في إشعار قناة سجل المطور)
+    ✅ pool_health_monitor: 
+       - لفّ sleep(120) الأولي في try/except CancelledError
+       - idle_in_tx: من >=3 إلى >=1 (idle in transaction يحجب VACUUM)
+    ✅ _collect_admin_ids: تسجيل اسم الدالة المُستخدمة
+
 🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS):
     ✅ pool_health_monitor: إصلاح الإنذارات الكاذبة
        - waiting الآن يحسب الأقفال الحقيقية فقط (Lock, LWLock, BufferPin)
@@ -65,7 +77,10 @@ from telegram.ext import (
 )
 
 from config import CONFIG, PATHS
-from database import DB, initialize_db
+
+# ✅ v5.5.11: إضافة TimeUtils — كان مفقوداً ويُسبب NameError صامت
+from database import DB, initialize_db, TimeUtils
+
 from handlers import (
     CommandHandlers,
     CallbackHandlers,
@@ -299,6 +314,120 @@ GROUP_COMMANDS = [
     ("unban", "🔓 إلغاء حظر"),
     ("pin", "📌 تثبيت رسالة"),
 ]
+
+
+# =====================================================================
+# 🆕 v5.5.11: إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
+# =====================================================================
+
+# الفهارس التي تُنشأ:
+#   - CONCURRENTLY: لا تقفل الجدول
+#   - IF NOT EXISTS: آمن للتكرار (البوت قد يُعاد تشغيله)
+#   - PostgreSQL فقط: SQLite/MySQL يتخطّى
+_PERFORMANCE_INDEXES = [
+    (
+        "idx_user_penalties_active_end",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_user_penalties_active_end "
+        "ON user_penalties(status, end_time) "
+        "WHERE status = 'active'",
+    ),
+    (
+        "idx_user_penalties_user_status",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_user_penalties_user_status "
+        "ON user_penalties(user_id, status)",
+    ),
+    (
+        "idx_auto_replies_chat_keyword",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_auto_replies_chat_keyword "
+        "ON auto_replies(chat_id, keyword)",
+    ),
+    (
+        "idx_user_violations_user_chat",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_user_violations_user_chat "
+        "ON user_violations(user_id, chat_id)",
+    ),
+    (
+        "idx_posts_channel_created",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_posts_channel_created "
+        "ON posts(channel_db_id, created_at)",
+    ),
+    (
+        "idx_posts_channel_published_partial",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "idx_posts_channel_published_partial "
+        "ON posts(channel_db_id) WHERE published = 0",
+    ),
+]
+
+
+async def ensure_performance_indexes() -> None:
+    """
+    ✅ v5.5.11: ينشئ الفهارس الحرجة تلقائياً عند بدء البوت.
+
+    - PostgreSQL فقط (SQLite/MySQL → تخطّي بصمت)
+    - يستخدم CONCURRENTLY → لا يقفل الجدول
+    - يستخدم IF NOT EXISTS → آمن للتكرار
+    - لا يفشل الإقلاع عند الخطأ (يُسجَّل تحذير فقط)
+
+    ملاحظة:
+        DB.execute() عادة لا يفتح transaction، لذا CONCURRENTLY يعمل.
+        لو ظهر خطأ "cannot run inside a transaction block" →
+        استبدل CONCURRENTLY في القائمة أعلاه.
+
+    Returns:
+        None (يعمل side effect فقط)
+    """
+    # ─── فحص نوع DB ───
+    try:
+        db_type = getattr(DB, "DB_TYPE", "sqlite")
+        if db_type != "postgres":
+            logger.debug(
+                f"ℹ️ ensure_performance_indexes: "
+                f"DB={db_type} — تخطّي (PG فقط)"
+            )
+            return
+    except Exception as e:
+        logger.debug(f"ensure_performance_indexes: فحص DB_TYPE: {e}")
+        return
+
+    created = 0
+    skipped = 0
+    failed = 0
+    t0 = time.monotonic()
+
+    for idx_name, sql in _PERFORMANCE_INDEXES:
+        try:
+            await DB.execute(sql)
+            created += 1
+            logger.debug(f"✅ فهرس: {idx_name}")
+        except Exception as e:
+            err = str(e).lower()
+            if "already exists" in err or "duplicate" in err:
+                skipped += 1
+            else:
+                failed += 1
+                logger.warning(
+                    f"⚠️ فشل إنشاء {idx_name}: {e}"
+                )
+
+    elapsed = time.monotonic() - t0
+    if failed:
+        logger.warning(
+            f"⚠️ ensure_performance_indexes: "
+            f"{created} مُنشأ | {skipped} موجود | {failed} فشل "
+            f"({elapsed:.2f}s)"
+        )
+    else:
+        logger.info(
+            f"✅ ensure_performance_indexes: "
+            f"{created} مُنشأ | {skipped} موجود | 0 فشل "
+            f"({elapsed:.2f}s)"
+        )
 
 
 # =====================================================================
@@ -923,12 +1052,12 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.10: مراقبة تلقائية لحالة PostgreSQL Pool (بدون إنذارات كاذبة)
+# ✅ v5.5.9/10/11: مراقبة تلقائية لحالة PostgreSQL Pool
 # =====================================================================
 
 async def pool_health_monitor() -> None:
     """
-    ✅ v5.5.9/10: يراقب حالة Pool + الاتصالات كل 5 دقائق.
+    ✅ v5.5.9/10/11: يراقب حالة Pool + الاتصالات كل 5 دقائق.
 
     يسجّل في اللوغ:
       🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
@@ -938,13 +1067,19 @@ async def pool_health_monitor() -> None:
       - waiting الآن يحسب الأقفال الحقيقية فقط
         (Lock, LWLock, BufferPin) — لا ClientRead/IO
       - waiting لم يعد يفعّل ⚠️ (معلومة فقط)
-      - ⚠️ يفعّل فقط عند: lock_waits>0 أو idle_tx>=3 أو util>=80%
+
+    ✅ v5.5.11:
+      - sleep(120) الأولي داخل try/except CancelledError
+        (كان يُسجّل كخطأ عند الإلغاء المبكر)
+      - idle_in_tx: >=1 بدل >=3 — أي idle in transaction يحجب
+        VACUUM ويستنزف pool، لذلك نُنبّه فوراً
     """
-    # تأخير أولي — لا نبدأ فوراً (نعطي bootstrap فرصة)
+    # ✅ v5.5.11: تأخير أولي — مُلفّف لمنع CancelledError غير الملتقط
     try:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
-        raise
+        logger.info("🛑 pool_health_monitor أُلغيت (قبل البدء)")
+        return
 
     while True:
         try:
@@ -952,7 +1087,11 @@ async def pool_health_monitor() -> None:
             db_type = getattr(DB, "DB_TYPE", "sqlite")
             if db_type != "postgres":
                 # نستمر لكن نطبع مرة كل 30 دقيقة فقط
-                await asyncio.sleep(1800)
+                try:
+                    await asyncio.sleep(1800)
+                except asyncio.CancelledError:
+                    logger.info("🛑 pool_health_monitor أُلغيت")
+                    return
                 continue
 
             # ═══ قراءة pg_stat_activity ═══
@@ -1011,9 +1150,10 @@ async def pool_health_monitor() -> None:
 
             # ═══ تحديد المستوى ═══
             # ✅ v5.5.10: أزلنا waiting>=3 — waiting معلومة فقط
+            # ✅ v5.5.11: idle_in_tx >= 1 (أي transaction معلّق يحجب VACUUM)
             is_stressed = (
                 lock_waits > 0
-                or idle_in_tx >= 3
+                or idle_in_tx >= 1
                 or util_pct >= 80
             )
 
@@ -1039,7 +1179,8 @@ async def pool_health_monitor() -> None:
         try:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
-            raise
+            logger.info("🛑 pool_health_monitor أُلغيت")
+            return
 
 
 # =====================================================================
@@ -1087,6 +1228,12 @@ async def main():
         await initialize_db()
     db_time = time.monotonic() - t0
     logger.info(f"⏱️ قاعدة البيانات تمت تهيئتها في {db_time:.2f} ثانية")
+
+    # ✅ v5.5.11: إنشاء الفهارس الحرجة تلقائياً (آمن + لا يقفل الجدول)
+    try:
+        await ensure_performance_indexes()
+    except Exception as e:
+        logger.warning(f"⚠️ ensure_performance_indexes فشل: {e}")
 
     # ═══ تسجيل المطورين والمالك ═══
     for dev_id in CONFIG.DEVELOPER_IDS:
@@ -1514,7 +1661,7 @@ async def main():
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
 
-        # ✅ v5.5.9/10: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
+        # ✅ v5.5.9/10/11: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
         # نفس المنطق — تُدير أخطاءها داخليًا.
         asyncio.create_task(pool_health_monitor()),
     ]
