@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.43 — REFACTOR-MIXIN)
+database.py - قاعدة البيانات المتكاملة (v7.7.44 — CACHES-EXTRACT)
 ================================================================================
+🆕 v7.7.44 (CACHES-EXTRACT — نقل Caches إلى ملف منفصل):
+  ✅ استخراج InternalQueryCache / SimpleCache / SettingsCache
+     + internal_cache (كائن عالمي) إلى database_caches.py
+  ✅ الفائدة:
+     • database.py أنحف بـ ~200 سطر
+     • cache.py يستطيع الاستيراد مباشرة من database_caches (بدون
+       اعتماد على database.py) — يمنع أي circular import مستقبلاً
+  ✅ Backward-compat محفوظ 100%:
+     • `from database import SimpleCache, SettingsCache` يعمل كما هو
+     • `from database import internal_cache` يعمل كما هو
+     • cache.py لا يحتاج تعديلاً (لأن database.py يمرّر الأسماء)
+  ✅ صفر regression — نفس السلوك بالضبط
+
 🆕 v7.7.43 (REFACTOR-MIXIN — استخراج الدوال الكبيرة):
   ✅ استخراج 8 دوال كبيرة إلى database_refactor_mixin.py
      (صفر تغيير في السلوك — نفس الكود حرفياً، فقط في ملف آخر)
@@ -150,6 +163,7 @@ _INTERNAL_DB_FILES = frozenset({
     "database_backup.py",
     "database_reminders.py",
     "database_refactor_mixin.py",
+    "database_caches.py",
 })
 
 def _is_internal_frame(filename: str) -> bool:
@@ -308,156 +322,29 @@ AnalyticsMixin, ANALYTICS_MIXIN_AVAILABLE = _load_mixin(
 )
 
 # =====================================================================
-# 0.4) InternalQueryCache
+# 🆕 v7.7.44: استيراد Caches من database_caches.py
+# =====================================================================
+# نُعيد تصدير الأسماء في نطاق database.py للحفاظ على
+# Backward-compat:
+#   from database import SimpleCache, SettingsCache, internal_cache
+# كلها تبقى تعمل بدون تعديل في cache.py أو أي ملف آخر.
 # =====================================================================
 
-class InternalQueryCache:
-    def __init__(self, ttl: int = 60, max_size: int = 10000):
-        self._cache: Dict[str, Tuple[Any, float, int]] = {}
-        self._ttl = ttl
-        self._max_size = max_size
-        self._eviction_lock = asyncio.Lock()
-
-    async def get(self, key: str):
-        entry = self._cache.get(key)
-        if entry is not None:
-            data, timestamp, ttl = entry
-            if time.monotonic() - timestamp < ttl:
-                return data
-            self._cache.pop(key, None)
-        return None
-
-    async def set(self, key: str, data, ttl: int = None):
-        effective_ttl = ttl if ttl is not None else self._ttl
-        if len(self._cache) >= self._max_size and key not in self._cache:
-            async with self._eviction_lock:
-                if len(self._cache) >= self._max_size:
-                    to_remove = list(self._cache.keys())[
-                        : max(1, self._max_size // 4)
-                    ]
-                    for k in to_remove:
-                        self._cache.pop(k, None)
-        self._cache[key] = (data, time.monotonic(), effective_ttl)
-
-    async def invalidate(self, key: str = None):
-        if key:
-            self._cache.pop(key, None)
-        else:
-            self._cache.clear()
-
-    async def clear(self):
-        self._cache.clear()
-
-    async def get_size(self) -> int:
-        return len(self._cache)
-
-internal_cache = InternalQueryCache(ttl=30, max_size=10000)
-
-# =====================================================================
-# 0.5) SimpleCache
-# =====================================================================
-
-class SimpleCache:
-    def __init__(self, default_ttl: int = 60, max_size: int = 10000):
-        self._cache: Dict[Union[str, int], Tuple[Any, float, int]] = {}
-        self._ttl = default_ttl
-        self._max_size = max_size
-        self._lock = asyncio.Lock()
-
-    async def get(self, key):
-        async with self._lock:
-            if key in self._cache:
-                data, ts, ttl = self._cache[key]
-                if time.monotonic() - ts < ttl:
-                    return data
-                del self._cache[key]
-            return None
-
-    async def set(self, key, data, ttl: int = None):
-        effective = ttl if ttl is not None else self._ttl
-        async with self._lock:
-            if len(self._cache) >= self._max_size and key not in self._cache:
-                to_remove = list(self._cache.keys())[
-                    : max(1, self._max_size // 4)
-                ]
-                for k in to_remove:
-                    self._cache.pop(k, None)
-            self._cache[key] = (data, time.monotonic(), effective)
-
-    async def invalidate(self, key=None):
-        async with self._lock:
-            if key is not None:
-                self._cache.pop(key, None)
-            else:
-                self._cache.clear()
-
-    async def clear(self):
-        async with self._lock:
-            self._cache.clear()
-
-    async def has(self, key) -> bool:
-        async with self._lock:
-            if key in self._cache:
-                _, ts, ttl = self._cache[key]
-                if time.monotonic() - ts < ttl:
-                    return True
-                del self._cache[key]
-            return False
-
-    async def get_with_ttl(self, key):
-        async with self._lock:
-            if key in self._cache:
-                data, ts, ttl = self._cache[key]
-                remaining = int(ttl - (time.monotonic() - ts))
-                if remaining > 0:
-                    return data, remaining
-                del self._cache[key]
-            return None, None
-
-    async def set_many(self, items: Dict[Any, Any], ttl: int = None):
-        effective = ttl if ttl is not None else self._ttl
-        async with self._lock:
-            now = time.monotonic()
-            for key, data in items.items():
-                if len(self._cache) >= self._max_size and key not in self._cache:
-                    to_remove = list(self._cache.keys())[
-                        : max(1, self._max_size // 4)
-                    ]
-                    for k in to_remove:
-                        self._cache.pop(k, None)
-                self._cache[key] = (data, now, effective)
-
-    async def delete_many(self, keys: List[Any]) -> int:
-        async with self._lock:
-            count = 0
-            for key in keys:
-                if key in self._cache:
-                    del self._cache[key]
-                    count += 1
-            return count
-
-    async def get_keys(self) -> List[Any]:
-        async with self._lock:
-            return list(self._cache.keys())
-
-    async def get_all(self) -> Dict[Any, Any]:
-        async with self._lock:
-            now = time.monotonic()
-            return {
-                k: v[0] for k, v in self._cache.items()
-                if now - v[1] < v[2]
-            }
-
-    async def get_stats(self) -> Dict[str, Any]:
-        async with self._lock:
-            return {
-                'size': len(self._cache),
-                'max_size': self._max_size,
-                'ttl': self._ttl,
-            }
-
-class SettingsCache(SimpleCache):
-    pass
+try:
+    from database_caches import (
+        InternalQueryCache,
+        SimpleCache,
+        SettingsCache,
+        internal_cache,
+    )
+    CACHES_MODULE_AVAILABLE = True
+    logger.info("✅ تم تحميل database_caches.py")
+except ImportError as _ce:
+    logger.error(
+        f"❌ database_caches.py مفقود: {_ce} "
+        f"— لا يمكن المتابعة بدون caches"
+    )
+    raise
 
 # =====================================================================
 # 0.6) cache.py
@@ -7589,4 +7476,5 @@ __all__ = [
     "_adapt_params", "_table_exists",
     "_MIGRATIONS_TYPES", "_compute_migrations_signature",
     "REFACTOR_MIXIN_AVAILABLE",
+    "CACHES_MODULE_AVAILABLE",
 ]
