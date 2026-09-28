@@ -2,8 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.29)
+handlers_callback.py - معالج الأزرار (v9.4.30)
 =====================================================================
+🆕 v9.4.30 — إصلاحات أمنية وذاكرة:
+    ✅ #1: _sec_auth_cache — إضافة _prune_sec_auth_cache لمنع تسريب الذاكرة
+       - حذف المنتهية + الأقدم 25% عند تجاوز 5000 entry
+    ✅ #2: contest_duration:* / contest_type_raffle / contest_type_quiz
+       — إضافة فحص CONFIG.is_developer(user_id)
+    ✅ #3: _CONTEXT_KEYS_TO_CLEAR — إضافة contest_* keys
+       - contest_title, contest_desc, contest_prize
+       - contest_end_date, contest_duration_label, contest_duration_seconds
+    ✅ #5: _PRIMARY_OWNER_ID — log critical عند الفشل (بدل صمت)
+    ✅ #6: _handle_group_delete — ترتيب صحيح لإبطال الكاش
+       (بعد نجاح الحذف، لا قبله)
+    ✅ #7: _handle_parameterized — توثيق عدم السقوط (سلوك مقصود)
+
 🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة:
     ✅ contest_duration:* → يستخدم _trans() لكل النصوص
     ✅ contest_type_raffle → رسالة نجاح مترجَمة بالكامل
@@ -15,11 +28,21 @@ handlers_callback.py - معالج الأزرار (v9.4.29)
        - contest_created_raffle
        - contest_create_failed
        - contest_end_line
+    ⚠️ ملاحظة v9.4.30: يجب إضافة المفاتيح التالية إلى ملفات JSON:
+       ar.json / en.json / (باقي اللغات)
+       - contest_duration_1h / _6h / _1d / _3d / _1w / _2w
+       - contest_duration_1mo / _2mo / _3mo / _6mo / _1y
+       - contest_duration_prompt
+       - contest_type_raffle_btn / contest_type_quiz_btn
+       - contest_type_raffle_label
+       - contest_ask_question
+       - contest_created_raffle
+       - contest_create_failed
+       - contest_end_line
+       - quiz_question_prompt
 
 🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة
-
 🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي)
-
 ✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب"
 ✅ v9.4.26 — دعم مسابقة "سؤال وجواب"
 ✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة
@@ -217,12 +240,25 @@ SUCCESS_RATE_GOOD_THRESHOLD = 70
 SUCCESS_RATE_WARN_THRESHOLD = 30
 DEFAULT_SUCCESS_RATE = 100.0
 
+# ✅ v9.4.30: حد أقصى لعدد entries في _sec_auth_cache (prune trigger)
+SEC_AUTH_CACHE_MAX_SIZE = 5000
+
 _BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
 
+# ✅ v9.4.30: log critical عند فشل قراءة PRIMARY_OWNER_ID
 try:
     _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
-except (TypeError, ValueError, AttributeError):
+    if _PRIMARY_OWNER_ID <= 0:
+        raise ValueError(
+            f"PRIMARY_OWNER_ID must be positive (got {_PRIMARY_OWNER_ID})"
+        )
+except (TypeError, ValueError, AttributeError) as _poe:
+    logger.critical(
+        f"❌ PRIMARY_OWNER_ID غير صالح: {_poe} — "
+        f"المالك سيفقد صلاحياته كاملة! "
+        f"تحقق من CONFIG.PRIMARY_OWNER_ID"
+    )
     _PRIMARY_OWNER_ID = None
 
 ACTIVE_TASKS: Set[asyncio.Task] = set()
@@ -230,9 +266,14 @@ _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 _security_stats_cache_local: SmartCache = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
 
+# ✅ v9.4.30: إضافة contest_* keys للتنظيف
 _CONTEXT_KEYS_TO_CLEAR = (
     'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
     'ban_chat', 'contest_join', 'channel_page', 'post_page', 'sec_chat',
+    # v9.4.30: contest flow cleanup
+    'contest_title', 'contest_desc', 'contest_prize',
+    'contest_end_date', 'contest_duration_label',
+    'contest_duration_seconds',
 )
 _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 
@@ -601,6 +642,44 @@ async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
             return None
     return None
 
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.4.30: prune لـ _sec_auth_cache لمنع تسريب الذاكرة
+# ═════════════════════════════════════════════════════════════════════
+
+def _prune_sec_auth_cache(now: float) -> int:
+    """
+    🧹 تنظيف _sec_auth_cache:
+      1) يحذف المنتهية (age >= SEC_AUTH_CACHE_TTL)
+      2) إن بقي > SEC_AUTH_CACHE_MAX_SIZE → يحذف الأقدم 25%
+
+    Returns:
+        عدد entries المحذوفة (مجموع المرحلتين).
+    """
+    removed = 0
+    # المرحلة 1: حذف المنتهية
+    expired_keys = [
+        k for k, (_, ts) in _sec_auth_cache.items()
+        if now - ts >= SEC_AUTH_CACHE_TTL
+    ]
+    for k in expired_keys:
+        _sec_auth_cache.pop(k, None)
+    removed += len(expired_keys)
+
+    # المرحلة 2: حذف الأقدم إن تجاوز الحد
+    if len(_sec_auth_cache) > SEC_AUTH_CACHE_MAX_SIZE:
+        target = max(1, SEC_AUTH_CACHE_MAX_SIZE // 4)
+        sorted_items = sorted(
+            _sec_auth_cache.items(), key=lambda kv: kv[1][1]
+        )
+        for k, _ in sorted_items[:target]:
+            _sec_auth_cache.pop(k, None)
+            removed += 1
+        logger.debug(
+            f"🧹 _sec_auth_cache prune: حُذف {removed} entry "
+            f"(المتبقي: {len(_sec_auth_cache)})"
+        )
+    return removed
+
 async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     if chat_id is None:
         return False
@@ -609,6 +688,11 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     cached = _sec_auth_cache.get(key)
     if cached and now - cached[1] < SEC_AUTH_CACHE_TTL:
         return cached[0]
+
+    # ✅ v9.4.30: prune عند الحاجة
+    if len(_sec_auth_cache) >= SEC_AUTH_CACHE_MAX_SIZE:
+        _prune_sec_auth_cache(now)
+
     try:
         result = await is_authorized_in_group(context.bot, chat_id, user_id)
     except Exception:
@@ -737,6 +821,8 @@ class CallbackHandlers:
             if handled:
                 return
         except Exception as e:
+            # ✅ v9.4.30: سلوك مقصود — توقّف كامل عند فشل param handler
+            # لتفادي تنفيذ handler آخر بنفس البيانات (قد يُنشئ حالة مختلطة)
             logger.error(f"❌ param outer: {e}", exc_info=True)
             try:
                 await safe_edit(query, await _trans('error_occurred', lang, "❌"),
@@ -1175,8 +1261,16 @@ class CallbackHandlers:
 
             # ═══════════════════════════════════════════════════════════════
             # ✅ v9.4.29: أزرار مدة المسابقة + نوع المسابقة (كل النصوص مترجمة)
+            # ✅ v9.4.30: إضافة فحص CONFIG.is_developer(user_id)
             # ═══════════════════════════════════════════════════════════════
             if data.startswith("contest_duration:"):
+                # ✅ v9.4.30: authorization check
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query,
+                        await _trans('unauthorized', lang, "❌"),
+                        bot=context.bot)
+                    return
+
                 duration_key = data.split(":", 1)[1]
 
                 if duration_key not in CONTEST_DURATIONS:
@@ -1231,6 +1325,13 @@ class CallbackHandlers:
                 return
 
             if data == "contest_type_raffle":
+                # ✅ v9.4.30: authorization check
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query,
+                        await _trans('unauthorized', lang, "❌"),
+                        bot=context.bot)
+                    return
+
                 c_title = (context.user_data.get('contest_title') or '').strip()
                 c_desc  = (context.user_data.get('contest_desc') or '').strip()
                 c_prize = (context.user_data.get('contest_prize') or '').strip()
@@ -1298,6 +1399,13 @@ class CallbackHandlers:
                 return
 
             if data == "contest_type_quiz":
+                # ✅ v9.4.30: authorization check
+                if not CONFIG.is_developer(user_id):
+                    await safe_edit(query,
+                        await _trans('unauthorized', lang, "❌"),
+                        bot=context.bot)
+                    return
+
                 StateManager.set(user_id, UserState.WAIT_CONTEST_QUESTION)
                 await safe_edit(query,
                     await _trans('contest_ask_question', lang,
@@ -2589,6 +2697,7 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_group_delete(update, context, query, user_id, data, lang):
+        # ✅ v9.4.30: ترتيب صحيح — إبطال الكاش بعد نجاح الحذف فقط
         try:
             chat_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
@@ -2603,11 +2712,13 @@ class CallbackHandlers:
             await safe_edit(query,
                 await _trans('not_owner', lang, "❌"), bot=context.bot)
             return
-        try:
-            await _invalidate_log_channel_menu_cache(chat_id)
-        except Exception:
-            pass
+
         if await DB.delete_group(chat_id):
+            # ✅ v9.4.30: إبطال الكاش بعد نجاح الحذف (لا قبله)
+            try:
+                await _invalidate_log_channel_menu_cache(chat_id)
+            except Exception:
+                pass
             await _invalidate_after_channel_change(user_id)
             await safe_edit(query,
                 await _trans('group_deleted', lang, "✅"), bot=context.bot)
