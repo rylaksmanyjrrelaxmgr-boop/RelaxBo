@@ -1,8 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.41 — POOL-LIFETIME-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.42 — AUDIT-FIX)
 ================================================================================
+🆕 v7.7.42 (AUDIT-FIX — إصلاحات ما بعد المراجعة الشاملة):
+  ✅ _index_exists (PG): فحص indisvalid + indisready — يكشف الفهارس المكسورة
+     - المشكلة: CONCURRENTLY يفشل أحياناً ويترك الفهرس INVALID
+     - الفهرس المكسور يبقى في pg_indexes للأبد → لا يُعاد إنشاؤه
+     - الحل: SELECT (i.indisvalid AND i.indisready)
+  ✅ _get_secondary_indexes: تعبئة القائمة الحقيقية (كانت return [])
+     + استدعاء _create_secondary_indexes في _do_bootstrap_inner
+  ✅ _ensure_bigint_ids (MySQL): إزالة تجاهل PK
+     - المشكلة: أعمدة PK تبقى INT → تفيض عند 2.1B
+     - الحل: MODIFY COLUMN يعمل على PK في MySQL (FKs هي القيد الحقيقي)
+  ✅ _convert_upsert: رفع ValueError بدل إرجاع استعلام مكسور
+     - المشكلة: عند عدم مطابقة النمط على MySQL، يُعاد الاستعلام
+       كما هو → syntax error غامض عند التنفيذ
+     - الحل: raise مبكر مع رسالة واضحة
+  ✅ connection(): لا نُعيد اتصالاً مسمومًا بعد فشل _destroy_connection
+     - المشكلة: اتصال MySQL فاسد يُعاد للـ pool → أخطاء صامتة لاحقة
+     - الحل: تجاهل الاتصال (تسرب واحد أنظف من أخطاء منتشرة)
+  ✅ _tune_heavy_tables_autovacuum: _autovacuum_tuned=True فقط لو 0 فشل
+     - المشكلة: 1 جدول فاشل يمنع إعادة المحاولة حتى restart
+     - الحل: إعادة المحاولة في الإقلاع التالي عند أي فشل
+  ✅ expire_penalties (MySQL): fallback لـ SKIP LOCKED
+     - المشكلة: MySQL < 8.0.1 / MariaDB < 10.6 يفشل بصمت
+     - الحل: try/except مع إعادة المحاولة بدون SKIP LOCKED
+  ✅ _execute_with_retry: تعليق توضيحي عن retry non-idempotent
+
 🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام):
   ✅ إصلاح جذري لبطء ~1 ثانية على كل استعلام (حتى PK lookups)
   ✅ السبب: max_inactive_connection_lifetime=0 يعني "احتفظ بالاتصال للأبد"
@@ -1739,10 +1764,14 @@ def _convert_upsert(query: str) -> str:
     )
     match = pattern.search(query)
     if not match:
+        # ✅ v7.7.42: رفع خطأ واضح بدل إرجاع استعلام مكسور على MySQL
+        # (سابقاً كان يُسجّل error ثم يُعيد الاستعلام → syntax error
+        #  غامض عند التنفيذ. الآن نكشف الخطأ بدقة.)
         if "ON CONFLICT" in query.upper():
-            logger.error(
-                "❌ _convert_upsert: ON CONFLICT لم يُطابق النمط "
-                "على MySQL — سيسبب syntax error"
+            raise ValueError(
+                "_convert_upsert: ON CONFLICT لم يُطابق النمط على "
+                "MySQL — الاستعلام سيسبب syntax error. "
+                f"أول 200 حرف: {query[:200]!r}"
             )
         return query
     update_set = match.group(2).strip()
@@ -2424,7 +2453,7 @@ class Database(
                 )
 
     # =================================================================
-    # 🆕 v7.7.32 + v7.7.38 + v7.7.39: ضبط autovacuum
+    # 🆕 v7.7.32 + v7.7.38 + v7.7.39 + v7.7.42: ضبط autovacuum
     # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
@@ -2441,6 +2470,10 @@ class Database(
           - threshold: 50 → 5 (يبدأ بعد 5 dead tuple فقط)
           - scale_factor: 0.05 → 0.0 (لا يعتمد على حجم الجدول)
           - analyze_threshold: 50 → 5
+
+        🆕 v7.7.42: _autovacuum_tuned=True فقط لو 0 فشل
+          - سابقاً: أي نجاح واحد (حتى مع فشل آخر) يضع العلم → لا إعادة محاولة
+          - الآن: أي فشل → العلم يبقى False → إعادة في الإقلاع التالي
 
         السبب:
           • posts وصل 68 dead tuple (12.8%) خلال ساعة
@@ -2531,7 +2564,14 @@ class Database(
                     f"{len(SMALL_TABLES_FOR_AUTOVACUUM)} small) — "
                     f"{failed} فشل"
                 )
-            self._autovacuum_tuned = True
+            # ✅ v7.7.42: لا نضع العلم عند أي فشل → إعادة المحاولة
+            if failed == 0:
+                self._autovacuum_tuned = True
+            else:
+                logger.warning(
+                    f"⚠️ v7.7.42: autovacuum — {failed} جدول فشل، "
+                    f"ستُعاد المحاولة في الإقلاع التالي"
+                )
         except Exception as e:
             logger.warning(f"⚠️ _tune_heavy_tables_autovacuum: {e}")
 
@@ -3457,11 +3497,15 @@ class Database(
                 try:
                     await self._destroy_connection(conn)
                 except Exception as de:
-                    logger.warning(f"⚠️ destroy in connection(): {de}")
-                    try:
-                        await self._return_connection(conn)
-                    except Exception:
-                        pass
+                    # ✅ v7.7.42: لا نُعيد اتصالاً مسمومًا إلى الـ pool
+                    # سابقاً كان الكود يستدعي _return_connection هنا،
+                    # لكن ذلك يُعيد اتصالاً فاسداً → أخطاء صامتة لاحقة.
+                    # الآن: نتجاهل الاتصال (تسرب واحد مقبول مقابل أخطاء
+                    # منتشرة على مستوى البوت كله).
+                    logger.warning(
+                        f"⚠️ destroy in connection(): {de} — "
+                        f"الاتصال سيُتجاهل (لا يُعاد للـ pool)"
+                    )
             else:
                 await self._return_connection(conn)
 
@@ -3526,8 +3570,11 @@ class Database(
                         pass
                     raise
                 except Exception as de:
-                    logger.warning(f"⚠️ destroy_connection: {de}")
-                    await self._return_connection(conn)
+                    # ✅ v7.7.42: لا _return_connection بعد فشل destroy
+                    logger.warning(
+                        f"⚠️ destroy_connection: {de} — "
+                        f"الاتصال سيُتجاهل"
+                    )
             else:
                 await self._return_connection(conn)
 
@@ -3643,6 +3690,11 @@ class Database(
             except Exception as e:
                 last_exception = e
                 retryable = False
+                # ⚠️ v7.7.42: ملاحظة — إعادة المحاولة على ConnectionError
+                # بعد فشل الاتصال أثناء COMMIT قد تُنشئ صفاً مكرراً في
+                # INSERTs غير idempotent. نعتمد على UNIQUE constraints
+                # (ON CONFLICT/INSERT IGNORE) في كل الاستعلامات الحساسة
+                # لتجنّب هذا السيناريو.
                 if DB_TYPE == "sqlite" and isinstance(e, sqlite3.Error):
                     if not isinstance(e, sqlite3.IntegrityError):
                         error_msg = str(e).lower()
@@ -4762,12 +4814,10 @@ class Database(
                     column_comment = r[7] or ""
                     extra = (r[8] or "").upper()
 
-                    if column_key == "PRI":
-                        logger.warning(
-                            f"⚠️ تجاهل {table}.{col} (PK) — "
-                            f"يحتاج migration معقّد"
-                        )
-                        continue
+                    # ✅ v7.7.42: إزالة تجاهل PK
+                    # MODIFY COLUMN يعمل على PK في MySQL (FKs هي القيد
+                    # الحقيقي — لو فشل، نسجّل ونكمل). أعمدة PK التي
+                    # تبقى INT قد تفيض عند 2.1B وهذا أسوأ من فشل ALTER.
 
                     type_modifiers = ""
                     if "unsigned" in column_type_full:
@@ -4819,14 +4869,26 @@ class Database(
                                 f"{current_type} → BIGINT"
                                 f"{type_modifiers} "
                                 f"({null_clause}{extra_clause})"
+                                + (
+                                    " [PK]"
+                                    if column_key == "PRI" else ""
+                                )
                             )
                             converted += 1
                         finally:
                             await cursor2.close()
                     except Exception as e:
-                        logger.warning(
-                            f"⚠️ MODIFY {table}.{col}: {e}"
-                        )
+                        # ✅ v7.7.42: نسجّل خطأ PK بشكل أوضح
+                        if column_key == "PRI":
+                            logger.warning(
+                                f"⚠️ MODIFY PK {table}.{col}: {e} "
+                                f"(قد تكون هناك FKs تشير إليه — "
+                                f"يحتاج migration يدوي)"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ MODIFY {table}.{col}: {e}"
+                            )
         except Exception as e:
             logger.warning(f"⚠️ _ensure_bigint_ids: {e}")
 
@@ -4942,13 +5004,21 @@ class Database(
             return False
         try:
             if USE_POSTGRES:
+                # ✅ v7.7.42: فحص indisvalid + indisready
+                # السبب: CONCURRENTLY قد يفشل ويترك الفهرس INVALID
+                # → يبقى في pg_indexes للأبد → لا يُعاد إنشاؤه.
+                # indisvalid=False OR indisready=False = فهرس مكسور
+                # (يجب حذفه وإعادة إنشائه). نُعيد True فقط إذا كان
+                # صالحاً فعلاً.
                 row = await conn.fetchval(
-                    "SELECT 1 FROM pg_indexes "
-                    "WHERE indexname = $1 "
-                    "AND schemaname = current_schema()",
-                    idx_name,
+                    "SELECT (i.indisvalid AND i.indisready) "
+                    "FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid "
+                    "WHERE c.relname = $1 "
+                    "AND i.indrelid = to_regclass($2)",
+                    idx_name, table,
                 )
-                return row is not None
+                return row is True
             elif USE_MYSQL:
                 if not await _table_exists(conn, table):
                     return False
@@ -5625,7 +5695,66 @@ class Database(
             logger.error(f"❌ auto_replies: {e}", exc_info=True)
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        return []
+        """
+        ✅ v7.7.42: قائمة الفهارس الثانوية الحرجة.
+
+        تُستدعى من _do_bootstrap_inner بعد _migrate_schema.
+        - PG فقط: تُنشأ بـ CONCURRENTLY (لا تقفل الجدول)
+        - SQLite/MySQL: _create_secondary_indexes يستخدم CREATE INDEX
+          العادي عبر _index_exists (مسبقاً الملف فارغ تماماً)
+
+        ملاحظة:
+          * idx_auto_replies_chat_keyword: إذا كان UNIQUE (chat_id,
+            keyword) موجوداً، فهذا الفهرس مكرر وسيُظهر "already exists"
+            دائماً → محسوب في skipped. آمن.
+          * idx_posts_channel_published: partial WHERE published=0
+            لتسريع COUNT(*) في get_channels_to_publish.
+        """
+        return [
+            (
+                "user_penalties",
+                "idx_user_penalties_active_end",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_user_penalties_active_end "
+                "ON user_penalties(status, end_time) "
+                "WHERE status = 'active'",
+            ),
+            (
+                "user_penalties",
+                "idx_user_penalties_user_status",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_user_penalties_user_status "
+                "ON user_penalties(user_id, status)",
+            ),
+            (
+                "auto_replies",
+                "idx_auto_replies_chat_keyword",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_auto_replies_chat_keyword "
+                "ON auto_replies(chat_id, keyword)",
+            ),
+            (
+                "user_violations",
+                "idx_user_violations_user_chat",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_user_violations_user_chat "
+                "ON user_violations(user_id, chat_id)",
+            ),
+            (
+                "posts",
+                "idx_posts_channel_created",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_posts_channel_created "
+                "ON posts(channel_db_id, created_at)",
+            ),
+            (
+                "posts",
+                "idx_posts_channel_published_partial",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_posts_channel_published_partial "
+                "ON posts(channel_db_id) WHERE published = 0",
+            ),
+        ]
 
     def _compute_bootstrap_hash(self) -> str:
         data = {
@@ -5889,6 +6018,16 @@ class Database(
                     "❌ فشل حفظ bootstrap_hash — قد يُعاد migrate"
                 )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
+
+        # ✅ v7.7.42: استدعاء _create_secondary_indexes
+        # (سابقاً كان الكود الميت: _get_secondary_indexes تُعيد [] و
+        #  _create_secondary_indexes غير مستدعاة أبداً)
+        try:
+            secondary_indexes = self._get_secondary_indexes()
+            if secondary_indexes:
+                await self._create_secondary_indexes(secondary_indexes)
+        except Exception as e:
+            logger.warning(f"⚠️ _create_secondary_indexes: {e}")
 
         if USE_POSTGRES:
             try:
@@ -7716,17 +7855,43 @@ class Database(
                                 *id_list,
                             ) or 0
                     elif USE_MYSQL:
-                        ids = await self._fetchall_with_conn(
-                            conn,
-                            "SELECT id FROM user_penalties "
-                            "WHERE status = 'active' "
-                            "  AND end_time IS NOT NULL "
-                            "  AND end_time <= UTC_TIMESTAMP() "
-                            "ORDER BY id "
-                            "LIMIT %s "
-                            "FOR UPDATE SKIP LOCKED",
-                            BATCH,
-                        )
+                        # ✅ v7.7.42: fallback لـ MySQL < 8.0.1 / MariaDB < 10.6
+                        # SKIP LOCKED غير مدعوم → نُعيد المحاولة بدونها
+                        try:
+                            ids = await self._fetchall_with_conn(
+                                conn,
+                                "SELECT id FROM user_penalties "
+                                "WHERE status = 'active' "
+                                "  AND end_time IS NOT NULL "
+                                "  AND end_time <= UTC_TIMESTAMP() "
+                                "ORDER BY id "
+                                "LIMIT %s "
+                                "FOR UPDATE SKIP LOCKED",
+                                BATCH,
+                            )
+                        except Exception as _lock_e:
+                            err_str = str(_lock_e).lower()
+                            if (
+                                "syntax" in err_str
+                                or "skip" in err_str
+                                or "for update" in err_str
+                            ):
+                                logger.debug(
+                                    f"MySQL: SKIP LOCKED غير مدعوم "
+                                    f"— fallback بدونها: {_lock_e}"
+                                )
+                                ids = await self._fetchall_with_conn(
+                                    conn,
+                                    "SELECT id FROM user_penalties "
+                                    "WHERE status = 'active' "
+                                    "  AND end_time IS NOT NULL "
+                                    "  AND end_time <= UTC_TIMESTAMP() "
+                                    "ORDER BY id "
+                                    "LIMIT %s",
+                                    BATCH,
+                                )
+                            else:
+                                raise
                         got_rows = len(ids)
                         if ids:
                             has_more = True
