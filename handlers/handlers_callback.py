@@ -2,45 +2,47 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.30)
+handlers_callback.py - معالج الأزرار (v9.4.32)
 =====================================================================
+🆕 v9.4.32 — إصلاحات الصيانة والاتساق (7 ملاحظات فحص):
+    ✅ #1: _KNOWN_CB_PREFIXES — توليد قائمة base_data prefixes ديناميكياً
+       من CB.* + إضافات صريحة، بدل قائمة hardcoded قابلة للكسر عند
+       إضافة أزرار جديدة.
+    ✅ #2: _make_user_cache_keys() — دالة مركزية لأسماء مفاتيح كاش
+       المستخدم/القناة، لتفادي التكرار اليدوي القابل للانحراف عن
+       cache.py.
+    ✅ #3: _clear_lang_cache_local — استخدام importlib مع lazy import
+       آمن بدل الاعتماد الحصري على sys.modules (hack).
+    ✅ #4: __all__ — توثيق صريح للـ re-exports الخاصة للتوافق الخلفي.
+    ✅ #5: color_emoji fallback — توحيد thresholds=(30.0, 70.0) مع
+       الاستخدام الفعلي في _format_channel_rate_line.
+    ✅ #6: _show_post_list — كاش COUNT(*) (TTL=5s) لتفادي استعلام DB
+       في كل عرض + إبطال الكاش عند add/delete/clear/recycle.
+    ✅ #7: _handle_panel — فحص صلاحية البوت (can_restrict_members)
+       قبل set_chat_permissions لتفادي فشل صامت.
+
+🆕 v9.4.31 — إصلاح زر الرجوع في قائمة الردود التلقائية:
+    ✅ #1: إضافة _patch_auto_reply_back() — يستبدل callback_data='back'
+       في قائمة auto_reply بـ 'grp_set:{chat_id}'
+       - المشكلة: الزر كان يذهب للقائمة الرئيسية دائماً
+       - السبب: "back" في _NO_CHAT_ID_BUTTONS في KeyboardFactory
+       - الحل: patch محلي في handlers_callback يحوّل الزر
+       - مطبَّق في 4 مواضع:
+         1) _handle_security (action = "auto_reply_menu")
+         2) _handle_auto_reply (action = "menu")
+         3) _handle_auto_reply (action = "toggle")
+         4) _handle_auto_reply (action = "admins")
+
 🆕 v9.4.30 — إصلاحات أمنية وذاكرة:
     ✅ #1: _sec_auth_cache — إضافة _prune_sec_auth_cache لمنع تسريب الذاكرة
-       - حذف المنتهية + الأقدم 25% عند تجاوز 5000 entry
     ✅ #2: contest_duration:* / contest_type_raffle / contest_type_quiz
        — إضافة فحص CONFIG.is_developer(user_id)
     ✅ #3: _CONTEXT_KEYS_TO_CLEAR — إضافة contest_* keys
-       - contest_title, contest_desc, contest_prize
-       - contest_end_date, contest_duration_label, contest_duration_seconds
     ✅ #5: _PRIMARY_OWNER_ID — log critical عند الفشل (بدل صمت)
     ✅ #6: _handle_group_delete — ترتيب صحيح لإبطال الكاش
-       (بعد نجاح الحذف، لا قبله)
     ✅ #7: _handle_parameterized — توثيق عدم السقوط (سلوك مقصود)
 
-🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة:
-    ✅ contest_duration:* → يستخدم _trans() لكل النصوص
-    ✅ contest_type_raffle → رسالة نجاح مترجَمة بالكامل
-    ✅ contest_type_quiz → نص مترجَم
-    ✅ مفاتيح جديدة:
-       - contest_duration_prompt
-       - contest_type_raffle_btn / contest_type_quiz_btn
-       - contest_ask_question
-       - contest_created_raffle
-       - contest_create_failed
-       - contest_end_line
-    ⚠️ ملاحظة v9.4.30: يجب إضافة المفاتيح التالية إلى ملفات JSON:
-       ar.json / en.json / (باقي اللغات)
-       - contest_duration_1h / _6h / _1d / _3d / _1w / _2w
-       - contest_duration_1mo / _2mo / _3mo / _6mo / _1y
-       - contest_duration_prompt
-       - contest_type_raffle_btn / contest_type_quiz_btn
-       - contest_type_raffle_label
-       - contest_ask_question
-       - contest_created_raffle
-       - contest_create_failed
-       - contest_end_line
-       - quiz_question_prompt
-
+🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة
 🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة
 🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي)
 ✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب"
@@ -57,6 +59,7 @@ handlers_callback.py - معالج الأزرار (v9.4.30)
 """
 
 import asyncio
+import importlib
 import logging
 import json
 import time
@@ -80,10 +83,13 @@ from telegram.error import BadRequest, RetryAfter, Forbidden
 from config import CONFIG, PATHS
 from database import DB, TimeUtils, internal_cache
 
+# =====================================================================
+# ✅ v9.4.32 (#5): توحيد thresholds مع الاستخدام الفعلي (30.0, 70.0)
+# =====================================================================
 try:
     from database_analytics import color_emoji
 except ImportError:
-    def color_emoji(value, thresholds=(0.3, 0.7), inverse=False):
+    def color_emoji(value, thresholds=(30.0, 70.0), inverse=False):
         try:
             v = float(value)
         except (TypeError, ValueError):
@@ -243,6 +249,10 @@ DEFAULT_SUCCESS_RATE = 100.0
 # ✅ v9.4.30: حد أقصى لعدد entries في _sec_auth_cache (prune trigger)
 SEC_AUTH_CACHE_MAX_SIZE = 5000
 
+# ✅ v9.4.32 (#6): TTL لكاش عدد المنشورات
+POST_COUNT_CACHE_TTL = 5
+POST_COUNT_CACHE_MAX_SIZE = 200
+
 _BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
 
@@ -264,20 +274,89 @@ except (TypeError, ValueError, AttributeError) as _poe:
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
-_security_stats_cache_local: SmartCache = SmartCache(ttl=SEC_STATS_CACHE_TTL, max_size=500)
+_security_stats_cache_local: SmartCache = SmartCache(
+    ttl=SEC_STATS_CACHE_TTL, max_size=500)
+
+# ✅ v9.4.32 (#6): كاش محلي لعدد المنشورات
+_post_count_cache: SmartCache = SmartCache(
+    ttl=POST_COUNT_CACHE_TTL, max_size=POST_COUNT_CACHE_MAX_SIZE)
 
 # ✅ v9.4.30: إضافة contest_* keys للتنظيف
 _CONTEXT_KEYS_TO_CLEAR = (
     'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
     'ban_chat', 'contest_join', 'channel_page', 'post_page', 'sec_chat',
-    # v9.4.30: contest flow cleanup
     'contest_title', 'contest_desc', 'contest_prize',
     'contest_end_date', 'contest_duration_label',
     'contest_duration_seconds',
 )
 _CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 
-GROUP_NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+GROUP_NUMBER_EMOJIS = [
+    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
+    "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
+]
+
+# =====================================================================
+# ✅ v9.4.32 (#1): توليد _KNOWN_CB_PREFIXES ديناميكياً من CB.*
+#     + إضافات صريحة للأزرار التي لا تبدأ بـ CB.*
+# =====================================================================
+
+_KNOWN_CB_PREFIXES: Set[str] = set()
+try:
+    for _attr_name in dir(CB):
+        if _attr_name.startswith('_'):
+            continue
+        try:
+            _val = getattr(CB, _attr_name)
+        except Exception:
+            continue
+        if isinstance(_val, str) and _val:
+            _KNOWN_CB_PREFIXES.add(_val)
+except Exception as _e_cb:
+    logger.warning(f"⚠️ _KNOWN_CB_PREFIXES build from CB.* failed: {_e_cb}")
+
+_KNOWN_CB_PREFIXES.update({
+    "finish_posts",
+    "gift_plans",
+    "redeem_gift",
+    "updates_channel_btn",
+    "admin_analytics",
+    "refresh_btn",
+})
+
+# =====================================================================
+# ✅ v9.4.32 (#2): دالة مركزية لمفاتيح الكاش
+# ⚠️ يجب إبقاؤها متوافقة مع الأنماط المُستخدمة في cache.py
+# =====================================================================
+
+def _make_user_cache_keys(
+    user_id: int,
+    channel_db_id: Optional[int] = None,
+) -> List[str]:
+    """
+    تُنشئ قائمة مفاتيح الكاش المرتبطة بمستخدم معيّن.
+
+    ⚠️ تحذير الصيانة:
+        أنماط المفاتيح هذه مُنسَّقة لتطابق cache.py.
+        إذا تغيّر نمط المفاتيح هناك، يجب تحديث هذه الدالة.
+
+    Args:
+        user_id: معرّف المستخدم.
+        channel_db_id: معرّف القناة في DB (اختياري).
+
+    Returns:
+        قائمة مفاتيح الكاش.
+    """
+    keys = [
+        f"start_data_{user_id}",
+        f"user_{user_id}",
+        f"user_{user_id}_True",
+        f"user_{user_id}_False",
+        f"channels_{user_id}",
+    ]
+    if channel_db_id is not None:
+        keys.append(f"channel_info_{channel_db_id}")
+    return keys
 
 # =====================================================================
 # ترجمة موحدة
@@ -388,34 +467,52 @@ def _is_valid_url(url: Optional[str]) -> bool:
     return True
 
 # =====================================================================
-# clear_lang_cache — محلي لتفادي circular import
+# ✅ v9.4.32 (#3): clear_lang_cache — lazy import عبر importlib
 # =====================================================================
 
 def _clear_lang_cache_local(context) -> None:
-    _cleared = False
-    try:
-        _mod = sys.modules.get('handlers_message')
-        if _mod is None:
-            for _name, _m in list(sys.modules.items()):
-                if _name.endswith('.handlers_message') or _name == 'handlers_message':
-                    _mod = _m
-                    break
-        if _mod is not None:
-            _clc = getattr(_mod, 'clear_lang_cache', None)
-            if _clc is not None:
-                _clc(context)
-                _cleared = True
-    except Exception as e:
-        logger.debug(f"_clear_lang_cache_local sys.modules: {e}")
+    """
+    يُفرغ كاش الترجمة للمستخدم الحالي.
 
-    if not _cleared:
+    الاستراتيجية:
+        1) البحث في sys.modules أولاً (سريع، بلا آثار جانبية).
+        2) إن لم يوجد، محاولة importlib.import_module (lazy).
+        3) Fallback أخير: مسح المفاتيح المعروفة مباشرة.
+    """
+    mod = sys.modules.get('handlers_message')
+
+    if mod is None:
+        for _name in list(sys.modules.keys()):
+            if _name == 'handlers_message' or _name.endswith('.handlers_message'):
+                mod = sys.modules[_name]
+                break
+
+    if mod is None:
         try:
-            if context is not None and hasattr(context, 'user_data'):
-                for _k in ('lang', 'translation_cache',
-                           'cached_translations', 'last_translation'):
-                    context.user_data.pop(_k, None)
-        except Exception as e:
-            logger.debug(f"_clear_lang_cache_local fallback: {e}")
+            mod = importlib.import_module('handlers_message')
+        except ImportError:
+            try:
+                mod = importlib.import_module(
+                    '.handlers_message', package=__package__)
+            except (ImportError, TypeError, ValueError):
+                mod = None
+
+    if mod is not None:
+        _clc = getattr(mod, 'clear_lang_cache', None)
+        if callable(_clc):
+            try:
+                _clc(context)
+                return
+            except Exception as e:
+                logger.debug(f"_clear_lang_cache_local call: {e}")
+
+    try:
+        if context is not None and hasattr(context, 'user_data'):
+            for _k in ('lang', 'translation_cache',
+                       'cached_translations', 'last_translation'):
+                context.user_data.pop(_k, None)
+    except Exception as e:
+        logger.debug(f"_clear_lang_cache_local fallback: {e}")
 
 # =====================================================================
 # تطبيق الحالة على أزرار auto_reply
@@ -442,6 +539,43 @@ def _apply_auto_reply_status_icons(
                 elif cb.startswith("auto_reply_admins"):
                     new_row.append(InlineKeyboardButton(
                         f"{a_icon} {admins_label}", callback_data=cb))
+                else:
+                    new_row.append(btn)
+            new_rows.append(new_row)
+        return InlineKeyboardMarkup(new_rows)
+    except Exception:
+        return kb
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.4.31: إصلاح زر الرجوع في قائمة auto_reply
+# ═════════════════════════════════════════════════════════════════════
+
+def _patch_auto_reply_back(
+    kb: InlineKeyboardMarkup, chat_id: int
+) -> InlineKeyboardMarkup:
+    """
+    ✅ v9.4.31: يستبدل callback_data='back' في قائمة auto_reply
+    بـ 'grp_set:{chat_id}' — ليُعيد المستخدم إلى قائمة الأمان
+    بدل القائمة الرئيسية.
+
+    Args:
+        kb: keyboard مبني عبر KeyboardFactory.build("auto_reply", ...)
+        chat_id: مجموعة الأمان (للعودة إليها)
+
+    Returns:
+        keyboard مُعدَّل (أو نفسه عند الفشل).
+    """
+    try:
+        new_rows = []
+        for row in kb.inline_keyboard:
+            new_row = []
+            for btn in row:
+                cb = btn.callback_data or ""
+                if cb == "back":
+                    new_row.append(InlineKeyboardButton(
+                        btn.text,
+                        callback_data=f"{CB.GRP_SET}:{chat_id}",
+                    ))
                 else:
                     new_row.append(btn)
             new_rows.append(new_row)
@@ -483,7 +617,8 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
                 share_count = len(others)
                 for o in others[:3]:
                     if isinstance(o, dict):
-                        name = o.get('chat_name') or f"Group {o.get('chat_id', '?')}"
+                        name = (o.get('chat_name')
+                                or f"Group {o.get('chat_id', '?')}")
                     else:
                         name = f"Group {_safe_str(o)}"
                     share_names.append(str(name))
@@ -496,7 +631,8 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
         'share_count': share_count,
         'share_names': share_names,
     }
-    await internal_cache.set(cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
+    await internal_cache.set(
+        cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
     return data
 
 async def _safe_answer(query, text=None, show_alert=False) -> bool:
@@ -559,9 +695,11 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
                 return False
             except Exception:
                 return False
-        elif "query is too old" in error_msg or "message to edit not found" in error_msg:
+        elif ("query is too old" in error_msg
+              or "message to edit not found" in error_msg):
             return False
-        elif "can't parse entities" in error_msg or "parse" in error_msg:
+        elif ("can't parse entities" in error_msg
+              or "parse" in error_msg):
             try:
                 await query.edit_message_text(
                     text, reply_markup=reply_markup, parse_mode=None)
@@ -570,7 +708,8 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
                 return False
         elif "message text is empty" in error_msg:
             try:
-                await query.edit_message_text("...", reply_markup=reply_markup)
+                await query.edit_message_text(
+                    "...", reply_markup=reply_markup)
                 return True
             except Exception:
                 return False
@@ -656,7 +795,6 @@ def _prune_sec_auth_cache(now: float) -> int:
         عدد entries المحذوفة (مجموع المرحلتين).
     """
     removed = 0
-    # المرحلة 1: حذف المنتهية
     expired_keys = [
         k for k, (_, ts) in _sec_auth_cache.items()
         if now - ts >= SEC_AUTH_CACHE_TTL
@@ -665,7 +803,6 @@ def _prune_sec_auth_cache(now: float) -> int:
         _sec_auth_cache.pop(k, None)
     removed += len(expired_keys)
 
-    # المرحلة 2: حذف الأقدم إن تجاوز الحد
     if len(_sec_auth_cache) > SEC_AUTH_CACHE_MAX_SIZE:
         target = max(1, SEC_AUTH_CACHE_MAX_SIZE // 4)
         sorted_items = sorted(
@@ -689,12 +826,12 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     if cached and now - cached[1] < SEC_AUTH_CACHE_TTL:
         return cached[0]
 
-    # ✅ v9.4.30: prune عند الحاجة
     if len(_sec_auth_cache) >= SEC_AUTH_CACHE_MAX_SIZE:
         _prune_sec_auth_cache(now)
 
     try:
-        result = await is_authorized_in_group(context.bot, chat_id, user_id)
+        result = await is_authorized_in_group(
+            context.bot, chat_id, user_id)
     except Exception:
         result = False
     _sec_auth_cache[key] = (result, now)
@@ -708,16 +845,21 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
             if k[1] == chat_id:
                 del _sec_auth_cache[k]
 
+async def _invalidate_post_count_cache(channel_db_id: int) -> None:
+    """✅ v9.4.32 (#6): إبطال كاش عدد المنشورات لقناة معيّنة."""
+    try:
+        await _post_count_cache.delete(f"post_count_{channel_db_id}")
+    except Exception:
+        pass
+
 async def _invalidate_after_channel_change(
     user_id: int,
     channel_db_id: Optional[int] = None,
     invalidate_posts: bool = True,
 ) -> None:
-    keys = [f"start_data_{user_id}", f"user_{user_id}",
-            f"user_{user_id}_True", f"user_{user_id}_False",
-            f"channels_{user_id}"]
-    if channel_db_id is not None:
-        keys.append(f"channel_info_{channel_db_id}")
+    # ✅ v9.4.32 (#2): استخدام الدالة المركزية للمفاتيح
+    keys = _make_user_cache_keys(user_id, channel_db_id)
+
     for k in keys:
         try:
             await internal_cache.invalidate(k)
@@ -732,6 +874,7 @@ async def _invalidate_after_channel_change(
             await posts_cache.invalidate(channel_db_id)
         except Exception as e:
             logger.debug(f"posts_cache invalidate: {e}")
+        await _invalidate_post_count_cache(channel_db_id)
 
 def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     published = _coerce_int(ch.get('published'), 0)
@@ -739,17 +882,25 @@ def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     total = _coerce_int(ch.get('total'), 0)
     attempted = _coerce_int(ch.get('attempted'), published + failed)
     pending = _coerce_int(ch.get('pending'), max(0, total - attempted))
-    success_rate = _coerce_float(ch.get('success_rate'), DEFAULT_SUCCESS_RATE)
+    success_rate = _coerce_float(
+        ch.get('success_rate'), DEFAULT_SUCCESS_RATE)
     completion_rate = _coerce_float(
         ch.get('completion_rate'),
         (published / total * 100) if total > 0 else 0.0)
-    color = color_emoji(success_rate,
+    color = color_emoji(
+        success_rate,
         (SUCCESS_RATE_WARN_THRESHOLD, SUCCESS_RATE_GOOD_THRESHOLD))
     name = _html.escape(str(ch.get('name') or '?')[:25])
     line = f"{color} <b>{name}</b>\n"
-    line += (f"   🎯 {published}/{attempted}  ❌ {failed}  ({success_rate}%)\n")
+    line += (
+        f"   🎯 {published}/{attempted}  "
+        f"❌ {failed}  ({success_rate}%)\n"
+    )
     if pending > 0:
-        line += f"   📈 {published}/{total}  ⏳ {pending}  ({completion_rate}%)\n"
+        line += (
+            f"   📈 {published}/{total}  "
+            f"⏳ {pending}  ({completion_rate}%)\n"
+        )
     line += "\n"
     return line
 
@@ -764,7 +915,10 @@ class CallbackHandlers:
     PUBLISH_BATCH_SIZE = 10
 
     @staticmethod
-    async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def handle(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
         query = update.callback_query
         if not query:
             return
@@ -797,7 +951,8 @@ class CallbackHandlers:
 
         rate_key = f"rate_{user_id}"
         rate_data = context.user_data.get(rate_key)
-        if not rate_data or now_time - rate_data.get('reset', 0) > RATE_LIMIT_WINDOW:
+        if (not rate_data
+                or now_time - rate_data.get('reset', 0) > RATE_LIMIT_WINDOW):
             rate_data = {'count': 0, 'reset': now_time}
         rate_data['count'] = rate_data.get('count', 0) + 1
         context.user_data[rate_key] = rate_data
@@ -821,46 +976,37 @@ class CallbackHandlers:
             if handled:
                 return
         except Exception as e:
-            # ✅ v9.4.30: سلوك مقصود — توقّف كامل عند فشل param handler
-            # لتفادي تنفيذ handler آخر بنفس البيانات (قد يُنشئ حالة مختلطة)
             logger.error(f"❌ param outer: {e}", exc_info=True)
             try:
-                await safe_edit(query, await _trans('error_occurred', lang, "❌"),
-                                bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('error_occurred', lang, "❌"),
+                    bot=context.bot)
             except Exception:
                 pass
             return
 
+        # ✅ v9.4.32 (#1): استخدام المجموعة الديناميكية
         base_data = data
         if ':' in data:
-            parts = data.split(':')
-            known = [
-                CB.TOGGLE_AUTO, CB.TOGGLE_REC, CB.TRANSLATION, CB.REFERRAL,
-                CB.REMINDER, CB.CONTESTS, CB.SUPPORT_TICKET, CB.CH_LIST,
-                CB.POST_ADD, CB.POST_PUB, CB.POST_LIST, CB.POST_REC, CB.PUB_ALL,
-                CB.GROUPS, CB.ADMIN, CB.SETTINGS, CB.PLANS, CB.INVOICES,
-                CB.REF_CLAIM, CB.REF_LIST, CB.CONTEST_WINNERS, CB.DEVELOPER,
-                CB.SUBSCRIBE, CB.SUPPORT, CB.LANGUAGE, CB.TRIAL, CB.HELP,
-                CB.CANCEL, CB.CHECK_SUB, CB.TRANS_OFF, CB.REM_TOGGLE_SUB,
-                CB.REM_TOGGLE_DAILY, CB.REM_TOGGLE_WEEKLY, CB.REM_SET_DAYS,
-                CB.ADMIN_LIST_ADMINS, "finish_posts", "gift_plans", "redeem_gift",
-                "updates_channel_btn",
-            ]
-            if parts[0] in known:
+            parts = data.split(':', 1)
+            if parts[0] in _KNOWN_CB_PREFIXES:
                 base_data = parts[0]
 
         try:
             if base_data in (CB.MAIN, CB.BACK):
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
-                ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
+                ok = await CallbackHandlers._show_main_menu_inline(
+                    query, context, user_id)
                 if not ok:
                     await CommandHandlers.start(update, context)
                 return
 
             if base_data == CB.CANCEL:
                 StateManager.clear(user_id)
-                _clear_context_keys(context, extra_keys=list(_CANCEL_EXTRA_KEYS))
+                _clear_context_keys(
+                    context, extra_keys=list(_CANCEL_EXTRA_KEYS))
                 try:
                     await query.edit_message_reply_markup(reply_markup=None)
                 except Exception:
@@ -874,23 +1020,27 @@ class CallbackHandlers:
 
             if base_data == CB.TRIAL:
                 if await DB.has_used_trial(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('trial_used', lang, "❌"),
                         bot=context.bot)
                     return
                 days = 0
                 try:
-                    days = _coerce_int(await DB.activate_trial(user_id), 0)
+                    days = _coerce_int(
+                        await DB.activate_trial(user_id), 0)
                 finally:
                     try:
                         await DB.invalidate_subscription_cache(user_id)
                     except Exception:
                         pass
                 if days == -1:
-                    text = await _trans('trial_already_longer', lang, "ℹ️")
+                    text = await _trans(
+                        'trial_already_longer', lang, "ℹ️")
                 elif days > 0:
-                    text = _fmt(await _trans('trial_activated', lang, "✅ {days}"),
-                                days=days)
+                    text = _fmt(
+                        await _trans('trial_activated', lang, "✅ {days}"),
+                        days=days)
                 else:
                     text = await _trans('trial_failed', lang, "❌")
                 await safe_edit(query, text, bot=context.bot)
@@ -923,31 +1073,37 @@ class CallbackHandlers:
                 except Exception:
                     pass
                 StateManager.clear(user_id)
-                ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
+                ok = await CallbackHandlers._show_main_menu_inline(
+                    query, context, user_id)
                 if not ok:
                     await CommandHandlers.start(update, context)
                 return
 
             if base_data == CB.SETTINGS:
-                await CallbackHandlers._render_settings(query, context, user_id, lang)
+                await CallbackHandlers._render_settings(
+                    query, context, user_id, lang)
                 return
 
             if base_data == CB.TOGGLE_AUTO:
                 cur = await DB.get_auto_publish_status(user_id)
                 await DB.set_auto_publish(user_id, not cur)
-                await CallbackHandlers._render_settings(query, context, user_id, lang)
+                await CallbackHandlers._render_settings(
+                    query, context, user_id, lang)
                 await invalidate_user_cache(user_id)
                 return
 
             if base_data == CB.TOGGLE_REC:
                 cur = await DB.get_auto_recycle_status(user_id)
                 await DB.set_auto_recycle(user_id, not cur)
-                await CallbackHandlers._render_settings(query, context, user_id, lang)
+                await CallbackHandlers._render_settings(
+                    query, context, user_id, lang)
                 await invalidate_user_cache(user_id)
                 return
 
             if base_data == CB.PLANS:
-                await safe_edit(query, await _trans('plan_selector', lang, "💎"),
+                await safe_edit(
+                    query,
+                    await _trans('plan_selector', lang, "💎"),
                     reply_markup=KeyboardFactory.build("plans", lang=lang),
                     bot=context.bot)
                 return
@@ -955,7 +1111,8 @@ class CallbackHandlers:
             if base_data == "gift_plans":
                 plans = await DB.get_gift_plans()
                 if not plans:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('no_gift_plans', lang, "📭"),
                         bot=context.bot)
                     return
@@ -968,10 +1125,13 @@ class CallbackHandlers:
                         f"🎁 {days} - {price} ⭐",
                         callback_data=f"buy_gift:{pd.get('id', 0)}")])
                 kb.append([InlineKeyboardButton(
-                    KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
-                await safe_edit(query,
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.BACK)])
+                await safe_edit(
+                    query,
                     await _trans('gift_plans_text', lang, "💎"),
-                    reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot)
                 return
 
             if base_data == "redeem_gift":
@@ -982,36 +1142,48 @@ class CallbackHandlers:
             if base_data == CB.INVOICES:
                 invoices = await DB.get_user_invoices(user_id, 10)
                 if not invoices:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('no_invoices', lang, "📭"),
                         bot=context.bot)
                     return
                 lines = []
                 for inv in invoices:
                     inv_d = _row_to_dict(inv) or {}
-                    lines.append(f"• #{_safe_str(inv_d.get('number'))} - "
-                                 f"{_safe_str(inv_d.get('amount'), '0')} ⭐")
-                text = await _trans('invoices_title', lang, "🧾") + "\n\n" + "\n".join(lines)
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                                           callback_data=CB.BACK)]]),
+                    lines.append(
+                        f"• #{_safe_str(inv_d.get('number'))} - "
+                        f"{_safe_str(inv_d.get('amount'), '0')} ⭐")
+                text = (await _trans('invoices_title', lang, "🧾")
+                        + "\n\n" + "\n".join(lines))
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=CB.BACK)]]),
                     bot=context.bot)
                 return
 
             if base_data == CB.REFERRAL:
-                await CallbackHandlers._render_referral(query, context, user_id, lang)
+                await CallbackHandlers._render_referral(
+                    query, context, user_id, lang)
                 return
 
             if base_data == CB.REF_CLAIM:
                 days = await DB.claim_referral_reward(user_id)
                 if days > 0:
-                    text = _fmt(await _trans('referral_claimed', lang,
-                                             "✅ {days}!"), days=days)
+                    text = _fmt(
+                        await _trans('referral_claimed', lang,
+                                     "✅ {days}!"),
+                        days=days)
                 else:
                     text = await _trans('no_rewards', lang, "📭")
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                                           callback_data=CB.REFERRAL)]]),
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=CB.REFERRAL)]]),
                     bot=context.bot)
                 await invalidate_user_cache(user_id)
                 return
@@ -1019,35 +1191,45 @@ class CallbackHandlers:
             if base_data == CB.REF_LIST:
                 refs = await DB.get_referrals_list(user_id)
                 if refs:
-                    text = await _trans('referrals_list', lang, "📋") + "\n\n" + "\n".join(
-                        f"{i}. {_mask_id(r)}" for i, r in enumerate(refs[:20], 1))
+                    text = (await _trans('referrals_list', lang, "📋")
+                            + "\n\n"
+                            + "\n".join(
+                                f"{i}. {_mask_id(r)}"
+                                for i, r in enumerate(refs[:20], 1)))
                 else:
                     text = await _trans('no_data', lang, "📭")
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                                           callback_data=CB.REFERRAL)]]),
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=CB.REFERRAL)]]),
                     bot=context.bot)
                 return
 
-            if base_data in (CB.REM_TOGGLE_SUB, CB.REM_TOGGLE_DAILY, CB.REM_TOGGLE_WEEKLY):
+            if base_data in (CB.REM_TOGGLE_SUB, CB.REM_TOGGLE_DAILY,
+                             CB.REM_TOGGLE_WEEKLY):
                 await CallbackHandlers._handle_reminder_toggle(
                     query, context, user_id, lang, base_data)
                 return
 
             if base_data == CB.REMINDER:
-                await CallbackHandlers._render_reminder(query, context, user_id, lang)
+                await CallbackHandlers._render_reminder(
+                    query, context, user_id, lang)
                 return
 
             if base_data == CB.REM_SET_DAYS:
                 StateManager.set(user_id, UserState.WAIT_REM_DAYS)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_days_btn', lang, "📅"),
                     bot=context.bot)
                 return
 
             if base_data == "rem_lang":
                 StateManager.set(user_id, UserState.WAIT_REM_LANG)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('choose_language', lang, "🌐"),
                     parse_mode='HTML', bot=context.bot)
                 return
@@ -1059,7 +1241,8 @@ class CallbackHandlers:
 
             if base_data == CB.TRANS_OFF:
                 await DB.set_user_language(user_id, 'off')
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('translation_disabled', lang, "✅"),
                     bot=context.bot)
                 await invalidate_user_cache(user_id)
@@ -1076,33 +1259,42 @@ class CallbackHandlers:
                     lines = []
                     for w in winners:
                         wd = _row_to_dict(w) or {}
-                        lines.append(f"• {_safe_str(wd.get('title'))} - "
-                                     f"{_mask_id(wd.get('winner_id'))}")
-                    text = await _trans('winners_title', lang, "🏆") + "\n\n" + "\n".join(lines)
+                        lines.append(
+                            f"• {_safe_str(wd.get('title'))} - "
+                            f"{_mask_id(wd.get('winner_id'))}")
+                    text = (await _trans('winners_title', lang, "🏆")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_winners', lang, "📭")
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                                           callback_data=CB.BACK)]]),
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=CB.BACK)]]),
                     bot=context.bot)
                 StateManager.clear(user_id)
                 return
 
             if base_data == CB.SUPPORT_TICKET:
                 StateManager.set(user_id, UserState.SUPPORT_MODE)
-                await safe_send(context.bot, user_id,
-                                await _trans('send_support_message', lang, "📞"))
+                await safe_send(
+                    context.bot, user_id,
+                    await _trans('send_support_message', lang, "📞"))
                 return
 
             if base_data == CB.CH_ADD:
-                has_sub = _is_primary_owner(user_id) or await DB.has_active_subscription(user_id)
+                has_sub = (_is_primary_owner(user_id)
+                           or await DB.has_active_subscription(user_id))
                 if not has_sub:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('subscription_required', lang, "❌"),
                         bot=context.bot)
                     return
                 StateManager.set(user_id, UserState.WAIT_CHANNEL)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_channel_id', lang, "📡"),
                     bot=context.bot)
                 return
@@ -1113,21 +1305,25 @@ class CallbackHandlers:
                 return
 
             if base_data == CB.POST_ADD:
-                await CallbackHandlers._handle_post_add(update, context, query, user_id)
+                await CallbackHandlers._handle_post_add(
+                    update, context, query, user_id)
                 return
 
             if base_data == "finish_posts":
                 StateManager.clear(user_id)
                 await invalidate_user_cache(user_id)
-                ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
+                ok = await CallbackHandlers._show_main_menu_inline(
+                    query, context, user_id)
                 if not ok:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('post_finish', lang, "✅"),
                         bot=context.bot)
                 return
 
             if base_data == CB.POST_PUB:
-                await CallbackHandlers._handle_post_publish(update, context, query, user_id)
+                await CallbackHandlers._handle_post_publish(
+                    update, context, query, user_id)
                 return
 
             if base_data == CB.POST_LIST:
@@ -1140,14 +1336,17 @@ class CallbackHandlers:
                 if active:
                     count = await DB.reset_posts(user_id, active)
                     await _invalidate_after_channel_change(user_id, active)
+                    await _invalidate_post_count_cache(active)
                     context.user_data['post_page'] = 0
-                    msg = _fmt(await _trans('posts_recycled', lang, "♻️ {count}"),
-                               count=count)
+                    msg = _fmt(
+                        await _trans('posts_recycled', lang, "♻️ {count}"),
+                        count=count)
                     await safe_send(context.bot, user_id, msg)
                     await CallbackHandlers._show_post_list(
                         update, context, query, user_id, lang)
                 else:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('no_active_channel', lang, "❌"),
                         bot=context.bot)
                 return
@@ -1155,21 +1354,27 @@ class CallbackHandlers:
             if base_data == CB.POST_CLEAR:
                 active = await DB.get_active_channel(user_id)
                 if active:
-                    await DB.execute("DELETE FROM posts WHERE channel_db_id=?", (active,))
+                    await DB.execute(
+                        "DELETE FROM posts WHERE channel_db_id=?",
+                        (active,))
                     await _invalidate_after_channel_change(user_id, active)
+                    await _invalidate_post_count_cache(active)
                     context.user_data['post_page'] = 0
-                    await safe_send(context.bot, user_id,
-                                    await _trans('posts_cleared', lang, "🧹"))
+                    await safe_send(
+                        context.bot, user_id,
+                        await _trans('posts_cleared', lang, "🧹"))
                     await CallbackHandlers._show_post_list(
                         update, context, query, user_id, lang)
                 else:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('no_active_channel', lang, "❌"),
                         bot=context.bot)
                 return
 
             if base_data == CB.PUB_ALL:
-                await CallbackHandlers._handle_publish_all(update, context, query, user_id)
+                await CallbackHandlers._handle_publish_all(
+                    update, context, query, user_id)
                 return
 
             if base_data == CB.GROUPS:
@@ -1184,12 +1389,14 @@ class CallbackHandlers:
 
             if base_data == CB.ADMIN:
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
                 kb = KeyboardFactory.build("admin_panel", lang=lang)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('admin_panel', lang, "👑"),
                     reply_markup=kb, bot=context.bot)
                 return
@@ -1206,7 +1413,8 @@ class CallbackHandlers:
 
             if data == "admin_analytics":
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
@@ -1216,7 +1424,8 @@ class CallbackHandlers:
 
             if data == "refresh_btn":
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
@@ -1224,9 +1433,11 @@ class CallbackHandlers:
                     query, context, user_id, lang)
                 return
 
-            if (data.startswith("analytics_") or data in _ANALYTICS_ALIASES):
+            if (data.startswith("analytics_")
+                    or data in _ANALYTICS_ALIASES):
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
@@ -1239,34 +1450,38 @@ class CallbackHandlers:
                     await CallbackHandlers._handle_admin(
                         update, context, query, user_id, lang)
                 else:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                 return
 
-            if data.startswith("auto_reply_") or data.startswith("auto_reply_menu:"):
+            if (data.startswith("auto_reply_")
+                    or data.startswith("auto_reply_menu:")):
                 await CallbackHandlers._handle_auto_reply(
                     update, context, query, user_id, lang)
                 return
 
-            if data.startswith("sched_open:") or data.startswith("sched_"):
+            if (data.startswith("sched_open:")
+                    or data.startswith("sched_")):
                 await CallbackHandlers._handle_schedule(
                     update, context, query, user_id)
                 return
 
-            if data.startswith("ban_") or data.startswith("act_") or data.startswith("pen_"):
+            if (data.startswith("ban_")
+                    or data.startswith("act_")
+                    or data.startswith("pen_")):
                 await CallbackHandlers._handle_advanced_actions(
                     update, context, query, user_id)
                 return
 
-            # ═══════════════════════════════════════════════════════════════
-            # ✅ v9.4.29: أزرار مدة المسابقة + نوع المسابقة (كل النصوص مترجمة)
-            # ✅ v9.4.30: إضافة فحص CONFIG.is_developer(user_id)
-            # ═══════════════════════════════════════════════════════════════
+            # ═══════════════════════════════════════════════════════════
+            # ✅ v9.4.29/30: أزرار مدة المسابقة + نوع المسابقة
+            # ═══════════════════════════════════════════════════════════
             if data.startswith("contest_duration:"):
-                # ✅ v9.4.30: authorization check
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
@@ -1274,7 +1489,8 @@ class CallbackHandlers:
                 duration_key = data.split(":", 1)[1]
 
                 if duration_key not in CONTEST_DURATIONS:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('invalid_data', lang, "❌"),
                         bot=context.bot)
                     return
@@ -1282,9 +1498,9 @@ class CallbackHandlers:
                 _fallback_label, seconds = CONTEST_DURATIONS[duration_key]
                 end_dt = TimeUtils.utc_now() + timedelta(seconds=seconds)
 
-                # 🌐 عنوان المدة من الترجمة (fallback → العربي)
-                label = await _trans(f"contest_duration_{duration_key}",
-                                     lang, _fallback_label)
+                label = await _trans(
+                    f"contest_duration_{duration_key}",
+                    lang, _fallback_label)
 
                 context.user_data['contest_end_date'] = end_dt.isoformat()
                 context.user_data['contest_duration_label'] = label
@@ -1292,11 +1508,10 @@ class CallbackHandlers:
 
                 StateManager.set(user_id, UserState.WAIT_CONTEST_TYPE)
 
-                # 🌐 نصوص الأزرار من الترجمة
-                raffle_btn = await _trans('contest_type_raffle_btn', lang,
-                                          "🎲 سحب عشوائي")
-                quiz_btn = await _trans('contest_type_quiz_btn', lang,
-                                        "❓ سؤال وجواب")
+                raffle_btn = await _trans(
+                    'contest_type_raffle_btn', lang, "🎲 سحب عشوائي")
+                quiz_btn = await _trans(
+                    'contest_type_quiz_btn', lang, "❓ سؤال وجواب")
 
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
@@ -1310,33 +1525,35 @@ class CallbackHandlers:
                         callback_data=CB.ADMIN)],
                 ])
 
-                # 🌐 قالب النص من الترجمة
                 text_template = await _trans(
                     'contest_duration_prompt', lang,
                     "📅 <b>المدة:</b> {label}\n"
                     "🕐 <b>ينتهي:</b> <code>{end}</code>\n\n"
                     "🎯 <b>اختر نوع المسابقة:</b>"
                 )
-                text = _fmt(text_template,
-                            label=label,
-                            end=end_dt.strftime('%Y-%m-%d %H:%M'))
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                text = _fmt(
+                    text_template,
+                    label=label,
+                    end=end_dt.strftime('%Y-%m-%d %H:%M'))
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if data == "contest_type_raffle":
-                # ✅ v9.4.30: authorization check
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
 
                 c_title = (context.user_data.get('contest_title') or '').strip()
-                c_desc  = (context.user_data.get('contest_desc') or '').strip()
+                c_desc = (context.user_data.get('contest_desc') or '').strip()
                 c_prize = (context.user_data.get('contest_prize') or '').strip()
-                c_end   = (context.user_data.get('contest_end_date') or '').strip()
-                c_label = (context.user_data.get('contest_duration_label') or '').strip()
+                c_end = (context.user_data.get('contest_end_date') or '').strip()
+                c_label = (context.user_data.get(
+                    'contest_duration_label') or '').strip()
 
                 cid = await DB.create_contest(
                     creator_id=user_id,
@@ -1355,23 +1572,22 @@ class CallbackHandlers:
                     prize_line = _html.escape(c_prize) if c_prize else "—"
                     label_line = _html.escape(c_label) if c_label else "—"
 
-                    # 🌐 سطر النهاية
                     end_line = ""
                     if c_end:
                         try:
                             display_end = c_end.replace('T', ' ')[:16]
                             end_line = _fmt(
-                                await _trans('contest_end_line', lang,
-                                             "🕐 <b>ينتهي:</b> <code>{end}</code>\n"),
+                                await _trans(
+                                    'contest_end_line', lang,
+                                    "🕐 <b>ينتهي:</b> <code>{end}</code>\n"),
                                 end=display_end)
                         except Exception:
                             end_line = ""
 
-                    # 🌐 نص النوع
-                    type_line = await _trans('contest_type_raffle_label', lang,
-                                             "🎲 النوع: سحب عشوائي")
+                    type_line = await _trans(
+                        'contest_type_raffle_label', lang,
+                        "🎲 النوع: سحب عشوائي")
 
-                    # 🌐 قالب الرسالة النهائية
                     text = _fmt(
                         await _trans('contest_created_raffle', lang,
                             "✅ <b>أُنشئت المسابقة!</b>\n\n"
@@ -1389,33 +1605,37 @@ class CallbackHandlers:
                         duration=label_line,
                         end_line=end_line,
                     )
-                    await safe_edit(query, text,
-                                    parse_mode='HTML', bot=context.bot)
+                    await safe_edit(
+                        query, text,
+                        parse_mode='HTML', bot=context.bot)
                 else:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('contest_create_failed', lang,
                                      "❌ فشل إنشاء المسابقة"),
                         bot=context.bot)
                 return
 
             if data == "contest_type_quiz":
-                # ✅ v9.4.30: authorization check
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('unauthorized', lang, "❌"),
                         bot=context.bot)
                     return
 
                 StateManager.set(user_id, UserState.WAIT_CONTEST_QUESTION)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('contest_ask_question', lang,
                                  "❓ <b>أرسل السؤال الآن:</b>"),
                     parse_mode='HTML', bot=context.bot)
                 return
-            # ═══════════════════════════════════════════════════════════════
 
-            declare_sel = getattr(CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
-            if data.startswith("contest_") or data.startswith(declare_sel + ":"):
+            declare_sel = getattr(
+                CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
+            if (data.startswith("contest_")
+                    or data.startswith(declare_sel + ":")):
                 await CallbackHandlers._handle_contests(
                     update, context, query, user_id)
                 return
@@ -1427,7 +1647,9 @@ class CallbackHandlers:
 
             if data == "ch_page_prev":
                 context.user_data['channel_page'] = max(
-                    0, _coerce_int(context.user_data.get('channel_page'), 0) - 1)
+                    0,
+                    _coerce_int(
+                        context.user_data.get('channel_page'), 0) - 1)
                 await CallbackHandlers._show_channel_list(
                     update, context, query, user_id, lang)
                 return
@@ -1439,7 +1661,9 @@ class CallbackHandlers:
                 return
             if data == "post_page_prev":
                 context.user_data['post_page'] = max(
-                    0, _coerce_int(context.user_data.get('post_page'), 0) - 1)
+                    0,
+                    _coerce_int(
+                        context.user_data.get('post_page'), 0) - 1)
                 await CallbackHandlers._show_post_list(
                     update, context, query, user_id, lang)
                 return
@@ -1468,7 +1692,8 @@ class CallbackHandlers:
                     update, context, query, user_id, data, lang)
                 return
 
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('not_available', lang, "⚠️"),
                 bot=context.bot)
 
@@ -1480,7 +1705,8 @@ class CallbackHandlers:
         finally:
             elapsed = time.monotonic() - start_time
             if elapsed > 1.0:
-                logger.warning(f"🐢 Slow button {data[:30]} — {elapsed:.2f}s")
+                logger.warning(
+                    f"🐢 Slow button {data[:30]} — {elapsed:.2f}s")
 
     @staticmethod
     def _cleanup_user_data(context) -> None:
@@ -1505,7 +1731,8 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_updates_channel(query, context, user_id, lang):
-        title = await _trans('updates_channel_title', lang, "📢 Updates Channel")
+        title = await _trans(
+            'updates_channel_title', lang, "📢 Updates Channel")
 
         try:
             ch = await DB.get_updates_channel()
@@ -1547,7 +1774,8 @@ class CallbackHandlers:
                         display = chat.title or ch_str
                     else:
                         try:
-                            url = await context.bot.export_chat_invite_link(cid)
+                            url = await context.bot.export_chat_invite_link(
+                                cid)
                             display = chat.title or ch_str
                         except Exception:
                             url = None
@@ -1581,12 +1809,13 @@ class CallbackHandlers:
 
         rows = []
         if url_is_valid:
-            open_text = await _trans('open_channel_btn', lang, "📢 Open Channel")
+            open_text = await _trans(
+                'open_channel_btn', lang, "📢 Open Channel")
             rows.append([InlineKeyboardButton(open_text, url=url)])
         else:
-            text += ("\n\n⚠️ " +
-                     await _trans('channel_link_unavailable', lang,
-                                  "Cannot generate link for this channel"))
+            text += ("\n\n⚠️ "
+                     + await _trans('channel_link_unavailable', lang,
+                                    "Cannot generate link for this channel"))
 
         rows.append([InlineKeyboardButton(back_text, callback_data=CB.BACK)])
 
@@ -1595,14 +1824,18 @@ class CallbackHandlers:
                         parse_mode='HTML', bot=context.bot)
 
     @staticmethod
-    async def _show_admin_update_channel_menu(query, context, user_id, lang):
+    async def _show_admin_update_channel_menu(
+        query, context, user_id, lang
+    ):
         if not CONFIG.is_developer(user_id):
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('unauthorized', lang, "❌ غير مصرح"),
                 bot=context.bot)
             return
 
-        title = await _trans('updates_channel_title', lang, "📢 قناة التحديثات")
+        title = await _trans(
+            'updates_channel_title', lang, "📢 قناة التحديثات")
 
         try:
             ch = await DB.get_updates_channel()
@@ -1611,9 +1844,12 @@ class CallbackHandlers:
             ch = None
 
         back_text = KeyboardFactory.get_text("back", lang)
-        change_text = await _trans('change_update_ch_btn', lang, "🔄 تغيير القناة")
-        remove_text = await _trans('remove_update_ch_btn', lang, "🗑️ حذف القناة")
-        send_text = await _trans('admin_send_update', lang, "📤 إرسال تحديث")
+        change_text = await _trans(
+            'change_update_ch_btn', lang, "🔄 تغيير القناة")
+        remove_text = await _trans(
+            'remove_update_ch_btn', lang, "🗑️ حذف القناة")
+        send_text = await _trans(
+            'admin_send_update', lang, "📤 إرسال تحديث")
 
         if ch:
             ch_str = str(ch).strip()
@@ -1644,12 +1880,15 @@ class CallbackHandlers:
             )
 
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(change_text,
-                                      callback_data="admin_change_update_ch")],
-                [InlineKeyboardButton(remove_text,
-                                      callback_data="admin_remove_update_ch")],
-                [InlineKeyboardButton(send_text,
-                                      callback_data="admin_send_update")],
+                [InlineKeyboardButton(
+                    change_text,
+                    callback_data="admin_change_update_ch")],
+                [InlineKeyboardButton(
+                    remove_text,
+                    callback_data="admin_remove_update_ch")],
+                [InlineKeyboardButton(
+                    send_text,
+                    callback_data="admin_send_update")],
                 [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)],
             ])
 
@@ -1660,10 +1899,12 @@ class CallbackHandlers:
                 + await _trans('no_update_channel', lang,
                                "📭 لم يتم تعيين قناة تحديثات")
             )
-            set_text = await _trans('set_update_ch_btn', lang, "🔗 تعيين قناة")
+            set_text = await _trans(
+                'set_update_ch_btn', lang, "🔗 تعيين قناة")
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(set_text,
-                                      callback_data="admin_change_update_ch")],
+                [InlineKeyboardButton(
+                    set_text,
+                    callback_data="admin_change_update_ch")],
                 [InlineKeyboardButton(back_text, callback_data=CB.ADMIN)],
             ])
 
@@ -1679,7 +1920,8 @@ class CallbackHandlers:
         try:
             cached = await settings_cache.get_security(chat_id)
         except Exception as e:
-            logger.debug(f"settings_cache.get_security({chat_id}): {e}")
+            logger.debug(
+                f"settings_cache.get_security({chat_id}): {e}")
             cached = None
 
         if cached is not None:
@@ -1700,7 +1942,8 @@ class CallbackHandlers:
         try:
             await settings_cache.set_security(chat_id, settings)
         except Exception as e:
-            logger.debug(f"settings_cache.set_security({chat_id}): {e}")
+            logger.debug(
+                f"settings_cache.set_security({chat_id}): {e}")
 
         return settings
 
@@ -1714,44 +1957,58 @@ class CallbackHandlers:
             )
 
         try:
-            await _security_stats_cache_local.delete(f"sec_stats_{chat_id}")
+            await _security_stats_cache_local.delete(
+                f"sec_stats_{chat_id}")
         except Exception:
             pass
 
     @staticmethod
-    async def _load_stats_and_edit(query, context, chat_id, lang, settings):
+    async def _load_stats_and_edit(
+        query, context, chat_id, lang, settings
+    ):
         try:
             cache_key = f"sec_stats_{chat_id}"
-            cached_stats = await _security_stats_cache_local.get(cache_key)
+            cached_stats = await _security_stats_cache_local.get(
+                cache_key)
             if cached_stats is not None:
                 stats = cached_stats
             else:
-                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
+                stats = await KeyboardFactory._get_security_stats(
+                    chat_id) or {}
                 await _security_stats_cache_local.set(
                     cache_key, stats, ttl=SEC_STATS_CACHE_TTL)
             try:
-                text = KeyboardFactory._format_security_text(settings, stats, lang=lang)
+                text = KeyboardFactory._format_security_text(
+                    settings, stats, lang=lang)
             except TypeError:
-                text = KeyboardFactory._format_security_text(settings, stats)
-            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
+                text = KeyboardFactory._format_security_text(
+                    settings, stats)
+            kb = KeyboardFactory.build(
+                "security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text, reply_markup=kb,
                             parse_mode='HTML', bot=context.bot)
         except Exception as e:
             logger.debug(f"_load_stats_and_edit({chat_id}): {e}")
 
     @staticmethod
-    async def _render_security_two_phase(query, context, chat_id, lang,
-                                          force_refresh_settings=False):
+    async def _render_security_two_phase(
+        query, context, chat_id, lang,
+        force_refresh_settings=False,
+    ):
         try:
             if force_refresh_settings:
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
-            settings = await CallbackHandlers._get_security_settings_cached(chat_id)
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
+            settings = await CallbackHandlers._get_security_settings_cached(
+                chat_id)
             try:
                 text_no_stats = KeyboardFactory._format_security_text(
                     settings, {}, lang=lang)
             except TypeError:
-                text_no_stats = KeyboardFactory._format_security_text(settings, {})
-            kb = KeyboardFactory.build("security", chat_id=chat_id, lang=lang)
+                text_no_stats = KeyboardFactory._format_security_text(
+                    settings, {})
+            kb = KeyboardFactory.build(
+                "security", chat_id=chat_id, lang=lang)
             await safe_edit(query, text_no_stats, reply_markup=kb,
                             parse_mode='HTML', bot=context.bot)
             task = asyncio.create_task(
@@ -1760,7 +2017,8 @@ class CallbackHandlers:
             ACTIVE_TASKS.add(task)
             task.add_done_callback(ACTIVE_TASKS.discard)
         except Exception as e:
-            logger.error(f"_render_security_two_phase: {e}", exc_info=True)
+            logger.error(
+                f"_render_security_two_phase: {e}", exc_info=True)
 
     # ═════════════════════════════════════════════════════════════
     # القائمة الرئيسية
@@ -1777,12 +2035,15 @@ class CallbackHandlers:
             if not user_data:
                 try:
                     if hasattr(user_cache, 'get_or_load'):
-                        user_data = await user_cache.get_or_load(user_id, DB)
+                        user_data = await user_cache.get_or_load(
+                            user_id, DB)
                     else:
-                        user_data = await DB.get_start_data(user_id) or {}
+                        user_data = await DB.get_start_data(
+                            user_id) or {}
                 except Exception:
                     try:
-                        user_data = await DB.get_start_data(user_id) or {}
+                        user_data = await DB.get_start_data(
+                            user_id) or {}
                     except Exception:
                         user_data = {}
             if not isinstance(user_data, dict):
@@ -1798,16 +2059,19 @@ class CallbackHandlers:
             auto_publish_text = "✅" if auto_publish else "❌"
             auto_recycle_text = "✅" if auto_recycle else "❌"
 
-            ch_display = await _trans('no_active_channel', lang, "-")
+            ch_display = await _trans(
+                'no_active_channel', lang, "-")
             if channel_info and isinstance(channel_info, dict):
                 raw_name = channel_info.get('channel_name')
                 if raw_name:
                     ch_display = _html.escape(str(raw_name))
 
             if has_sub:
-                sub_text = await _trans('subscription_active', lang, "✅")
+                sub_text = await _trans(
+                    'subscription_active', lang, "✅")
             else:
-                sub_text = await _trans('subscription_inactive', lang, "❌")
+                sub_text = await _trans(
+                    'subscription_inactive', lang, "❌")
 
             try:
                 kb = KeyboardFactory.build("main_menu", lang=lang)
@@ -1818,7 +2082,8 @@ class CallbackHandlers:
                         callback_data=CB.BACK)]])
 
             if CONFIG.is_developer(user_id):
-                admin_text = KeyboardFactory.get_text("admin_panel_btn", lang)
+                admin_text = KeyboardFactory.get_text(
+                    "admin_panel_btn", lang)
                 existing_callbacks = set()
                 for row in kb.inline_keyboard:
                     for btn in row:
@@ -1845,7 +2110,8 @@ class CallbackHandlers:
                             parse_mode='HTML', bot=context.bot)
             return True
         except Exception as e:
-            logger.error(f"_show_main_menu_inline: {e}", exc_info=True)
+            logger.error(
+                f"_show_main_menu_inline: {e}", exc_info=True)
             return False
 
     # ═════════════════════════════════════════════════════════════
@@ -1853,7 +2119,9 @@ class CallbackHandlers:
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _handle_parameterized(update, context, query, user_id, lang, data) -> bool:
+    async def _handle_parameterized(
+        update, context, query, user_id, lang, data
+    ) -> bool:
         try:
             if data in ("sec_close", "grp_close", "security_close",
                         "back_to_groups", "sec_back"):
@@ -1863,14 +2131,16 @@ class CallbackHandlers:
                     update, context, query, user_id, lang)
                 return True
 
-            if data.startswith("sec_close:") or data.startswith("grp_close:"):
+            if (data.startswith("sec_close:")
+                    or data.startswith("grp_close:")):
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
                 await CallbackHandlers._show_groups_list(
                     update, context, query, user_id, lang)
                 return True
 
-            if data.startswith("back_to_groups:") or data.startswith("sec_back:"):
+            if (data.startswith("back_to_groups:")
+                    or data.startswith("sec_back:")):
                 StateManager.clear(user_id)
                 _clear_context_keys(context)
                 await CallbackHandlers._show_groups_list(
@@ -1880,21 +2150,29 @@ class CallbackHandlers:
             if data.startswith("set_warn_count:"):
                 parts = data.split(":")
                 if len(parts) != 3:
-                    await safe_edit(query, await _trans('invalid_data', lang, "❌"),
-                                    bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
                     return True
                 chat_id = _coerce_int(parts[1])
                 count = _coerce_int(parts[2])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 if count < 1 or count > 100:
-                    await safe_edit(query,
-                        await _trans('invalid_number', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_number', lang, "❌"),
+                        bot=context.bot)
                     return True
-                await DB.update_security_settings(chat_id, max_warnings=count)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await DB.update_security_settings(
+                    chat_id, max_warnings=count)
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return True
@@ -1902,17 +2180,24 @@ class CallbackHandlers:
             if data == f"{CB.POST_CLEAR}_confirm":
                 active = await DB.get_active_channel(user_id)
                 if not active:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('no_active_channel', lang, "❌"),
                         bot=context.bot)
                     return True
                 count = await DB.fetchval(
                     "SELECT COUNT(*) FROM posts WHERE channel_db_id=?",
                     (active,), default=0)
-                text = (await _trans('clear_posts_confirm_title', lang, "⚠️") + "\n\n" +
-                        _fmt(await _trans('clear_posts_confirm_body', lang, "{count}"),
-                             count=count) + "\n" +
-                        await _trans('clear_posts_confirm_note', lang, ""))
+                text = (await _trans('clear_posts_confirm_title',
+                                     lang, "⚠️")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('clear_posts_confirm_body',
+                                         lang, "{count}"),
+                            count=count)
+                        + "\n"
+                        + await _trans('clear_posts_confirm_note',
+                                       lang, ""))
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('yes_clear_all', lang, "🧹"),
@@ -1935,8 +2220,9 @@ class CallbackHandlers:
                         await _trans('cancel_btn', lang, "❌"),
                         callback_data=CB.POST_LIST)],
                 ])
-                text = _fmt(await _trans('delete_post_confirm', lang, "⚠️"),
-                            post_id=post_id)
+                text = _fmt(
+                    await _trans('delete_post_confirm', lang, "⚠️"),
+                    post_id=post_id)
                 await safe_edit(query, text, reply_markup=kb,
                                 parse_mode='HTML', bot=context.bot)
                 return True
@@ -1951,20 +2237,27 @@ class CallbackHandlers:
                         await _trans('cancel_btn', lang, "❌"),
                         callback_data=CB.CH_LIST)],
                 ])
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('delete_channel_confirm', lang, "⚠️"),
-                    reply_markup=kb, parse_mode='HTML', bot=context.bot)
+                    reply_markup=kb, parse_mode='HTML',
+                    bot=context.bot)
                 return True
 
             if data.startswith("grp_del_confirm:"):
                 chat_id = _coerce_int(data.split(":")[-1])
-                if not await is_authorized_in_group(context.bot, chat_id, user_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                if not await is_authorized_in_group(
+                        context.bot, chat_id, user_id):
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 if not await _is_group_owner(user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('not_owner', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('not_owner', lang, "❌"),
+                        bot=context.bot)
                     return True
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
@@ -1974,9 +2267,11 @@ class CallbackHandlers:
                         await _trans('cancel_btn', lang, "❌"),
                         callback_data=CB.GROUPS)],
                 ])
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('delete_group_confirm', lang, "⚠️"),
-                    reply_markup=kb, parse_mode='HTML', bot=context.bot)
+                    reply_markup=kb, parse_mode='HTML',
+                    bot=context.bot)
                 return True
 
             if data.startswith("set_warn_penalty:"):
@@ -1986,16 +2281,21 @@ class CallbackHandlers:
                 _, penalty_type, chat_id_str = parts
                 chat_id = _coerce_int(chat_id_str)
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 if penalty_type not in DB.VALID_PENALTY_TYPES:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('invalid_penalty_type', lang, "❌"),
                         bot=context.bot)
                     return True
-                await DB.update_security_settings(chat_id, warn_penalty=penalty_type)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await DB.update_security_settings(
+                    chat_id, warn_penalty=penalty_type)
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return True
@@ -2008,8 +2308,10 @@ class CallbackHandlers:
                 chat_id = _coerce_int(parts[2])
                 duration = _coerce_int(parts[3])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 col_map = {
                     'mute': 'mute_default_duration',
@@ -2023,12 +2325,15 @@ class CallbackHandlers:
                 }
                 col = col_map.get(penalty_type)
                 if col is None:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('invalid_penalty_type', lang, "❌"),
                         bot=context.bot)
                     return True
-                await DB.update_security_settings(chat_id, **{col: duration})
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await DB.update_security_settings(
+                    chat_id, **{col: duration})
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return True
@@ -2040,19 +2345,26 @@ class CallbackHandlers:
                 _, penalty_type, chat_id_str = parts
                 chat_id = _coerce_int(chat_id_str)
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
-                    return True
-                if penalty_type == "none":
-                    await DB.update_security_settings(chat_id, delete_penalty="none")
-                elif penalty_type in DB.VALID_PENALTY_TYPES:
-                    await DB.update_security_settings(chat_id, delete_penalty=penalty_type)
-                else:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
                         bot=context.bot)
                     return True
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                if penalty_type == "none":
+                    await DB.update_security_settings(
+                        chat_id, delete_penalty="none")
+                elif penalty_type in DB.VALID_PENALTY_TYPES:
+                    await DB.update_security_settings(
+                        chat_id, delete_penalty=penalty_type)
+                else:
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_penalty_type',
+                                     lang, "❌"),
+                        bot=context.bot)
+                    return True
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return True
@@ -2063,11 +2375,14 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'delete_penalty')
+                    update, context, query, chat_id, lang,
+                    'delete_penalty')
                 return True
 
             if data.startswith("sec_penalty_durations:"):
@@ -2076,8 +2391,10 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_all_penalty_durations_menu(
                     query, context, chat_id, lang)
@@ -2095,13 +2412,16 @@ class CallbackHandlers:
                     if len(parts) != 2:
                         return True
                     chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
+                    if not await _check_sec_auth(
+                            context, user_id, chat_id):
+                        await safe_edit(
+                            query,
                             await _trans('no_permission', lang, "❌"),
                             bot=context.bot)
                         return True
                     await CallbackHandlers._show_penalty_durations(
-                        update, context, query, chat_id, lang, action_type)
+                        update, context, query, chat_id, lang,
+                        action_type)
                     return True
 
             if data.startswith("sec_warn_penalty_duration:"):
@@ -2110,11 +2430,14 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'warn_penalty')
+                    update, context, query, chat_id, lang,
+                    'warn_penalty')
                 return True
 
             if data.startswith("sec_warn_penalty:"):
@@ -2123,8 +2446,10 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_warn_penalty_types(
                     update, context, query, chat_id, lang)
@@ -2136,8 +2461,10 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_warn_count_buttons(
                     update, context, query, chat_id, lang)
@@ -2149,13 +2476,20 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
-                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-                new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
-                await DB.update_security_settings(chat_id, warn_enabled=new_val)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                settings = (
+                    await CallbackHandlers._get_security_settings_cached(
+                        chat_id))
+                new_val = 1 - _coerce_int(
+                    settings.get('warn_enabled', 0))
+                await DB.update_security_settings(
+                    chat_id, warn_enabled=new_val)
+                await CallbackHandlers._invalidate_security_settings_cache(
+                    chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return True
@@ -2169,31 +2503,41 @@ class CallbackHandlers:
                 else:
                     chat_id = await _resolve_sec_chat_id(context, data)
                 if chat_id is None:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('group_not_specified', lang, "❌"),
                         bot=context.bot)
                     return True
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
-                action = parts[0][4:] if parts[0].startswith("sec_") else parts[0]
+                action = (parts[0][4:] if parts[0].startswith("sec_")
+                          else parts[0])
                 action = action.replace("penalty_", "", 1)
                 if action in ('ban', 'mute', 'kick', 'restrict', 'none'):
-                    await DB.update_security_settings(chat_id, auto_penalty=action)
-                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                    await DB.update_security_settings(
+                        chat_id, auto_penalty=action)
+                    await CallbackHandlers.\
+                        _invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(
                         query, context, chat_id, lang)
                 else:
-                    await safe_edit(query,
-                        await _trans('invalid_penalty_type', lang, "❌"),
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_penalty_type',
+                                     lang, "❌"),
                         bot=context.bot)
                 return True
 
             for prefix, state, prompt_key, prompt_default in (
-                ("sec_set_antiflood_messages:", UserState.WAIT_ANTIFLOOD_MESSAGES,
+                ("sec_set_antiflood_messages:",
+                 UserState.WAIT_ANTIFLOOD_MESSAGES,
                  "send_antiflood_messages", "📊 Send allowed messages:"),
-                ("sec_set_antiflood_seconds:", UserState.WAIT_ANTIFLOOD_SECONDS,
+                ("sec_set_antiflood_seconds:",
+                 UserState.WAIT_ANTIFLOOD_SECONDS,
                  "send_antiflood_seconds", "⏱️ Send seconds:"),
             ):
                 if data.startswith(prefix):
@@ -2201,14 +2545,17 @@ class CallbackHandlers:
                     if len(parts) != 2:
                         return True
                     chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
+                    if not await _check_sec_auth(
+                            context, user_id, chat_id):
+                        await safe_edit(
+                            query,
                             await _trans('no_permission', lang, "❌"),
                             bot=context.bot)
                         return True
                     StateManager.set(user_id, state)
                     _set_sec_chat(context, chat_id)
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans(prompt_key, lang, prompt_default),
                         bot=context.bot)
                     return True
@@ -2219,11 +2566,14 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang, 'antiflood_penalty')
+                    update, context, query, chat_id, lang,
+                    'antiflood_penalty')
                 return True
 
             if data.startswith("sec_set_antiflood_penalty:"):
@@ -2232,13 +2582,18 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 penalty_type = parts[2]
-                if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
-                    await DB.update_security_settings(chat_id, antiflood_penalty=penalty_type)
-                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                if penalty_type in ('ban', 'mute', 'kick',
+                                    'restrict', 'none'):
+                    await DB.update_security_settings(
+                        chat_id, antiflood_penalty=penalty_type)
+                    await CallbackHandlers.\
+                        _invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(
                         query, context, chat_id, lang)
                 return True
@@ -2254,14 +2609,17 @@ class CallbackHandlers:
                     if len(parts) != 2:
                         return True
                     chat_id = _coerce_int(parts[1])
-                    if not await _check_sec_auth(context, user_id, chat_id):
-                        await safe_edit(query,
+                    if not await _check_sec_auth(
+                            context, user_id, chat_id):
+                        await safe_edit(
+                            query,
                             await _trans('no_permission', lang, "❌"),
                             bot=context.bot)
                         return True
                     StateManager.set(user_id, state)
                     _set_sec_chat(context, chat_id)
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans(prompt_key, lang, prompt_default),
                         bot=context.bot)
                     return True
@@ -2272,11 +2630,14 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang, 'night_action')
+                    update, context, query, chat_id, lang,
+                    'night_action')
                 return True
 
             if data.startswith("sec_set_night_action:"):
@@ -2285,14 +2646,17 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 action_type = parts[2]
                 if action_type in ('ban', 'mute', 'kick', 'restrict'):
                     await DB.update_security_settings(
                         chat_id, night_mode_action=action_type)
-                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                    await CallbackHandlers.\
+                        _invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(
                         query, context, chat_id, lang)
                 return True
@@ -2303,8 +2667,10 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_violation_penalties(
                     update, context, query, chat_id, lang)
@@ -2316,12 +2682,16 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
-                StateManager.set(user_id, UserState.WAIT_VIOLATION_STRIKES)
+                StateManager.set(
+                    user_id, UserState.WAIT_VIOLATION_STRIKES)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_violation_strikes', lang, "🔢"),
                     bot=context.bot)
                 return True
@@ -2332,8 +2702,10 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 await CallbackHandlers._show_penalty_durations(
                     update, context, query, chat_id, lang, 'violation')
@@ -2345,14 +2717,18 @@ class CallbackHandlers:
                     return True
                 chat_id = _coerce_int(parts[1])
                 if not await _check_sec_auth(context, user_id, chat_id):
-                    await safe_edit(query,
-                        await _trans('no_permission', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_permission', lang, "❌"),
+                        bot=context.bot)
                     return True
                 penalty_type = parts[2]
-                if penalty_type in ('ban', 'mute', 'kick', 'restrict', 'none'):
+                if penalty_type in ('ban', 'mute', 'kick',
+                                    'restrict', 'none'):
                     await DB.update_security_settings(
                         chat_id, violation_penalty=penalty_type)
-                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                    await CallbackHandlers.\
+                        _invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(
                         query, context, chat_id, lang)
                 return True
@@ -2406,7 +2782,8 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"❌ param: {e}", exc_info=True)
             try:
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('unexpected_error', lang, "❌"),
                     bot=context.bot)
             except Exception:
@@ -2416,11 +2793,14 @@ class CallbackHandlers:
     @staticmethod
     async def _refresh_security_view(query, context, chat_id, lang):
         try:
-            await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+            await CallbackHandlers._invalidate_security_settings_cache(
+                chat_id)
             await CallbackHandlers._render_security_two_phase(
-                query, context, chat_id, lang, force_refresh_settings=False)
+                query, context, chat_id, lang,
+                force_refresh_settings=False)
         except Exception as e:
-            logger.error(f"_refresh_security_view: {e}", exc_info=True)
+            logger.error(
+                f"_refresh_security_view: {e}", exc_info=True)
 
     @staticmethod
     async def _render_settings(query, context, user_id, lang):
@@ -2432,14 +2812,19 @@ class CallbackHandlers:
             rec = "✅" if s.get('auto_recycle') else "❌"
             kb = KeyboardFactory.build("settings", lang=lang)
             text = await _trans('settings_title', lang, "⚙️")
-            auto_label = await _trans('auto_publish_status', lang, "📤")
-            rec_label = await _trans('auto_recycle_status', lang, "♻️")
+            auto_label = await _trans(
+                'auto_publish_status', lang, "📤")
+            rec_label = await _trans(
+                'auto_recycle_status', lang, "♻️")
             text = f"{text}\n\n{auto_label}: {auto}\n{rec_label}: {rec}"
-            await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+            await safe_edit(query, text, reply_markup=kb,
+                            bot=context.bot)
         except Exception as e:
             logger.error(f"_render_settings: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
     async def _render_referral(query, context, user_id, lang):
@@ -2452,9 +2837,12 @@ class CallbackHandlers:
                 code = code[4:]
             link = f"https://t.me/{CONFIG.BOT_USERNAME}?start=ref_{code}"
             title = await _trans('referral_title', lang, "🔗")
-            link_label = await _trans('referral_link_label', lang, "📎")
-            referred_label = await _trans('referral_referred', lang, "👥")
-            available_label = await _trans('referral_available', lang, "🎁")
+            link_label = await _trans(
+                'referral_link_label', lang, "📎")
+            referred_label = await _trans(
+                'referral_referred', lang, "👥")
+            available_label = await _trans(
+                'referral_available', lang, "🎁")
             text = (
                 f"{title}\n\n{link_label}\n{link}\n\n"
                 f"{referred_label} {stats.get('total', 0)}\n"
@@ -2464,15 +2852,20 @@ class CallbackHandlers:
             claim = await _trans('ref_claim', lang, "🎁")
             list_l = await _trans('ref_list', lang, "📋")
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(claim, callback_data=CB.REF_CLAIM),
-                 InlineKeyboardButton(list_l, callback_data=CB.REF_LIST)],
+                [InlineKeyboardButton(
+                    claim, callback_data=CB.REF_CLAIM),
+                 InlineKeyboardButton(
+                    list_l, callback_data=CB.REF_LIST)],
                 [InlineKeyboardButton(back, callback_data=CB.BACK)],
             ])
-            await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+            await safe_edit(query, text, reply_markup=kb,
+                            bot=context.bot)
         except Exception as e:
             logger.error(f"_render_referral: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
     async def _render_reminder(query, context, user_id, lang):
@@ -2486,36 +2879,52 @@ class CallbackHandlers:
             weekly_l = await _trans('rem_weekly_label', lang, "📈")
             text = (
                 f"{title}\n\n"
-                f"{sub_l}: {'✅' if settings.get('subscription_reminder') else '❌'}\n"
-                f"{daily_l}: {'✅' if settings.get('daily_stats_reminder') else '❌'}\n"
-                f"{weekly_l}: {'✅' if settings.get('weekly_report') else '❌'}"
+                f"{sub_l}: "
+                f"{'✅' if settings.get('subscription_reminder') else '❌'}\n"
+                f"{daily_l}: "
+                f"{'✅' if settings.get('daily_stats_reminder') else '❌'}\n"
+                f"{weekly_l}: "
+                f"{'✅' if settings.get('weekly_report') else '❌'}"
             )
-            await safe_edit(query, text,
-                            reply_markup=KeyboardFactory.build("reminder", lang=lang),
-                            bot=context.bot)
+            await safe_edit(
+                query, text,
+                reply_markup=KeyboardFactory.build(
+                    "reminder", lang=lang),
+                bot=context.bot)
         except Exception as e:
             logger.error(f"_render_reminder: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _handle_reminder_toggle(query, context, user_id, lang, base_data):
+    async def _handle_reminder_toggle(
+        query, context, user_id, lang, base_data
+    ):
         try:
             settings = await DB.get_reminder_settings(user_id) or {}
             if not isinstance(settings, dict):
                 settings = _row_to_dict(settings) or {}
             if base_data == CB.REM_TOGGLE_SUB:
-                new_val = not settings.get('subscription_reminder', False)
-                await DB.update_reminder_settings(user_id, subscription_reminder=new_val)
+                new_val = not settings.get(
+                    'subscription_reminder', False)
+                await DB.update_reminder_settings(
+                    user_id, subscription_reminder=new_val)
             elif base_data == CB.REM_TOGGLE_DAILY:
-                new_val = not settings.get('daily_stats_reminder', False)
-                await DB.update_reminder_settings(user_id, daily_stats_reminder=new_val)
+                new_val = not settings.get(
+                    'daily_stats_reminder', False)
+                await DB.update_reminder_settings(
+                    user_id, daily_stats_reminder=new_val)
             elif base_data == CB.REM_TOGGLE_WEEKLY:
                 new_val = not settings.get('weekly_report', False)
-                await DB.update_reminder_settings(user_id, weekly_report=new_val)
-            await CallbackHandlers._render_reminder(query, context, user_id, lang)
+                await DB.update_reminder_settings(
+                    user_id, weekly_report=new_val)
+            await CallbackHandlers._render_reminder(
+                query, context, user_id, lang)
         except Exception as e:
-            logger.error(f"_handle_reminder_toggle: {e}", exc_info=True)
+            logger.error(
+                f"_handle_reminder_toggle: {e}", exc_info=True)
 
     @staticmethod
     async def _render_translation_menu(query, context, user_id, lang):
@@ -2532,14 +2941,17 @@ class CallbackHandlers:
         title = await _trans('translation', lang, "🌐")
 
         if is_off:
-            state_line = await _trans('translation_state_off', lang, "❌")
-            hint_line = await _trans('translation_hint_off', lang, "💡")
+            state_line = await _trans(
+                'translation_state_off', lang, "❌")
+            hint_line = await _trans(
+                'translation_hint_off', lang, "💡")
         else:
             current_name = langs.get(current_lang, current_lang)
             state_line = _fmt(
                 await _trans('translation_state_on', lang, "✅ {name}"),
                 name=_html.escape(str(current_name)))
-            hint_line = await _trans('translation_hint_on', lang, "💡")
+            hint_line = await _trans(
+                'translation_hint_on', lang, "💡")
 
         text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"{state_line}\n<i>{hint_line}</i>")
@@ -2547,7 +2959,9 @@ class CallbackHandlers:
         rows: list = []
         current_row: list = []
         for code, name in langs.items():
-            label = f"✅ {name}" if (code == current_lang and not is_off) else name
+            label = (f"✅ {name}"
+                     if (code == current_lang and not is_off)
+                     else name)
             current_row.append((label, code))
             if len(current_row) == 2:
                 rows.append(current_row)
@@ -2555,8 +2969,11 @@ class CallbackHandlers:
         if current_row:
             rows.append(current_row)
 
-        kb = [[InlineKeyboardButton(t, callback_data=f"lang_{c}") for t, c in row]
-              for row in rows]
+        kb = [
+            [InlineKeyboardButton(t, callback_data=f"lang_{c}")
+             for t, c in row]
+            for row in rows
+        ]
 
         if not is_off:
             kb.append([InlineKeyboardButton(
@@ -2564,15 +2981,19 @@ class CallbackHandlers:
                 callback_data=CB.TRANS_OFF)])
 
         kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
+            KeyboardFactory.get_text("back", lang),
+            callback_data=CB.BACK)])
 
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-                        parse_mode='HTML', bot=context.bot)
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
     async def _handle_language_change(update, context, query, user_id):
         data = query.data or ""
-        lang_set = data[5:] if data.startswith("lang_") else data.split("_")[-1]
+        lang_set = (data[5:] if data.startswith("lang_")
+                    else data.split("_")[-1])
         valid_langs = {
             'ar', 'en', 'fr', 'tr', 'zh', 'ru', 'de', 'es', 'it',
             'pt', 'ja', 'ko', 'fa', 'ur', 'nl', 'pl', 'hi', 'off',
@@ -2585,27 +3006,37 @@ class CallbackHandlers:
             except Exception:
                 pass
             _clear_lang_cache_local(context)
-            ok = await CallbackHandlers._show_main_menu_inline(query, context, user_id)
+            ok = await CallbackHandlers._show_main_menu_inline(
+                query, context, user_id)
             if not ok:
                 await CommandHandlers.start(update, context)
         else:
             lang = await DB.get_user_language(user_id) or 'ar'
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _handle_buy_subscription(update, context, query, user_id, data, lang):
+    async def _handle_buy_subscription(
+        update, context, query, user_id, data, lang
+    ):
         try:
             days = int(data.split("_")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
-        plan_names = {1: "يوم", 7: "أسبوع", 30: "شهر", 90: "3 أشهر", 365: "سنة"}
+        plan_names = {1: "يوم", 7: "أسبوع", 30: "شهر",
+                      90: "3 أشهر", 365: "سنة"}
         plan_name = plan_names.get(days)
         if not plan_name:
-            await safe_edit(query,
-                await _trans('plan_not_found', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('plan_not_found', lang, "❌"),
+                bot=context.bot)
             return
         plan = await DB.get_plan_by_name(plan_name)
         plan_d = _row_to_dict(plan)
@@ -2618,8 +3049,10 @@ class CallbackHandlers:
             except Exception:
                 pass
         if not plan_d:
-            await safe_edit(query,
-                await _trans('plan_not_found', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('plan_not_found', lang, "❌"),
+                bot=context.bot)
             return
         plan_id = plan_d.get('id', 0)
         price = _coerce_int(plan_d.get('price'), 0)
@@ -2627,15 +3060,18 @@ class CallbackHandlers:
         description = plan_d.get('description') or name
         invoice_number = await DB.create_invoice(user_id, plan_id, price)
         if not invoice_number:
-            await safe_edit(query,
-                await _trans('invoice_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invoice_failed', lang, "❌"),
+                bot=context.bot)
             return
         try:
             await context.bot.send_invoice(
                 chat_id=user_id, title=f"💎 {name}",
                 description=description,
                 payload=json.dumps({
-                    'plan_id': plan_id, 'invoice': invoice_number,
+                    'plan_id': plan_id,
+                    'invoice': invoice_number,
                     'type': 'subscription'}),
                 provider_token="", currency="XTR",
                 prices=[LabeledPrice(name, price)],
@@ -2645,25 +3081,32 @@ class CallbackHandlers:
             logger.error(f"❌ invoice: {e}")
             try:
                 await DB.execute(
-                    "UPDATE invoices SET status='cancelled' WHERE number=?",
-                    (invoice_number,))
+                    "UPDATE invoices SET status='cancelled' "
+                    "WHERE number=?", (invoice_number,))
             except Exception:
                 pass
-            await safe_edit(query, f"❌ {str(e)[:50]}", bot=context.bot)
+            await safe_edit(
+                query, f"❌ {str(e)[:50]}", bot=context.bot)
 
     @staticmethod
-    async def _handle_buy_gift(update, context, query, user_id, data, lang):
+    async def _handle_buy_gift(
+        update, context, query, user_id, data, lang
+    ):
         try:
             gift_plan_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         plan = await DB.get_gift_plan(gift_plan_id)
         plan_d = _row_to_dict(plan)
         if not plan_d:
-            await safe_edit(query,
-                await _trans('plan_not_found', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('plan_not_found', lang, "❌"),
+                bot=context.bot)
             return
         plan_id = plan_d.get('id', 0)
         price = _coerce_int(plan_d.get('price'), 0)
@@ -2671,15 +3114,18 @@ class CallbackHandlers:
         description = plan_d.get('description') or "Gift code"
         invoice_number = await DB.create_invoice(user_id, plan_id, price)
         if not invoice_number:
-            await safe_edit(query,
-                await _trans('invoice_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invoice_failed', lang, "❌"),
+                bot=context.bot)
             return
         try:
             await context.bot.send_invoice(
                 chat_id=user_id, title=f"🎁 {name}",
                 description=description,
                 payload=json.dumps({
-                    'gift_plan_id': plan_id, 'invoice': invoice_number,
+                    'gift_plan_id': plan_id,
+                    'invoice': invoice_number,
                     'type': 'gift'}),
                 provider_token="", currency="XTR",
                 prices=[LabeledPrice(name, price)],
@@ -2689,82 +3135,113 @@ class CallbackHandlers:
             logger.error(f"❌ gift invoice: {e}")
             try:
                 await DB.execute(
-                    "UPDATE invoices SET status='cancelled' WHERE number=?",
-                    (invoice_number,))
+                    "UPDATE invoices SET status='cancelled' "
+                    "WHERE number=?", (invoice_number,))
             except Exception:
                 pass
-            await safe_edit(query, f"❌ {str(e)[:50]}", bot=context.bot)
+            await safe_edit(
+                query, f"❌ {str(e)[:50]}", bot=context.bot)
 
     @staticmethod
-    async def _handle_group_delete(update, context, query, user_id, data, lang):
-        # ✅ v9.4.30: ترتيب صحيح — إبطال الكاش بعد نجاح الحذف فقط
+    async def _handle_group_delete(
+        update, context, query, user_id, data, lang
+    ):
         try:
             chat_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
-        if not await is_authorized_in_group(context.bot, chat_id, user_id):
-            await safe_edit(query,
-                await _trans('no_permission', lang, "❌"), bot=context.bot)
+        if not await is_authorized_in_group(
+                context.bot, chat_id, user_id):
+            await safe_edit(
+                query,
+                await _trans('no_permission', lang, "❌"),
+                bot=context.bot)
             return
         if not await _is_group_owner(user_id, chat_id):
-            await safe_edit(query,
-                await _trans('not_owner', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('not_owner', lang, "❌"),
+                bot=context.bot)
             return
 
         if await DB.delete_group(chat_id):
-            # ✅ v9.4.30: إبطال الكاش بعد نجاح الحذف (لا قبله)
             try:
                 await _invalidate_log_channel_menu_cache(chat_id)
             except Exception:
                 pass
             await _invalidate_after_channel_change(user_id)
-            await safe_edit(query,
-                await _trans('group_deleted', lang, "✅"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('group_deleted', lang, "✅"),
+                bot=context.bot)
         else:
-            await safe_edit(query,
-                await _trans('delete_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('delete_failed', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _handle_group_settings(update, context, query, user_id, lang, data):
+    async def _handle_group_settings(
+        update, context, query, user_id, lang, data
+    ):
         try:
             chat_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query,
-                await _trans('no_permission', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_permission', lang, "❌"),
+                bot=context.bot)
             return
         _set_sec_chat(context, chat_id)
         await CallbackHandlers._render_security_two_phase(
-            query, context, chat_id, lang, force_refresh_settings=False)
+            query, context, chat_id, lang,
+            force_refresh_settings=False)
 
     @staticmethod
-    async def _handle_channel_select(update, context, query, user_id, data, lang):
+    async def _handle_channel_select(
+        update, context, query, user_id, data, lang
+    ):
         try:
             ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         if await DB.set_active_channel(user_id, ch_id):
             await _invalidate_after_channel_change(user_id, ch_id)
-            await safe_edit(query,
-                await _trans('channel_selected', lang, "✅"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('channel_selected', lang, "✅"),
+                bot=context.bot)
         else:
-            await safe_edit(query,
-                await _trans('channel_select_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('channel_select_failed', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _handle_channel_delete(update, context, query, user_id, lang, data):
+    async def _handle_channel_delete(
+        update, context, query, user_id, lang, data
+    ):
         try:
             ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         if await DB.delete_channel(user_id, ch_id):
             context.user_data['channel_page'] = 0
@@ -2772,16 +3249,22 @@ class CallbackHandlers:
             await CallbackHandlers._show_channel_list(
                 update, context, query, user_id, lang)
         else:
-            await safe_edit(query,
-                await _trans('delete_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('delete_failed', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _handle_channel_stats(update, context, query, user_id, data, lang):
+    async def _handle_channel_stats(
+        update, context, query, user_id, data, lang
+    ):
         try:
             ch_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         try:
             stats = await DB.get_channel_stats(user_id, ch_id) or {}
@@ -2794,9 +3277,12 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"_handle_channel_stats: {e}")
             text = await _trans('error_occurred', lang, "❌")
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(KeyboardFactory.get_text("back", lang),
-                                   callback_data=CB.CH_LIST)]]),
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.CH_LIST)]]),
             bot=context.bot)
 
     @staticmethod
@@ -2808,28 +3294,36 @@ class CallbackHandlers:
             pass
         try:
             is_owner = _is_primary_owner(user_id)
-            has_sub = True if is_owner else await DB.has_active_subscription(user_id)
+            has_sub = (True if is_owner
+                       else await DB.has_active_subscription(user_id))
             active = await DB.get_active_channel(user_id)
             if not has_sub:
-                await safe_edit(query,
-                    await _trans('subscription_expired', lang, "❌"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('subscription_expired', lang, "❌"),
+                    bot=context.bot)
                 return
             if not active:
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('no_active_channel_alert', lang, "❌"),
                     parse_mode='HTML', bot=context.bot)
                 return
             StateManager.set(user_id, UserState.ADDING_POSTS)
             finish_btn = await _trans('finish_btn', lang, "✅")
             await safe_edit(
-                query, await _trans('send_posts_prompt', lang, "📥"),
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(finish_btn, callback_data="finish_posts")]]),
+                query,
+                await _trans('send_posts_prompt', lang, "📥"),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        finish_btn, callback_data="finish_posts")]]),
                 bot=context.bot)
         except Exception as e:
             logger.error(f"❌ _handle_post_add: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
@@ -2840,25 +3334,34 @@ class CallbackHandlers:
             pass
         is_owner = _is_primary_owner(user_id)
         if not is_owner and not await DB.has_active_subscription(user_id):
-            await safe_edit(query,
-                await _trans('subscription_expired', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('subscription_expired', lang, "❌"),
+                bot=context.bot)
             return
         active = await DB.get_active_channel(user_id)
         if not active:
-            await safe_edit(query,
-                await _trans('no_channels', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_channels', lang, "❌"),
+                bot=context.bot)
             return
         raw_result = await DB.get_next_post(active)
-        post, was_recycled = CallbackHandlers._unwrap_get_next_post(raw_result)
+        post, was_recycled = CallbackHandlers._unwrap_get_next_post(
+            raw_result)
         if not post or not isinstance(post, dict):
-            await safe_edit(query,
-                await _trans('no_posts', lang, "📭"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_posts', lang, "📭"),
+                bot=context.bot)
             return
         ch_info = await DB.get_channel_info(user_id, active)
         ch_info_d = _row_to_dict(ch_info)
         if not ch_info_d or not ch_info_d.get('channel_id'):
-            await safe_edit(query,
-                await _trans('channel_info_unavailable', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('channel_info_unavailable', lang, "❌"),
+                bot=context.bot)
             return
         bot = context.bot
         ch_id = ch_info_d['channel_id']
@@ -2871,25 +3374,33 @@ class CallbackHandlers:
                         bot, active, ch_id, post)
                 if result:
                     try:
-                        await _invalidate_after_channel_change(user_id, active)
+                        await _invalidate_after_channel_change(
+                            user_id, active)
                     except Exception:
                         pass
                     if recycled_flag:
-                        msg = await _trans('publish_success_recycled', lang, "✅")
+                        msg = await _trans(
+                            'publish_success_recycled', lang, "✅")
                     else:
-                        msg = await _trans('publish_success', lang, "✅")
+                        msg = await _trans(
+                            'publish_success', lang, "✅")
                     await safe_send(bot, user_id, msg)
                 else:
                     if recycled_flag:
-                        msg = await _trans('publish_failed_recycled', lang, "❌")
+                        msg = await _trans(
+                            'publish_failed_recycled', lang, "❌")
                     else:
-                        msg = await _trans('publish_failed', lang, "❌")
+                        msg = await _trans(
+                            'publish_failed', lang, "❌")
                     await safe_send(bot, user_id, msg)
             except Exception as e:
-                logger.error(f"❌ _publish_task: {e}", exc_info=True)
+                logger.error(
+                    f"❌ _publish_task: {e}", exc_info=True)
                 try:
-                    msg = _fmt(await _trans('publish_unexpected_error', lang, "❌"),
-                               error=str(e)[:80])
+                    msg = _fmt(
+                        await _trans('publish_unexpected_error',
+                                     lang, "❌"),
+                        error=str(e)[:80])
                     await safe_send(bot, user_id, msg)
                 except Exception:
                     pass
@@ -2898,18 +3409,23 @@ class CallbackHandlers:
         ACTIVE_TASKS.add(task)
         task.add_done_callback(ACTIVE_TASKS.discard)
         if was_recycled:
-            msg = await _trans('publish_started_recycled', lang, "✅")
+            msg = await _trans(
+                'publish_started_recycled', lang, "✅")
         else:
             msg = await _trans('publish_started', lang, "✅")
         await safe_edit(query, msg, bot=context.bot)
 
     @staticmethod
-    async def _handle_post_delete(update, context, query, user_id, lang, data):
+    async def _handle_post_delete(
+        update, context, query, user_id, lang, data
+    ):
         try:
             post_id = int(data.split(":")[-1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         active = await DB.get_active_channel(user_id)
         if active and await DB.delete_post(user_id, post_id, active):
@@ -2917,8 +3433,10 @@ class CallbackHandlers:
             await CallbackHandlers._show_post_list(
                 update, context, query, user_id, lang)
         else:
-            await safe_edit(query,
-                await _trans('delete_failed', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('delete_failed', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
     async def _handle_publish_all(update, context, query, user_id):
@@ -2929,20 +3447,27 @@ class CallbackHandlers:
             pass
         is_owner = _is_primary_owner(user_id)
         if not is_owner and not await DB.has_active_subscription(user_id):
-            await safe_edit(query,
-                await _trans('subscription_expired', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('subscription_expired', lang, "❌"),
+                bot=context.bot)
             return
         channels = await DB.get_user_channels(user_id)
         if not channels:
-            await safe_edit(query,
-                await _trans('no_channels_for_publish', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_channels_for_publish', lang, "❌"),
+                bot=context.bot)
             return
         task = asyncio.create_task(
-            CallbackHandlers._publish_all(context.bot, user_id, channels))
+            CallbackHandlers._publish_all(
+                context.bot, user_id, channels))
         ACTIVE_TASKS.add(task)
         task.add_done_callback(ACTIVE_TASKS.discard)
-        await safe_edit(query,
-            await _trans('publish_all_started', lang, "✅"), bot=context.bot)
+        await safe_edit(
+            query,
+            await _trans('publish_all_started', lang, "✅"),
+            bot=context.bot)
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
@@ -2953,10 +3478,12 @@ class CallbackHandlers:
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     add_bot,
-                    url=f"https://t.me/{CONFIG.BOT_USERNAME}?startgroup")],
+                    url=(f"https://t.me/{CONFIG.BOT_USERNAME}"
+                         "?startgroup"))],
                 [InlineKeyboardButton(back, callback_data=CB.BACK)],
             ])
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('no_groups', lang, "📭"),
                 reply_markup=kb, bot=context.bot)
             return
@@ -2978,23 +3505,33 @@ class CallbackHandlers:
             status = "⛔" if gd.get('banned') else "✅"
             number = _group_number(display_idx)
             text += f"{status} {number} {name}\n"
-            sec_label = _fmt(await _trans('group_security_btn', lang, "{number} ⚙️ Security"),
-                             number=number)
-            del_label = _fmt(await _trans('group_delete_btn', lang, "{number} 🗑️ Delete"),
-                             number=number)
+            sec_label = _fmt(
+                await _trans('group_security_btn', lang,
+                             "{number} ⚙️ Security"),
+                number=number)
+            del_label = _fmt(
+                await _trans('group_delete_btn', lang,
+                             "{number} 🗑️ Delete"),
+                number=number)
             kb.append([
-                InlineKeyboardButton(sec_label,
-                                     callback_data=f"{CB.GRP_SET}:{gid}"),
-                InlineKeyboardButton(del_label,
-                                     callback_data=f"grp_del_confirm:{gid}"),
+                InlineKeyboardButton(
+                    sec_label,
+                    callback_data=f"{CB.GRP_SET}:{gid}"),
+                InlineKeyboardButton(
+                    del_label,
+                    callback_data=f"grp_del_confirm:{gid}"),
             ])
         kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-                        bot=context.bot)
+            KeyboardFactory.get_text("back", lang),
+            callback_data=CB.BACK)])
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            bot=context.bot)
         if first_chat_id:
             task = asyncio.create_task(
-                CallbackHandlers._preload_group_security(first_chat_id))
+                CallbackHandlers._preload_group_security(
+                    first_chat_id))
             ACTIVE_TASKS.add(task)
             task.add_done_callback(ACTIVE_TASKS.discard)
 
@@ -3013,15 +3550,18 @@ class CallbackHandlers:
                     await settings_cache.set_security(chat_id, settings)
                 except Exception as e:
                     logger.debug(
-                        f"_preload_group_security set_security({chat_id}): {e}"
+                        f"_preload_group_security set_security"
+                        f"({chat_id}): {e}"
                     )
 
             stats_key = f"sec_stats_{chat_id}"
-            cached_stats = await _security_stats_cache_local.get(stats_key)
+            cached_stats = await _security_stats_cache_local.get(
+                stats_key)
             if cached_stats is None:
-                stats = await KeyboardFactory._get_security_stats(chat_id) or {}
-                await _security_stats_cache_local.set(stats_key, stats,
-                                                      ttl=SEC_STATS_CACHE_TTL)
+                stats = await KeyboardFactory._get_security_stats(
+                    chat_id) or {}
+                await _security_stats_cache_local.set(
+                    stats_key, stats, ttl=SEC_STATS_CACHE_TTL)
         except Exception as e:
             logger.debug(f"_preload_group_security({chat_id}): {e}")
 
@@ -3059,13 +3599,17 @@ class CallbackHandlers:
                 return False
             caption = text[:MAX_CAPTION_LENGTH] if text else None
             if media_type == 'photo' and media_file_id:
-                await bot.send_photo(ch_tele, media_file_id, caption=caption)
+                await bot.send_photo(
+                    ch_tele, media_file_id, caption=caption)
             elif media_type == 'video' and media_file_id:
-                await bot.send_video(ch_tele, media_file_id, caption=caption)
+                await bot.send_video(
+                    ch_tele, media_file_id, caption=caption)
             elif media_type == 'document' and media_file_id:
-                await bot.send_document(ch_tele, media_file_id, caption=caption)
+                await bot.send_document(
+                    ch_tele, media_file_id, caption=caption)
             elif media_type == 'audio' and media_file_id:
-                await bot.send_audio(ch_tele, media_file_id, caption=caption)
+                await bot.send_audio(
+                    ch_tele, media_file_id, caption=caption)
             elif media_type == 'voice' and media_file_id:
                 await bot.send_voice(ch_tele, media_file_id)
                 if text:
@@ -3074,7 +3618,8 @@ class CallbackHandlers:
                     except Exception:
                         pass
             elif media_type == 'animation' and media_file_id:
-                await bot.send_animation(ch_tele, media_file_id, caption=caption)
+                await bot.send_animation(
+                    ch_tele, media_file_id, caption=caption)
             elif media_type == 'sticker' and media_file_id:
                 await bot.send_sticker(ch_tele, media_file_id)
                 if text:
@@ -3092,9 +3637,11 @@ class CallbackHandlers:
             else:
                 if text and len(text) > MAX_MESSAGE_LENGTH:
                     for i in range(0, len(text), MAX_MESSAGE_LENGTH):
-                        await bot.send_message(ch_tele, text[i:i + MAX_MESSAGE_LENGTH])
+                        await bot.send_message(
+                            ch_tele, text[i:i + MAX_MESSAGE_LENGTH])
                 else:
-                    await bot.send_message(ch_tele, text if text else ".")
+                    await bot.send_message(
+                        ch_tele, text if text else ".")
             if post_id:
                 await DB.mark_post_published(post_id)
             await DB.update_last_publish(ch_db_id)
@@ -3117,7 +3664,8 @@ class CallbackHandlers:
         except Forbidden:
             try:
                 await DB.execute(
-                    "UPDATE user_channels SET banned=1 WHERE id=?", (ch_db_id,))
+                    "UPDATE user_channels SET banned=1 WHERE id=?",
+                    (ch_db_id,))
             except Exception:
                 pass
             if post_id:
@@ -3155,12 +3703,16 @@ class CallbackHandlers:
                     banned_count += 1
                     continue
                 raw_result = await DB.get_next_post(chd.get('id'))
-                post, _ = CallbackHandlers._unwrap_get_next_post(raw_result)
+                post, _ = CallbackHandlers._unwrap_get_next_post(
+                    raw_result)
                 if post and isinstance(post, dict):
-                    ch_info = await DB.get_channel_info(user_id, chd.get('id'))
+                    ch_info = await DB.get_channel_info(
+                        user_id, chd.get('id'))
                     ch_info_d = _row_to_dict(ch_info)
                     if ch_info_d and ch_info_d.get('channel_id'):
-                        tasks.append((chd.get('id'), ch_info_d['channel_id'], post))
+                        tasks.append(
+                            (chd.get('id'),
+                             ch_info_d['channel_id'], post))
                     else:
                         pid = post.get('id')
                         if pid:
@@ -3174,9 +3726,11 @@ class CallbackHandlers:
 
             if not tasks:
                 if banned_count == len(channels):
-                    msg = await _trans('all_channels_banned', lang, "❌")
+                    msg = await _trans(
+                        'all_channels_banned', lang, "❌")
                 elif no_post_count == len(channels) - banned_count:
-                    msg = await _trans('no_valid_posts_short', lang, "📭")
+                    msg = await _trans(
+                        'no_valid_posts_short', lang, "📭")
                 else:
                     msg = await _trans('no_valid_posts', lang, "📭")
                 await safe_send(bot, user_id, msg)
@@ -3192,14 +3746,16 @@ class CallbackHandlers:
                         pass
                     result = await CallbackHandlers._publish_single(
                         bot, task[0], task[1], task[2])
-                    await asyncio.sleep(CallbackHandlers.PUBLISH_DELAY_SECONDS)
+                    await asyncio.sleep(
+                        CallbackHandlers.PUBLISH_DELAY_SECONDS)
                     return result
 
             BATCH = CallbackHandlers.PUBLISH_BATCH_SIZE
             for i in range(0, len(tasks), BATCH):
                 batch = tasks[i:i + BATCH]
                 results = await asyncio.gather(
-                    *(run(t) for t in batch), return_exceptions=True)
+                    *(run(t) for t in batch),
+                    return_exceptions=True)
                 for r in results:
                     if r is True:
                         published += 1
@@ -3207,31 +3763,40 @@ class CallbackHandlers:
                         failed += 1
 
             if lost_count:
-                summary = _fmt(await _trans('publish_summary_lost', lang,
-                                            "✅ {published} ❌ {failed} ⚠️ {lost}"),
-                               published=published, failed=failed, lost=lost_count)
+                summary = _fmt(
+                    await _trans(
+                        'publish_summary_lost', lang,
+                        "✅ {published} ❌ {failed} ⚠️ {lost}"),
+                    published=published, failed=failed,
+                    lost=lost_count)
             else:
-                summary = _fmt(await _trans('publish_summary', lang,
-                                            "✅ {published} ❌ {failed}"),
-                               published=published, failed=failed)
+                summary = _fmt(
+                    await _trans(
+                        'publish_summary', lang,
+                        "✅ {published} ❌ {failed}"),
+                    published=published, failed=failed)
             await safe_send(bot, user_id, summary)
 
             try:
                 await _invalidate_after_channel_change(
-                    user_id, channel_db_id=None, invalidate_posts=False)
+                    user_id, channel_db_id=None,
+                    invalidate_posts=False)
             except Exception:
                 pass
         except Exception as e:
             logger.error(f"❌ _publish_all: {e}", exc_info=True)
             try:
-                msg = _fmt(await _trans('publish_all_failed', lang, "❌"),
-                           error=str(e)[:100])
+                msg = _fmt(
+                    await _trans('publish_all_failed', lang, "❌"),
+                    error=str(e)[:100])
                 await safe_send(bot, user_id, msg)
             except Exception:
                 pass
 
     @staticmethod
-    async def _show_channel_list(update, context, query, user_id, lang=None):
+    async def _show_channel_list(
+        update, context, query, user_id, lang=None
+    ):
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         channels = await DB.get_user_channels(user_id)
@@ -3244,25 +3809,29 @@ class CallbackHandlers:
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.BACK)],
             ])
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('no_channels', lang, "📭"),
                 reply_markup=kb, bot=context.bot)
             return
 
         page = _coerce_int(context.user_data.get('channel_page'), 0)
         per_page = 5
-        total_pages = max(1, (len(channels) + per_page - 1) // per_page)
+        total_pages = max(
+            1, (len(channels) + per_page - 1) // per_page)
         if page >= total_pages:
             page = total_pages - 1
         if page < 0:
             page = 0
         context.user_data['channel_page'] = page
 
-        page_channels = channels[page * per_page:(page + 1) * per_page]
+        page_channels = channels[
+            page * per_page:(page + 1) * per_page]
         start_index = page * per_page
 
         title = await _trans('your_channels', lang, "📡")
-        text = f"{title} ({len(channels)})\n<i>{page + 1}/{total_pages}</i>\n\n"
+        text = (f"{title} ({len(channels)})\n"
+                f"<i>{page + 1}/{total_pages}</i>\n\n")
 
         kb = []
         display_idx = start_index
@@ -3274,20 +3843,25 @@ class CallbackHandlers:
             display_idx += 1
             number = _group_number(display_idx)
             st = "✅" if not chd.get('banned') else "🚫"
-            raw_name = chd.get('channel_name') or f"Channel {display_idx}"
+            raw_name = (chd.get('channel_name')
+                        or f"Channel {display_idx}")
             name = _html.escape(str(raw_name)[:35])
             text += f"{st} {number}  {name}\n"
             kb.append([
-                InlineKeyboardButton(f"{number} 📌",
-                                     callback_data=f"{CB.CH_SEL}:{ch_id}"),
-                InlineKeyboardButton(f"{number} 📅",
-                                     callback_data=f"sched_open:{ch_id}"),
+                InlineKeyboardButton(
+                    f"{number} 📌",
+                    callback_data=f"{CB.CH_SEL}:{ch_id}"),
+                InlineKeyboardButton(
+                    f"{number} 📅",
+                    callback_data=f"sched_open:{ch_id}"),
             ])
             kb.append([
-                InlineKeyboardButton(f"{number} 📊",
-                                     callback_data=f"{CB.CH_STATS}:{ch_id}"),
-                InlineKeyboardButton(f"{number} 🗑️",
-                                     callback_data=f"ch_del_confirm:{ch_id}"),
+                InlineKeyboardButton(
+                    f"{number} 📊",
+                    callback_data=f"{CB.CH_STATS}:{ch_id}"),
+                InlineKeyboardButton(
+                    f"{number} 🗑️",
+                    callback_data=f"ch_del_confirm:{ch_id}"),
             ])
 
         nav = []
@@ -3303,26 +3877,48 @@ class CallbackHandlers:
             kb.append(nav)
 
         kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("ch_add", lang), callback_data=CB.CH_ADD)])
+            KeyboardFactory.get_text("ch_add", lang),
+            callback_data=CB.CH_ADD)])
         kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
+            KeyboardFactory.get_text("back", lang),
+            callback_data=CB.BACK)])
 
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-                        parse_mode='HTML', bot=context.bot)
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
-    async def _show_post_list(update, context, query, user_id, lang=None):
+    async def _show_post_list(
+        update, context, query, user_id, lang=None
+    ):
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         active = await DB.get_active_channel(user_id)
         if not active:
-            await safe_edit(query,
-                await _trans('no_active_channel', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_active_channel', lang, "❌"),
+                bot=context.bot)
             return
         per_page = 5
-        total = await DB.fetchval(
-            "SELECT COUNT(*) FROM posts WHERE channel_db_id=?",
-            (active,), default=0)
+
+        # ✅ v9.4.32 (#6): كاش COUNT(*) لتقليل ضغط DB
+        cache_key = f"post_count_{active}"
+        try:
+            total = await _post_count_cache.get(cache_key)
+        except Exception:
+            total = None
+        if total is None:
+            total = await DB.fetchval(
+                "SELECT COUNT(*) FROM posts WHERE channel_db_id=?",
+                (active,), default=0)
+            try:
+                await _post_count_cache.set(
+                    cache_key, total, ttl=POST_COUNT_CACHE_TTL)
+            except Exception:
+                pass
+
         total_pages = max(1, (total + per_page - 1) // per_page)
         page = _coerce_int(context.user_data.get('post_page'), 0)
         if page >= total_pages:
@@ -3331,7 +3927,8 @@ class CallbackHandlers:
             page = 0
         context.user_data['post_page'] = page
         posts = await DB.fetchall(
-            "SELECT id, text, published FROM posts WHERE channel_db_id=? "
+            "SELECT id, text, published FROM posts "
+            "WHERE channel_db_id=? "
             "ORDER BY created_at ASC LIMIT ? OFFSET ?",
             (active, per_page, page * per_page))
         title = await _trans('post_list', lang, "📋")
@@ -3358,22 +3955,29 @@ class CallbackHandlers:
         if nav:
             kb.append(nav)
         kb.append([InlineKeyboardButton(
-            await _trans('post_rec', lang, "♻️"), callback_data=CB.POST_REC)])
+            await _trans('post_rec', lang, "♻️"),
+            callback_data=CB.POST_REC)])
         kb.append([InlineKeyboardButton(
             await _trans('post_clear', lang, "🧹"),
             callback_data=f"{CB.POST_CLEAR}_confirm")])
         kb.append([InlineKeyboardButton(
-            KeyboardFactory.get_text("back", lang), callback_data=CB.BACK)])
-        display_text = text if posts else await _trans('no_posts', lang, "📭")
-        await safe_edit(query, display_text,
-                        reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+            KeyboardFactory.get_text("back", lang),
+            callback_data=CB.BACK)])
+        display_text = (text if posts
+                        else await _trans('no_posts', lang, "📭"))
+        await safe_edit(
+            query, display_text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # Security handlers
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _handle_security(update, context, query, user_id, lang=None):
+    async def _handle_security(
+        update, context, query, user_id, lang=None
+    ):
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
@@ -3392,16 +3996,21 @@ class CallbackHandlers:
                     chat_id = None
 
         if chat_id is None:
-            await safe_edit(query,
-                await _trans('group_not_specified', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('group_not_specified', lang, "❌"),
+                bot=context.bot)
             return
 
         prefix0 = parts[0]
-        action = prefix0[4:] if prefix0.startswith("sec_") else prefix0
+        action = (prefix0[4:] if prefix0.startswith("sec_")
+                  else prefix0)
 
         if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query,
-                await _trans('no_permission', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_permission', lang, "❌"),
+                bot=context.bot)
             return
 
         try:
@@ -3412,26 +4021,33 @@ class CallbackHandlers:
 
             if action == "auto_reply_menu":
                 context.user_data['auto_chat'] = chat_id
-                settings = await DB.get_auto_reply_settings(chat_id) or {}
+                settings = await DB.get_auto_reply_settings(
+                    chat_id) or {}
                 if not isinstance(settings, dict):
                     settings = _row_to_dict(settings) or {}
                 try:
-                    kb = KeyboardFactory.build("auto_reply",
-                                                chat_id=chat_id, lang=lang)
+                    kb = KeyboardFactory.build(
+                        "auto_reply",
+                        chat_id=chat_id, lang=lang)
                 except Exception:
-                    kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
                             KeyboardFactory.get_text("back", lang),
-                            callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
-                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                            callback_data=(
+                                f"{CB.GRP_SET}:{chat_id}"))]])
+                enabled_lbl = await _trans(
+                    'auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans(
+                    'auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
                     _coerce_int(settings.get('enabled', 0)),
                     _coerce_int(settings.get('only_admins', 0)),
                     enabled_lbl, admins_lbl,
                 )
-                await safe_edit(query,
+                kb = _patch_auto_reply_back(kb, chat_id)
+                await safe_edit(
+                    query,
                     await _trans('auto_reply_title', lang, "🤖"),
                     reply_markup=kb, bot=context.bot)
                 return
@@ -3439,8 +4055,10 @@ class CallbackHandlers:
             if action == "maxlen":
                 StateManager.set(user_id, UserState.WAIT_MAX_LEN)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_max_length', lang, "📏"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_max_length', lang, "📏"),
+                    bot=context.bot)
                 return
 
             if action == "act_log":
@@ -3450,141 +4068,188 @@ class CallbackHandlers:
 
             if action in ("activate_all", "enable_all",
                           "deactivate_all", "disable_all"):
-                is_activate = action in ("activate_all", "enable_all")
-                confirm_action = ("activate_all_confirm" if is_activate
-                                  else "deactivate_all_confirm")
+                is_activate = action in (
+                    "activate_all", "enable_all")
+                confirm_action = (
+                    "activate_all_confirm" if is_activate
+                    else "deactivate_all_confirm")
                 if is_activate:
-                    confirm_text = await _trans('activate_all_confirmation',
-                                                lang, "⚠️")
+                    confirm_text = await _trans(
+                        'activate_all_confirmation', lang, "⚠️")
                 else:
-                    confirm_text = await _trans('deactivate_all_confirmation',
-                                                lang, "⚠️")
+                    confirm_text = await _trans(
+                        'deactivate_all_confirmation', lang, "⚠️")
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('yes_btn', lang, "✅"),
-                        callback_data=f"sec_{confirm_action}:{chat_id}")],
+                        callback_data=(
+                            f"sec_{confirm_action}:{chat_id}"))],
                     [InlineKeyboardButton(
                         await _trans('cancel_btn', lang, "❌"),
                         callback_data=f"{CB.GRP_SET}:{chat_id}")],
                 ])
-                await safe_edit(query, confirm_text,
-                                reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, confirm_text,
+                    reply_markup=kb, bot=context.bot)
                 return
 
-            if action in ("activate_all_confirm", "deactivate_all_confirm"):
+            if action in ("activate_all_confirm",
+                          "deactivate_all_confirm"):
                 is_activate = (action == "activate_all_confirm")
                 activate_values = dict(
                     delete_links=1, delete_mentions=1, slow_mode=1,
                     slow_mode_seconds=5,
-                    delete_videos=1, delete_audio=1, delete_animation=1,
-                    delete_service=1, delete_documents=1, delete_stickers=1,
-                    delete_forwarded=1, delete_polls=1, delete_games=1,
-                    delete_voice=1, delete_video_note=1,
+                    delete_videos=1, delete_audio=1,
+                    delete_animation=1, delete_service=1,
+                    delete_documents=1, delete_stickers=1,
+                    delete_forwarded=1, delete_polls=1,
+                    delete_games=1, delete_voice=1,
+                    delete_video_note=1,
                     welcome_enabled=1, goodbye_enabled=1,
                     antiflood_enabled=1, antiflood_messages=5,
                     antiflood_seconds=5,
-                    antiflood_penalty="mute", antiflood_penalty_duration=60,
+                    antiflood_penalty="mute",
+                    antiflood_penalty_duration=60,
                     night_mode_enabled=1,
-                    night_mode_start="22:00", night_mode_end="06:00",
-                    night_mode_action="mute", night_mode_action_duration=3600,
-                    auto_approve_join=0, auto_reject_join=0, nsfw_enabled=0,
+                    night_mode_start="22:00",
+                    night_mode_end="06:00",
+                    night_mode_action="mute",
+                    night_mode_action_duration=3600,
+                    auto_approve_join=0, auto_reject_join=0,
+                    nsfw_enabled=0,
                     warn_enabled=1, max_warnings=3,
                     warn_penalty="mute", warn_penalty_duration=3600,
                     delete_banned_words=1, auto_penalty="mute",
-                    delete_penalty="mute", delete_penalty_duration=3600,
+                    delete_penalty="mute",
+                    delete_penalty_duration=3600,
                     violation_strikes=3, violation_duration=60,
                 )
                 deactivate_values = dict(
                     delete_links=0, delete_mentions=0, slow_mode=0,
                     slow_mode_seconds=0,
-                    delete_videos=0, delete_audio=0, delete_animation=0,
-                    delete_service=0, delete_documents=0, delete_stickers=0,
-                    delete_forwarded=0, delete_polls=0, delete_games=0,
-                    delete_voice=0, delete_video_note=0,
+                    delete_videos=0, delete_audio=0,
+                    delete_animation=0, delete_service=0,
+                    delete_documents=0, delete_stickers=0,
+                    delete_forwarded=0, delete_polls=0,
+                    delete_games=0, delete_voice=0,
+                    delete_video_note=0,
                     welcome_enabled=0, goodbye_enabled=0,
                     antiflood_enabled=0, antiflood_messages=0,
                     antiflood_seconds=0,
-                    antiflood_penalty="none", antiflood_penalty_duration=0,
+                    antiflood_penalty="none",
+                    antiflood_penalty_duration=0,
                     night_mode_enabled=0, night_mode_start="",
                     night_mode_end="",
-                    night_mode_action="none", night_mode_action_duration=0,
-                    auto_approve_join=0, auto_reject_join=0, nsfw_enabled=0,
+                    night_mode_action="none",
+                    night_mode_action_duration=0,
+                    auto_approve_join=0, auto_reject_join=0,
+                    nsfw_enabled=0,
                     warn_enabled=0, max_warnings=0,
                     warn_penalty="none", warn_penalty_duration=0,
                     delete_banned_words=0, auto_penalty="none",
-                    delete_penalty="none", delete_penalty_duration=0,
+                    delete_penalty="none",
+                    delete_penalty_duration=0,
                     violation_strikes=0, violation_duration=0,
                 )
-                values = activate_values if is_activate else deactivate_values
-                action_name = (f"{'activate' if is_activate else 'deactivate'}_all_security")
+                values = (activate_values if is_activate
+                          else deactivate_values)
+                action_name = (
+                    f"{'activate' if is_activate else 'deactivate'}"
+                    "_all_security")
                 try:
                     async with DB.transaction() as _conn:
-                        await DB.update_security_settings(chat_id, conn=_conn, **values)
+                        await DB.update_security_settings(
+                            chat_id, conn=_conn, **values)
                         await DB.add_admin_log(
                             chat_id=chat_id, admin_id=user_id,
                             action=action_name, target_id=None,
                             reason="", conn=_conn)
                 except TypeError:
                     try:
-                        await DB.update_security_settings(chat_id, **values)
+                        await DB.update_security_settings(
+                            chat_id, **values)
                     except Exception as ex:
-                        logger.error(f"activate/deactivate: {ex}", exc_info=True)
-                        await safe_edit(query,
-                            await _trans('error_occurred', lang, "❌"),
+                        logger.error(
+                            f"activate/deactivate: {ex}",
+                            exc_info=True)
+                        await safe_edit(
+                            query,
+                            await _trans('error_occurred',
+                                         lang, "❌"),
                             bot=context.bot)
                         return
 
                     async def _log_security_action():
                         try:
                             await DB.add_admin_log(
-                                chat_id=chat_id, admin_id=user_id,
+                                chat_id=chat_id,
+                                admin_id=user_id,
                                 action=action_name)
                         except Exception:
                             pass
                     try:
-                        log_task = asyncio.create_task(_log_security_action())
+                        log_task = asyncio.create_task(
+                            _log_security_action())
                         ACTIVE_TASKS.add(log_task)
-                        log_task.add_done_callback(ACTIVE_TASKS.discard)
+                        log_task.add_done_callback(
+                            ACTIVE_TASKS.discard)
                     except Exception:
                         pass
                 except Exception as ex:
-                    logger.error(f"activate/deactivate: {ex}", exc_info=True)
-                    await safe_edit(query,
-                        await _trans('error_occurred', lang, "❌"), bot=context.bot)
+                    logger.error(
+                        f"activate/deactivate: {ex}",
+                        exc_info=True)
+                    await safe_edit(
+                        query,
+                        await _trans('error_occurred', lang, "❌"),
+                        bot=context.bot)
                     return
 
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return
 
             toggle_map = {
-                "links": "delete_links", "mentions": "mentions",
+                "links": "delete_links",
+                "mentions": "mentions",
                 "slow": "slow_mode",
-                "video": "delete_videos", "audio": "delete_audio",
-                "anim": "delete_animation", "service": "delete_service",
-                "doc": "delete_documents", "sticker": "delete_stickers",
-                "forward": "delete_forwarded", "poll": "delete_polls",
-                "game": "delete_games", "voice": "delete_voice",
+                "video": "delete_videos",
+                "audio": "delete_audio",
+                "anim": "delete_animation",
+                "service": "delete_service",
+                "doc": "delete_documents",
+                "sticker": "delete_stickers",
+                "forward": "delete_forwarded",
+                "poll": "delete_polls",
+                "game": "delete_games",
+                "voice": "delete_voice",
                 "videonote": "delete_video_note",
                 "welcome": "welcome_enabled",
-                "goodbye": "goodbye_enabled", "flood": "antiflood_enabled",
+                "goodbye": "goodbye_enabled",
+                "flood": "antiflood_enabled",
                 "night": "night_mode_enabled",
                 "approve_join": "auto_approve_join",
-                "reject_join": "auto_reject_join", "nsfw": "nsfw_enabled",
+                "reject_join": "auto_reject_join",
+                "nsfw": "nsfw_enabled",
             }
 
             if action in toggle_map:
                 col = toggle_map[action]
-                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
+                settings = (
+                    await CallbackHandlers.
+                    _get_security_settings_cached(chat_id))
                 new_val = 1 - _coerce_int(settings.get(col, 0))
                 update_data = {col: new_val}
                 if action == "approve_join" and new_val:
                     update_data['auto_reject_join'] = 0
                 elif action == "reject_join" and new_val:
                     update_data['auto_approve_join'] = 0
-                await DB.update_security_settings(chat_id, **update_data)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                await DB.update_security_settings(
+                    chat_id, **update_data)
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return
@@ -3592,23 +4257,34 @@ class CallbackHandlers:
             if action == "warn":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        await _trans('warn_toggle_btn', lang, "✅"),
-                        callback_data=f"sec_warn_toggle:{chat_id}")],
+                        await _trans(
+                            'warn_toggle_btn', lang, "✅"),
+                        callback_data=(
+                            f"sec_warn_toggle:{chat_id}"))],
                     [InlineKeyboardButton(
-                        await _trans('warn_count_btn', lang, "🔢"),
-                        callback_data=f"sec_warn_count:{chat_id}")],
+                        await _trans(
+                            'warn_count_btn', lang, "🔢"),
+                        callback_data=(
+                            f"sec_warn_count:{chat_id}"))],
                     [InlineKeyboardButton(
-                        await _trans('warn_penalty_btn', lang, "⚖️"),
-                        callback_data=f"sec_warn_penalty:{chat_id}")],
+                        await _trans(
+                            'warn_penalty_btn', lang, "⚖️"),
+                        callback_data=(
+                            f"sec_warn_penalty:{chat_id}"))],
                     [InlineKeyboardButton(
-                        await _trans('warn_penalty_duration_btn', lang, "⏱️"),
-                        callback_data=f"sec_warn_penalty_duration:{chat_id}")],
+                        await _trans(
+                            'warn_penalty_duration_btn',
+                            lang, "⏱️"),
+                        callback_data=(
+                            f"sec_warn_penalty_duration:{chat_id}"))],
                     [InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=f"{CB.GRP_SET}:{chat_id}")],
                 ])
-                await safe_edit(query,
-                    await _trans('warnings_management', lang, "⚠️"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'warnings_management', lang, "⚠️"),
                     reply_markup=kb, bot=context.bot)
                 return
 
@@ -3619,14 +4295,20 @@ class CallbackHandlers:
 
             if action == "warn_penalty_duration":
                 await CallbackHandlers._show_penalty_durations(
-                    update, context, query, chat_id, lang, 'warn_penalty')
+                    update, context, query, chat_id, lang,
+                    'warn_penalty')
                 return
 
             if action == "warn_toggle":
-                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-                new_val = 1 - _coerce_int(settings.get('warn_enabled', 0))
-                await DB.update_security_settings(chat_id, warn_enabled=new_val)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                settings = (
+                    await CallbackHandlers.
+                    _get_security_settings_cached(chat_id))
+                new_val = 1 - _coerce_int(
+                    settings.get('warn_enabled', 0))
+                await DB.update_security_settings(
+                    chat_id, warn_enabled=new_val)
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._refresh_security_view(
                     query, context, chat_id, lang)
                 return
@@ -3645,28 +4327,39 @@ class CallbackHandlers:
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('ban_btn', lang, "🚫"),
-                        callback_data=f"sec_set_del_penalty:ban:{chat_id}"),
+                        callback_data=(
+                            f"sec_set_del_penalty:ban:{chat_id}")),
                      InlineKeyboardButton(
                         await _trans('mute_btn', lang, "🔇"),
-                        callback_data=f"sec_set_del_penalty:mute:{chat_id}")],
+                        callback_data=(
+                            f"sec_set_del_penalty:mute:{chat_id}"))],
                     [InlineKeyboardButton(
                         await _trans('kick_btn', lang, "👢"),
-                        callback_data=f"sec_set_del_penalty:kick:{chat_id}"),
+                        callback_data=(
+                            f"sec_set_del_penalty:kick:{chat_id}")),
                      InlineKeyboardButton(
                         await _trans('restrict_btn', lang, "🔒"),
-                        callback_data=f"sec_set_del_penalty:restrict:{chat_id}")],
+                        callback_data=(
+                            f"sec_set_del_penalty:restrict:"
+                            f"{chat_id}"))],
                     [InlineKeyboardButton(
                         await _trans('no_penalty_btn', lang, "🚫"),
-                        callback_data=f"sec_set_del_penalty:none:{chat_id}")],
+                        callback_data=(
+                            f"sec_set_del_penalty:none:{chat_id}"))],
                     [InlineKeyboardButton(
-                        await _trans('penalty_duration_btn', lang, "⏱️"),
-                        callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
+                        await _trans(
+                            'penalty_duration_btn', lang, "⏱️"),
+                        callback_data=(
+                            f"sec_set_del_penalty_duration:"
+                            f"{chat_id}"))],
                     [InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=f"{CB.GRP_SET}:{chat_id}")],
                 ])
-                await safe_edit(query,
-                    await _trans('choose_delete_penalty', lang, "🚫"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'choose_delete_penalty', lang, "🚫"),
                     reply_markup=kb, bot=context.bot)
                 return
 
@@ -3676,10 +4369,15 @@ class CallbackHandlers:
                 return
 
             if action == "toggle_banned_words":
-                settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-                new_val = 1 - _coerce_int(settings.get('delete_banned_words', 0))
-                await DB.update_security_settings(chat_id, delete_banned_words=new_val)
-                await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                settings = (
+                    await CallbackHandlers.
+                    _get_security_settings_cached(chat_id))
+                new_val = 1 - _coerce_int(
+                    settings.get('delete_banned_words', 0))
+                await DB.update_security_settings(
+                    chat_id, delete_banned_words=new_val)
+                await CallbackHandlers.\
+                    _invalidate_security_settings_cache(chat_id)
                 await CallbackHandlers._show_banned_words_menu(
                     update, context, query, chat_id, lang)
                 return
@@ -3707,92 +4405,123 @@ class CallbackHandlers:
                 return
 
             if action == "slow_mode_seconds":
-                StateManager.set(user_id, UserState.WAIT_SLOW_MODE_SECONDS)
+                StateManager.set(
+                    user_id, UserState.WAIT_SLOW_MODE_SECONDS)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_slow_mode_seconds', lang, "⏱️"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'send_slow_mode_seconds', lang, "⏱️"),
                     bot=context.bot)
                 return
 
             if action == "welcome_text":
-                StateManager.set(user_id, UserState.WAIT_WELCOME_TEXT)
+                StateManager.set(
+                    user_id, UserState.WAIT_WELCOME_TEXT)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_welcome_text', lang, "📝"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_welcome_text', lang, "📝"),
+                    bot=context.bot)
                 return
 
             if action == "goodbye_text":
-                StateManager.set(user_id, UserState.WAIT_GOODBYE_TEXT)
+                StateManager.set(
+                    user_id, UserState.WAIT_GOODBYE_TEXT)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_goodbye_text', lang, "📝"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_goodbye_text', lang, "📝"),
+                    bot=context.bot)
                 return
 
             if action == "set_antiflood_messages":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
+                StateManager.set(
+                    user_id, UserState.WAIT_ANTIFLOOD_MESSAGES)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_antiflood_messages', lang, "📊"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'send_antiflood_messages', lang, "📊"),
                     bot=context.bot)
                 return
 
             if action == "set_antiflood_seconds":
-                StateManager.set(user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
+                StateManager.set(
+                    user_id, UserState.WAIT_ANTIFLOOD_SECONDS)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_antiflood_seconds', lang, "⏱️"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'send_antiflood_seconds', lang, "⏱️"),
                     bot=context.bot)
                 return
 
             if action == "antiflood_penalty":
                 await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang, 'antiflood_penalty')
+                    update, context, query, chat_id, lang,
+                    'antiflood_penalty')
                 return
 
             if action == "set_night_start":
-                StateManager.set(user_id, UserState.WAIT_NIGHT_START)
+                StateManager.set(
+                    user_id, UserState.WAIT_NIGHT_START)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_night_start', lang, "🌙"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_night_start', lang, "🌙"),
+                    bot=context.bot)
                 return
 
             if action == "set_night_end":
-                StateManager.set(user_id, UserState.WAIT_NIGHT_END)
+                StateManager.set(
+                    user_id, UserState.WAIT_NIGHT_END)
                 _set_sec_chat(context, chat_id)
-                await safe_edit(query,
-                    await _trans('send_night_end', lang, "🌙"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_night_end', lang, "🌙"),
+                    bot=context.bot)
                 return
 
             if action == "night_action":
                 await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang, 'night_action')
+                    update, context, query, chat_id, lang,
+                    'night_action')
                 return
 
-            if action in ("violation_settings", "violation_penalties"):
+            if action in ("violation_settings",
+                          "violation_penalties"):
                 await CallbackHandlers._show_violation_penalties(
                     update, context, query, chat_id, lang)
                 return
 
             if action == "violation_penalty":
                 await CallbackHandlers._show_penalty_type_selection(
-                    update, context, query, chat_id, lang, 'violation_penalty')
+                    update, context, query, chat_id, lang,
+                    'violation_penalty')
                 return
 
             logger.debug(f"⚠️ unknown sec action: {action}")
-            await safe_edit(query,
-                await _trans('not_available', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('not_available', lang, "⚠️"),
+                bot=context.bot)
 
         except Exception as e:
             logger.error(f"security error: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # قناة السجل
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _show_log_channel_menu(query, context, chat_id, user_id, lang):
+    async def _show_log_channel_menu(
+        query, context, chat_id, user_id, lang
+    ):
         data = await _get_log_channel_menu_data(chat_id)
         current = data.get('current')
         effective = data.get('effective')
@@ -3801,53 +4530,78 @@ class CallbackHandlers:
 
         if current:
             if share_count == 0:
-                status_block = (f"✅ <b>Private</b>\n"
-                                f"🆔 <code>{current}</code>")
+                status_block = (
+                    f"✅ <b>Private</b>\n"
+                    f"🆔 <code>{current}</code>")
             else:
-                others_text = "، ".join(_html.escape(str(n)) for n in share_names)
+                others_text = "، ".join(
+                    _html.escape(str(n)) for n in share_names)
                 if share_count > 3:
                     others_text += f" +{share_count - 3}"
-                status_block = (f"🤝 <b>Shared</b>\n"
-                                f"🆔 <code>{current}</code>\n"
-                                f"👥 {share_count + 1}\n"
-                                f"📋 {others_text}")
+                status_block = (
+                    f"🤝 <b>Shared</b>\n"
+                    f"🆔 <code>{current}</code>\n"
+                    f"👥 {share_count + 1}\n"
+                    f"📋 {others_text}")
         elif effective:
-            status_block = (f"🌐 <b>Global</b>\n"
-                            f"🆔 <code>{effective}</code>")
+            status_block = (
+                f"🌐 <b>Global</b>\n"
+                f"🆔 <code>{effective}</code>")
         else:
             status_block = "❌"
 
-        help_text = KeyboardFactory.get_text("log_channel_help", lang) or ""
-        title = await _trans('log_channel_btn', lang, "📢 Log channel")
+        help_text = (
+            KeyboardFactory.get_text("log_channel_help", lang) or "")
+        title = await _trans(
+            'log_channel_btn', lang, "📢 Log channel")
         text = (f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{status_block}\n\n<i>{_html.escape(help_text)}</i>\n\n"
+                f"{status_block}\n\n"
+                f"<i>{_html.escape(help_text)}</i>\n\n"
                 f"🆔 <code>{chat_id}</code>")
 
         if current:
-            set_text = KeyboardFactory.get_text("log_channel_change", lang) or "🔄 Change channel"
+            set_text = (
+                KeyboardFactory.get_text(
+                    "log_channel_change", lang)
+                or "🔄 Change channel")
         else:
-            set_text = KeyboardFactory.get_text("log_channel_set", lang) or "🔗 Set log"
-        test_text = KeyboardFactory.get_text("log_channel_test", lang) or "🧪 Test"
-        remove_text = KeyboardFactory.get_text("log_channel_remove", lang) or "🗑️ Remove log"
+            set_text = (
+                KeyboardFactory.get_text(
+                    "log_channel_set", lang)
+                or "🔗 Set log")
+        test_text = (
+            KeyboardFactory.get_text("log_channel_test", lang)
+            or "🧪 Test")
+        remove_text = (
+            KeyboardFactory.get_text(
+                "log_channel_remove", lang)
+            or "🗑️ Remove log")
         back_text = KeyboardFactory.get_text("back", lang) or "🔙 Back"
 
         rows = [[InlineKeyboardButton(
-            set_text, callback_data=f"log_channel_set:{chat_id}")]]
+            set_text,
+            callback_data=f"log_channel_set:{chat_id}")]]
         if current:
             rows.append([
-                InlineKeyboardButton(test_text,
-                                     callback_data=f"log_channel_test:{chat_id}"),
-                InlineKeyboardButton(remove_text,
-                                     callback_data=f"log_channel_remove:{chat_id}"),
+                InlineKeyboardButton(
+                    test_text,
+                    callback_data=f"log_channel_test:{chat_id}"),
+                InlineKeyboardButton(
+                    remove_text,
+                    callback_data=f"log_channel_remove:{chat_id}"),
             ])
         rows.append([InlineKeyboardButton(
             back_text, callback_data=f"{CB.GRP_SET}:{chat_id}")])
 
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(rows),
-                        parse_mode='HTML', bot=context.bot)
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(rows),
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
-    async def _handle_log_channel(update, context, query, user_id, lang):
+    async def _handle_log_channel(
+        update, context, query, user_id, lang
+    ):
         data = query.data or ""
         parts = data.split(":")
 
@@ -3864,13 +4618,17 @@ class CallbackHandlers:
                     chat_id = None
 
         if chat_id is None:
-            await safe_edit(query,
-                await _trans('group_not_specified', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('group_not_specified', lang, "❌"),
+                bot=context.bot)
             return
 
         if not await _check_sec_auth(context, user_id, chat_id):
-            await safe_edit(query,
-                await _trans('no_permission', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('no_permission', lang, "❌"),
+                bot=context.bot)
             return
 
         if parts[0] == "log_channel_btn":
@@ -3889,8 +4647,10 @@ class CallbackHandlers:
             if action == "set":
                 StateManager.set(user_id, UserState.WAIT_LOG_CH)
                 context.user_data['log_group_id'] = chat_id
-                await safe_edit(query,
-                    await _trans('log_channel_set', lang, "🔗 Set log"),
+                await safe_edit(
+                    query,
+                    await _trans(
+                        'log_channel_set', lang, "🔗 Set log"),
                     parse_mode='HTML', bot=context.bot)
                 return
 
@@ -3899,8 +4659,9 @@ class CallbackHandlers:
                 share_info = ""
                 if current:
                     try:
-                        others = await DB.get_groups_sharing_log_channel(
-                            current, exclude_group_id=chat_id)
+                        others = (
+                            await DB.get_groups_sharing_log_channel(
+                                current, exclude_group_id=chat_id))
                         share_count = len(others) if others else 0
                         if share_count > 0:
                             share_info = f"\n\n⚠️ {share_count}"
@@ -3909,17 +4670,26 @@ class CallbackHandlers:
                 ok = await DB.remove_group_log_channel(chat_id)
                 await _invalidate_log_channel_menu_cache(chat_id)
                 if not ok:
-                    await safe_edit(query,
-                        await _trans('delete_failed', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('delete_failed', lang, "❌"),
+                        bot=context.bot)
                     return
-                back_text = KeyboardFactory.get_text("back", lang) or "🔙 Back"
-                msg = await _trans('log_channel_removed', lang, "🗑️ Log channel removed")
+                back_text = (
+                    KeyboardFactory.get_text("back", lang)
+                    or "🔙 Back")
+                msg = await _trans(
+                    'log_channel_removed', lang,
+                    "🗑️ Log channel removed")
                 await safe_edit(
                     query,
-                    f"{msg}\n\n🆔 <code>{chat_id}</code>{share_info}",
+                    f"{msg}\n\n🆔 <code>{chat_id}</code>"
+                    f"{share_info}",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(back_text,
-                                             callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
+                        InlineKeyboardButton(
+                            back_text,
+                            callback_data=(
+                                f"{CB.GRP_SET}:{chat_id}"))]]),
                     parse_mode='HTML', bot=context.bot)
                 return
 
@@ -3928,12 +4698,17 @@ class CallbackHandlers:
                 if not current:
                     current = await DB.get_log_channel()
                 if not current:
-                    await safe_edit(query,
-                        await _trans('log_channel_none', lang, "❌ No log channel"),
+                    await safe_edit(
+                        query,
+                        await _trans(
+                            'log_channel_none', lang,
+                            "❌ No log channel"),
                         bot=context.bot)
                     return
                 try:
-                    test_msg = await _trans('log_channel_test', lang, "🧪 Test — Log channel works!")
+                    test_msg = await _trans(
+                        'log_channel_test', lang,
+                        "🧪 Test — Log channel works!")
                     await safe_send(
                         context.bot, current,
                         f"{test_msg}\n"
@@ -3941,33 +4716,45 @@ class CallbackHandlers:
                         f"🕐 {TimeUtils.mecca_iso()}",
                         parse_mode='HTML')
                     await _invalidate_log_channel_menu_cache(chat_id)
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         f"✅ <code>{current}</code>",
                         parse_mode='HTML', bot=context.bot)
                 except Exception as e:
                     logger.error(f"test log: {e}", exc_info=True)
-                    await safe_edit(query, f"❌ {str(e)[:100]}", bot=context.bot)
+                    await safe_edit(
+                        query, f"❌ {str(e)[:100]}",
+                        bot=context.bot)
                 return
 
-            await safe_edit(query,
-                await _trans('unknown_action', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('unknown_action', lang, "⚠️"),
+                bot=context.bot)
 
         except Exception as e:
-            logger.error(f"_handle_log_channel: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"_handle_log_channel: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # دوال عرض الأمان
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _show_warn_count_buttons(update, context, query, chat_id, lang):
-        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
+    async def _show_warn_count_buttons(
+        update, context, query, chat_id, lang
+    ):
+        settings = await CallbackHandlers._get_security_settings_cached(
+            chat_id)
         current = _coerce_int(settings.get('max_warnings'), 3)
         title = await _trans('warn_count_title', lang, "🔢")
-        current_label = _fmt(await _trans('warn_count_current', lang, "{count}"),
-                             count=current)
+        current_label = _fmt(
+            await _trans('warn_count_current', lang, "{count}"),
+            count=current)
         choose = await _trans('warn_count_choose', lang, "")
         text = f"{title}\n\n{current_label}\n\n{choose}"
         counts = [1, 2, 3, 4, 5, 10]
@@ -3976,7 +4763,8 @@ class CallbackHandlers:
         for n in counts:
             icon = "✅" if n == current else ""
             row.append(InlineKeyboardButton(
-                f"{icon} {n}", callback_data=f"set_warn_count:{chat_id}:{n}"))
+                f"{icon} {n}",
+                callback_data=f"set_warn_count:{chat_id}:{n}"))
             if len(row) == 3:
                 kb.append(row)
                 row = []
@@ -3985,11 +4773,15 @@ class CallbackHandlers:
         kb.append([InlineKeyboardButton(
             KeyboardFactory.get_text("back", lang),
             callback_data=f"sec_warn:{chat_id}")])
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-                        parse_mode='HTML', bot=context.bot)
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
-    async def _show_warn_penalty_types(update, context, query, chat_id, lang):
+    async def _show_warn_penalty_types(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('ban_btn', lang, "🚫"),
@@ -4007,14 +4799,19 @@ class CallbackHandlers:
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('choose_warn_penalty', lang, "⚖️"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_banned_words_menu(update, context, query, chat_id, lang):
-        settings = await CallbackHandlers._get_security_settings_cached(chat_id)
-        is_enabled = _coerce_int(settings.get('delete_banned_words'), 0)
+    async def _show_banned_words_menu(
+        update, context, query, chat_id, lang
+    ):
+        settings = await CallbackHandlers._get_security_settings_cached(
+            chat_id)
+        is_enabled = _coerce_int(
+            settings.get('delete_banned_words'), 0)
 
         if is_enabled:
             toggle_text = await _trans(
@@ -4044,13 +4841,15 @@ class CallbackHandlers:
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('manage_banned_words', lang, "🚫"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_penalty_type_selection(update, context, query, chat_id,
-                                            lang, setting_key):
+    async def _show_penalty_type_selection(
+        update, context, query, chat_id, lang, setting_key
+    ):
         penalty_types = [
             (await _trans('mute_btn', lang, "🔇"), "mute"),
             (await _trans('ban_btn', lang, "🚫"), "ban"),
@@ -4061,16 +4860,21 @@ class CallbackHandlers:
         kb = []
         for label, ptype in penalty_types:
             callback = f"sec_set_{setting_key}:{chat_id}:{ptype}"
-            kb.append([InlineKeyboardButton(label, callback_data=callback)])
+            kb.append([InlineKeyboardButton(
+                label, callback_data=callback)])
         kb.append([InlineKeyboardButton(
             KeyboardFactory.get_text("back", lang),
             callback_data=f"{CB.GRP_SET}:{chat_id}")])
         text = await _trans('choose_penalty_type', lang, "🚫")
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb),
-                        bot=context.bot)
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            bot=context.bot)
 
     @staticmethod
-    async def _show_all_penalty_durations_menu(query, context, chat_id, lang):
+    async def _show_all_penalty_durations_menu(
+        query, context, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('mute_duration_btn', lang, "⏱️"),
@@ -4083,7 +4887,8 @@ class CallbackHandlers:
                 callback_data=f"sec_set_restrict_duration:{chat_id}"),
              InlineKeyboardButton(
                 await _trans('warn_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_warn_penalty_duration:{chat_id}")],
+                callback_data=(
+                    f"sec_warn_penalty_duration:{chat_id}"))],
             [InlineKeyboardButton(
                 await _trans('flood_duration_btn', lang, "⏱️"),
                 callback_data=f"sec_antiflood_duration:{chat_id}"),
@@ -4091,25 +4896,30 @@ class CallbackHandlers:
                 await _trans('night_duration_btn', lang, "⏱️"),
                 callback_data=f"sec_night_duration:{chat_id}")],
             [InlineKeyboardButton(
-                await _trans('delete_penalty_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_set_del_penalty_duration:{chat_id}")],
+                await _trans(
+                    'delete_penalty_duration_btn', lang, "⏱️"),
+                callback_data=(
+                    f"sec_set_del_penalty_duration:{chat_id}"))],
             [InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('penalty_durations_title', lang, "⏱️"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_penalty_durations(update, context, query, chat_id,
-                                       lang, penalty_type='mute'):
+    async def _show_penalty_durations(
+        update, context, query, chat_id, lang, penalty_type='mute'
+    ):
         if penalty_type == 'kick':
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=f"{CB.GRP_SET}:{chat_id}")]])
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('kick_no_duration', lang, "✅"),
                 reply_markup=kb, bot=context.bot)
             return
@@ -4127,69 +4937,97 @@ class CallbackHandlers:
             row = []
             name, secs = durations[i]
             row.append(InlineKeyboardButton(
-                name, callback_data=f"set_duration:{penalty_type}:{chat_id}:{secs}"))
+                name,
+                callback_data=(
+                    f"set_duration:{penalty_type}:"
+                    f"{chat_id}:{secs}")))
             if i + 1 < len(durations):
                 name2, secs2 = durations[i + 1]
                 row.append(InlineKeyboardButton(
                     name2,
-                    callback_data=f"set_duration:{penalty_type}:{chat_id}:{secs2}"))
+                    callback_data=(
+                        f"set_duration:{penalty_type}:"
+                        f"{chat_id}:{secs2}")))
             kb.append(row)
         kb.append([InlineKeyboardButton(
             KeyboardFactory.get_text("back", lang),
             callback_data=f"{CB.GRP_SET}:{chat_id}")])
         type_key = f"duration_type_{penalty_type}"
         type_name = await _trans(type_key, lang, penalty_type)
-        msg = _fmt(await _trans('choose_duration_for', lang,
-                                "⏱️ Choose {type_name} duration:"),
-                   type_name=type_name)
-        await safe_edit(query, msg, reply_markup=InlineKeyboardMarkup(kb),
-                        bot=context.bot)
+        msg = _fmt(
+            await _trans('choose_duration_for', lang,
+                         "⏱️ Choose {type_name} duration:"),
+            type_name=type_name)
+        await safe_edit(
+            query, msg,
+            reply_markup=InlineKeyboardMarkup(kb),
+            bot=context.bot)
 
     @staticmethod
-    async def _show_violation_penalties(update, context, query, chat_id, lang):
+    async def _show_violation_penalties(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                await _trans('violation_strikes_btn', lang, "🔢"),
-                callback_data=f"sec_set_violation_strikes:{chat_id}"),
+                await _trans(
+                    'violation_strikes_btn', lang, "🔢"),
+                callback_data=(
+                    f"sec_set_violation_strikes:{chat_id}")),
              InlineKeyboardButton(
-                await _trans('violation_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_set_violation_duration:{chat_id}")],
+                await _trans(
+                    'violation_duration_btn', lang, "⏱️"),
+                callback_data=(
+                    f"sec_set_violation_duration:{chat_id}"))],
             [InlineKeyboardButton(
-                await _trans('violation_penalty_btn', lang, "⚖️"),
-                callback_data=f"sec_violation_penalty:{chat_id}")],
+                await _trans(
+                    'violation_penalty_btn', lang, "⚖️"),
+                callback_data=(
+                    f"sec_violation_penalty:{chat_id}"))],
             [InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('violation_settings_title', lang, "🚨"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_antiflood_settings(update, context, query, chat_id, lang):
+    async def _show_antiflood_settings(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('messages_count_btn', lang, "🔢"),
-                callback_data=f"sec_set_antiflood_messages:{chat_id}"),
+                callback_data=(
+                    f"sec_set_antiflood_messages:{chat_id}")),
              InlineKeyboardButton(
                 await _trans('seconds_btn', lang, "⏱️"),
-                callback_data=f"sec_set_antiflood_seconds:{chat_id}")],
+                callback_data=(
+                    f"sec_set_antiflood_seconds:{chat_id}"))],
             [InlineKeyboardButton(
-                await _trans('penalty_type_btn', lang, "Penalty type"),
-                callback_data=f"sec_antiflood_penalty:{chat_id}"),
+                await _trans(
+                    'penalty_type_btn', lang, "Penalty type"),
+                callback_data=(
+                    f"sec_antiflood_penalty:{chat_id}")),
              InlineKeyboardButton(
-                await _trans('penalty_duration_btn', lang, "⏱️"),
-                callback_data=f"sec_antiflood_duration:{chat_id}")],
+                await _trans(
+                    'penalty_duration_btn', lang, "⏱️"),
+                callback_data=(
+                    f"sec_antiflood_duration:{chat_id}"))],
             [InlineKeyboardButton(
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('antiflood_settings_title', lang, "🌊"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_night_settings(update, context, query, chat_id, lang):
+    async def _show_night_settings(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('start_time_btn', lang, "🌙"),
@@ -4207,12 +5045,15 @@ class CallbackHandlers:
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('night_mode_settings', lang, "🌙"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_advanced_actions(update, context, query, chat_id, lang):
+    async def _show_advanced_actions(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('deactivate_all_btn', lang, "🔴"),
@@ -4248,30 +5089,39 @@ class CallbackHandlers:
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('advanced_actions_title', lang, "🛠️"),
             reply_markup=kb, bot=context.bot)
 
     @staticmethod
-    async def _show_admin_logs(update, context, query, chat_id, lang):
+    async def _show_admin_logs(
+        update, context, query, chat_id, lang
+    ):
         logs = await DB.get_admin_logs(chat_id, 10)
         if logs:
             lines = []
             for l in logs:
                 ld = _row_to_dict(l) or {}
-                lines.append(f"• {_safe_str(ld.get('admin_id'))} → "
-                             f"{_safe_str(ld.get('action'))}")
-            text = await _trans('admin_logs_title', lang, "📋") + "\n\n" + "\n".join(lines)
+                lines.append(
+                    f"• {_safe_str(ld.get('admin_id'))} → "
+                    f"{_safe_str(ld.get('action'))}")
+            text = (await _trans('admin_logs_title', lang, "📋")
+                    + "\n\n" + "\n".join(lines))
         else:
             text = await _trans('no_data', lang, "📭")
-        await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang),
-                callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
+        await safe_edit(
+            query, text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=f"{CB.GRP_SET}:{chat_id}")]]),
             bot=context.bot)
 
     @staticmethod
-    async def _show_penalty_types(update, context, query, chat_id, lang):
+    async def _show_penalty_types(
+        update, context, query, chat_id, lang
+    ):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 await _trans('ban_btn', lang, "🚫"),
@@ -4292,7 +5142,8 @@ class CallbackHandlers:
                 KeyboardFactory.get_text("back", lang),
                 callback_data=f"{CB.GRP_SET}:{chat_id}")],
         ])
-        await safe_edit(query,
+        await safe_edit(
+            query,
             await _trans('choose_penalty_type', lang, "🚫"),
             reply_markup=kb, bot=context.bot)
 
@@ -4301,9 +5152,12 @@ class CallbackHandlers:
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _handle_admin(update, context, query, user_id, lang=None):
+    async def _handle_admin(
+        update, context, query, user_id, lang=None
+    ):
         if not CONFIG.is_developer(user_id):
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('unauthorized', lang or 'ar', "❌"),
                 bot=context.bot)
             return
@@ -4319,7 +5173,8 @@ class CallbackHandlers:
 
             if data == "admin_change_update_ch":
                 StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_update_ch_prompt', lang,
                                  "📢 أرسل معرف قناة التحديثات:"),
                     bot=context.bot)
@@ -4333,37 +5188,48 @@ class CallbackHandlers:
                     ok = False
 
                 if ok:
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('update_channel_removed', lang,
                                      "🗑️ تم حذف قناة التحديثات"),
                         bot=context.bot)
                 else:
-                    await safe_edit(query,
-                        await _trans('save_failed', lang, "❌ فشل الحذف"),
+                    await safe_edit(
+                        query,
+                        await _trans('save_failed', lang,
+                                     "❌ فشل الحذف"),
                         bot=context.bot)
                 return
 
             if data == "admin_grant_free":
                 StateManager.set(user_id, UserState.WAIT_GRANT_FREE)
-                await safe_edit(query,
-                    await _trans('grant_usage', lang, "🎁"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('grant_usage', lang, "🎁"),
+                    bot=context.bot)
                 return
 
             if data == "admin_ban_user":
                 StateManager.set(user_id, UserState.WAIT_BAN_USER_ID)
-                await safe_edit(query,
-                    await _trans('ban_user_title', lang, "🚫") + "\n\n" +
-                    await _trans('ban_user_prompt', lang, "") + "\n" +
-                    await _trans('ban_user_example', lang, ""),
+                await safe_edit(
+                    query,
+                    await _trans('ban_user_title', lang, "🚫")
+                    + "\n\n"
+                    + await _trans('ban_user_prompt', lang, "")
+                    + "\n"
+                    + await _trans('ban_user_example', lang, ""),
                     bot=context.bot)
                 return
 
             if data == "admin_unban_user":
                 StateManager.set(user_id, UserState.WAIT_UNBAN_USER_ID)
-                await safe_edit(query,
-                    await _trans('unban_user_title', lang, "✅") + "\n\n" +
-                    await _trans('unban_user_prompt', lang, "") + "\n" +
-                    await _trans('unban_user_example', lang, ""),
+                await safe_edit(
+                    query,
+                    await _trans('unban_user_title', lang, "✅")
+                    + "\n\n"
+                    + await _trans('unban_user_prompt', lang, "")
+                    + "\n"
+                    + await _trans('unban_user_example', lang, ""),
                     bot=context.bot)
                 return
 
@@ -4374,11 +5240,17 @@ class CallbackHandlers:
                         stats = _row_to_dict(stats) or {}
                 except Exception:
                     stats = {}
-                text = (await _trans('users_title', lang, "👥") + "\n\n"
-                        + _fmt(await _trans('users_total', lang, "👥 {count}"),
-                               count=stats.get('users', 0)) + "\n"
-                        + _fmt(await _trans('users_banned', lang, "⛔ {count}"),
-                               count=stats.get('banned', 0)))
+                text = (await _trans('users_title', lang, "👥")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('users_total', lang,
+                                         "👥 {count}"),
+                            count=stats.get('users', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('users_banned', lang,
+                                         "⛔ {count}"),
+                            count=stats.get('banned', 0)))
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('banned_users_btn', lang, "⛔"),
@@ -4387,19 +5259,27 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_BANNED:
                 banned_users = await DB.fetchall(
-                    "SELECT user_id FROM users WHERE banned=1 LIMIT 20")
+                    "SELECT user_id FROM users "
+                    "WHERE banned=1 LIMIT 20")
                 if banned_users:
-                    text = (await _trans('banned_users_title', lang, "⛔") + "\n\n"
+                    text = (await _trans('banned_users_title',
+                                         lang, "⛔")
+                            + "\n\n"
                             + "\n".join(
-                                _safe_str((_row_to_dict(u) or {}).get('user_id'))
+                                _safe_str(
+                                    (_row_to_dict(u) or {}).get(
+                                        'user_id'))
                                 for u in banned_users))
                 else:
-                    text = await _trans('no_banned_users', lang, "📭")
+                    text = await _trans(
+                        'no_banned_users', lang, "📭")
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('unban_all_btn', lang, "✅"),
@@ -4408,13 +5288,18 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_UNBAN_ALL:
-                await DB.execute("UPDATE users SET banned=0 WHERE banned=1")
-                await safe_edit(query,
-                    await _trans('unban_all_success', lang, "✅"), bot=context.bot)
+                await DB.execute(
+                    "UPDATE users SET banned=0 WHERE banned=1")
+                await safe_edit(
+                    query,
+                    await _trans('unban_all_success', lang, "✅"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_STATS:
@@ -4424,26 +5309,50 @@ class CallbackHandlers:
                         stats = _row_to_dict(stats) or {}
                 except Exception:
                     stats = {}
-                text = (await _trans('general_stats_title', lang, "📊") + "\n\n"
-                        + _fmt(await _trans('stats_users', lang, "👥 {count}"),
-                               count=stats.get('users', 0)) + "\n"
-                        + _fmt(await _trans('stats_channels', lang, "📡 {count}"),
-                               count=stats.get('channels', 0)) + "\n"
-                        + _fmt(await _trans('stats_groups', lang, "👥 {count}"),
-                               count=stats.get('groups', 0)) + "\n"
-                        + _fmt(await _trans('stats_posts', lang, "📝 {count}"),
-                               count=stats.get('posts', 0)) + "\n"
-                        + _fmt(await _trans('stats_published', lang, "✅ {count}"),
-                               count=stats.get('published', 0)) + "\n"
-                        + _fmt(await _trans('stats_invoices', lang, "🧾 {count}"),
-                               count=stats.get('invoices', 0)) + "\n"
-                        + _fmt(await _trans('stats_tickets', lang, "🎫 {count}"),
-                               count=stats.get('tickets', 0)))
+                text = (await _trans('general_stats_title',
+                                     lang, "📊")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('stats_users', lang,
+                                         "👥 {count}"),
+                            count=stats.get('users', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_channels', lang,
+                                         "📡 {count}"),
+                            count=stats.get('channels', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_groups', lang,
+                                         "👥 {count}"),
+                            count=stats.get('groups', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_posts', lang,
+                                         "📝 {count}"),
+                            count=stats.get('posts', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_published', lang,
+                                         "✅ {count}"),
+                            count=stats.get('published', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_invoices', lang,
+                                         "🧾 {count}"),
+                            count=stats.get('invoices', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_tickets', lang,
+                                         "🎫 {count}"),
+                            count=stats.get('tickets', 0)))
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)]])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_CHANNELS:
@@ -4455,12 +5364,14 @@ class CallbackHandlers:
             if data.startswith("admin_toggle_ch:"):
                 ch_db_id = _coerce_int(data.split(":")[-1])
                 if ch_db_id <= 0:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
                     return
                 await DB.execute(
-                    "UPDATE user_channels SET banned = 1 - banned WHERE id=?",
-                    (ch_db_id,))
+                    "UPDATE user_channels SET banned = 1 - banned "
+                    "WHERE id=?", (ch_db_id,))
                 await CallbackHandlers._show_admin_channels(
                     update, context, query, user_id, lang)
                 return
@@ -4474,11 +5385,14 @@ class CallbackHandlers:
             if data.startswith("admin_toggle_gr:"):
                 chat_id = _coerce_int(data.split(":")[-1])
                 if chat_id == 0:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
                     return
                 row = await DB.fetchone(
-                    "SELECT banned FROM bot_groups WHERE chat_id=?", (chat_id,))
+                    "SELECT banned FROM bot_groups WHERE chat_id=?",
+                    (chat_id,))
                 row_d = _row_to_dict(row) or {}
                 if row_d:
                     new_val = 0 if row_d.get('banned') else 1
@@ -4488,7 +5402,8 @@ class CallbackHandlers:
                         except Exception:
                             pass
                     await DB.execute(
-                        "UPDATE bot_groups SET banned=? WHERE chat_id=?",
+                        "UPDATE bot_groups SET banned=? "
+                        "WHERE chat_id=?",
                         (new_val, chat_id))
                 await CallbackHandlers._show_admin_groups(
                     update, context, query, user_id, lang)
@@ -4496,20 +5411,26 @@ class CallbackHandlers:
 
             if data == CB.ADMIN_ADD_ADMIN:
                 StateManager.set(user_id, UserState.WAIT_ADMIN_ADD)
-                await safe_edit(query,
-                    await _trans('add_admin_prompt', lang, "👑"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('add_admin_prompt', lang, "👑"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_REM_ADMIN:
                 StateManager.set(user_id, UserState.WAIT_ADMIN_REM)
-                await safe_edit(query,
-                    await _trans('remove_admin_prompt', lang, "🗑️"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('remove_admin_prompt', lang, "🗑️"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_LIST_ADMINS:
                 admins = await DB.get_admin_list()
                 if admins:
-                    text = (await _trans('admins_list_title', lang, "👑") + "\n\n"
+                    text = (await _trans('admins_list_title',
+                                         lang, "👑")
+                            + "\n\n"
                             + "\n".join(
                                 f"• {_safe_str((_row_to_dict(a) or {}).get('user_id'))}"
                                 for a in admins))
@@ -4526,13 +5447,17 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_BROADCAST:
                 StateManager.set(user_id, UserState.WAIT_BROADCAST)
-                await safe_edit(query,
-                    await _trans('broadcast_prompt', lang, "📨"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('broadcast_prompt', lang, "📨"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_INVOICES:
@@ -4547,21 +5472,29 @@ class CallbackHandlers:
                             f"• {_safe_str(id_.get('number'))} - "
                             f"{_safe_str(id_.get('amount'), '0')} ⭐ - "
                             f"{_safe_str(id_.get('status'))}")
-                    text = await _trans('invoices_title', lang, "🧾") + "\n\n" + "\n".join(lines)
+                    text = (await _trans('invoices_title',
+                                         lang, "🧾")
+                            + "\n\n" + "\n".join(lines))
                 else:
-                    text = await _trans('no_invoices_admin', lang, "📭")
+                    text = await _trans(
+                        'no_invoices_admin', lang, "📭")
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)]])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_BACKUP:
-                await safe_edit(query,
-                    await _trans('backup_started', lang, "⏳"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('backup_started', lang, "⏳"),
+                    bot=context.bot)
                 task = asyncio.create_task(
-                    CallbackHandlers._do_backup(context, user_id, lang))
+                    CallbackHandlers._do_backup(
+                        context, user_id, lang))
                 ACTIVE_TASKS.add(task)
                 task.add_done_callback(ACTIVE_TASKS.discard)
                 return
@@ -4584,8 +5517,10 @@ class CallbackHandlers:
                     await safe_edit(query, "❌", bot=context.bot)
                     return
                 try:
-                    pre_restore = (PATHS.BACKUPS / f"pre_restore_"
-                                   f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')}.db")
+                    pre_restore = (
+                        PATHS.BACKUPS
+                        / f"pre_restore_"
+                          f"{TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')}.db")
                     shutil.copy2(PATHS.DB, pre_restore)
                     db_closed = False
                     try:
@@ -4598,35 +5533,50 @@ class CallbackHandlers:
                     shutil.copy2(backup_file, PATHS.DB)
                     if db_closed:
                         try:
-                            reconnect_fn = getattr(DB, 'reconnect', None)
+                            reconnect_fn = getattr(
+                                DB, 'reconnect', None)
                             if callable(reconnect_fn):
                                 await reconnect_fn()
                             else:
-                                init_fn = getattr(DB, 'initialize_db', None)
+                                init_fn = getattr(
+                                    DB, 'initialize_db', None)
                                 if callable(init_fn):
                                     await init_fn()
                                 else:
-                                    init_fn = getattr(DB, 'initialize', None)
+                                    init_fn = getattr(
+                                        DB, 'initialize', None)
                                     if callable(init_fn):
                                         await init_fn()
                         except Exception:
                             pass
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans('restore_success', lang, "✅"),
                         bot=context.bot)
                 except Exception as e:
-                    await safe_edit(query, f"❌ {str(e)[:100]}", bot=context.bot)
+                    await safe_edit(
+                        query, f"❌ {str(e)[:100]}",
+                        bot=context.bot)
                 return
 
             if data == CB.ADMIN_RAM:
                 ram = get_ram_usage() or {}
-                text = (await _trans('ram_title', lang, "🖥️") + "\n\n"
-                        + _fmt(await _trans('ram_total', lang, "💾 {value}"),
-                               value=ram.get('total', 0)) + "\n"
-                        + _fmt(await _trans('ram_used', lang, "📊 {value}"),
-                               value=ram.get('used', 0)) + "\n"
-                        + _fmt(await _trans('ram_percent', lang, "📈 {value}"),
-                               value=ram.get('percent', 0)))
+                text = (await _trans('ram_title', lang, "🖥️")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('ram_total', lang,
+                                         "💾 {value}"),
+                            value=ram.get('total', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('ram_used', lang,
+                                         "📊 {value}"),
+                            value=ram.get('used', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('ram_percent', lang,
+                                         "📈 {value}"),
+                            value=ram.get('percent', 0)))
                 await safe_edit(query, text, bot=context.bot)
                 return
 
@@ -4638,44 +5588,74 @@ class CallbackHandlers:
                 except Exception:
                     stats = {}
                 try:
-                    db_size_kb = float(stats.get('db_size_kb', 0) or 0)
+                    db_size_kb = float(
+                        stats.get('db_size_kb', 0) or 0)
                     if db_size_kb == 0:
                         db_size_kb = await DB.get_db_size_kb()
                 except Exception:
                     db_size_kb = 0.0
                 if db_size_kb >= 1024 * 1024:
-                    size_display = f"{db_size_kb / (1024 * 1024):.2f} GB"
+                    size_display = (
+                        f"{db_size_kb / (1024 * 1024):.2f} GB")
                 elif db_size_kb >= 1024:
                     size_display = f"{db_size_kb / 1024:.2f} MB"
                 else:
                     size_display = f"{db_size_kb:.1f} KB"
-                text = (await _trans('metrics_title', lang, "📊") + "\n\n"
-                        + _fmt(await _trans('stats_users', lang, "👥 {count}"),
-                               count=stats.get('users', 0)) + "\n"
-                        + _fmt(await _trans('stats_channels', lang, "📡 {count}"),
-                               count=stats.get('channels', 0)) + "\n"
-                        + _fmt(await _trans('stats_groups', lang, "👥 {count}"),
-                               count=stats.get('groups', 0)) + "\n"
-                        + _fmt(await _trans('stats_posts', lang, "📝 {count}"),
-                               count=stats.get('posts', 0)) + "\n"
-                        + _fmt(await _trans('stats_published', lang, "✅ {count}"),
-                               count=stats.get('published', 0)) + "\n"
-                        + _fmt(await _trans('stats_invoices', lang, "🧾 {count}"),
-                               count=stats.get('invoices', 0)) + "\n"
-                        + _fmt(await _trans('stats_tickets', lang, "🎫 {count}"),
-                               count=stats.get('tickets', 0)) + "\n"
-                        + _fmt(await _trans('metrics_db_size', lang, "💾 {size}"),
-                               size=size_display))
+                text = (await _trans('metrics_title', lang, "📊")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('stats_users', lang,
+                                         "👥 {count}"),
+                            count=stats.get('users', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_channels', lang,
+                                         "📡 {count}"),
+                            count=stats.get('channels', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_groups', lang,
+                                         "👥 {count}"),
+                            count=stats.get('groups', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_posts', lang,
+                                         "📝 {count}"),
+                            count=stats.get('posts', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_published', lang,
+                                         "✅ {count}"),
+                            count=stats.get('published', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_invoices', lang,
+                                         "🧾 {count}"),
+                            count=stats.get('invoices', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('stats_tickets', lang,
+                                         "🎫 {count}"),
+                            count=stats.get('tickets', 0))
+                        + "\n"
+                        + _fmt(
+                            await _trans('metrics_db_size', lang,
+                                         "💾 {size}"),
+                            size=size_display))
                 await safe_edit(query, text, bot=context.bot)
                 return
 
             if data == CB.ADMIN_UPTIME:
-                uptime = (time.monotonic()
-                          - context.bot_data.get('start_time', time.monotonic()))
+                uptime = (
+                    time.monotonic()
+                    - context.bot_data.get(
+                        'start_time', time.monotonic()))
                 hours, remainder = divmod(uptime, 3600)
                 minutes, seconds = divmod(remainder, 60)
-                text = _fmt(await _trans('uptime_format', lang, "{h}h {m}m {s}s"),
-                            h=int(hours), m=int(minutes), s=int(seconds))
+                text = _fmt(
+                    await _trans('uptime_format', lang,
+                                 "{h}h {m}m {s}s"),
+                    h=int(hours), m=int(minutes), s=int(seconds))
                 await safe_edit(query, text, bot=context.bot)
                 return
 
@@ -4689,7 +5669,8 @@ class CallbackHandlers:
                             f"• #{_safe_str(td.get('ticket_number'))} - "
                             f"{_safe_str(td.get('user_id'))}: "
                             f"{_safe_str(td.get('message'), '')[:50]}")
-                    text = await _trans('tickets_title', lang, "🎫") + "\n\n" + "\n".join(lines)
+                    text = (await _trans('tickets_title', lang, "🎫")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_tickets', lang, "📭")
                 kb = InlineKeyboardMarkup([
@@ -4700,13 +5681,17 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_DEL_TICKETS:
                 await DB.delete_all_tickets()
-                await safe_edit(query,
-                    await _trans('tickets_deleted', lang, "✅"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('tickets_deleted', lang, "✅"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_PAYMENT_LOGS:
@@ -4721,7 +5706,9 @@ class CallbackHandlers:
                             f"• {_safe_str(ld.get('user_id'))} - "
                             f"{_safe_str(ld.get('event_type'))} "
                             f"({_safe_str(ld.get('created_at'))})")
-                    text = await _trans('payment_logs_title', lang, "💳") + "\n\n" + "\n".join(lines)
+                    text = (await _trans('payment_logs_title',
+                                         lang, "💳")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_data', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
@@ -4729,14 +5716,17 @@ class CallbackHandlers:
 
             if data == CB.ADMIN_SET_UPDATE_CH:
                 StateManager.set(user_id, UserState.WAIT_UPDATE_CH)
-                await safe_edit(query,
-                    await _trans('send_update_ch_prompt', lang, "📢"),
+                await safe_edit(
+                    query,
+                    await _trans('send_update_ch_prompt',
+                                 lang, "📢"),
                     bot=context.bot)
                 return
 
             if data == CB.ADMIN_SEND_UPDATE:
                 StateManager.set(user_id, UserState.WAIT_UPDATE)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_update_prompt', lang, "📝"),
                     bot=context.bot)
                 return
@@ -4744,16 +5734,20 @@ class CallbackHandlers:
             if data == CB.ADMIN_SHOW_UPDATE:
                 ch = await DB.get_updates_channel()
                 if ch:
-                    text = _fmt(await _trans('update_channel_set', lang, "📢 {ch}"),
-                                ch=ch)
+                    text = _fmt(
+                        await _trans('update_channel_set',
+                                     lang, "📢 {ch}"),
+                        ch=ch)
                 else:
-                    text = await _trans('update_channel_not_set', lang, "📭")
+                    text = await _trans(
+                        'update_channel_not_set', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
                 return
 
             if data == CB.ADMIN_SET_LOG_CH:
                 StateManager.set(user_id, UserState.WAIT_LOG_CH)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_log_ch_prompt', lang, "📋"),
                     bot=context.bot)
                 return
@@ -4761,29 +5755,39 @@ class CallbackHandlers:
             if data == CB.ADMIN_LOG_CH:
                 ch = await DB.get_log_channel()
                 if ch:
-                    text = _fmt(await _trans('log_channel_set_success', lang, "📋 {ch}"),
-                                ch=ch)
+                    text = _fmt(
+                        await _trans('log_channel_set_success',
+                                     lang, "📋 {ch}"),
+                        ch=ch)
                 else:
-                    text = await _trans('log_channel_not_set', lang, "📭")
+                    text = await _trans(
+                        'log_channel_not_set', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
                 return
 
             if data == CB.ADMIN_FORCE_SUB:
                 sub = await DB.get_force_subscribe_channel()
-                status = (await _trans('force_sub_enabled', lang, "✅")
-                          if sub else await _trans('force_sub_disabled', lang, "❌"))
-                text = _fmt(await _trans('force_sub_status', lang, "🔒 {status}"),
-                            status=status)
+                status = (
+                    await _trans('force_sub_enabled', lang, "✅")
+                    if sub
+                    else await _trans(
+                        'force_sub_disabled', lang, "❌"))
+                text = _fmt(
+                    await _trans('force_sub_status', lang,
+                                 "🔒 {status}"),
+                    status=status)
                 if sub:
                     text += "\n" + _fmt(
-                        await _trans('force_sub_channel', lang, "Channel: {ch}"),
+                        await _trans('force_sub_channel', lang,
+                                     "Channel: {ch}"),
                         ch=sub)
                 await safe_edit(query, text, bot=context.bot)
                 return
 
             if data == CB.ADMIN_SET_FORCE:
                 StateManager.set(user_id, UserState.WAIT_FORCE)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_force_ch_prompt', lang, "🔒"),
                     bot=context.bot)
                 return
@@ -4796,15 +5800,19 @@ class CallbackHandlers:
                     _invalidate_force_sub_cache()
                 except Exception:
                     pass
-                await safe_edit(query,
-                    await _trans('force_disabled_success', lang, "✅"),
+                await safe_edit(
+                    query,
+                    await _trans('force_disabled_success',
+                                 lang, "✅"),
                     bot=context.bot)
                 return
 
             if data == "admin_upload_backup":
                 StateManager.set(user_id, UserState.WAIT_BACKUP_FILE)
-                await safe_edit(query,
-                    await _trans('upload_backup_prompt', lang, "📤"),
+                await safe_edit(
+                    query,
+                    await _trans('upload_backup_prompt',
+                                 lang, "📤"),
                     bot=context.bot)
                 return
 
@@ -4824,22 +5832,32 @@ class CallbackHandlers:
                 except Exception:
                     pass
                 try:
+                    await _post_count_cache.clear()
+                except Exception:
+                    pass
+                try:
                     await settings_cache.invalidate_security()
                 except Exception as e:
-                    logger.debug(f"refresh settings_cache.invalidate_security: {e}")
+                    logger.debug(
+                        f"refresh settings_cache."
+                        f"invalidate_security: {e}")
                 try:
                     await settings_cache.invalidate_auto_reply()
                 except Exception as e:
-                    logger.debug(f"refresh settings_cache.invalidate_auto_reply: {e}")
-                await safe_edit(query,
-                    await _trans('cache_refreshed_admin', lang, "🔄"),
+                    logger.debug(
+                        f"refresh settings_cache."
+                        f"invalidate_auto_reply: {e}")
+                await safe_edit(
+                    query,
+                    await _trans('cache_refreshed_admin',
+                                 lang, "🔄"),
                     bot=context.bot)
                 return
 
             if data == CB.ADMIN_BANNED_CH:
                 banned_channels = await DB.fetchall(
-                    "SELECT channel_id, channel_name FROM user_channels "
-                    "WHERE banned=1 LIMIT 20")
+                    "SELECT channel_id, channel_name "
+                    "FROM user_channels WHERE banned=1 LIMIT 20")
                 if banned_channels:
                     lines = []
                     for c in banned_channels:
@@ -4847,7 +5865,9 @@ class CallbackHandlers:
                         lines.append(
                             f"• {_safe_str(cd.get('channel_name'))} "
                             f"({_safe_str(cd.get('channel_id'))})")
-                    text = await _trans('banned_channels_title', lang, "🚫") + "\n\n" + "\n".join(lines)
+                    text = (await _trans(
+                        'banned_channels_title', lang, "🚫")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_data', lang, "📭")
                 kb = InlineKeyboardMarkup([
@@ -4858,13 +5878,17 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_ACTIVATE_CH:
                 await DB.execute(
-                    "UPDATE user_channels SET banned=0 WHERE banned=1")
-                await safe_edit(query,
+                    "UPDATE user_channels SET banned=0 "
+                    "WHERE banned=1")
+                await safe_edit(
+                    query,
                     await _trans('channels_activated', lang, "✅"),
                     bot=context.bot)
                 return
@@ -4880,25 +5904,32 @@ class CallbackHandlers:
                         lines.append(
                             f"• {_safe_str(gd.get('chat_name'))} "
                             f"({_safe_str(gd.get('chat_id'))})")
-                    text = await _trans('banned_groups_title', lang, "🚫") + "\n\n" + "\n".join(lines)
+                    text = (await _trans(
+                        'banned_groups_title', lang, "🚫")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_data', lang, "📭")
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        await _trans('unban_all_groups_btn', lang, "🔓"),
+                        await _trans(
+                            'unban_all_groups_btn', lang, "🔓"),
                         callback_data=CB.ADMIN_UNBAN_GR)],
                     [InlineKeyboardButton(
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_UNBAN_GR:
                 await DB.execute(
                     "UPDATE bot_groups SET banned=0 WHERE banned=1")
-                await safe_edit(query,
-                    await _trans('groups_unbanned', lang, "✅"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('groups_unbanned', lang, "✅"),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_REPLIES:
@@ -4909,8 +5940,11 @@ class CallbackHandlers:
                     lines = []
                     for r in replies:
                         rd = _row_to_dict(r) or {}
-                        lines.append(f"• {_safe_str(rd.get('keyword'))}")
-                    text = await _trans('public_replies_title', lang, "💬") + "\n\n" + "\n".join(lines)
+                        lines.append(
+                            f"• {_safe_str(rd.get('keyword'))}")
+                    text = (await _trans(
+                        'public_replies_title', lang, "💬")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_replies', lang, "📭")
                 kb = InlineKeyboardMarkup([
@@ -4930,13 +5964,16 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == "admin_add_reply":
                 StateManager.set(user_id, UserState.WAIT_KEYWORD)
                 context.user_data['auto_chat'] = -1
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_keyword_prompt', lang, "📝"),
                     bot=context.bot)
                 return
@@ -4944,8 +5981,10 @@ class CallbackHandlers:
             if data == "admin_del_reply":
                 StateManager.set(user_id, UserState.WAIT_AUTO_DEL)
                 context.user_data['auto_chat'] = -1
-                await safe_edit(query,
-                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                await safe_edit(
+                    query,
+                    await _trans('send_keyword_delete_prompt',
+                                 lang, "🗑️"),
                     bot=context.bot)
                 return
 
@@ -4957,8 +5996,11 @@ class CallbackHandlers:
                     lines = []
                     for r in replies:
                         rd = _row_to_dict(r) or {}
-                        lines.append(f"• {_safe_str(rd.get('keyword'))}")
-                    text = await _trans('public_replies_list_title', lang, "📋") + "\n\n" + "\n".join(lines)
+                        lines.append(
+                            f"• {_safe_str(rd.get('keyword'))}")
+                    text = (await _trans(
+                        'public_replies_list_title', lang, "📋")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_replies', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
@@ -4966,7 +6008,8 @@ class CallbackHandlers:
 
             if data == CB.ADMIN_EXPORT_REPLIES:
                 try:
-                    file_path = await DB.export_auto_replies_to_file()
+                    file_path = (
+                        await DB.export_auto_replies_to_file())
                 except (AttributeError, Exception):
                     file_path = None
                 if file_path:
@@ -4976,27 +6019,32 @@ class CallbackHandlers:
                                 chat_id=user_id, document=f,
                                 filename=Path(file_path).name)
                     except Exception as e:
-                        await safe_send(context.bot, user_id, f"❌ {e}")
+                        await safe_send(
+                            context.bot, user_id, f"❌ {e}")
                     finally:
                         try:
                             os.remove(file_path)
                         except OSError:
                             pass
                 else:
-                    await safe_edit(query,
-                        await _trans('no_replies', lang, "📭"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_replies', lang, "📭"),
+                        bot=context.bot)
                 return
 
             if data == CB.ADMIN_IMPORT_REPLIES:
                 StateManager.set(user_id, UserState.WAIT_IMPORT_FILE)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_json_prompt', lang, "📤"),
                     bot=context.bot)
                 return
 
             if data == CB.ADMIN_IMPORT_GITHUB:
                 StateManager.set(user_id, UserState.WAIT_GITHUB_URL)
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_url_prompt', lang, "📥"),
                     bot=context.bot)
                 return
@@ -5004,9 +6052,12 @@ class CallbackHandlers:
             if data == CB.ADMIN_BANNED_WORDS:
                 words = await DB.get_banned_words(-1)
                 if words:
-                    text = (await _trans('public_banned_words_title_full', lang, "🚫")
-                            + "\n\n"
-                            + "\n".join(f"• {w}" for w in words[:30]))
+                    text = (
+                        await _trans(
+                            'public_banned_words_title_full',
+                            lang, "🚫")
+                        + "\n\n"
+                        + "\n".join(f"• {w}" for w in words[:30]))
                 else:
                     text = await _trans('no_data', lang, "📭")
                 kb = InlineKeyboardMarkup([
@@ -5020,48 +6071,62 @@ class CallbackHandlers:
                         KeyboardFactory.get_text("back", lang),
                         callback_data=CB.ADMIN)],
                 ])
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if data == "admin_add_banned":
                 StateManager.set(user_id, UserState.WAIT_GLOBAL_BAN)
                 context.user_data['ban_chat'] = -1
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_keyword_prompt', lang, "📝"),
                     bot=context.bot)
                 return
 
             if data == "admin_rem_banned":
-                StateManager.set(user_id, UserState.WAIT_REM_GLOBAL_BAN)
+                StateManager.set(
+                    user_id, UserState.WAIT_REM_GLOBAL_BAN)
                 context.user_data['ban_chat'] = -1
-                await safe_edit(query,
-                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                await safe_edit(
+                    query,
+                    await _trans('send_keyword_delete_prompt',
+                                 lang, "🗑️"),
                     bot=context.bot)
                 return
 
             if data == "admin_list_banned":
                 words = await DB.get_banned_words(-1)
                 if words:
-                    text = (await _trans('public_banned_words_list_full', lang, "📋")
-                            + "\n\n"
-                            + "\n".join(f"• {w}" for w in words))
+                    text = (
+                        await _trans(
+                            'public_banned_words_list_full',
+                            lang, "📋")
+                        + "\n\n"
+                        + "\n".join(f"• {w}" for w in words))
                 else:
                     text = await _trans('no_data', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
                 return
 
             if data == CB.ADMIN_CREATE_CONTEST:
-                StateManager.set(user_id, UserState.WAIT_CONTEST_TITLE)
-                await safe_edit(query,
-                    await _trans('contest_title_prompt', lang, "🏆"),
+                StateManager.set(
+                    user_id, UserState.WAIT_CONTEST_TITLE)
+                await safe_edit(
+                    query,
+                    await _trans('contest_title_prompt',
+                                 lang, "🏆"),
                     bot=context.bot)
                 return
 
             if data == CB.ADMIN_DECLARE_WINNER:
                 contests = await DB.get_active_contests(5)
                 if not contests:
-                    await safe_edit(query,
-                        await _trans('no_active_contests_admin', lang, "📭"),
+                    await safe_edit(
+                        query,
+                        await _trans('no_active_contests_admin',
+                                     lang, "📭"),
                         bot=context.bot)
                     return
                 kb = []
@@ -5070,13 +6135,16 @@ class CallbackHandlers:
                     kb.append([InlineKeyboardButton(
                         f"🏆 {_safe_str(cd.get('title'))[:20]}",
                         callback_data=(
-                            f"{CB.DECLARE_WINNER_SEL}:{cd.get('id', 0)}"))])
+                            f"{CB.DECLARE_WINNER_SEL}:"
+                            f"{cd.get('id', 0)}"))])
                 kb.append([InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.ADMIN)])
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('choose_contest', lang, "🏆"),
-                    reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot)
                 return
 
             if data == CB.ADMIN_DEL_CONTEST:
@@ -5084,8 +6152,10 @@ class CallbackHandlers:
                     "SELECT id, title FROM contests "
                     "WHERE status='active' LIMIT 10")
                 if not contests:
-                    await safe_edit(query,
-                        await _trans('no_contests_admin', lang, "📭"),
+                    await safe_edit(
+                        query,
+                        await _trans('no_contests_admin',
+                                     lang, "📭"),
                         bot=context.bot)
                     return
                 kb = []
@@ -5094,29 +6164,39 @@ class CallbackHandlers:
                     kb.append([InlineKeyboardButton(
                         f"🗑️ {_safe_str(cd.get('title'))[:20]}",
                         callback_data=(
-                            f"admin_delete_contest:{cd.get('id', 0)}"))])
+                            f"admin_delete_contest:"
+                            f"{cd.get('id', 0)}"))])
                 kb.append([InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.ADMIN)])
-                await safe_edit(query,
-                    await _trans('choose_contest_delete', lang, "🗑️"),
-                    reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('choose_contest_delete',
+                                 lang, "🗑️"),
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    bot=context.bot)
                 return
 
             if data.startswith("admin_delete_contest:"):
                 contest_id = _coerce_int(data.split(":")[-1])
                 if await DB.delete_contest(contest_id, user_id):
-                    await safe_edit(query,
-                        await _trans('contest_deleted', lang, "✅"),
+                    await safe_edit(
+                        query,
+                        await _trans('contest_deleted',
+                                     lang, "✅"),
                         bot=context.bot)
                 else:
-                    await safe_edit(query,
-                        await _trans('contest_deleted_failed', lang, "❌"),
+                    await safe_edit(
+                        query,
+                        await _trans('contest_deleted_failed',
+                                     lang, "❌"),
                         bot=context.bot)
                 return
 
-            await safe_edit(query,
-                await _trans('not_available', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('not_available', lang, "⚠️"),
+                bot=context.bot)
 
         except BadRequest as e:
             if "query is too old" not in str(e).lower():
@@ -5124,19 +6204,24 @@ class CallbackHandlers:
         except Exception as e:
             logger.error(f"admin error: {e}", exc_info=True)
             try:
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('error_occurred', lang, "❌"),
                     bot=context.bot)
             except Exception:
                 pass
 
     @staticmethod
-    async def _show_admin_channels(update, context, query, user_id, lang):
+    async def _show_admin_channels(
+        update, context, query, user_id, lang
+    ):
         try:
             total = await DB.fetchval(
                 "SELECT COUNT(*) FROM user_channels", default=0)
-            page = _coerce_int(context.user_data.get('adm_ch_page'), 0)
-            total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+            page = _coerce_int(
+                context.user_data.get('adm_ch_page'), 0)
+            total_pages = max(
+                1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
             if page >= total_pages:
                 page = total_pages - 1
             if page < 0:
@@ -5155,8 +6240,10 @@ class CallbackHandlers:
                 action = unban_l if cd.get('banned') else ban_l
                 icon = "🚫" if cd.get('banned') else "✅"
                 kb.append([InlineKeyboardButton(
-                    f"{icon} {_safe_str(cd.get('channel_name'))[:20]} - {action}",
-                    callback_data=f"admin_toggle_ch:{cd.get('id', 0)}")])
+                    f"{icon} {_safe_str(cd.get('channel_name'))[:20]} "
+                    f"- {action}",
+                    callback_data=(
+                        f"admin_toggle_ch:{cd.get('id', 0)}"))])
             nav = []
             if page > 0:
                 nav.append(InlineKeyboardButton(
@@ -5169,24 +6256,34 @@ class CallbackHandlers:
             if nav:
                 kb.append(nav)
             kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang), callback_data=CB.ADMIN)])
-            text = (await _trans('admin_channels_title', lang, "📡")
-                    + f" ({total}) — {page + 1}/{total_pages}")
-            await safe_edit(query, text,
-                            reply_markup=InlineKeyboardMarkup(kb),
-                            bot=context.bot)
+                KeyboardFactory.get_text("back", lang),
+                callback_data=CB.ADMIN)])
+            text = (await _trans(
+                'admin_channels_title', lang, "📡")
+                + f" ({total}) — {page + 1}/{total_pages}")
+            await safe_edit(
+                query, text,
+                reply_markup=InlineKeyboardMarkup(kb),
+                bot=context.bot)
         except Exception as e:
-            logger.error(f"_show_admin_channels: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"_show_admin_channels: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _show_admin_groups(update, context, query, user_id, lang):
+    async def _show_admin_groups(
+        update, context, query, user_id, lang
+    ):
         try:
             total = await DB.fetchval(
                 "SELECT COUNT(*) FROM bot_groups", default=0)
-            page = _coerce_int(context.user_data.get('adm_gr_page'), 0)
-            total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+            page = _coerce_int(
+                context.user_data.get('adm_gr_page'), 0)
+            total_pages = max(
+                1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
             if page >= total_pages:
                 page = total_pages - 1
             if page < 0:
@@ -5204,8 +6301,11 @@ class CallbackHandlers:
                 action = unban_l if gd.get('banned') else ban_l
                 icon = "🚫" if gd.get('banned') else "✅"
                 kb.append([InlineKeyboardButton(
-                    f"{icon} {_safe_str(gd.get('chat_name'))[:20]} - {action}",
-                    callback_data=f"admin_toggle_gr:{gd.get('chat_id', 0)}")])
+                    f"{icon} {_safe_str(gd.get('chat_name'))[:20]} "
+                    f"- {action}",
+                    callback_data=(
+                        f"admin_toggle_gr:"
+                        f"{gd.get('chat_id', 0)}"))])
             nav = []
             if page > 0:
                 nav.append(InlineKeyboardButton(
@@ -5218,30 +6318,41 @@ class CallbackHandlers:
             if nav:
                 kb.append(nav)
             kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang), callback_data=CB.ADMIN)])
-            text = (await _trans('admin_groups_title', lang, "👥")
-                    + f" ({total}) — {page + 1}/{total_pages}")
-            await safe_edit(query, text,
-                            reply_markup=InlineKeyboardMarkup(kb),
-                            bot=context.bot)
+                KeyboardFactory.get_text("back", lang),
+                callback_data=CB.ADMIN)])
+            text = (await _trans(
+                'admin_groups_title', lang, "👥")
+                + f" ({total}) — {page + 1}/{total_pages}")
+            await safe_edit(
+                query, text,
+                reply_markup=InlineKeyboardMarkup(kb),
+                bot=context.bot)
         except Exception as e:
-            logger.error(f"_show_admin_groups: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"_show_admin_groups: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _show_restore_backups(update, context, query, user_id, lang='ar'):
+    async def _show_restore_backups(
+        update, context, query, user_id, lang='ar'
+    ):
         def _safe_mtime(p):
             try:
                 return p.stat().st_mtime
             except (OSError, FileNotFoundError):
                 return 0
         try:
-            backups = sorted(PATHS.BACKUPS.glob("backup_*.db"),
-                             key=_safe_mtime, reverse=True)
+            backups = sorted(
+                PATHS.BACKUPS.glob("backup_*.db"),
+                key=_safe_mtime, reverse=True)
             if not backups:
-                await safe_edit(query,
-                    await _trans('no_backups_available', lang, "📭"),
+                await safe_edit(
+                    query,
+                    await _trans('no_backups_available',
+                                 lang, "📭"),
                     bot=context.bot)
                 return
             kb = []
@@ -5251,14 +6362,21 @@ class CallbackHandlers:
                     f"📁 {fname}",
                     callback_data=f"admin_restore_file:{fname}")])
             kb.append([InlineKeyboardButton(
-                KeyboardFactory.get_text("back", lang), callback_data=CB.ADMIN)])
-            await safe_edit(query,
-                await _trans('choose_backup_restore', lang, "📂"),
-                reply_markup=InlineKeyboardMarkup(kb), bot=context.bot)
+                KeyboardFactory.get_text("back", lang),
+                callback_data=CB.ADMIN)])
+            await safe_edit(
+                query,
+                await _trans('choose_backup_restore',
+                             lang, "📂"),
+                reply_markup=InlineKeyboardMarkup(kb),
+                bot=context.bot)
         except Exception as e:
-            logger.error(f"_show_restore_backups: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"_show_restore_backups: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # Analytics
@@ -5279,11 +6397,14 @@ class CallbackHandlers:
                 InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.ADMIN)]])
-        await safe_edit(query, text, reply_markup=kb,
-                        parse_mode='HTML', bot=context.bot)
+        await safe_edit(
+            query, text, reply_markup=kb,
+            parse_mode='HTML', bot=context.bot)
 
     @staticmethod
-    async def _handle_analytics(update, context, query, user_id, lang, data):
+    async def _handle_analytics(
+        update, context, query, user_id, lang, data
+    ):
         if data.startswith("analytics_"):
             raw_action = data[len("analytics_"):]
         else:
@@ -5298,11 +6419,14 @@ class CallbackHandlers:
                 if not rows:
                     await safe_edit(
                         query,
-                        await _trans('growth_title', lang, "📈") + "\n\n" +
-                        await _trans('no_data_enough', lang, "📭"),
+                        await _trans('growth_title', lang, "📈")
+                        + "\n\n"
+                        + await _trans('no_data_enough',
+                                       lang, "📭"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
                 max_cnt = max(r['count'] for r in rows) or 1
@@ -5310,23 +6434,31 @@ class CallbackHandlers:
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 total = sum(r['count'] for r in rows)
                 avg = total / len(rows) if rows else 0
-                text += _fmt(await _trans('growth_total', lang, "{total}"),
-                             total=total) + "\n"
-                text += _fmt(await _trans('growth_avg', lang, "{avg}"),
-                             avg=f"{avg:.1f}") + "\n"
-                text += _fmt(await _trans('growth_days_count', lang, "{count}"),
-                             count=len(rows)) + "\n\n"
-                text += await _trans('growth_last_10_days', lang, "") + "\n"
+                text += _fmt(
+                    await _trans('growth_total', lang, "{total}"),
+                    total=total) + "\n"
+                text += _fmt(
+                    await _trans('growth_avg', lang, "{avg}"),
+                    avg=f"{avg:.1f}") + "\n"
+                text += _fmt(
+                    await _trans('growth_days_count', lang,
+                                 "{count}"),
+                    count=len(rows)) + "\n\n"
+                text += await _trans(
+                    'growth_last_10_days', lang, "") + "\n"
                 for r in rows[-10:]:
                     bar_len = int((r['count'] / max_cnt) * 10)
                     bar = "█" * bar_len + "░" * (10 - bar_len)
                     date_short = r['date'][5:]
-                    text += f"<code>{date_short}</code> {bar} {r['count']}\n"
+                    text += (f"<code>{date_short}</code> "
+                             f"{bar} {r['count']}\n")
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(back_btn,
-                                         callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "top_channels":
@@ -5334,77 +6466,127 @@ class CallbackHandlers:
                 if not rows:
                     await safe_edit(
                         query,
-                        await _trans('top_channels_title', lang, "🏆") + "\n\n" +
-                        await _trans('no_channels_data', lang, "📭"),
+                        await _trans('top_channels_title',
+                                     lang, "🏆")
+                        + "\n\n"
+                        + await _trans('no_channels_data',
+                                       lang, "📭"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
-                text = await _trans('top_channels_title', lang, "🏆") + "\n"
+                text = await _trans(
+                    'top_channels_title', lang, "🏆") + "\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 for i, ch in enumerate(rows[:10], 1):
                     rate = ch.get('success_rate', 100)
-                    color = color_emoji(rate,
-                        (SUCCESS_RATE_WARN_THRESHOLD, SUCCESS_RATE_GOOD_THRESHOLD))
+                    color = color_emoji(
+                        rate,
+                        (SUCCESS_RATE_WARN_THRESHOLD,
+                         SUCCESS_RATE_GOOD_THRESHOLD))
                     name = _html.escape(str(ch['name'])[:25])
                     text += (f"{i}. {color} <b>{name}</b>\n"
-                             f"   📝 {ch['total']} | ✅ {ch['published']} "
-                             f"| ❌ {ch['failed']} | 🎯 {rate}%\n\n")
+                             f"   📝 {ch['total']} | "
+                             f"✅ {ch['published']} "
+                             f"| ❌ {ch['failed']} | "
+                             f"🎯 {rate}%\n\n")
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(back_btn,
-                                         callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "publish_stats":
                 stats = await DB.get_publish_stats()
                 total_ch = stats['total_channels']
                 avg_posts = stats['avg_posts_per_channel']
-                rate = stats.get('success_rate', DEFAULT_SUCCESS_RATE)
+                rate = stats.get(
+                    'success_rate', DEFAULT_SUCCESS_RATE)
                 completion = stats.get('completion_rate', 0)
-                rate_color = color_emoji(rate,
-                    (SUCCESS_RATE_WARN_THRESHOLD, SUCCESS_RATE_GOOD_THRESHOLD))
-                completion_color = color_emoji(completion,
-                    (SUCCESS_RATE_WARN_THRESHOLD, SUCCESS_RATE_GOOD_THRESHOLD))
-                avg_color = "🟢" if avg_posts >= 20 else ("🟡" if avg_posts >= 10 else "🔴")
-                attempted = stats.get('attempted',
-                                      stats['published'] + stats['failed'])
-                pending = stats.get('pending',
-                                    max(0, stats['total_posts'] - attempted))
-                text = (await _trans('publish_stats_title', lang, "📊") + "\n"
-                        + "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        + _fmt(await _trans('publish_stats_channels', lang, "{count}"),
-                               count=total_ch) + "\n"
-                        + _fmt(await _trans('publish_stats_total', lang, "{count}"),
-                               count=stats['total_posts']) + "\n"
-                        + _fmt(await _trans('publish_stats_published', lang, "{count}"),
-                               count=stats['published']) + "\n"
-                        + _fmt(await _trans('publish_stats_failed', lang, "{count}"),
-                               count=stats['failed']) + "\n"
-                        + _fmt(await _trans('publish_stats_pending', lang, "{count}"),
-                               count=pending) + "\n\n"
-                        + f"{avg_color} "
-                        + _fmt(await _trans('publish_stats_avg_posts', lang, "{value}"),
-                               value=avg_posts) + "\n"
-                        + f"{avg_color} "
-                        + _fmt(await _trans('publish_stats_avg_published', lang, "{value}"),
-                               value=stats['avg_published_per_channel']) + "\n\n"
-                        + f"{rate_color} "
-                        + _fmt(await _trans('publish_stats_success_rate', lang,
-                                            "{rate}% ({pub}/{att})"),
-                               rate=rate, pub=stats['published'], att=attempted) + "\n"
-                        + f"{completion_color} "
-                        + _fmt(await _trans('publish_stats_completion_rate', lang,
-                                            "{rate}% ({pub}/{total})"),
-                               rate=completion, pub=stats['published'],
-                               total=stats['total_posts']) + "\n")
+                rate_color = color_emoji(
+                    rate,
+                    (SUCCESS_RATE_WARN_THRESHOLD,
+                     SUCCESS_RATE_GOOD_THRESHOLD))
+                completion_color = color_emoji(
+                    completion,
+                    (SUCCESS_RATE_WARN_THRESHOLD,
+                     SUCCESS_RATE_GOOD_THRESHOLD))
+                avg_color = (
+                    "🟢" if avg_posts >= 20
+                    else ("🟡" if avg_posts >= 10 else "🔴"))
+                attempted = stats.get(
+                    'attempted',
+                    stats['published'] + stats['failed'])
+                pending = stats.get(
+                    'pending',
+                    max(0,
+                        stats['total_posts'] - attempted))
+                text = (
+                    await _trans('publish_stats_title',
+                                 lang, "📊")
+                    + "\n"
+                    + "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    + _fmt(
+                        await _trans('publish_stats_channels',
+                                     lang, "{count}"),
+                        count=total_ch) + "\n"
+                    + _fmt(
+                        await _trans('publish_stats_total',
+                                     lang, "{count}"),
+                        count=stats['total_posts']) + "\n"
+                    + _fmt(
+                        await _trans('publish_stats_published',
+                                     lang, "{count}"),
+                        count=stats['published']) + "\n"
+                    + _fmt(
+                        await _trans('publish_stats_failed',
+                                     lang, "{count}"),
+                        count=stats['failed']) + "\n"
+                    + _fmt(
+                        await _trans('publish_stats_pending',
+                                     lang, "{count}"),
+                        count=pending) + "\n\n"
+                    + f"{avg_color} "
+                    + _fmt(
+                        await _trans(
+                            'publish_stats_avg_posts',
+                            lang, "{value}"),
+                        value=avg_posts) + "\n"
+                    + f"{avg_color} "
+                    + _fmt(
+                        await _trans(
+                            'publish_stats_avg_published',
+                            lang, "{value}"),
+                        value=stats[
+                            'avg_published_per_channel'])
+                    + "\n\n"
+                    + f"{rate_color} "
+                    + _fmt(
+                        await _trans(
+                            'publish_stats_success_rate',
+                            lang, "{rate}% ({pub}/{att})"),
+                        rate=rate, pub=stats['published'],
+                        att=attempted) + "\n"
+                    + f"{completion_color} "
+                    + _fmt(
+                        await _trans(
+                            'publish_stats_completion_rate',
+                            lang, "{rate}% ({pub}/{total})"),
+                        rate=completion,
+                        pub=stats['published'],
+                        total=stats['total_posts']) + "\n")
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(back_btn,
-                                         callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "channels_rate":
@@ -5412,35 +6594,49 @@ class CallbackHandlers:
                 if not rows:
                     await safe_edit(
                         query,
-                        await _trans('channels_rate_title', lang, "🎯") + "\n\n"
+                        await _trans('channels_rate_title',
+                                     lang, "🎯")
+                        + "\n\n"
                         + await _trans('no_data', lang, "📭"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
-                text = await _trans('channels_rate_title', lang, "🎯") + "\n"
+                text = await _trans(
+                    'channels_rate_title', lang, "🎯") + "\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-                text += await _trans('channels_rate_success_definition', lang, "") + "\n"
-                text += await _trans('channels_rate_completion_definition', lang, "") + "\n\n"
+                text += await _trans(
+                    'channels_rate_success_definition',
+                    lang, "") + "\n"
+                text += await _trans(
+                    'channels_rate_completion_definition',
+                    lang, "") + "\n\n"
 
                 def _sort_key(ch):
-                    sr = _coerce_float(ch.get('success_rate'), DEFAULT_SUCCESS_RATE)
-                    cr = _coerce_float(ch.get('completion_rate'), 0.0)
+                    sr = _coerce_float(
+                        ch.get('success_rate'),
+                        DEFAULT_SUCCESS_RATE)
+                    cr = _coerce_float(
+                        ch.get('completion_rate'), 0.0)
                     return (sr, cr)
 
                 sorted_rows = sorted(rows, key=_sort_key)
                 for ch in sorted_rows[:10]:
                     text += _format_channel_rate_line(ch)
-                text += await _trans('channels_rate_less_success_hint', lang, "")
+                text += await _trans(
+                    'channels_rate_less_success_hint', lang, "")
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         await _trans('refresh_btn', lang, "🔄"),
                         callback_data="analytics_channels_rate")],
-                    [InlineKeyboardButton(back_btn,
-                                          callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    [InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "subscriptions":
@@ -5448,32 +6644,43 @@ class CallbackHandlers:
                 if not rows:
                     await safe_edit(
                         query,
-                        await _trans('subscriptions_title', lang, "💎") + "\n\n"
+                        await _trans('subscriptions_title',
+                                     lang, "💎")
+                        + "\n\n"
                         + await _trans('no_data', lang, "📭"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
-                text = await _trans('subscriptions_title', lang, "💎") + "\n"
+                text = await _trans(
+                    'subscriptions_title', lang, "💎") + "\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 max_cnt = max(r['count'] for r in rows) or 1
                 total = sum(r['count'] for r in rows)
                 for r in rows:
                     bar_len = int((r['count'] / max_cnt) * 12)
                     bar = "█" * bar_len + "░" * (12 - bar_len)
-                    text += f"<code>{r['month']}</code> {bar} {r['count']}\n"
+                    text += (f"<code>{r['month']}</code> "
+                             f"{bar} {r['count']}\n")
                 text += "\n"
-                text += _fmt(await _trans('subscriptions_total', lang, "{count}"),
-                             count=total) + "\n"
+                text += _fmt(
+                    await _trans('subscriptions_total',
+                                 lang, "{count}"),
+                    count=total) + "\n"
                 avg = total / len(rows) if rows else 0
-                text += _fmt(await _trans('subscriptions_avg', lang, "{value}"),
-                             value=f"{avg:.1f}") + "\n"
+                text += _fmt(
+                    await _trans('subscriptions_avg',
+                                 lang, "{value}"),
+                    value=f"{avg:.1f}") + "\n"
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(back_btn,
-                                         callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "pool":
@@ -5481,45 +6688,66 @@ class CallbackHandlers:
                 if not pool_data.get('available'):
                     await safe_edit(
                         query,
-                        await _trans('pool_title', lang, "🚀") + "\n\n"
-                        + _fmt(await _trans('pool_unavailable', lang, "{type}"),
-                               type=pool_data.get('type', '?')),
+                        await _trans('pool_title', lang, "🚀")
+                        + "\n\n"
+                        + _fmt(
+                            await _trans('pool_unavailable',
+                                         lang, "{type}"),
+                            type=pool_data.get('type', '?')),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
                 util = pool_data['utilization_pct']
                 if util >= 80:
-                    alert = await _trans('pool_alert_critical', lang, "🔴")
+                    alert = await _trans(
+                        'pool_alert_critical', lang, "🔴")
                 elif util >= 60:
-                    alert = await _trans('pool_alert_warning', lang, "🟡")
+                    alert = await _trans(
+                        'pool_alert_warning', lang, "🟡")
                 else:
-                    alert = await _trans('pool_alert_ok', lang, "🟢")
+                    alert = await _trans(
+                        'pool_alert_ok', lang, "🟢")
                 bar_len = int(util / 100 * 15)
                 bar = "█" * bar_len + "░" * (15 - bar_len)
-                text = (await _trans('pool_title', lang, "🚀") + "\n"
-                        + "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        + f"{alert}\n"
-                        + f"<code>{bar}</code> {util}%\n\n"
-                        + _fmt(await _trans('pool_type_label', lang, "{type}"),
-                               type=pool_data['type']) + "\n"
-                        + _fmt(await _trans('pool_max_label', lang, "{value}"),
-                               value=pool_data['max_size']) + "\n"
-                        + _fmt(await _trans('pool_current_label', lang, "{value}"),
-                               value=pool_data['current_size']) + "\n"
-                        + _fmt(await _trans('pool_idle_label', lang, "{value}"),
-                               value=pool_data['idle_size']) + "\n"
-                        + _fmt(await _trans('pool_in_use_label', lang, "{value}"),
-                               value=pool_data['in_use']) + "\n")
+                text = (
+                    await _trans('pool_title', lang, "🚀")
+                    + "\n"
+                    + "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    + f"{alert}\n"
+                    + f"<code>{bar}</code> {util}%\n\n"
+                    + _fmt(
+                        await _trans('pool_type_label',
+                                     lang, "{type}"),
+                        type=pool_data['type']) + "\n"
+                    + _fmt(
+                        await _trans('pool_max_label',
+                                     lang, "{value}"),
+                        value=pool_data['max_size']) + "\n"
+                    + _fmt(
+                        await _trans('pool_current_label',
+                                     lang, "{value}"),
+                        value=pool_data['current_size']) + "\n"
+                    + _fmt(
+                        await _trans('pool_idle_label',
+                                     lang, "{value}"),
+                        value=pool_data['idle_size']) + "\n"
+                    + _fmt(
+                        await _trans('pool_in_use_label',
+                                     lang, "{value}"),
+                        value=pool_data['in_use']) + "\n")
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
                         await _trans('refresh_btn', lang, "🔄"),
                         callback_data="analytics_pool"),
-                    InlineKeyboardButton(back_btn,
-                                         callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "slow":
@@ -5527,30 +6755,48 @@ class CallbackHandlers:
                 if not rows:
                     await safe_edit(
                         query,
-                        await _trans('slow_queries_title', lang, "🐌") + "\n\n"
-                        + await _trans('no_slow_queries', lang, "📭"),
+                        await _trans('slow_queries_title',
+                                     lang, "🐌")
+                        + "\n\n"
+                        + await _trans('no_slow_queries',
+                                       lang, "📭"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         parse_mode='HTML', bot=context.bot)
                     return
-                text = await _trans('slow_queries_title', lang, "🐌") + "\n"
+                text = await _trans(
+                    'slow_queries_title', lang, "🐌") + "\n"
                 text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 for i, q in enumerate(rows[:10], 1):
                     elapsed = q.get('elapsed', 0)
-                    color = "🔴" if elapsed >= 3 else ("🟡" if elapsed >= 1.5 else "🟢")
+                    color = (
+                        "🔴" if elapsed >= 3
+                        else ("🟡" if elapsed >= 1.5 else "🟢"))
                     caller_file = q.get('caller_file', '?') or '?'
                     caller_line = q.get('caller_line', 0)
                     caller_func = q.get('caller_func', '?') or '?'
                     conn_type = q.get('conn_type', '?')
                     params_count = q.get('params_count', 0)
-                    qs = _html.escape(str(q.get('query', ''))[:70])
-                    text += f"{i}. {color} <code>{elapsed:.2f}s</code>\n"
+                    qs = _html.escape(
+                        str(q.get('query', ''))[:70])
+                    text += (f"{i}. {color} "
+                             f"<code>{elapsed:.2f}s</code>\n")
                     text += f"   <i>{qs}</i>\n"
-                    text += (await _trans('slow_queries_source', lang, "📍") + " "
-                             + f"<code>{_html.escape(caller_file)}:{caller_line}</code>\n")
-                    text += (await _trans('slow_queries_function', lang, "🔧") + " "
-                             + f"<code>{_html.escape(caller_func)}</code>\n")
+                    text += (
+                        await _trans(
+                            'slow_queries_source', lang, "📍")
+                        + " "
+                        + f"<code>"
+                          f"{_html.escape(caller_file)}:"
+                          f"{caller_line}</code>\n")
+                    text += (
+                        await _trans(
+                            'slow_queries_function', lang, "🔧")
+                        + " "
+                        + f"<code>"
+                          f"{_html.escape(caller_func)}</code>\n")
                     extra = []
                     if conn_type and conn_type != '?':
                         extra.append(f"🗄️ {conn_type}")
@@ -5563,22 +6809,29 @@ class CallbackHandlers:
                     [InlineKeyboardButton(
                         await _trans('refresh_btn', lang, "🔄"),
                         callback_data="analytics_slow")],
-                    [InlineKeyboardButton(back_btn,
-                                          callback_data="admin_analytics")]])
-                await safe_edit(query, text, reply_markup=kb,
-                                parse_mode='HTML', bot=context.bot)
+                    [InlineKeyboardButton(
+                        back_btn,
+                        callback_data="admin_analytics")]])
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    parse_mode='HTML', bot=context.bot)
                 return
 
             if action == "export":
-                await safe_edit(query,
-                    await _trans('export_starting', lang, "⏳"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('export_starting', lang, "⏳"),
+                    bot=context.bot)
                 try:
-                    file_path = await CallbackHandlers._generate_excel_report()
+                    file_path = (
+                        await CallbackHandlers.
+                        _generate_excel_report())
                     with open(file_path, 'rb') as f:
                         await context.bot.send_document(
                             chat_id=user_id, document=f,
                             filename=os.path.basename(file_path),
-                            caption=await _trans('report_caption', lang, "📊"),
+                            caption=await _trans(
+                                'report_caption', lang, "📊"),
                             parse_mode='HTML')
                     try:
                         os.remove(file_path)
@@ -5586,39 +6839,53 @@ class CallbackHandlers:
                         pass
                     await safe_edit(
                         query,
-                        await _trans('export_success', lang, "✅"),
+                        await _trans('export_success',
+                                     lang, "✅"),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         bot=context.bot)
                 except ImportError:
                     await safe_edit(
                         query,
-                        await _trans('export_no_openpyxl', lang, "❌"),
+                        await _trans('export_no_openpyxl',
+                                     lang, "❌"),
                         parse_mode='HTML',
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         bot=context.bot)
                 except Exception as e:
-                    logger.error(f"❌ export: {e}", exc_info=True)
+                    logger.error(
+                        f"❌ export: {e}", exc_info=True)
                     await safe_edit(
                         query,
-                        _fmt(await _trans('export_failed', lang, "❌ {error}"),
-                             error=str(e)[:80]),
+                        _fmt(
+                            await _trans('export_failed',
+                                         lang, "❌ {error}"),
+                            error=str(e)[:80]),
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(back_btn,
-                                                 callback_data="admin_analytics")]]),
+                            InlineKeyboardButton(
+                                back_btn,
+                                callback_data="admin_analytics")]]),
                         bot=context.bot)
                 return
 
-            await safe_edit(query,
-                await _trans('unknown_report', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('unknown_report', lang, "⚠️"),
+                bot=context.bot)
 
         except Exception as e:
-            logger.error(f"❌ _handle_analytics({action}): {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"❌ _handle_analytics({action}): {e}",
+                exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
     async def _generate_excel_report() -> str:
@@ -5627,7 +6894,8 @@ class CallbackHandlers:
         wb = Workbook()
         header_font = Font(bold=True, size=12)
         header_fill = PatternFill(start_color="4472C4",
-                                  end_color="4472C4", fill_type="solid")
+                                  end_color="4472C4",
+                                  fill_type="solid")
 
         ws1 = wb.active
         ws1.title = "Users"
@@ -5656,8 +6924,12 @@ class CallbackHandlers:
             ws2.cell(row=i, column=3, value=ch['total'])
             ws2.cell(row=i, column=4, value=ch['published'])
             ws2.cell(row=i, column=5, value=ch['failed'])
-            ws2.cell(row=i, column=6, value=ch.get('success_rate', 100))
-            ws2.cell(row=i, column=7, value=ch.get('completion_rate', 0))
+            ws2.cell(
+                row=i, column=6,
+                value=ch.get('success_rate', 100))
+            ws2.cell(
+                row=i, column=7,
+                value=ch.get('completion_rate', 0))
 
         ws3 = wb.create_sheet("Subscriptions")
         ws3['A1'] = "Month"
@@ -5685,9 +6957,12 @@ class CallbackHandlers:
             ("Tickets", stats.get('tickets', 0)),
             ("DB size KB", stats.get('db_size_kb', 0)),
             ("", ""),
-            ("Avg posts/channel", pub_stats['avg_posts_per_channel']),
-            ("Success %", f"{pub_stats.get('success_rate', 100)}%"),
-            ("Completion %", f"{pub_stats.get('completion_rate', 0)}%"),
+            ("Avg posts/channel",
+             pub_stats['avg_posts_per_channel']),
+            ("Success %",
+             f"{pub_stats.get('success_rate', 100)}%"),
+            ("Completion %",
+             f"{pub_stats.get('completion_rate', 0)}%"),
             ("", ""),
             ("Pool available", pool.get('available', False)),
         ]
@@ -5700,7 +6975,9 @@ class CallbackHandlers:
 
         import tempfile
         ts = TimeUtils.utc_now().strftime('%Y%m%d_%H%M%S')
-        file_path = os.path.join(tempfile.gettempdir(), f"analytics_{ts}.xlsx")
+        file_path = os.path.join(
+            tempfile.gettempdir(),
+            f"analytics_{ts}.xlsx")
         wb.save(file_path)
         return file_path
 
@@ -5709,7 +6986,9 @@ class CallbackHandlers:
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _handle_auto_reply(update, context, query, user_id, lang=None):
+    async def _handle_auto_reply(
+        update, context, query, user_id, lang=None
+    ):
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
@@ -5735,38 +7014,51 @@ class CallbackHandlers:
                 except (TypeError, ValueError):
                     chat_id = None
         if chat_id is None:
-            await safe_edit(query,
-                await _trans('group_not_specified', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('group_not_specified', lang, "❌"),
+                bot=context.bot)
             return
 
         if chat_id == -1:
             if not CONFIG.is_developer(user_id):
-                await safe_edit(query,
-                    await _trans('unauthorized', lang, "❌"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('unauthorized', lang, "❌"),
+                    bot=context.bot)
                 return
         else:
-            if not await is_authorized_in_group(context.bot, chat_id, user_id):
-                await safe_edit(query,
-                    await _trans('no_permission', lang, "❌"), bot=context.bot)
+            if not await is_authorized_in_group(
+                    context.bot, chat_id, user_id):
+                await safe_edit(
+                    query,
+                    await _trans('no_permission', lang, "❌"),
+                    bot=context.bot)
                 return
 
         try:
             if action == "menu":
                 context.user_data['auto_chat'] = chat_id
-                settings = await DB.get_auto_reply_settings(chat_id) or {}
+                settings = await DB.get_auto_reply_settings(
+                    chat_id) or {}
                 if not isinstance(settings, dict):
                     settings = _row_to_dict(settings) or {}
-                kb = KeyboardFactory.build("auto_reply",
-                                            chat_id=chat_id, lang=lang)
-                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
-                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = KeyboardFactory.build(
+                    "auto_reply",
+                    chat_id=chat_id, lang=lang)
+                enabled_lbl = await _trans(
+                    'auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans(
+                    'auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
                     _coerce_int(settings.get('enabled', 0)),
                     _coerce_int(settings.get('only_admins', 0)),
                     enabled_lbl, admins_lbl,
                 )
-                await safe_edit(query,
+                kb = _patch_auto_reply_back(kb, chat_id)
+                await safe_edit(
+                    query,
                     await _trans('auto_reply_title', lang, "🤖"),
                     reply_markup=kb, bot=context.bot)
                 return
@@ -5775,72 +7067,107 @@ class CallbackHandlers:
                 cache_key = f"ars_{chat_id}"
                 settings = context.user_data.get(cache_key)
                 if settings is None:
-                    settings = await DB.get_auto_reply_settings(chat_id) or {}
+                    settings = await DB.get_auto_reply_settings(
+                        chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                new_status = 1 - _coerce_int(settings.get('enabled', 0))
-                await DB.update_auto_reply_settings(chat_id, enabled=new_status)
+                new_status = 1 - _coerce_int(
+                    settings.get('enabled', 0))
+                await DB.update_auto_reply_settings(
+                    chat_id, enabled=new_status)
                 settings['enabled'] = new_status
                 context.user_data[cache_key] = settings
-                kb = KeyboardFactory.build("auto_reply",
-                                            chat_id=chat_id, lang=lang)
-                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
-                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = KeyboardFactory.build(
+                    "auto_reply",
+                    chat_id=chat_id, lang=lang)
+                enabled_lbl = await _trans(
+                    'auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans(
+                    'auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
                     _coerce_int(new_status),
                     _coerce_int(settings.get('only_admins', 0)),
                     enabled_lbl, admins_lbl,
                 )
-                status = (await _trans('auto_reply_status_enabled', lang, "✅")
-                          if new_status == 1
-                          else await _trans('auto_reply_status_disabled', lang, "❌"))
-                admins = (await _trans('auto_reply_admins_yes', lang, "✅")
-                          if _coerce_int(settings.get('only_admins', 0)) == 1
-                          else await _trans('auto_reply_admins_no', lang, "❌"))
-                text = _fmt(await _trans('auto_reply_full', lang,
-                                          "🤖\n{status}\n{admins}"),
-                            status=status, admins=admins)
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                kb = _patch_auto_reply_back(kb, chat_id)
+                status = (
+                    await _trans('auto_reply_status_enabled',
+                                 lang, "✅")
+                    if new_status == 1
+                    else await _trans(
+                        'auto_reply_status_disabled', lang, "❌"))
+                admins = (
+                    await _trans('auto_reply_admins_yes',
+                                 lang, "✅")
+                    if _coerce_int(
+                        settings.get('only_admins', 0)) == 1
+                    else await _trans(
+                        'auto_reply_admins_no', lang, "❌"))
+                text = _fmt(
+                    await _trans('auto_reply_full', lang,
+                                 "🤖\n{status}\n{admins}"),
+                    status=status, admins=admins)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if action == "admins":
                 cache_key = f"ars_{chat_id}"
                 settings = context.user_data.get(cache_key)
                 if settings is None:
-                    settings = await DB.get_auto_reply_settings(chat_id) or {}
+                    settings = await DB.get_auto_reply_settings(
+                        chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
-                new_status = 1 - _coerce_int(settings.get('only_admins', 0))
-                await DB.update_auto_reply_settings(chat_id, only_admins=new_status)
+                new_status = 1 - _coerce_int(
+                    settings.get('only_admins', 0))
+                await DB.update_auto_reply_settings(
+                    chat_id, only_admins=new_status)
                 settings['only_admins'] = new_status
                 context.user_data[cache_key] = settings
-                kb = KeyboardFactory.build("auto_reply",
-                                            chat_id=chat_id, lang=lang)
-                enabled_lbl = await _trans('auto_reply_toggle', lang, "🔄 On/Off")
-                admins_lbl = await _trans('auto_reply_admins', lang, "👤 Admins only")
+                kb = KeyboardFactory.build(
+                    "auto_reply",
+                    chat_id=chat_id, lang=lang)
+                enabled_lbl = await _trans(
+                    'auto_reply_toggle', lang, "🔄 On/Off")
+                admins_lbl = await _trans(
+                    'auto_reply_admins', lang, "👤 Admins only")
                 kb = _apply_auto_reply_status_icons(
                     kb,
                     _coerce_int(settings.get('enabled', 0)),
                     _coerce_int(new_status),
                     enabled_lbl, admins_lbl,
                 )
-                status = (await _trans('auto_reply_status_enabled', lang, "✅")
-                          if _coerce_int(settings.get('enabled', 0)) == 1
-                          else await _trans('auto_reply_status_disabled', lang, "❌"))
-                admins = (await _trans('auto_reply_admins_yes', lang, "✅")
-                          if new_status == 1
-                          else await _trans('auto_reply_admins_no', lang, "❌"))
-                text = _fmt(await _trans('auto_reply_full', lang,
-                                          "🤖\n{status}\n{admins}"),
-                            status=status, admins=admins)
-                await safe_edit(query, text, reply_markup=kb, bot=context.bot)
+                kb = _patch_auto_reply_back(kb, chat_id)
+                status = (
+                    await _trans('auto_reply_status_enabled',
+                                 lang, "✅")
+                    if _coerce_int(
+                        settings.get('enabled', 0)) == 1
+                    else await _trans(
+                        'auto_reply_status_disabled', lang, "❌"))
+                admins = (
+                    await _trans('auto_reply_admins_yes',
+                                 lang, "✅")
+                    if new_status == 1
+                    else await _trans(
+                        'auto_reply_admins_no', lang, "❌"))
+                text = _fmt(
+                    await _trans('auto_reply_full', lang,
+                                 "🤖\n{status}\n{admins}"),
+                    status=status, admins=admins)
+                await safe_edit(
+                    query, text, reply_markup=kb,
+                    bot=context.bot)
                 return
 
             if action == "add":
                 StateManager.set(user_id, UserState.WAIT_AUTO_KEY)
                 context.user_data['auto_chat'] = chat_id
-                await safe_edit(query,
+                await safe_edit(
+                    query,
                     await _trans('send_keyword_prompt', lang, "📝"),
                     bot=context.bot)
                 return
@@ -5848,30 +7175,41 @@ class CallbackHandlers:
             if action == "del":
                 StateManager.set(user_id, UserState.WAIT_AUTO_DEL)
                 context.user_data['auto_chat'] = chat_id
-                await safe_edit(query,
-                    await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                await safe_edit(
+                    query,
+                    await _trans('send_keyword_delete_prompt',
+                                 lang, "🗑️"),
                     bot=context.bot)
                 return
 
             if action == "reset":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        await _trans('auto_reply_reset_btn', lang, "🗑️"),
-                        callback_data=f"auto_reply_reset_confirm:{chat_id}")],
+                        await _trans('auto_reply_reset_btn',
+                                     lang, "🗑️"),
+                        callback_data=(
+                            f"auto_reply_reset_confirm:"
+                            f"{chat_id}"))],
                     [InlineKeyboardButton(
                         await _trans('cancel_btn', lang, "❌"),
-                        callback_data=f"auto_reply_menu:{chat_id}")],
+                        callback_data=(
+                            f"auto_reply_menu:{chat_id}"))],
                 ])
-                await safe_edit(query,
-                    await _trans('auto_reply_reset_confirm', lang, "⚠️"),
-                    reply_markup=kb, parse_mode='HTML', bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('auto_reply_reset_confirm',
+                                 lang, "⚠️"),
+                    reply_markup=kb, parse_mode='HTML',
+                    bot=context.bot)
                 return
 
             if action == "reset_confirm":
                 await DB.reset_auto_replies(chat_id)
                 context.user_data.pop(f"ars_{chat_id}", None)
-                await safe_edit(query,
-                    await _trans('auto_reply_reset_success', lang, "✅"),
+                await safe_edit(
+                    query,
+                    await _trans('auto_reply_reset_success',
+                                 lang, "✅"),
                     bot=context.bot)
                 return
 
@@ -5883,46 +7221,71 @@ class CallbackHandlers:
                     lines = []
                     for r in rows:
                         rd = _row_to_dict(r) or {}
-                        lines.append(f"• {_safe_str(rd.get('keyword'))}")
-                    text = await _trans('auto_reply_list_title', lang, "📋") + "\n\n" + "\n".join(lines)
+                        lines.append(
+                            f"• {_safe_str(rd.get('keyword'))}")
+                    text = (await _trans(
+                        'auto_reply_list_title', lang, "📋")
+                            + "\n\n" + "\n".join(lines))
                 else:
-                    text = await _trans('no_auto_replies', lang, "📭")
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(
-                        KeyboardFactory.get_text("back", lang),
-                        callback_data=f"auto_reply_menu:{chat_id}")]]),
+                    text = await _trans(
+                        'no_auto_replies', lang, "📭")
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=(
+                                f"auto_reply_menu:{chat_id}"))]]),
                     bot=context.bot)
                 return
 
             if action == "stats":
                 stats = await DB.get_auto_reply_stats(chat_id, 20)
                 if stats:
-                    text = await _trans('auto_reply_stats_title', lang, "📊") + "\n\n"
+                    text = (await _trans(
+                        'auto_reply_stats_title', lang, "📊")
+                            + "\n\n")
                     for s in stats:
                         sd = _row_to_dict(s) or {}
-                        source = (await _trans('auto_reply_source_global', lang, "🌐")
-                                  if sd.get('source') == 'global'
-                                  else await _trans('auto_reply_source_group', lang, "👥"))
-                        text += _fmt(await _trans('auto_reply_stats_line', lang,
-                                                  "• {keyword} ({source}): {count}"),
-                                     keyword=_safe_str(sd.get('keyword')),
-                                     source=source,
-                                     count=sd.get('usage_count', 0)) + "\n"
+                        source = (
+                            await _trans(
+                                'auto_reply_source_global',
+                                lang, "🌐")
+                            if sd.get('source') == 'global'
+                            else await _trans(
+                                'auto_reply_source_group',
+                                lang, "👥"))
+                        text += _fmt(
+                            await _trans(
+                                'auto_reply_stats_line', lang,
+                                "• {keyword} ({source}): {count}"),
+                            keyword=_safe_str(sd.get('keyword')),
+                            source=source,
+                            count=sd.get('usage_count', 0)) + "\n"
                 else:
-                    text = await _trans('no_auto_replies_stats', lang, "📭")
-                await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(
-                        KeyboardFactory.get_text("back", lang),
-                        callback_data=f"auto_reply_menu:{chat_id}")]]),
+                    text = await _trans(
+                        'no_auto_replies_stats', lang, "📭")
+                await safe_edit(
+                    query, text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            KeyboardFactory.get_text("back", lang),
+                            callback_data=(
+                                f"auto_reply_menu:{chat_id}"))]]),
                     bot=context.bot)
                 return
 
-            await safe_edit(query,
-                await _trans('unknown_action', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('unknown_action', lang, "⚠️"),
+                bot=context.bot)
         except Exception as e:
-            logger.error(f"auto_reply error: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"auto_reply error: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # Schedule
@@ -5934,19 +7297,25 @@ class CallbackHandlers:
         data = query.data
         parts = data.split(":")
         if len(parts) < 2:
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         action = parts[0].replace("sched_", "")
         try:
             ch_id = int(parts[1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         if not await _is_channel_owner(user_id, ch_id):
-            await safe_edit(query,
-                await _trans('not_owner', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('not_owner', lang, "❌"),
+                bot=context.bot)
             return
         try:
             if action == "open":
@@ -5956,39 +7325,55 @@ class CallbackHandlers:
             if action == "min":
                 StateManager.set(user_id, UserState.WAIT_MIN)
                 context.user_data['schedule_ch'] = ch_id
-                await safe_edit(query,
-                    await _trans('send_minutes_btn', lang, "📅"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_minutes_btn', lang, "📅"),
+                    bot=context.bot)
                 return
             if action == "hour":
                 StateManager.set(user_id, UserState.WAIT_HOUR)
                 context.user_data['schedule_ch'] = ch_id
-                await safe_edit(query,
-                    await _trans('send_hours_btn', lang, "📅"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_hours_btn', lang, "📅"),
+                    bot=context.bot)
                 return
             if action == "day":
                 StateManager.set(user_id, UserState.WAIT_DAY)
                 context.user_data['schedule_ch'] = ch_id
-                await safe_edit(query,
-                    await _trans('send_days_btn_short', lang, "📅"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_days_btn_short', lang, "📅"),
+                    bot=context.bot)
                 return
             if action == "time":
                 StateManager.set(user_id, UserState.WAIT_PUB_TIME)
                 context.user_data['schedule_ch'] = ch_id
-                await safe_edit(query,
-                    await _trans('send_time_btn', lang, "🕐"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('send_time_btn', lang, "🕐"),
+                    bot=context.bot)
                 return
-            await safe_edit(query,
-                await _trans('unknown_action', lang, "⚠️"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('unknown_action', lang, "⚠️"),
+                bot=context.bot)
         except Exception as e:
             logger.error(f"schedule error: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     @staticmethod
-    async def _show_schedule_menu(update, context, query, ch_id, user_id):
+    async def _show_schedule_menu(
+        update, context, query, ch_id, user_id
+    ):
         lang = await DB.get_user_language(user_id) or 'ar'
-        kb = KeyboardFactory.build("channel_settings", chat_id=ch_id, lang=lang)
-        await safe_edit(query,
+        kb = KeyboardFactory.build(
+            "channel_settings", chat_id=ch_id, lang=lang)
+        await safe_edit(
+            query,
             await _trans('channel_schedule_title', lang, "📅"),
             reply_markup=kb, bot=context.bot)
 
@@ -5998,80 +7383,118 @@ class CallbackHandlers:
         data = query.data
         parts = data.split(":")
         if len(parts) < 2:
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
         prefix = parts[0]
-        action = prefix.replace("act_", "").replace("pen_", "").replace("ban_", "")
+        action = (prefix.replace("act_", "")
+                  .replace("pen_", "")
+                  .replace("ban_", ""))
         try:
             chat_id = int(parts[1])
         except (ValueError, IndexError):
-            await safe_edit(query,
-                await _trans('invalid_data', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('invalid_data', lang, "❌"),
+                bot=context.bot)
             return
-        if chat_id == -1 and (prefix.startswith("act_") or prefix.startswith("pen_")):
-            await safe_edit(query,
-                await _trans('invalid_id', lang, "❌"), bot=context.bot)
+        if chat_id == -1 and (
+                prefix.startswith("act_")
+                or prefix.startswith("pen_")):
+            await safe_edit(
+                query,
+                await _trans('invalid_id', lang, "❌"),
+                bot=context.bot)
             return
         if chat_id != -1:
-            if not await is_authorized_in_group(context.bot, chat_id, user_id):
-                await safe_edit(query,
-                    await _trans('no_permission', lang, "❌"), bot=context.bot)
+            if not await is_authorized_in_group(
+                    context.bot, chat_id, user_id):
+                await safe_edit(
+                    query,
+                    await _trans('no_permission', lang, "❌"),
+                    bot=context.bot)
                 return
         else:
             if not CONFIG.is_developer(user_id):
-                await safe_edit(query,
-                    await _trans('unauthorized', lang, "❌"), bot=context.bot)
+                await safe_edit(
+                    query,
+                    await _trans('unauthorized', lang, "❌"),
+                    bot=context.bot)
                 return
 
         try:
             if prefix.startswith("ban_"):
                 if action == "add":
-                    state = (UserState.WAIT_GROUP_BAN if chat_id != -1
-                             else UserState.WAIT_GLOBAL_BAN)
+                    state = (
+                        UserState.WAIT_GROUP_BAN
+                        if chat_id != -1
+                        else UserState.WAIT_GLOBAL_BAN)
                     StateManager.set(user_id, state)
                     context.user_data['ban_chat'] = chat_id
-                    await safe_edit(query,
-                        await _trans('send_keyword_prompt', lang, "📝"),
+                    await safe_edit(
+                        query,
+                        await _trans('send_keyword_prompt',
+                                     lang, "📝"),
                         bot=context.bot)
                     return
                 if action == "list":
                     words = await DB.get_banned_words(chat_id)
                     if words:
-                        text = (await _trans('words_list_title_full', lang, "🚫")
-                                + "\n\n"
-                                + "\n".join(f"• {w}" for w in words[:50]))
+                        text = (
+                            await _trans(
+                                'words_list_title_full',
+                                lang, "🚫")
+                            + "\n\n"
+                            + "\n".join(
+                                f"• {w}" for w in words[:50]))
                     else:
                         text = await _trans('no_data', lang, "📭")
                     await safe_edit(query, text, bot=context.bot)
                     return
                 if action == "rem":
-                    state = (UserState.WAIT_REM_GROUP_BAN if chat_id != -1
-                             else UserState.WAIT_REM_GLOBAL_BAN)
+                    state = (
+                        UserState.WAIT_REM_GROUP_BAN
+                        if chat_id != -1
+                        else UserState.WAIT_REM_GLOBAL_BAN)
                     StateManager.set(user_id, state)
                     context.user_data['ban_chat'] = chat_id
-                    await safe_edit(query,
-                        await _trans('send_keyword_delete_prompt', lang, "🗑️"),
+                    await safe_edit(
+                        query,
+                        await _trans(
+                            'send_keyword_delete_prompt',
+                            lang, "🗑️"),
                         bot=context.bot)
                     return
                 return
 
             if prefix.startswith("act_"):
                 user_actions = {
-                    "ban": (UserState.WAIT_BAN, "send_user_id_ban", "🚫"),
-                    "mute": (UserState.WAIT_MUTE, "send_user_id_mute", "🔇"),
-                    "warn": (UserState.WAIT_WARN, "send_user_id_warn", "⚠️"),
-                    "kick": (UserState.WAIT_KICK, "send_user_id_kick", "👢"),
-                    "restrict": (UserState.WAIT_RESTRICT, "send_user_id_restrict", "🔒"),
-                    "unban": (UserState.WAIT_UNBAN, "send_user_id_unban", "🔓"),
-                    "pin": (UserState.WAIT_PIN, "pin_prompt_full", "📌"),
+                    "ban": (UserState.WAIT_BAN,
+                            "send_user_id_ban", "🚫"),
+                    "mute": (UserState.WAIT_MUTE,
+                             "send_user_id_mute", "🔇"),
+                    "warn": (UserState.WAIT_WARN,
+                             "send_user_id_warn", "⚠️"),
+                    "kick": (UserState.WAIT_KICK,
+                             "send_user_id_kick", "👢"),
+                    "restrict": (UserState.WAIT_RESTRICT,
+                                 "send_user_id_restrict", "🔒"),
+                    "unban": (UserState.WAIT_UNBAN,
+                              "send_user_id_unban", "🔓"),
+                    "pin": (UserState.WAIT_PIN,
+                            "pin_prompt_full", "📌"),
                 }
                 if action in user_actions:
-                    state, prompt_key, prompt_default = user_actions[action]
+                    state, prompt_key, prompt_default = (
+                        user_actions[action])
                     StateManager.set(user_id, state)
                     context.user_data['adv_chat'] = chat_id
-                    await safe_edit(query,
-                        await _trans(prompt_key, lang, prompt_default),
+                    await safe_edit(
+                        query,
+                        await _trans(prompt_key, lang,
+                                     prompt_default),
                         bot=context.bot)
                     return
                 if action == "log":
@@ -6082,60 +7505,112 @@ class CallbackHandlers:
                 return
 
             if prefix.startswith("pen_"):
-                penalty_types = {'ban', 'mute', 'kick', 'restrict', 'none'}
+                penalty_types = {
+                    'ban', 'mute', 'kick', 'restrict', 'none'}
                 if action in penalty_types:
-                    await DB.update_security_settings(chat_id, auto_penalty=action)
-                    await CallbackHandlers._invalidate_security_settings_cache(chat_id)
+                    await DB.update_security_settings(
+                        chat_id, auto_penalty=action)
+                    await CallbackHandlers.\
+                        _invalidate_security_settings_cache(chat_id)
                     await CallbackHandlers._refresh_security_view(
                         query, context, chat_id, lang)
                     return
                 return
         except Exception as e:
-            logger.error(f"advanced actions: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            logger.error(
+                f"advanced actions: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
+
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.4.32 (#7): _handle_panel — فحص صلاحية البوت قبل التنفيذ
+    # ═════════════════════════════════════════════════════════════
 
     @staticmethod
-    async def _handle_panel(update, context, query, user_id, data, lang='ar'):
+    async def _handle_panel(
+        update, context, query, user_id, data, lang='ar'
+    ):
         if not update.effective_chat:
-            await safe_edit(query,
+            await safe_edit(
+                query,
                 await _trans('cannot_determine_group', lang, "❌"),
                 bot=context.bot)
             return
         chat_id = update.effective_chat.id
-        if not await is_authorized_in_group(context.bot, chat_id, user_id):
-            await safe_edit(query,
-                await _trans('no_permission', lang, "❌"), bot=context.bot)
+
+        if not await is_authorized_in_group(
+                context.bot, chat_id, user_id):
+            await safe_edit(
+                query,
+                await _trans('no_permission', lang, "❌"),
+                bot=context.bot)
             return
+
+        try:
+            bot_member = await context.bot.get_chat_member(
+                chat_id, context.bot.id)
+            bot_can_restrict = bool(
+                getattr(bot_member, 'can_restrict_members', False))
+        except Exception as e:
+            logger.warning(
+                f"_handle_panel: get_chat_member({chat_id}) "
+                f"failed: {e}")
+            bot_can_restrict = False
+
+        if not bot_can_restrict:
+            await safe_edit(
+                query,
+                await _trans(
+                    'bot_missing_restrict_permission', lang,
+                    "❌ البوت لا يملك صلاحية "
+                    "«تقييد الأعضاء» في هذه المجموعة."),
+                bot=context.bot)
+            return
+
         try:
             if data == "panel_lock":
                 await context.bot.set_chat_permissions(
                     chat_id,
                     permissions=ChatPermissions(
-                        can_send_messages=False, can_send_audios=False,
+                        can_send_messages=False,
+                        can_send_audios=False,
                         can_send_documents=False,
-                        can_send_photos=False, can_send_videos=False,
+                        can_send_photos=False,
+                        can_send_videos=False,
                         can_send_video_notes=False,
-                        can_send_voice_notes=False, can_send_polls=False,
+                        can_send_voice_notes=False,
+                        can_send_polls=False,
                         can_send_other_messages=False,
-                        can_add_web_page_previews=False, can_change_info=False,
-                        can_invite_users=False, can_pin_messages=False))
-                await safe_edit(query,
-                    await _trans('group_locked_full', lang, "🔒"), bot=context.bot)
+                        can_add_web_page_previews=False,
+                        can_change_info=False,
+                        can_invite_users=False,
+                        can_pin_messages=False))
+                await safe_edit(
+                    query,
+                    await _trans('group_locked_full', lang, "🔒"),
+                    bot=context.bot)
                 return
             if data == "panel_unlock":
                 await context.bot.set_chat_permissions(
                     chat_id,
                     permissions=ChatPermissions(
-                        can_send_messages=True, can_send_audios=True,
+                        can_send_messages=True,
+                        can_send_audios=True,
                         can_send_documents=True,
-                        can_send_photos=True, can_send_videos=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
                         can_send_video_notes=True,
-                        can_send_voice_notes=True, can_send_polls=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
                         can_send_other_messages=True,
-                        can_add_web_page_previews=True, can_change_info=True,
-                        can_invite_users=True, can_pin_messages=True))
-                await safe_edit(query,
+                        can_add_web_page_previews=True,
+                        can_change_info=True,
+                        can_invite_users=True,
+                        can_pin_messages=True))
+                await safe_edit(
+                    query,
                     await _trans('group_unlocked_full', lang, "🔓"),
                     bot=context.bot)
                 return
@@ -6146,8 +7621,10 @@ class CallbackHandlers:
                 return
         except Exception as e:
             logger.error(f"panel: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # Contests — v9.4.27
@@ -6157,54 +7634,69 @@ class CallbackHandlers:
     async def _handle_contests(update, context, query, user_id):
         lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
-        declare_sel = getattr(CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
-        contest_join = getattr(CB, 'CONTEST_JOIN', 'contest_join')
+        declare_sel = getattr(
+            CB, 'DECLARE_WINNER_SEL', 'declare_winner_sel')
+        contest_join = getattr(
+            CB, 'CONTEST_JOIN', 'contest_join')
 
         try:
             if data.startswith(contest_join + ":"):
                 cid = _coerce_int(data.split(":")[-1])
                 if cid <= 0:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
                     return
 
                 contest = await DB.get_contest_by_id(cid)
                 cd = _row_to_dict(contest) or {}
 
                 if not cd or cd.get('status') != 'active':
-                    await safe_edit(query,
-                        await _trans('no_contests', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('no_contests', lang, "❌"),
+                        bot=context.bot)
                     StateManager.clear(user_id)
                     return
 
-                already_joined = await DB.check_contest_joined(cid, user_id)
+                already_joined = await DB.check_contest_joined(
+                    cid, user_id)
                 if already_joined:
-                    await safe_edit(query,
-                        await _trans('already_joined_contest', lang,
-                                     "✅ أنت مشارك بالفعل في هذه المسابقة"),
+                    await safe_edit(
+                        query,
+                        await _trans(
+                            'already_joined_contest', lang,
+                            "✅ أنت مشارك بالفعل في هذه المسابقة"),
                         bot=context.bot)
                     return
 
-                StateManager.set(user_id, UserState.WAIT_CONTEST_ANSWER)
+                StateManager.set(
+                    user_id, UserState.WAIT_CONTEST_ANSWER)
                 context.user_data['contest_join'] = cid
 
-                contest_type = (cd.get('contest_type') or 'raffle').lower()
+                contest_type = (
+                    cd.get('contest_type') or 'raffle').lower()
                 question = cd.get('question') or ''
 
                 if contest_type == 'quiz' and question:
                     prompt_template = await _trans(
                         'quiz_question_prompt', lang,
-                        "❓ <b>السؤال:</b>\n{question}\n\n📝 <b>أرسل إجابتك الآن:</b>"
+                        "❓ <b>السؤال:</b>\n{question}\n\n"
+                        "📝 <b>أرسل إجابتك الآن:</b>"
                     )
-                    prompt = _fmt(prompt_template,
-                                  question=_html.escape(question))
+                    prompt = _fmt(
+                        prompt_template,
+                        question=_html.escape(question))
                     await safe_edit(
                         query, prompt,
                         parse_mode='HTML', bot=context.bot,
                     )
                 else:
-                    await safe_edit(query,
-                        await _trans('send_answer_btn', lang, "📝"),
+                    await safe_edit(
+                        query,
+                        await _trans('send_answer_btn',
+                                     lang, "📝"),
                         bot=context.bot)
                 return
 
@@ -6214,9 +7706,12 @@ class CallbackHandlers:
                     lines = []
                     for w in winners:
                         wd = _row_to_dict(w) or {}
-                        lines.append(f"• {_safe_str(wd.get('title'))} - "
-                                     f"{_safe_str(wd.get('winner_id'))}")
-                    text = await _trans('winners_title', lang, "🏆") + "\n\n" + "\n".join(lines)
+                        lines.append(
+                            f"• {_safe_str(wd.get('title'))} - "
+                            f"{_safe_str(wd.get('winner_id'))}")
+                    text = (await _trans('winners_title',
+                                         lang, "🏆")
+                            + "\n\n" + "\n".join(lines))
                 else:
                     text = await _trans('no_winners', lang, "📭")
                 await safe_edit(query, text, bot=context.bot)
@@ -6225,14 +7720,18 @@ class CallbackHandlers:
 
             if data.startswith(declare_sel + ":"):
                 if not CONFIG.is_developer(user_id):
-                    await safe_edit(query,
-                        await _trans('unauthorized', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('unauthorized', lang, "❌"),
+                        bot=context.bot)
                     return
 
                 cid = _coerce_int(data.split(":")[-1])
                 if cid <= 0:
-                    await safe_edit(query,
-                        await _trans('invalid_data', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('invalid_data', lang, "❌"),
+                        bot=context.bot)
                     return
 
                 if hasattr(DB, 'get_correct_answerers'):
@@ -6240,7 +7739,8 @@ class CallbackHandlers:
                 else:
                     logger.warning(
                         "⚠️ get_correct_answerers غير موجودة — "
-                        "fallback إلى كل المشاركين (سلوك pre-v9.4.26)"
+                        "fallback إلى كل المشاركين "
+                        "(سلوك pre-v9.4.26)"
                     )
                     eligible = await DB.fetchall(
                         "SELECT user_id FROM contest_participants "
@@ -6256,7 +7756,8 @@ class CallbackHandlers:
                     else:
                         msg_key = 'no_participants_full'
                         msg_default = "❌ لا يوجد مشاركون"
-                    await safe_edit(query,
+                    await safe_edit(
+                        query,
                         await _trans(msg_key, lang, msg_default),
                         bot=context.bot)
                     return
@@ -6269,30 +7770,40 @@ class CallbackHandlers:
                         user_ids.append(uid_val)
 
                 if not user_ids:
-                    await safe_edit(query,
-                        await _trans('no_participants_full', lang, "❌"),
+                    await safe_edit(
+                        query,
+                        await _trans('no_participants_full',
+                                     lang, "❌"),
                         bot=context.bot)
                     return
 
                 winner_id = random.choice(user_ids)
                 if await DB.declare_winner(cid, winner_id):
-                    msg = _fmt(await _trans('winner_announced', lang, "✅ {winner_id}"),
-                               winner_id=winner_id)
+                    msg = _fmt(
+                        await _trans('winner_announced',
+                                     lang, "✅ {winner_id}"),
+                        winner_id=winner_id)
                     await safe_edit(query, msg, bot=context.bot)
                     try:
-                        congrats = await _trans('congrats_winner_full', lang, "🎉")
-                        await context.bot.send_message(winner_id, congrats)
+                        congrats = await _trans(
+                            'congrats_winner_full', lang, "🎉")
+                        await context.bot.send_message(
+                            winner_id, congrats)
                     except Exception:
                         pass
                 else:
-                    await safe_edit(query,
-                        await _trans('declare_failed', lang, "❌"), bot=context.bot)
+                    await safe_edit(
+                        query,
+                        await _trans('declare_failed', lang, "❌"),
+                        bot=context.bot)
                 return
 
         except Exception as e:
             logger.error(f"contests: {e}", exc_info=True)
-            await safe_edit(query,
-                await _trans('error_occurred', lang, "❌"), bot=context.bot)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # Backup
@@ -6302,15 +7813,18 @@ class CallbackHandlers:
     async def _do_backup(context, user_id, lang='ar'):
         try:
             PATHS.BACKUPS.mkdir(parents=True, exist_ok=True)
-            timestamp = TimeUtils.mecca_now().strftime('%Y%m%d_%H%M%S_%f')
+            timestamp = TimeUtils.mecca_now().strftime(
+                '%Y%m%d_%H%M%S_%f')
             backup_file = PATHS.BACKUPS / f"backup_{timestamp}.db"
             success = await DB.backup_database(backup_file)
             if not success:
-                await safe_send(context.bot, user_id,
-                                await _trans('backup_failed_full', lang, "❌"))
+                await safe_send(
+                    context.bot, user_id,
+                    await _trans('backup_failed_full', lang, "❌"))
                 return
             try:
-                await DB.set_setting('last_backup', TimeUtils.sql_iso())
+                await DB.set_setting(
+                    'last_backup', TimeUtils.sql_iso())
             except Exception:
                 pass
             try:
@@ -6319,9 +7833,11 @@ class CallbackHandlers:
                 size = 0
             if size > MAX_TG_FILE_SIZE:
                 size_mb = size / (1024 * 1024)
-                msg = _fmt(await _trans('backup_too_large', lang,
-                                        "⚠️ {size}MB {path}"),
-                           size=f"{size_mb:.1f}", path=str(backup_file))
+                msg = _fmt(
+                    await _trans('backup_too_large', lang,
+                                 "⚠️ {size}MB {path}"),
+                    size=f"{size_mb:.1f}",
+                    path=str(backup_file))
                 await safe_send(context.bot, user_id, msg)
                 return
 
@@ -6331,8 +7847,9 @@ class CallbackHandlers:
                 except (OSError, FileNotFoundError):
                     return 0
 
-            backups = sorted(PATHS.BACKUPS.glob("backup_*.db"),
-                             key=_safe_mtime, reverse=True)
+            backups = sorted(
+                PATHS.BACKUPS.glob("backup_*.db"),
+                key=_safe_mtime, reverse=True)
             others = [b for b in backups if b != backup_file]
             for old in others[MAX_BACKUPS - 1:]:
                 try:
@@ -6342,18 +7859,34 @@ class CallbackHandlers:
 
             with open(backup_file, 'rb') as f:
                 await context.bot.send_document(
-                    chat_id=user_id, document=f, filename=backup_file.name)
+                    chat_id=user_id, document=f,
+                    filename=backup_file.name)
         except Exception as e:
             logger.error(f"❌ backup: {e}", exc_info=True)
             try:
-                msg = _fmt(await _trans('backup_error_full', lang, "❌ {error}"),
-                           error=str(e)[:100])
+                msg = _fmt(
+                    await _trans('backup_error_full', lang,
+                                 "❌ {error}"),
+                    error=str(e)[:100])
                 await safe_send(context.bot, user_id, msg)
             except Exception:
                 pass
 
+
+# =====================================================================
+# ✅ v9.4.32 (#4): __all__ — توثيق صريح
+#
+# ملاحظة: بعض الأسماء تبدأ بـ "_" لأنها تُستخدم خارجياً من قبل
+# وحدات أخرى (handlers_command, handlers_message, main).
+# إبقاؤها هنا مقصود للتوافق الخلفي، وللتوثيق بأنها جزء من الواجهة
+# العامة (على الرغم من التسمية الخاصة باصطلاح PEP-8).
+# =====================================================================
+
 __all__ = [
+    # API الرئيسي
     "CallbackHandlers",
+
+    # دوال re-export للاستخدام الخارجي
     "_invalidate_sec_auth_cache",
     "_invalidate_after_channel_change",
     "_set_sec_chat",
@@ -6361,10 +7894,26 @@ __all__ = [
     "_md_to_html",
     "_get_log_channel_menu_data",
     "_invalidate_log_channel_menu_cache",
-    "_ANALYTICS_ALIASES",
-    "CONTEST_DURATIONS",
     "_clear_lang_cache_local",
     "_apply_auto_reply_status_icons",
+    "_patch_auto_reply_back",
+    "_prune_sec_auth_cache",
+    "_make_user_cache_keys",
+    "_invalidate_post_count_cache",
+
+    # ثوابت
+    "_ANALYTICS_ALIASES",
+    "CONTEST_DURATIONS",
+    "_KNOWN_CB_PREFIXES",
+
+    # كائنات مشتركة (للـ monitoring / test)
     "ACTIVE_TASKS",
     "settings_cache",
+    "user_cache",
+    "posts_cache",
+
+    # كاشات محلية (للاختبار)
+    "_sec_auth_cache",
+    "_security_stats_cache_local",
+    "_post_count_cache",
 ]
