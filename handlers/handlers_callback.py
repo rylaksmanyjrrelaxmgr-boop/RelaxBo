@@ -2,59 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.4.32)
+handlers_callback.py - معالج الأزرار (v9.5.0)
 =====================================================================
-🆕 v9.4.32 — إصلاحات الصيانة والاتساق (7 ملاحظات فحص):
-    ✅ #1: _KNOWN_CB_PREFIXES — توليد قائمة base_data prefixes ديناميكياً
-       من CB.* + إضافات صريحة، بدل قائمة hardcoded قابلة للكسر عند
-       إضافة أزرار جديدة.
-    ✅ #2: _make_user_cache_keys() — دالة مركزية لأسماء مفاتيح كاش
-       المستخدم/القناة، لتفادي التكرار اليدوي القابل للانحراف عن
-       cache.py.
-    ✅ #3: _clear_lang_cache_local — استخدام importlib مع lazy import
-       آمن بدل الاعتماد الحصري على sys.modules (hack).
-    ✅ #4: __all__ — توثيق صريح للـ re-exports الخاصة للتوافق الخلفي.
-    ✅ #5: color_emoji fallback — توحيد thresholds=(30.0, 70.0) مع
-       الاستخدام الفعلي في _format_channel_rate_line.
-    ✅ #6: _show_post_list — كاش COUNT(*) (TTL=5s) لتفادي استعلام DB
-       في كل عرض + إبطال الكاش عند add/delete/clear/recycle.
-    ✅ #7: _handle_panel — فحص صلاحية البوت (can_restrict_members)
-       قبل set_chat_permissions لتفادي فشل صامت.
+🆕 v9.5.0 — تقسيم الملف (المرحلة 1):
+    ✅ نقل الثوابت والدوال النقية إلى handlers_callback_base.py
+    ✅ كل الأسماء لا تزال متاحة هنا (backward-compatible)
+    ✅ كلاس CallbackHandlers بدون أي تغيير
 
-🆕 v9.4.31 — إصلاح زر الرجوع في قائمة الردود التلقائية:
-    ✅ #1: إضافة _patch_auto_reply_back() — يستبدل callback_data='back'
-       في قائمة auto_reply بـ 'grp_set:{chat_id}'
-       - المشكلة: الزر كان يذهب للقائمة الرئيسية دائماً
-       - السبب: "back" في _NO_CHAT_ID_BUTTONS في KeyboardFactory
-       - الحل: patch محلي في handlers_callback يحوّل الزر
-       - مطبَّق في 4 مواضع:
-         1) _handle_security (action = "auto_reply_menu")
-         2) _handle_auto_reply (action = "menu")
-         3) _handle_auto_reply (action = "toggle")
-         4) _handle_auto_reply (action = "admins")
+🆕 v9.4.32 — إصلاحات الصيانة والاتساق:
+    ✅ #1: _KNOWN_CB_PREFIXES (منقول إلى base)
+    ✅ #2: _make_user_cache_keys (منقول إلى base)
+    ✅ #3: _clear_lang_cache_local
+    ✅ #4: __all__
+    ✅ #5: color_emoji fallback thresholds=(30.0, 70.0)
+    ✅ #6: _show_post_list — كاش COUNT(*) (TTL=5s)
+    ✅ #7: _handle_panel — فحص can_restrict_members
 
-🆕 v9.4.30 — إصلاحات أمنية وذاكرة:
-    ✅ #1: _sec_auth_cache — إضافة _prune_sec_auth_cache لمنع تسريب الذاكرة
-    ✅ #2: contest_duration:* / contest_type_raffle / contest_type_quiz
-       — إضافة فحص CONFIG.is_developer(user_id)
-    ✅ #3: _CONTEXT_KEYS_TO_CLEAR — إضافة contest_* keys
-    ✅ #5: _PRIMARY_OWNER_ID — log critical عند الفشل (بدل صمت)
-    ✅ #6: _handle_group_delete — ترتيب صحيح لإبطال الكاش
-    ✅ #7: _handle_parameterized — توثيق عدم السقوط (سلوك مقصود)
-
+🆕 v9.4.31 — إصلاح زر الرجوع في قائمة الردود التلقائية
+🆕 v9.4.30 — إصلاحات أمنية وذاكرة
 🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة
-🆕 v9.4.28.1 — إصلاح عرض عنوان المسابقة
-🆕 v9.4.28 — أزرار مدة المسابقة (بدل تاريخ نصي)
-✅ v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب"
-✅ v9.4.26 — دعم مسابقة "سؤال وجواب"
-✅ v9.4.25 — إصلاح دلالة أيقونة زر حذف الكلمات المحظورة
-✅ v9.4.24 — توحيد كاش الإعدادات الأمنية (Option C)
-✅ v9.4.23 — إصلاح اتساق الكاش (Cache Coherency Bug)
-✅ v9.4.22 — شاشة إدارة قناة التحديثات
-✅ v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int لـ PG)
-✅ v9.4.20 — إصلاح clear_lang_cache (circular import)
-✅ v9.4.19 — فحص URL لـ updates_channel
-✅ v9.4.18 — زر قناة التحديثات
+🆕 v9.4.28 — أزرار مدة المسابقة
+🆕 v9.4.27 — إصلاحات منطق مسابقة "سؤال وجواب"
+🆕 v9.4.26 — دعم مسابقة "سؤال وجواب"
+🆕 v9.4.25 — إصلاح أيقونة زر حذف الكلمات المحظورة
+🆕 v9.4.24 — توحيد كاش الإعدادات الأمنية
+🆕 v9.4.23 — إصلاح اتساق الكاش
+🆕 v9.4.22 — شاشة إدارة قناة التحديثات
+🆕 v9.4.21 — إصلاح أزرار الردود التلقائية (bool → int)
+🆕 v9.4.20 — إصلاح clear_lang_cache (circular import)
+🆕 v9.4.19 — فحص URL لـ updates_channel
+🆕 v9.4.18 — زر قناة التحديثات
 =====================================================================
 """
 
@@ -83,9 +60,6 @@ from telegram.error import BadRequest, RetryAfter, Forbidden
 from config import CONFIG, PATHS
 from database import DB, TimeUtils, internal_cache
 
-# =====================================================================
-# ✅ v9.4.32 (#5): توحيد thresholds مع الاستخدام الفعلي (30.0, 70.0)
-# =====================================================================
 try:
     from database_analytics import color_emoji
 except ImportError:
@@ -182,94 +156,55 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# =====================================================================
-# خريطة أسماء أزرار التحليلات
-# =====================================================================
 
-_ANALYTICS_ALIASES: Dict[str, str] = {
-    "growth_30d_btn": "user_growth",
-    "top_channels_btn": "top_channels",
-    "publish_stats_btn": "publish_stats",
-    "channels_rate_btn": "channels_rate",
-    "subscriptions_btn": "subscriptions",
-    "pool_live_btn": "pool",
-    "slow_queries_btn": "slow",
-    "export_excel_btn": "export",
-    "user_growth": "user_growth",
-    "top_channels": "top_channels",
-    "publish_stats": "publish_stats",
-    "channels_rate": "channels_rate",
-    "subscriptions": "subscriptions",
-    "pool": "pool",
-    "slow": "slow",
-    "export": "export",
-}
-
-# =====================================================================
-# ✅ v9.4.28: مدد المسابقات الجاهزة (key, fallback_label, seconds)
-# =====================================================================
-
-CONTEST_DURATIONS: Dict[str, Tuple[str, int]] = {
-    "1h":  ("⏰ ساعة واحدة",  1 * 3600),
-    "6h":  ("🕐 6 ساعات",     6 * 3600),
-    "1d":  ("📅 يوم واحد",    1 * 86400),
-    "3d":  ("📅 3 أيام",      3 * 86400),
-    "1w":  ("📅 أسبوع",       7 * 86400),
-    "2w":  ("📅 أسبوعان",     14 * 86400),
-    "1mo": ("📅 شهر",         30 * 86400),
-    "2mo": ("📅 شهران",       60 * 86400),
-    "3mo": ("📅 3 أشهر",      90 * 86400),
-    "6mo": ("📅 6 أشهر",      180 * 86400),
-    "1y":  ("📅 سنة",         365 * 86400),
-}
-
-# =====================================================================
-# ثوابت
-# =====================================================================
-
-MAX_CAPTION_LENGTH = 1024
-MAX_MESSAGE_LENGTH = 4096
-MAX_BACKUPS = getattr(CONFIG, "MAX_BACKUPS", 10)
-MAX_CONCURRENT_PUBLISH = 2
-MAX_PUBLISH_DELAY_SECONDS = 60
-MAX_TG_FILE_SIZE = 49 * 1024 * 1024
-CALLBACK_MIN_INTERVAL = 0.5
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_CLEANUP_EVERY = 100
-ADMIN_PAGE_SIZE = 10
-SEC_AUTH_CACHE_TTL = 300
-PUBLISH_ACQUIRE_TIMEOUT = 30
-SEC_SETTINGS_CACHE_TTL = 5
-SEC_STATS_CACHE_TTL = 30
-LOG_CHANNEL_MENU_CACHE_TTL = 30
-SUCCESS_RATE_GOOD_THRESHOLD = 70
-SUCCESS_RATE_WARN_THRESHOLD = 30
-DEFAULT_SUCCESS_RATE = 100.0
-
-# ✅ v9.4.30: حد أقصى لعدد entries في _sec_auth_cache (prune trigger)
-SEC_AUTH_CACHE_MAX_SIZE = 5000
-
-# ✅ v9.4.32 (#6): TTL لكاش عدد المنشورات
-POST_COUNT_CACHE_TTL = 5
-POST_COUNT_CACHE_MAX_SIZE = 200
-
-_BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
-
-# ✅ v9.4.30: log critical عند فشل قراءة PRIMARY_OWNER_ID
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.5.0 — استيراد الثوابت والدوال المساعدة من الملف المُقسَّم
+# ═════════════════════════════════════════════════════════════════════
 try:
-    _PRIMARY_OWNER_ID = int(CONFIG.PRIMARY_OWNER_ID)
-    if _PRIMARY_OWNER_ID <= 0:
-        raise ValueError(
-            f"PRIMARY_OWNER_ID must be positive (got {_PRIMARY_OWNER_ID})"
-        )
-except (TypeError, ValueError, AttributeError) as _poe:
-    logger.critical(
-        f"❌ PRIMARY_OWNER_ID غير صالح: {_poe} — "
-        f"المالك سيفقد صلاحياته كاملة! "
-        f"تحقق من CONFIG.PRIMARY_OWNER_ID"
+    from .handlers_callback_base import (  # noqa: F401
+        _ANALYTICS_ALIASES, CONTEST_DURATIONS,
+        MAX_CAPTION_LENGTH, MAX_MESSAGE_LENGTH, MAX_BACKUPS,
+        MAX_CONCURRENT_PUBLISH, MAX_PUBLISH_DELAY_SECONDS,
+        MAX_TG_FILE_SIZE, CALLBACK_MIN_INTERVAL, RATE_LIMIT_WINDOW,
+        RATE_LIMIT_CLEANUP_EVERY, ADMIN_PAGE_SIZE, SEC_AUTH_CACHE_TTL,
+        PUBLISH_ACQUIRE_TIMEOUT, SEC_SETTINGS_CACHE_TTL,
+        SEC_STATS_CACHE_TTL, LOG_CHANNEL_MENU_CACHE_TTL,
+        SUCCESS_RATE_GOOD_THRESHOLD, SUCCESS_RATE_WARN_THRESHOLD,
+        DEFAULT_SUCCESS_RATE, SEC_AUTH_CACHE_MAX_SIZE,
+        POST_COUNT_CACHE_TTL, POST_COUNT_CACHE_MAX_SIZE,
+        _BOLD_MD_PATTERN, _VALID_URL_PATTERN,
+        _PRIMARY_OWNER_ID, _CONTEXT_KEYS_TO_CLEAR, _CANCEL_EXTRA_KEYS,
+        GROUP_NUMBER_EMOJIS, _KNOWN_CB_PREFIXES,
+        _trans, _fmt, _group_number, _is_primary_owner,
+        _row_to_dict, _coerce_int, _coerce_float, _safe_str,
+        _md_to_html, _log_channel_cache_key, _is_valid_url,
+        _mask_id, _make_user_cache_keys,
     )
-    _PRIMARY_OWNER_ID = None
+except ImportError:
+    from handlers_callback_base import (  # noqa: F401
+        _ANALYTICS_ALIASES, CONTEST_DURATIONS,
+        MAX_CAPTION_LENGTH, MAX_MESSAGE_LENGTH, MAX_BACKUPS,
+        MAX_CONCURRENT_PUBLISH, MAX_PUBLISH_DELAY_SECONDS,
+        MAX_TG_FILE_SIZE, CALLBACK_MIN_INTERVAL, RATE_LIMIT_WINDOW,
+        RATE_LIMIT_CLEANUP_EVERY, ADMIN_PAGE_SIZE, SEC_AUTH_CACHE_TTL,
+        PUBLISH_ACQUIRE_TIMEOUT, SEC_SETTINGS_CACHE_TTL,
+        SEC_STATS_CACHE_TTL, LOG_CHANNEL_MENU_CACHE_TTL,
+        SUCCESS_RATE_GOOD_THRESHOLD, SUCCESS_RATE_WARN_THRESHOLD,
+        DEFAULT_SUCCESS_RATE, SEC_AUTH_CACHE_MAX_SIZE,
+        POST_COUNT_CACHE_TTL, POST_COUNT_CACHE_MAX_SIZE,
+        _BOLD_MD_PATTERN, _VALID_URL_PATTERN,
+        _PRIMARY_OWNER_ID, _CONTEXT_KEYS_TO_CLEAR, _CANCEL_EXTRA_KEYS,
+        GROUP_NUMBER_EMOJIS, _KNOWN_CB_PREFIXES,
+        _trans, _fmt, _group_number, _is_primary_owner,
+        _row_to_dict, _coerce_int, _coerce_float, _safe_str,
+        _md_to_html, _log_channel_cache_key, _is_valid_url,
+        _mask_id, _make_user_cache_keys,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# حالة مشتركة — تبقى هنا في المرحلة 1
+# ═════════════════════════════════════════════════════════════════════
 
 ACTIVE_TASKS: Set[asyncio.Task] = set()
 _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
@@ -281,194 +216,10 @@ _security_stats_cache_local: SmartCache = SmartCache(
 _post_count_cache: SmartCache = SmartCache(
     ttl=POST_COUNT_CACHE_TTL, max_size=POST_COUNT_CACHE_MAX_SIZE)
 
-# ✅ v9.4.30: إضافة contest_* keys للتنظيف
-_CONTEXT_KEYS_TO_CLEAR = (
-    'security_chat_id', 'auto_chat', 'adv_chat', 'schedule_ch',
-    'ban_chat', 'contest_join', 'channel_page', 'post_page', 'sec_chat',
-    'contest_title', 'contest_desc', 'contest_prize',
-    'contest_end_date', 'contest_duration_label',
-    'contest_duration_seconds',
-)
-_CANCEL_EXTRA_KEYS = ('pin_msg_id',)
 
-GROUP_NUMBER_EMOJIS = [
-    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
-    "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
-]
-
-# =====================================================================
-# ✅ v9.4.32 (#1): توليد _KNOWN_CB_PREFIXES ديناميكياً من CB.*
-#     + إضافات صريحة للأزرار التي لا تبدأ بـ CB.*
-# =====================================================================
-
-_KNOWN_CB_PREFIXES: Set[str] = set()
-try:
-    for _attr_name in dir(CB):
-        if _attr_name.startswith('_'):
-            continue
-        try:
-            _val = getattr(CB, _attr_name)
-        except Exception:
-            continue
-        if isinstance(_val, str) and _val:
-            _KNOWN_CB_PREFIXES.add(_val)
-except Exception as _e_cb:
-    logger.warning(f"⚠️ _KNOWN_CB_PREFIXES build from CB.* failed: {_e_cb}")
-
-_KNOWN_CB_PREFIXES.update({
-    "finish_posts",
-    "gift_plans",
-    "redeem_gift",
-    "updates_channel_btn",
-    "admin_analytics",
-    "refresh_btn",
-})
-
-# =====================================================================
-# ✅ v9.4.32 (#2): دالة مركزية لمفاتيح الكاش
-# ⚠️ يجب إبقاؤها متوافقة مع الأنماط المُستخدمة في cache.py
-# =====================================================================
-
-def _make_user_cache_keys(
-    user_id: int,
-    channel_db_id: Optional[int] = None,
-) -> List[str]:
-    """
-    تُنشئ قائمة مفاتيح الكاش المرتبطة بمستخدم معيّن.
-
-    ⚠️ تحذير الصيانة:
-        أنماط المفاتيح هذه مُنسَّقة لتطابق cache.py.
-        إذا تغيّر نمط المفاتيح هناك، يجب تحديث هذه الدالة.
-
-    Args:
-        user_id: معرّف المستخدم.
-        channel_db_id: معرّف القناة في DB (اختياري).
-
-    Returns:
-        قائمة مفاتيح الكاش.
-    """
-    keys = [
-        f"start_data_{user_id}",
-        f"user_{user_id}",
-        f"user_{user_id}_True",
-        f"user_{user_id}_False",
-        f"channels_{user_id}",
-    ]
-    if channel_db_id is not None:
-        keys.append(f"channel_info_{channel_db_id}")
-    return keys
-
-# =====================================================================
-# ترجمة موحدة
-# =====================================================================
-
-async def _trans(key: str, lang: str, default: str = "") -> str:
-    if not key:
-        return default or ""
-    try:
-        if lang and lang != 'off':
-            text = TranslationManager.get_text(lang, key)
-            if text and text != key:
-                return text
-    except Exception as e:
-        logger.debug(f"_trans({key},{lang}) TM: {e}")
-    try:
-        if lang and lang != 'off':
-            text = await get_text(lang, key)
-            if text and text != key:
-                return text
-    except Exception as e:
-        logger.debug(f"_trans({key},{lang}) get_text: {e}")
-    return default or key
-
-def _fmt(text: str, **kwargs) -> str:
-    try:
-        return text.format(**kwargs)
-    except (KeyError, IndexError):
-        return text
-
-# =====================================================================
-# دوال مساعدة
-# =====================================================================
-
-def _group_number(index: int) -> str:
-    if 1 <= index <= len(GROUP_NUMBER_EMOJIS):
-        return GROUP_NUMBER_EMOJIS[index - 1]
-    return f"{index}."
-
-def _is_primary_owner(user_id: int) -> bool:
-    return _PRIMARY_OWNER_ID is not None and user_id == _PRIMARY_OWNER_ID
-
-def _row_to_dict(row) -> Optional[Dict[str, Any]]:
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    try:
-        return dict(row)
-    except (TypeError, ValueError):
-        return None
-
-def _coerce_int(value, default=0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-def _coerce_float(value, default=0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-def _safe_str(value, default='?') -> str:
-    if value is None:
-        return default
-    s = str(value)
-    return s if s.strip() else default
-
-def _md_to_html(text: str) -> str:
-    if not text or '**' not in text:
-        return text
-    return _BOLD_MD_PATTERN.sub(r"<b>\1</b>", text)
-
-def _log_channel_cache_key(chat_id: int) -> str:
-    return f"log_ch_menu_{chat_id}"
-
-async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
-    try:
-        await internal_cache.invalidate(_log_channel_cache_key(chat_id))
-    except Exception:
-        pass
-    try:
-        await internal_cache.invalidate(f"group_log_{chat_id}")
-    except Exception:
-        pass
-
-def _set_sec_chat(context, chat_id: int) -> None:
-    try:
-        context.user_data['sec_chat'] = chat_id
-        context.user_data['security_chat_id'] = chat_id
-    except Exception:
-        pass
-
-def _is_valid_url(url: Optional[str]) -> bool:
-    if not url:
-        return False
-    if not isinstance(url, str):
-        return False
-    url_stripped = url.strip()
-    if not url_stripped:
-        return False
-    if ' ' in url_stripped or '\n' in url_stripped or '\t' in url_stripped:
-        return False
-    if not _VALID_URL_PATTERN.match(url_stripped):
-        return False
-    return True
-
-# =====================================================================
-# ✅ v9.4.32 (#3): clear_lang_cache — lazy import عبر importlib
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.4.32 (#3): clear_lang_cache_local — lazy import عبر importlib
+# ═════════════════════════════════════════════════════════════════════
 
 def _clear_lang_cache_local(context) -> None:
     """
@@ -514,9 +265,10 @@ def _clear_lang_cache_local(context) -> None:
     except Exception as e:
         logger.debug(f"_clear_lang_cache_local fallback: {e}")
 
-# =====================================================================
+
+# ═════════════════════════════════════════════════════════════════════
 # تطبيق الحالة على أزرار auto_reply
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
 
 def _apply_auto_reply_status_icons(
     kb: InlineKeyboardMarkup,
@@ -546,6 +298,7 @@ def _apply_auto_reply_status_icons(
     except Exception:
         return kb
 
+
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v9.4.31: إصلاح زر الرجوع في قائمة auto_reply
 # ═════════════════════════════════════════════════════════════════════
@@ -557,13 +310,6 @@ def _patch_auto_reply_back(
     ✅ v9.4.31: يستبدل callback_data='back' في قائمة auto_reply
     بـ 'grp_set:{chat_id}' — ليُعيد المستخدم إلى قائمة الأمان
     بدل القائمة الرئيسية.
-
-    Args:
-        kb: keyboard مبني عبر KeyboardFactory.build("auto_reply", ...)
-        chat_id: مجموعة الأمان (للعودة إليها)
-
-    Returns:
-        keyboard مُعدَّل (أو نفسه عند الفشل).
     """
     try:
         new_rows = []
@@ -583,9 +329,29 @@ def _patch_auto_reply_back(
     except Exception:
         return kb
 
-# =====================================================================
+
+# ═════════════════════════════════════════════════════════════════════
 # قناة السجل
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
+
+async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
+    try:
+        await internal_cache.invalidate(_log_channel_cache_key(chat_id))
+    except Exception:
+        pass
+    try:
+        await internal_cache.invalidate(f"group_log_{chat_id}")
+    except Exception:
+        pass
+
+
+def _set_sec_chat(context, chat_id: int) -> None:
+    try:
+        context.user_data['sec_chat'] = chat_id
+        context.user_data['security_chat_id'] = chat_id
+    except Exception:
+        pass
+
 
 async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
     cache_key = _log_channel_cache_key(chat_id)
@@ -635,6 +401,7 @@ async def _get_log_channel_menu_data(chat_id: int) -> Dict[str, Any]:
         cache_key, data, ttl=LOG_CHANNEL_MENU_CACHE_TTL)
     return data
 
+
 async def _safe_answer(query, text=None, show_alert=False) -> bool:
     if not query:
         return False
@@ -648,6 +415,7 @@ async def _safe_answer(query, text=None, show_alert=False) -> bool:
         return False
     except Exception:
         return False
+
 
 async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
                     clear_markup=False) -> bool:
@@ -717,6 +485,7 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None, bot=None,
     except Exception:
         return False
 
+
 async def safe_delete_message(query_or_message) -> None:
     try:
         if hasattr(query_or_message, 'message') and query_or_message.message:
@@ -726,19 +495,13 @@ async def safe_delete_message(query_or_message) -> None:
     except Exception:
         pass
 
-def _mask_id(id_value, prefix=3, suffix=2) -> str:
-    if id_value is None:
-        return "***"
-    s = str(id_value)
-    if len(s) <= 5:
-        return "***"
-    return s[:prefix] + "***" + s[-suffix:]
 
 async def _is_channel_owner(user_id: int, channel_db_id: int) -> bool:
     try:
         return await DB.is_channel_owner(user_id, channel_db_id)
     except Exception:
         return False
+
 
 async def _is_group_owner(user_id: int, chat_id: int) -> bool:
     try:
@@ -755,6 +518,7 @@ async def _is_group_owner(user_id: int, chat_id: int) -> bool:
         logger.warning(f"_is_group_owner error: {e}")
         return False
 
+
 def _clear_context_keys(context, extra_keys=None) -> None:
     for k in _CONTEXT_KEYS_TO_CLEAR:
         context.user_data.pop(k, None)
@@ -762,9 +526,11 @@ def _clear_context_keys(context, extra_keys=None) -> None:
         for k in extra_keys:
             context.user_data.pop(k, None)
 
+
 def _ensure_bot_start_time(context) -> None:
     if 'start_time' not in context.bot_data:
         context.bot_data['start_time'] = time.monotonic()
+
 
 async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
     parts = data.split(":")
@@ -780,6 +546,7 @@ async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
         except (TypeError, ValueError):
             return None
     return None
+
 
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v9.4.30: prune لـ _sec_auth_cache لمنع تسريب الذاكرة
@@ -817,6 +584,7 @@ def _prune_sec_auth_cache(now: float) -> int:
         )
     return removed
 
+
 async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     if chat_id is None:
         return False
@@ -837,6 +605,7 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     _sec_auth_cache[key] = (result, now)
     return result
 
+
 def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
     if chat_id is None:
         _sec_auth_cache.clear()
@@ -845,12 +614,14 @@ def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
             if k[1] == chat_id:
                 del _sec_auth_cache[k]
 
+
 async def _invalidate_post_count_cache(channel_db_id: int) -> None:
     """✅ v9.4.32 (#6): إبطال كاش عدد المنشورات لقناة معيّنة."""
     try:
         await _post_count_cache.delete(f"post_count_{channel_db_id}")
     except Exception:
         pass
+
 
 async def _invalidate_after_channel_change(
     user_id: int,
@@ -875,6 +646,7 @@ async def _invalidate_after_channel_change(
         except Exception as e:
             logger.debug(f"posts_cache invalidate: {e}")
         await _invalidate_post_count_cache(channel_db_id)
+
 
 def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     published = _coerce_int(ch.get('published'), 0)
@@ -904,9 +676,10 @@ def _format_channel_rate_line(ch: Dict[str, Any]) -> str:
     line += "\n"
     return line
 
-# =====================================================================
+
+# ═════════════════════════════════════════════════════════════════════
 # CallbackHandlers
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
 
 class CallbackHandlers:
 
@@ -7873,14 +7646,9 @@ class CallbackHandlers:
                 pass
 
 
-# =====================================================================
-# ✅ v9.4.32 (#4): __all__ — توثيق صريح
-#
-# ملاحظة: بعض الأسماء تبدأ بـ "_" لأنها تُستخدم خارجياً من قبل
-# وحدات أخرى (handlers_command, handlers_message, main).
-# إبقاؤها هنا مقصود للتوافق الخلفي، وللتوثيق بأنها جزء من الواجهة
-# العامة (على الرغم من التسمية الخاصة باصطلاح PEP-8).
-# =====================================================================
+# ═════════════════════════════════════════════════════════════════════
+# __all__ — توثيق صريح
+# ═════════════════════════════════════════════════════════════════════
 
 __all__ = [
     # API الرئيسي
