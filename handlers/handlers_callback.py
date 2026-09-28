@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.5.0)
+handlers_callback.py - معالج الأزرار (v9.5.1)
 =====================================================================
+🆕 v9.5.1 — إصلاح خطأ منطقي:
+    ✅ toggle_map["mentions"] → "delete_mentions" (كان "mentions")
+
 🆕 v9.5.0 — تقسيم الملف (المرحلة 1):
     ✅ نقل الثوابت والدوال النقية إلى handlers_callback_base.py
     ✅ كل الأسماء لا تزال متاحة هنا (backward-compatible)
@@ -3984,9 +3987,10 @@ class CallbackHandlers:
                     query, context, chat_id, lang)
                 return
 
+            # ✅ v9.5.1: إصلاح — "mentions" → "delete_mentions"
             toggle_map = {
                 "links": "delete_links",
-                "mentions": "mentions",
+                "mentions": "delete_mentions",
                 "slow": "slow_mode",
                 "video": "delete_videos",
                 "audio": "delete_audio",
