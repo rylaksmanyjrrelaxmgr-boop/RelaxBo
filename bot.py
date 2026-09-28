@@ -2,51 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.12)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.13)
 ================================================================================
+🆕 v5.5.13 (REMOVE DUPLICATE POOL MONITOR):
+    ✅ حذف BackgroundTasks.monitor_pool (المكرر)
+       - كان يُسجّل "🟢 Pool: 0/20 (0.0%)" كل 30 ثانية
+       - pool_health_monitor يغطّيه بشكل أفضل (تقرير شامل كل 5 دقائق)
+       - الفائدة: تقليل الضجيج في اللوغ بنسبة ~90%
+       - monitor_pool_alert يبقى (غرضه مختلف: إشعارات استباقية للأدمن)
+
 🆕 v5.5.12 (POOL DATA DUAL FALLBACK):
     ✅ pool_health_monitor: fallback مزدوج لقراءة pool data
        - المصدر 1: DB.get_pool_live() (من AnalyticsMixin)
        - المصدر 2: DB.get_pool_stats() (من Database مباشرة)
        - المصدر 3: القيم الافتراضية (total/active من pg_stat_activity)
-       الفائدة: المراقبة تعمل حتى لو:
-         • أُعيد هيكلة AnalyticsMixin
-         • فشل تحميل database_analytics.py
-         • تغيّرت مفاتيح الإرجاع مستقبلاً
     ✅ إضافة imports: from typing import Any, Dict, Optional
 
 🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES):
     ✅ ensure_performance_indexes(): إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
-       - PostgreSQL فقط (SQLite/MySQL → تخطّي)
-       - CONCURRENTLY + IF NOT EXISTS → آمن للتكرار
-       - لا يفشل الإقلاع عند الخطأ
     ✅ إصلاح حرج: استيراد TimeUtils من database
-       (كان يُسبب NameError صامت في إشعار قناة سجل المطور)
-    ✅ pool_health_monitor: 
-       - لفّ sleep(120) الأولي في try/except CancelledError
-       - idle_in_tx: من >=3 إلى >=1 (idle in transaction يحجب VACUUM)
-    ✅ _collect_admin_ids: تسجيل اسم الدالة المُستخدمة
+    ✅ pool_health_monitor: لفّ sleep(120) في try/except CancelledError
+    ✅ idle_in_tx: >=1 بدل >=3
+    ✅ _collect_admin_ids: تسجيل اسم الدالة
 
 🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS):
-    ✅ pool_health_monitor: إصلاح الإنذارات الكاذبة
-       - waiting الآن يحسب الأقفال الحقيقية فقط (Lock, LWLock, BufferPin)
-       - إزالة waiting>=3 من شروط التحذير
-       - waiting أصبح معلومة تشخيصية فقط (لا يفعّل ⚠️)
-    ✅ تقليل الضجيج في اللوغ
+    ✅ waiting يحسب الأقفال الحقيقية فقط
+    ✅ إزالة waiting>=3 من شروط التحذير
 
 🆕 v5.5.9 (AUTO POOL HEALTH MONITOR):
-    ✅ pool_health_monitor(): مراقبة تلقائية لحالة PostgreSQL Pool
-       - كل 5 دقائق → يسجّل في اللوغ
-       - يقرأ pg_stat_activity + DB.get_pool_live()
-       - 🟢 pool HEALTH (طبيعي) أو ⚠️ pool DIAG (ضغط)
+    ✅ pool_health_monitor(): مراقبة تلقائية كل 5 دقائق
 
-🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT):
-    ✅ successful_payment: إشعار قناة سجل المطور عند كل اشتراك مدفوع
-    ✅ استيراد _notify_dev_log من handlers_command (مع fallback)
-
-🆕 v5.5.7 (DEV LOG NOTIFICATIONS):
-    ✅ يدعم إشعار قناة السجل من handlers_command و handlers_message
-
+🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT)
+🆕 v5.5.7 (DEV LOG NOTIFICATIONS)
 🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS)
 🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX)
 🆕 v5.5.4 (CONTEST-AUTO-CLEANUP)
@@ -1066,12 +1053,12 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.9/10/11/12: مراقبة تلقائية لحالة PostgreSQL Pool
+# ✅ v5.5.9/10/11/12/13: مراقبة تلقائية لحالة PostgreSQL Pool
 # =====================================================================
 
 async def pool_health_monitor() -> None:
     """
-    ✅ v5.5.9/10/11/12: يراقب حالة Pool + الاتصالات كل 5 دقائق.
+    ✅ v5.5.9/10/11/12/13: يراقب حالة Pool + الاتصالات كل 5 دقائق.
 
     يسجّل في اللوغ:
       🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
@@ -1093,10 +1080,10 @@ async def pool_health_monitor() -> None:
           1) DB.get_pool_live() (من AnalyticsMixin)
           2) DB.get_pool_stats() (من Database مباشرة)
           3) القيم الافتراضية (total/active من pg_stat_activity)
-        الفائدة: المراقبة تعمل حتى لو:
-          • أُعيد هيكلة AnalyticsMixin
-          • فشل تحميل database_analytics.py
-          • تغيّرت مفاتيح الإرجاع مستقبلاً
+
+    ✅ v5.5.13:
+      - هذه الدالة هي المصدر الوحيد للمراقبة الدورية الآن
+        (حُذف monitor_pool المكرر من قائمة المهام)
     """
     # ✅ v5.5.11: تأخير أولي — مُلفّف لمنع CancelledError غير الملتقط
     try:
@@ -1715,13 +1702,9 @@ async def main():
                 task_name="periodic_cleanup"
             )
         ),
-        # 🔍 v5.4.0: مراقبة PostgreSQL Pool
-        asyncio.create_task(
-            run_task_with_retry(
-                BackgroundTasks.monitor_pool,
-                task_name="monitor_pool"
-            )
-        ),
+        # ✅ v5.5.13: حُذف BackgroundTasks.monitor_pool (المكرر)
+        # السبب: pool_health_monitor يغطّيه بشكل أفضل وأشمل
+        # monitor_pool_alert يبقى (غرضه مختلف: إشعارات استباقية للأدمن)
         asyncio.create_task(
             run_task_with_retry(
                 BackgroundTasks.monitor_pool_alert,
@@ -1734,8 +1717,9 @@ async def main():
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
 
-        # ✅ v5.5.9/10/11/12: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
-        # نفس المنطق — تُدير أخطاءها داخليًا.
+        # ✅ v5.5.9/10/11/12/13: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
+        # هذه هي المصدر الوحيد للمراقبة الدورية الآن
+        # (بعد حذف monitor_pool المكرر في v5.5.13)
         asyncio.create_task(pool_health_monitor()),
     ]
 
