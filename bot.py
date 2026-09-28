@@ -20,20 +20,36 @@
 
 🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES):
     ✅ ensure_performance_indexes(): إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
+       - PostgreSQL فقط (SQLite/MySQL → تخطّي)
+       - CONCURRENTLY + IF NOT EXISTS → آمن للتكرار
+       - لا يفشل الإقلاع عند الخطأ
     ✅ إصلاح حرج: استيراد TimeUtils من database
-    ✅ pool_health_monitor: لفّ sleep(120) في try/except CancelledError
-    ✅ idle_in_tx: >=1 بدل >=3
-    ✅ _collect_admin_ids: تسجيل اسم الدالة
+       (كان يُسبب NameError صامت في إشعار قناة سجل المطور)
+    ✅ pool_health_monitor: 
+       - لفّ sleep(120) الأولي في try/except CancelledError
+       - idle_in_tx: من >=3 إلى >=1 (idle in transaction يحجب VACUUM)
+    ✅ _collect_admin_ids: تسجيل اسم الدالة المُستخدمة
 
 🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS):
-    ✅ waiting يحسب الأقفال الحقيقية فقط
-    ✅ إزالة waiting>=3 من شروط التحذير
+    ✅ pool_health_monitor: إصلاح الإنذارات الكاذبة
+       - waiting الآن يحسب الأقفال الحقيقية فقط (Lock, LWLock, BufferPin)
+       - إزالة waiting>=3 من شروط التحذير
+       - waiting أصبح معلومة تشخيصية فقط (لا يفعّل ⚠️)
+    ✅ تقليل الضجيج في اللوغ
 
 🆕 v5.5.9 (AUTO POOL HEALTH MONITOR):
-    ✅ pool_health_monitor(): مراقبة تلقائية كل 5 دقائق
+    ✅ pool_health_monitor(): مراقبة تلقائية لحالة PostgreSQL Pool
+       - كل 5 دقائق → يسجّل في اللوغ
+       - يقرأ pg_stat_activity + DB.get_pool_live()
+       - 🟢 pool HEALTH (طبيعي) أو ⚠️ pool DIAG (ضغط)
 
-🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT)
-🆕 v5.5.7 (DEV LOG NOTIFICATIONS)
+🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT):
+    ✅ successful_payment: إشعار قناة سجل المطور عند كل اشتراك مدفوع
+    ✅ استيراد _notify_dev_log من handlers_command (مع fallback)
+
+🆕 v5.5.7 (DEV LOG NOTIFICATIONS):
+    ✅ يدعم إشعار قناة السجل من handlers_command و handlers_message
+
 🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS)
 🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX)
 🆕 v5.5.4 (CONTEST-AUTO-CLEANUP)
@@ -80,6 +96,7 @@ from telegram.ext import (
 from config import CONFIG, PATHS
 
 # ✅ v5.5.11: إضافة TimeUtils — كان مفقوداً ويُسبب NameError صامت
+# ✅ v7.7.43: نفس الاستيراد يعمل مع database.py v7.7.43
 from database import DB, initialize_db, TimeUtils
 
 from handlers import (
@@ -215,6 +232,21 @@ try:
         logger.info(f"✅ كل الـ {len(_mixins_status)} Mixins محمّلة")
 except Exception as _e:
     logger.debug(f"⚠️ فحص Mixins: {_e}")
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.7.43: فحص تحميل RefactorMixin (اختياري، للتشخيص)
+# ═══════════════════════════════════════════════════════════════════
+try:
+    from database import REFACTOR_MIXIN_AVAILABLE
+    if REFACTOR_MIXIN_AVAILABLE:
+        logger.info("✅ RefactorMixin محمّل (database_refactor_mixin.py)")
+    else:
+        logger.info(
+            "ℹ️ RefactorMixin غير محمّل — database.py يستخدم "
+            "النسخة المدمجة (سلوك متطابق)"
+        )
+except Exception as _e:
+    logger.debug(f"⚠️ فحص RefactorMixin: {_e}")
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔍 v5.4.3: فحص توفر maintenance
