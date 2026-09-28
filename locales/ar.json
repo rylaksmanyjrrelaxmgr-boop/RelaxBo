@@ -373,6 +373,7 @@
   "contest_type_raffle_name": "سحب عشوائي",
   "contest_type_quiz_name": "سؤال وجواب",
   "contest_ask_question": "❓ <b>أرسل السؤال الآن:</b>",
+  "quiz_question_prompt": "❓ <b>السؤال:</b>\n{question}\n\n📝 <b>أرسل إجابتك الآن:</b>",
   "contest_correct_answer_prompt": "✅ <b>الإجابة الصحيحة؟</b>\n<i>ستُقارَن بإجابات المشاركين (غير حساسة لحالة الأحرف).</i>",
   "contest_create_failed": "❌ فشل إنشاء المسابقة",
   "contest_end_line": "🕐 <b>ينتهي:</b> <code>{end}</code>\n",
@@ -1005,7 +1006,6 @@
   "penalty_no_reason": "بدون سبب محدد",
   "unknown_user": "مستخدم",
 
-  "duration_permanent": "دائم",
   "duration_seconds": "{seconds} ثانية",
   "duration_minutes": "{minutes} دقيقة",
   "duration_hours": "{hours} ساعة",
