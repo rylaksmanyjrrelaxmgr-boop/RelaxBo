@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.11)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.12)
 ================================================================================
+🆕 v5.5.12 (POOL DATA DUAL FALLBACK):
+    ✅ pool_health_monitor: fallback مزدوج لقراءة pool data
+       - المصدر 1: DB.get_pool_live() (من AnalyticsMixin)
+       - المصدر 2: DB.get_pool_stats() (من Database مباشرة)
+       - المصدر 3: القيم الافتراضية (total/active من pg_stat_activity)
+       الفائدة: المراقبة تعمل حتى لو:
+         • أُعيد هيكلة AnalyticsMixin
+         • فشل تحميل database_analytics.py
+         • تغيّرت مفاتيح الإرجاع مستقبلاً
+    ✅ إضافة imports: from typing import Any, Dict, Optional
+
 🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES):
     ✅ ensure_performance_indexes(): إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
        - PostgreSQL فقط (SQLite/MySQL → تخطّي)
@@ -63,6 +74,9 @@ import json
 import time
 from urllib.parse import urlparse
 from aiohttp import web
+
+# ✅ v5.5.12: imports للـ typing (يُستخدم في pool_health_monitor)
+from typing import Any, Dict, Optional
 
 from telegram import (
     BotCommandScopeAllPrivateChats,
@@ -1052,12 +1066,12 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.9/10/11: مراقبة تلقائية لحالة PostgreSQL Pool
+# ✅ v5.5.9/10/11/12: مراقبة تلقائية لحالة PostgreSQL Pool
 # =====================================================================
 
 async def pool_health_monitor() -> None:
     """
-    ✅ v5.5.9/10/11: يراقب حالة Pool + الاتصالات كل 5 دقائق.
+    ✅ v5.5.9/10/11/12: يراقب حالة Pool + الاتصالات كل 5 دقائق.
 
     يسجّل في اللوغ:
       🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
@@ -1073,6 +1087,16 @@ async def pool_health_monitor() -> None:
         (كان يُسجّل كخطأ عند الإلغاء المبكر)
       - idle_in_tx: >=1 بدل >=3 — أي idle in transaction يحجب
         VACUUM ويستنزف pool، لذلك نُنبّه فوراً
+
+    ✅ v5.5.12:
+      - fallback مزدوج لقراءة pool data:
+          1) DB.get_pool_live() (من AnalyticsMixin)
+          2) DB.get_pool_stats() (من Database مباشرة)
+          3) القيم الافتراضية (total/active من pg_stat_activity)
+        الفائدة: المراقبة تعمل حتى لو:
+          • أُعيد هيكلة AnalyticsMixin
+          • فشل تحميل database_analytics.py
+          • تغيّرت مفاتيح الإرجاع مستقبلاً
     """
     # ✅ v5.5.11: تأخير أولي — مُلفّف لمنع CancelledError غير الملتقط
     try:
@@ -1132,21 +1156,70 @@ async def pool_health_monitor() -> None:
             lock_waits = int(data.get("lock_waits") or 0)
             waiting = int(data.get("waiting") or 0)
 
-            # ═══ قراءة pool من DB.get_pool_live إن توفرت ═══
+            # ═══════════════════════════════════════════════════════════
+            # ✅ v5.5.12: fallback مزدوج لقراءة pool data
+            # ═══════════════════════════════════════════════════════════
+            # القيم الافتراضية (تُستخدم إن فشل المصدران)
             pool_max = 20
             pool_current = total
             pool_in_use = active
+
+            # _pool_data: dict يحوي max_size/current_size/in_use
+            # إن نجح أحد المصادر
+            _pool_data: Optional[Dict[str, Any]] = None
+
+            # ── المصدر 1: DB.get_pool_live() (من AnalyticsMixin) ──
             try:
                 if hasattr(DB, "get_pool_live"):
-                    pool_data = await DB.get_pool_live()
-                    if isinstance(pool_data, dict) and pool_data.get("available"):
-                        pool_max = int(pool_data.get("max_size") or 20)
-                        pool_current = int(pool_data.get("current_size") or total)
-                        pool_in_use = int(pool_data.get("in_use") or active)
-            except Exception:
-                pass
+                    _pd_live = await DB.get_pool_live()
+                    if (isinstance(_pd_live, dict)
+                            and _pd_live.get("available")
+                            and _pd_live.get("max_size")):
+                        _pool_data = _pd_live
+            except Exception as _e:
+                logger.debug(f"pool_health_monitor: get_pool_live: {_e}")
 
-            util_pct = (pool_current / pool_max * 100) if pool_max else 0
+            # ── المصدر 2: DB.get_pool_stats() (من Database مباشرة) ──
+            if _pool_data is None:
+                try:
+                    if hasattr(DB, "get_pool_stats"):
+                        _pd_stats = await DB.get_pool_stats()
+                        if (isinstance(_pd_stats, dict)
+                                and _pd_stats.get("type") in (
+                                    "postgres", "mysql"
+                                )
+                                and _pd_stats.get("max_size")):
+                            # نُوحّد المفاتيح لتُطابق get_pool_live
+                            _pool_data = {
+                                "max_size": _pd_stats.get("max_size"),
+                                "current_size": _pd_stats.get(
+                                    "current_size"
+                                ),
+                                "in_use": _pd_stats.get("in_use"),
+                            }
+                except Exception as _e:
+                    logger.debug(
+                        f"pool_health_monitor: get_pool_stats: {_e}"
+                    )
+
+            # ── تطبيق القيم إن نجح أي مصدر ──
+            if _pool_data is not None:
+                try:
+                    pool_max = int(_pool_data.get("max_size") or 20)
+                    pool_current = int(
+                        _pool_data.get("current_size") or total
+                    )
+                    pool_in_use = int(
+                        _pool_data.get("in_use") or active
+                    )
+                except (TypeError, ValueError) as _e:
+                    logger.debug(
+                        f"pool_health_monitor: تطبيق pool_data: {_e}"
+                    )
+
+            util_pct = (
+                (pool_current / pool_max * 100) if pool_max else 0
+            )
 
             # ═══ تحديد المستوى ═══
             # ✅ v5.5.10: أزلنا waiting>=3 — waiting معلومة فقط
@@ -1661,7 +1734,7 @@ async def main():
         # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
 
-        # ✅ v5.5.9/10/11: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
+        # ✅ v5.5.9/10/11/12: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
         # نفس المنطق — تُدير أخطاءها داخليًا.
         asyncio.create_task(pool_health_monitor()),
     ]
