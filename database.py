@@ -1,52 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.44 — CACHES-EXTRACT)
+database.py - قاعدة البيانات المتكاملة (v7.7.45 — MIGRATIONS-EXTRACT)
 ================================================================================
+🆕 v7.7.45 (MIGRATIONS-EXTRACT — نقل منطق الترحيل إلى ملف منفصل):
+  ✅ استخراج منطق الترحيل إلى database_migrations.py:
+     • _MIGRATIONS_TYPES + _compute_migrations_signature
+     • _ALLOWED_COLUMN_TYPES + _ALLOWED_COL_KEYWORDS
+     • _validate_column_def + _table_exists
+     • MigrationsMixin (7 طرق):
+        - _add_column_safe
+        - _execute_batch_migrations
+        - _column_exists
+        - _migrate_delete_penalty_type
+        - _ensure_text_hash_column
+        - _ensure_bigint_ids
+        - _get_existing_columns
+  ✅ الفائدة:
+     • database.py أنحف بـ ~720 سطر
+     • منطق الترحيل متماسك في ملف واحد
+     • سهل للاختبار منفصلاً
+  ✅ Backward-compat 100%:
+     • `from database import _MIGRATIONS_TYPES` يعمل (via re-export)
+     • `from database import _table_exists` يعمل (via re-export)
+     • _migrate_schema / _fetch_all_columns_map / _index_exists تبقى
+       في Database (tightly coupled)
+  ✅ صفر regression — نفس السلوك بالضبط
+
 🆕 v7.7.44 (CACHES-EXTRACT — نقل Caches إلى ملف منفصل):
   ✅ استخراج InternalQueryCache / SimpleCache / SettingsCache
      + internal_cache (كائن عالمي) إلى database_caches.py
-  ✅ الفائدة:
-     • database.py أنحف بـ ~200 سطر
-     • cache.py يستطيع الاستيراد مباشرة من database_caches (بدون
-       اعتماد على database.py) — يمنع أي circular import مستقبلاً
-  ✅ Backward-compat محفوظ 100%:
-     • `from database import SimpleCache, SettingsCache` يعمل كما هو
-     • `from database import internal_cache` يعمل كما هو
-     • cache.py لا يحتاج تعديلاً (لأن database.py يمرّر الأسماء)
-  ✅ صفر regression — نفس السلوك بالضبط
 
 🆕 v7.7.43 (REFACTOR-MIXIN — استخراج الدوال الكبيرة):
   ✅ استخراج 8 دوال كبيرة إلى database_refactor_mixin.py
-     (صفر تغيير في السلوك — نفس الكود حرفياً، فقط في ملف آخر)
-  ✅ الدوال المُستخرجة:
-     • _pg_pool_factory / _pg_pool_cleanup
-     • _mysql_pool_factory / _mysql_pool_cleanup
-     • _sqlite_pool_factory
-     • _expire_penalties_pg / _mysql / _sqlite
-     • _ensure_bigint_pg / _ensure_bigint_mysql
-  ✅ استعلامات get_channels_to_publish أصبحت module-level constants
-     في database_refactor_mixin.py
-  ✅ الفائدة: database.py أنحف بـ ~750 سطر، قابلية اختبار أعلى
-  ✅ مهم: كل الاستدعاءات المباشرة (main.py, handlers) لم تتغير
+     (Pool factories + expire_penalties + bigint conversion)
 
-🆕 v7.7.42 (AUDIT-FIX — إصلاحات ما بعد المراجعة الشاملة):
-  ✅ _index_exists (PG): فحص indisvalid + indisready
-  ✅ _get_secondary_indexes: تعبئة القائمة
-  ✅ _ensure_bigint_ids (MySQL): إزالة تجاهل PK
-  ✅ _convert_upsert: raise بدل إرجاع مكسور
-  ✅ connection(): لا نُعيد اتصالاً مسمومًا
-  ✅ _tune_heavy_tables_autovacuum: العلم فقط لو 0 فشل
-  ✅ expire_penalties (MySQL): fallback لـ SKIP LOCKED
-  ✅ _execute_with_retry: تعليق توضيحي عن retry
-
-🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام):
-  ✅ max_inactive_connection_lifetime: 0 → 60
-  ✅ tcp_keepalives_idle=30, interval=10, count=3
-
-🆕 v7.7.40 (BATCH-PUBLISH — تجميع تحديثات النشر):
-  ✅ mark_published_batch: transaction واحد لعدة منشورات
-
+🆕 v7.7.42 (AUDIT-FIX — إصلاحات ما بعد المراجعة الشاملة)
+🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام)
+🆕 v7.7.40 (BATCH-PUBLISH — تجميع تحديثات النشر)
 🆕 v7.7.39 (SMALL-TABLES-AUTOVACUUM)
 🆕 v7.7.38 (STRICTER-AUTOVACUUM)
 🆕 v7.7.37 (USERS-AUTOVACUUM)
@@ -164,6 +155,7 @@ _INTERNAL_DB_FILES = frozenset({
     "database_reminders.py",
     "database_refactor_mixin.py",
     "database_caches.py",
+    "database_migrations.py",
 })
 
 def _is_internal_frame(filename: str) -> bool:
@@ -343,6 +335,34 @@ except ImportError as _ce:
     logger.error(
         f"❌ database_caches.py مفقود: {_ce} "
         f"— لا يمكن المتابعة بدون caches"
+    )
+    raise
+
+# =====================================================================
+# 🆕 v7.7.45: استيراد MigrationsMixin + helpers من database_migrations.py
+# =====================================================================
+# نُعيد تصدير الأسماء في نطاق database.py للحفاظ على
+# Backward-compat:
+#   from database import _MIGRATIONS_TYPES, _table_exists
+# كلها تبقى تعمل.
+# =====================================================================
+
+try:
+    from database_migrations import (
+        MigrationsMixin,
+        _MIGRATIONS_TYPES,
+        _compute_migrations_signature,
+        _validate_column_def,
+        _table_exists,
+        _ALLOWED_COLUMN_TYPES,
+        _ALLOWED_COL_KEYWORDS,
+    )
+    MIGRATIONS_MIXIN_AVAILABLE = True
+    logger.info("✅ تم تحميل database_migrations.py")
+except ImportError as _me:
+    logger.error(
+        f"❌ database_migrations.py مفقود: {_me} "
+        f"— لا يمكن المتابعة بدون migrations"
     )
     raise
 
@@ -547,106 +567,6 @@ SLOW_QUERY_FULL_STACK = (
 )
 
 # =====================================================================
-# 0.8) v7.7.29 — MIGRATIONS ثابت
-# =====================================================================
-
-_MIGRATIONS_TYPES: Dict[str, List[Tuple[str, str]]] = {
-    "group_security": [
-        ("antiflood_penalty_duration", "INTEGER DEFAULT 3600"),
-        ("night_mode_action_duration", "INTEGER DEFAULT 3600"),
-        ("warn_penalty_duration", "INTEGER DEFAULT 3600"),
-        ("mute_default_duration", "INTEGER DEFAULT 3600"),
-        ("ban_default_duration", "INTEGER DEFAULT 0"),
-        ("warn_default_duration", "INTEGER DEFAULT 0"),
-        ("restrict_default_duration", "INTEGER DEFAULT 1800"),
-        ("enable_timed_penalties", "INTEGER DEFAULT 1"),
-        ("auto_remove_penalties", "INTEGER DEFAULT 1"),
-        ("violation_strikes", "INTEGER DEFAULT 3"),
-        ("violation_duration", "INTEGER DEFAULT 60"),
-        ("delete_links", "INTEGER DEFAULT 0"),
-        ("mentions", "INTEGER DEFAULT 0"),
-        ("delete_videos", "INTEGER DEFAULT 0"),
-        ("delete_audio", "INTEGER DEFAULT 0"),
-        ("delete_animation", "INTEGER DEFAULT 0"),
-        ("delete_service", "INTEGER DEFAULT 0"),
-        ("delete_documents", "INTEGER DEFAULT 0"),
-        ("delete_stickers", "INTEGER DEFAULT 0"),
-        ("delete_forwarded", "INTEGER DEFAULT 0"),
-        ("delete_polls", "INTEGER DEFAULT 0"),
-        ("delete_games", "INTEGER DEFAULT 0"),
-        ("delete_voice", "INTEGER DEFAULT 0"),
-        ("delete_video_note", "INTEGER DEFAULT 0"),
-        ("delete_photos", "INTEGER DEFAULT 0"),
-        ("delete_banned_words", "INTEGER DEFAULT 0"),
-        ("antiflood_enabled", "INTEGER DEFAULT 0"),
-        ("antiflood_messages", "INTEGER DEFAULT 5"),
-        ("antiflood_seconds", "INTEGER DEFAULT 10"),
-        ("antiflood_penalty", "TEXT DEFAULT 'mute'"),
-        ("night_mode_enabled", "INTEGER DEFAULT 0"),
-        ("night_mode_start", "TEXT DEFAULT '23:00'"),
-        ("night_mode_end", "TEXT DEFAULT '07:00'"),
-        ("night_mode_action", "TEXT DEFAULT 'mute'"),
-        ("warn_enabled", "INTEGER DEFAULT 0"),
-        ("max_warnings", "INTEGER DEFAULT 3"),
-        ("warn_penalty", "TEXT DEFAULT 'mute'"),
-        ("welcome_enabled", "INTEGER DEFAULT 0"),
-        ("welcome_text", "TEXT DEFAULT ''"),
-        ("goodbye_enabled", "INTEGER DEFAULT 0"),
-        ("goodbye_text", "TEXT DEFAULT ''"),
-        ("auto_approve_join", "INTEGER DEFAULT 0"),
-        ("auto_reject_join", "INTEGER DEFAULT 0"),
-        ("slow_mode", "INTEGER DEFAULT 0"),
-        ("slow_mode_seconds", "INTEGER DEFAULT 0"),
-        ("max_message_length", "INTEGER DEFAULT 0"),
-        ("nsfw_enabled", "INTEGER DEFAULT 0"),
-        ("nsfw_threshold", "REAL DEFAULT 0.8"),
-        ("nsfw_filter", "INTEGER DEFAULT 0"),
-        ("auto_penalty", "TEXT DEFAULT 'mute'"),
-        ("auto_mute_duration", "INTEGER DEFAULT 3600"),
-        ("delete_penalty", "TEXT DEFAULT 'none'"),
-        ("delete_penalty_duration", "INTEGER DEFAULT 3600"),
-        ("delete_penalty_messages", "INTEGER DEFAULT 0"),
-        ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
-        ("violation_penalty", "TEXT DEFAULT 'none'"),
-    ],
-    "users": [
-        ("active_channel", "INTEGER DEFAULT NULL")
-    ],
-    "bot_groups": [
-        ("log_channel_id", "BIGINT DEFAULT NULL"),
-    ],
-    "auto_replies": [
-        ("usage_count", "INTEGER DEFAULT 0")
-    ],
-    "anonymous_admins": [("user_id", "BIGINT")],
-    "posts": [
-        ("text_hash", "TEXT DEFAULT ''"),
-        ("published_at", "TIMESTAMP"),
-        ("fail_count", "INTEGER DEFAULT 0"),
-    ],
-    "user_reminder_settings": [
-        ("subscription_reminder", "INTEGER DEFAULT 1"),
-        ("daily_stats_reminder", "INTEGER DEFAULT 0"),
-        ("weekly_report", "INTEGER DEFAULT 1"),
-        ("reminder_days_before", "INTEGER DEFAULT 3"),
-        ("last_daily_sent", "TIMESTAMP"),
-        ("last_weekly_sent", "TIMESTAMP"),
-        ("last_subscription_sent", "TIMESTAMP"),
-        ("last_reminder_sent", "TIMESTAMP"),
-        ("notification_lang", "TEXT DEFAULT 'ar'"),
-    ],
-    "user_translation": [
-        ("lang", "TEXT DEFAULT 'off'")
-    ],
-}
-
-def _compute_migrations_signature() -> Dict[str, List[str]]:
-    return {
-        table: [f"{col}:{typ}" for col, typ in cols]
-        for table, cols in _MIGRATIONS_TYPES.items()
-    }
-
-# =====================================================================
 # 1) ثوابت مساعدة
 # =====================================================================
 
@@ -697,57 +617,6 @@ KNOWN_UNIQUE_FALLBACK = {
 
 _UNIQUE_CACHE: Dict[str, List[str]] = {}
 _UNIQUE_CACHE_LOCK = asyncio.Lock()
-
-_ALLOWED_COLUMN_TYPES = frozenset({
-    "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
-    "TEXT", "VARCHAR", "CHAR", "VARCHAR2",
-    "REAL", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC",
-    "TIMESTAMP", "DATETIME", "DATE", "TIME",
-    "BOOLEAN", "BOOL", "BLOB", "BYTEA",
-})
-
-_ALLOWED_COL_KEYWORDS = frozenset({
-    "DEFAULT", "NULL", "NOT", "PRIMARY", "KEY", "UNIQUE",
-    "CURRENT_TIMESTAMP", "UTC_TIMESTAMP", "NOW",
-    "AUTOINCREMENT", "AUTO_INCREMENT",
-    "CURRENT_DATE", "CURRENT_TIME", "SYSDATE", "LOCALTIME",
-    "LOCALTIMESTAMP", "TRUE", "FALSE",
-    "COLLATE", "ON", "UPDATE", "DELETE", "CASCADE",
-    "REFERENCES", "CHECK", "CONSTRAINT",
-})
-
-def _validate_column_def(col_name: str, col_def: str) -> bool:
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
-        logger.error(f"❌ اسم عمود غير صالح: {col_name}")
-        return False
-    if not col_def or not isinstance(col_def, str):
-        return False
-    for dangerous in (";", "--", "/*", "*/", "\x00"):
-        if dangerous in col_def:
-            logger.error(f"❌ أحرف خطرة: {col_def}")
-            return False
-    col_def_stripped = col_def.strip()
-    if not col_def_stripped:
-        return False
-    col_def_upper = col_def_stripped.upper()
-    type_match = re.match(r"^([A-Z_][A-Z0-9_]*)", col_def_upper)
-    if not type_match:
-        return False
-    base_type = type_match.group(1)
-    if base_type not in _ALLOWED_COLUMN_TYPES:
-        logger.error(f"❌ نوع غير مسموح: {base_type}")
-        return False
-    without_strings = re.sub(r"'[^']*'", "", col_def_upper)
-    cleaned = re.sub(r"[(),.\d+\-*/=]", " ", without_strings)
-    words = re.findall(r"[A-Z_]+", cleaned)
-    for word in words:
-        if word in _ALLOWED_COLUMN_TYPES or word in _ALLOWED_COL_KEYWORDS:
-            continue
-        if re.match(r"^[A-Z_][A-Z0-9_]*$", word):
-            continue
-        logger.error(f"❌ كلمة غير مسموحة: {word}")
-        return False
-    return True
 
 def _clone_start_data(data: Dict) -> Dict:
     if not isinstance(data, dict):
@@ -1712,44 +1581,6 @@ def _adapt_params(params: tuple, query: str = "") -> tuple:
             new_params.append(p)
     return tuple(new_params)
 
-async def _table_exists(conn, table: str) -> bool:
-    try:
-        if USE_POSTGRES:
-            row = await conn.fetchval(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_name = $1 AND table_schema = current_schema()",
-                table,
-            )
-            return row is not None
-        elif USE_MYSQL:
-            cursor = await conn.cursor()
-            try:
-                await cursor.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_schema = DATABASE() "
-                    "AND table_name = %s",
-                    (table,),
-                )
-                row = await cursor.fetchone()
-                return row is not None
-            finally:
-                await cursor.close()
-        else:
-            cursor = await conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name=?", (table,),
-            )
-            try:
-                row = await cursor.fetchone()
-                return row is not None
-            finally:
-                try:
-                    await cursor.close()
-                except Exception:
-                    pass
-    except Exception:
-        return False
-
 # =====================================================================
 # 2) TimeUtils
 # =====================================================================
@@ -1817,11 +1648,12 @@ class TimeUtils:
             return None
 
 # =====================================================================
-# 3) فئة Database — ✅ v7.7.43: RefactorMixin أُضيف أولاً في MRO
+# 3) فئة Database — ✅ v7.7.45: MigrationsMixin أُضيف بعد RefactorMixin
 # =====================================================================
 
 class Database(
-    RefactorMixin,           # ← ✅ v7.7.43: mixin جديد
+    RefactorMixin,           # ← ✅ v7.7.43: Pool factories + expire + bigint
+    MigrationsMixin,         # ← ✅ v7.7.45: Migrations (7 طرق)
     ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin,
     TicketsMixin, ContestsMixin, StatsMixin, SettingsMixin,
     PointsMixin, BackupMixin, RemindersMixin,
@@ -4066,392 +3898,21 @@ class Database(
             async with self.connection() as c:
                 await _do_all(c)
 
-    async def _add_column_safe(
-        self, conn, table, col_name, col_def
-    ):
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or \
-           not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", col_name):
-            return
-        if not _validate_column_def(col_name, col_def):
-            logger.error(
-                f"❌ _add_column_safe: col_def غير صالح لـ "
-                f"{table}.{col_name}: {col_def}"
-            )
-            return
-        if USE_MYSQL and "TEXT DEFAULT" in col_def.upper():
-            col_def = re.sub(
-                r"\bTEXT\s+DEFAULT\b", "VARCHAR(255) DEFAULT",
-                col_def, flags=re.IGNORECASE,
-            )
-        try:
-            if USE_POSTGRES:
-                exists = await conn.fetchval(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_name = $1 AND column_name = $2 "
-                    "AND table_schema = current_schema()",
-                    table, col_name,
-                )
-                if not exists:
-                    await conn.execute(
-                        f'ALTER TABLE "{table}" '
-                        f'ADD COLUMN "{col_name}" {col_def}'
-                    )
-                    if table == "group_security":
-                        self._group_security_columns_cache = None
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                try:
-                    await cursor.execute(
-                        f"SHOW COLUMNS FROM `{table}` LIKE %s",
-                        (col_name,),
-                    )
-                    exists = await cursor.fetchone()
-                finally:
-                    await cursor.close()
-                if not exists:
-                    await conn.execute(
-                        f"ALTER TABLE `{table}` "
-                        f"ADD COLUMN `{col_name}` {col_def}"
-                    )
-                    if table == "group_security":
-                        self._group_security_columns_cache = None
-            else:
-                cursor = await conn.execute(
-                    f"PRAGMA table_info({table})"
-                )
-                try:
-                    rows = await cursor.fetchall()
-                finally:
-                    try:
-                        await cursor.close()
-                    except Exception:
-                        pass
-                exists = any(row[1] == col_name for row in rows)
-                if not exists:
-                    await conn.execute(
-                        f"ALTER TABLE {table} "
-                        f"ADD COLUMN {col_name} {col_def}"
-                    )
-                    if table == "group_security":
-                        self._group_security_columns_cache = None
-        except Exception as e:
-            err = str(e).lower()
-            if "already exists" not in err and "duplicate" not in err:
-                logger.warning(f"⚠️ {col_name} في {table}: {e}")
-
-    async def _execute_batch_migrations(
-        self, conn, table, missing_columns
-    ) -> int:
-        if not missing_columns:
-            return 0
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
-            return 0
-        for col_name, col_def in missing_columns:
-            if not _validate_column_def(col_name, col_def):
-                return 0
-        try:
-            if USE_POSTGRES:
-                alters = ", ".join([
-                    f'ADD COLUMN IF NOT EXISTS "{c}" {t}'
-                    for c, t in missing_columns
-                ])
-                await conn.execute(
-                    f'ALTER TABLE "{table}" {alters}'
-                )
-                return len(missing_columns)
-            elif USE_MYSQL:
-                safe_cols = []
-                for c, t in missing_columns:
-                    if "TEXT DEFAULT" in t.upper():
-                        t = re.sub(
-                            r"\bTEXT\s+DEFAULT\b",
-                            "VARCHAR(255) DEFAULT",
-                            t, flags=re.IGNORECASE,
-                        )
-                    safe_cols.append((c, t))
-                alters = ", ".join([
-                    f"ADD COLUMN `{c}` {t}" for c, t in safe_cols
-                ])
-                await conn.execute(
-                    f"ALTER TABLE `{table}` {alters}"
-                )
-                return len(safe_cols)
-            else:
-                added = 0
-                for col_name, col_def in missing_columns:
-                    try:
-                        await conn.execute(
-                            f"ALTER TABLE {table} "
-                            f"ADD COLUMN {col_name} {col_def}"
-                        )
-                        added += 1
-                    except Exception as e:
-                        err = str(e).lower()
-                        if "duplicate" in err or "already exists" in err:
-                            continue
-                return added
-        except Exception as e:
-            logger.warning(f"⚠️ batch ALTER {table}: {e}")
-            added = 0
-            for col_name, col_def in missing_columns:
-                if not _validate_column_def(col_name, col_def):
-                    continue
-                try:
-                    if USE_POSTGRES:
-                        await conn.execute(
-                            f'ALTER TABLE "{table}" '
-                            f'ADD COLUMN IF NOT EXISTS '
-                            f'"{col_name}" {col_def}'
-                        )
-                    elif USE_MYSQL:
-                        safe_def = col_def
-                        if "TEXT DEFAULT" in safe_def.upper():
-                            safe_def = re.sub(
-                                r"\bTEXT\s+DEFAULT\b",
-                                "VARCHAR(255) DEFAULT",
-                                safe_def, flags=re.IGNORECASE,
-                            )
-                        await conn.execute(
-                            f"ALTER TABLE `{table}` "
-                            f"ADD COLUMN `{col_name}` {safe_def}"
-                        )
-                    else:
-                        await conn.execute(
-                            f"ALTER TABLE {table} "
-                            f"ADD COLUMN {col_name} {col_def}"
-                        )
-                    added += 1
-                except Exception:
-                    pass
-            return added
-
-    async def _column_exists(self, conn, table, column) -> bool:
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or \
-           not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", column):
-            return False
-        try:
-            if USE_POSTGRES:
-                row = await conn.fetchval(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_name = $1 AND column_name = $2 "
-                    "AND table_schema = current_schema()",
-                    table, column,
-                )
-                return row is not None
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                try:
-                    await cursor.execute(
-                        f"SHOW COLUMNS FROM `{table}` LIKE %s",
-                        (column,),
-                    )
-                    row = await cursor.fetchone()
-                    return row is not None
-                finally:
-                    await cursor.close()
-            else:
-                cursor = await conn.execute(
-                    f"PRAGMA table_info({table})"
-                )
-                try:
-                    rows = await cursor.fetchall()
-                finally:
-                    try:
-                        await cursor.close()
-                    except Exception:
-                        pass
-                return any(row[1] == column for row in rows)
-        except Exception:
-            return False
-
     # =================================================================
-    # 🆕 v7.7.33: ترحيل نوع delete_penalty
+    # ✅ v7.7.45: _add_column_safe / _execute_batch_migrations /
+    #              _column_exists / _migrate_delete_penalty_type /
+    #              _ensure_text_hash_column / _ensure_bigint_ids /
+    #              _get_existing_columns
+    #     → انتقلت إلى MigrationsMixin (database_migrations.py)
     # =================================================================
-
-    async def _migrate_delete_penalty_type(self, conn) -> bool:
-        if DB_TYPE == "sqlite":
-            return True
-
-        try:
-            if USE_POSTGRES:
-                row = await conn.fetchrow(
-                    "SELECT data_type FROM information_schema.columns "
-                    "WHERE table_name = 'group_security' "
-                    "AND column_name = 'delete_penalty' "
-                    "AND table_schema = current_schema()"
-                )
-                if not row:
-                    return False
-                current_type = (row["data_type"] or "").lower()
-                if current_type in ("text", "character varying", "varchar"):
-                    return True
-
-                if current_type != "integer":
-                    logger.debug(
-                        f"ℹ️ delete_penalty نوعه: {current_type} — "
-                        f"لا تغيير"
-                    )
-                    return False
-
-                try:
-                    await conn.execute(
-                        "ALTER TABLE group_security "
-                        "ALTER COLUMN delete_penalty TYPE TEXT "
-                        "USING CASE "
-                        "  WHEN delete_penalty = 0 THEN 'none' "
-                        "  WHEN delete_penalty IS NULL THEN 'none' "
-                        "  ELSE 'mute' "
-                        "END"
-                    )
-                    logger.info(
-                        "🔧 v7.7.33: delete_penalty "
-                        "INTEGER → TEXT (PostgreSQL)"
-                    )
-                    return True
-                except Exception as alter_e:
-                    logger.warning(
-                        f"⚠️ ALTER delete_penalty فشل: {alter_e}"
-                    )
-                    return False
-
-            elif USE_MYSQL:
-                cursor = await conn.cursor()
-                try:
-                    await cursor.execute(
-                        "SELECT DATA_TYPE, COLUMN_TYPE "
-                        "FROM information_schema.COLUMNS "
-                        "WHERE TABLE_SCHEMA = DATABASE() "
-                        "AND TABLE_NAME = 'group_security' "
-                        "AND COLUMN_NAME = 'delete_penalty'"
-                    )
-                    row = await cursor.fetchone()
-                    if not row:
-                        return False
-                    data_type = (row[0] or "").lower()
-                    column_type = (row[1] or "").lower()
-                    if data_type in ("varchar", "text", "char"):
-                        return True
-
-                    await cursor.execute(
-                        "UPDATE group_security SET delete_penalty = "
-                        "  CASE "
-                        "    WHEN delete_penalty = 0 OR "
-                        "         delete_penalty IS NULL THEN 'none' "
-                        "    ELSE 'mute' "
-                        "  END"
-                    )
-                    await cursor.execute(
-                        "ALTER TABLE group_security "
-                        "MODIFY COLUMN delete_penalty "
-                        "VARCHAR(20) DEFAULT 'none'"
-                    )
-                    logger.info(
-                        "🔧 v7.7.33: delete_penalty "
-                        "NUMERIC → VARCHAR(20) (MySQL)"
-                    )
-                    return True
-                finally:
-                    try:
-                        await cursor.close()
-                    except Exception:
-                        pass
-
-        except Exception as e:
-            logger.warning(
-                f"⚠️ _migrate_delete_penalty_type: {e}",
-                exc_info=True,
-            )
-            return False
-
-        return False
-
-    async def _ensure_text_hash_column(self, conn) -> bool:
-        try:
-            if not await _table_exists(conn, "posts"):
-                return False
-            column_exists = await self._column_exists(
-                conn, "posts", "text_hash"
-            )
-            if not column_exists:
-                try:
-                    if USE_POSTGRES:
-                        await conn.execute(
-                            "ALTER TABLE posts ADD COLUMN "
-                            "text_hash TEXT DEFAULT ''"
-                        )
-                    elif USE_MYSQL:
-                        await conn.execute(
-                            "ALTER TABLE posts ADD COLUMN "
-                            "text_hash CHAR(64) DEFAULT ''"
-                        )
-                    else:
-                        await conn.execute(
-                            "ALTER TABLE posts ADD COLUMN "
-                            "text_hash TEXT DEFAULT ''"
-                        )
-                except Exception:
-                    return False
-            if not await self._index_exists(
-                conn, "posts", "idx_posts_text_hash"
-            ):
-                try:
-                    if USE_POSTGRES:
-                        try:
-                            await conn.execute(
-                                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-                                "idx_posts_text_hash ON posts(text_hash)"
-                            )
-                        except Exception:
-                            await conn.execute(
-                                "CREATE INDEX IF NOT EXISTS "
-                                "idx_posts_text_hash ON posts(text_hash)"
-                            )
-                    else:
-                        await conn.execute(
-                            "CREATE INDEX IF NOT EXISTS "
-                            "idx_posts_text_hash ON posts(text_hash)"
-                        )
-                except Exception as e:
-                    err = str(e).lower()
-                    if "duplicate" not in err and \
-                       "already exists" not in err:
-                        logger.warning(f"⚠️ idx text_hash: {e}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ _ensure_text_hash_column: {e}")
-            return False
-
-    # =================================================================
-    # ✅ v7.7.43: _ensure_bigint_ids مبسّطة — تستدعي الدوال من Mixin
-    # =================================================================
-
-    async def _ensure_bigint_ids(self, conn) -> int:
-        """
-        ✅ v7.7.43: مبسّطة — تستدعي _ensure_bigint_pg/_mysql من Mixin.
-        نفس السلوك 100% كما في v7.7.42.
-        """
-        if DB_TYPE == "sqlite":
-            return 0
-
-        if not self.BIGINT_COLUMNS:
-            return 0
-
-        converted = 0
-        try:
-            if USE_POSTGRES:
-                converted = await self._ensure_bigint_pg(conn)
-            elif USE_MYSQL:
-                converted = await self._ensure_bigint_mysql(conn)
-        except Exception as e:
-            logger.warning(f"⚠️ _ensure_bigint_ids: {e}")
-
-        if converted > 0:
-            logger.info(
-                f"✅ تحويل {converted} عمود إلى BIGINT"
-            )
-        return converted
 
     async def _migrate_schema(self, conn):
+        """
+        🚀 ترحيل Schema — يبقى في Database لأنه يستدعي:
+          • _fetch_all_columns_map (helper داخلي)
+          • _UNIQUE_CACHE.clear()   (قاموس module-level)
+        يستفيد من MigrationsMixin للدوال المساعدة.
+        """
         if USE_MYSQL:
             try:
                 await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=0")
@@ -4512,44 +3973,6 @@ class Database(
                     )
                 except Exception:
                     pass
-
-    async def _get_existing_columns(self, conn, table) -> set:
-        try:
-            if USE_POSTGRES:
-                rows = await conn.fetch(
-                    "SELECT column_name "
-                    "FROM information_schema.columns "
-                    "WHERE table_name = $1 "
-                    "AND table_schema = current_schema()",
-                    table,
-                )
-                return {row["column_name"] for row in rows}
-            elif USE_MYSQL:
-                if not await _table_exists(conn, table):
-                    return set()
-                cursor = await conn.cursor()
-                try:
-                    await cursor.execute(
-                        f"SHOW COLUMNS FROM `{table}`"
-                    )
-                    rows = await cursor.fetchall()
-                    return {row[0] for row in rows}
-                finally:
-                    await cursor.close()
-            else:
-                cursor = await conn.execute(
-                    f"PRAGMA table_info({table})"
-                )
-                try:
-                    rows = await cursor.fetchall()
-                    return {row[1] for row in rows}
-                finally:
-                    try:
-                        await cursor.close()
-                    except Exception:
-                        pass
-        except Exception:
-            return set()
 
     async def _index_exists(self, conn, table, idx_name) -> bool:
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table) or \
@@ -5245,7 +4668,6 @@ class Database(
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
         """
         ✅ v7.7.42: قائمة الفهارس الثانوية الحرجة.
-        (التفاصيل محفوظة كما في v7.7.42)
         """
         return [
             (
@@ -6884,19 +6306,11 @@ class Database(
             logger.error(f"❌ update_last_publish: {e}")
             return False
 
-    # =================================================================
-    # ✅ v7.7.43: get_channels_to_publish مبسّطة — تستخدم الثوابت
-    # =================================================================
-
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
         """
         ✅ v7.7.43: تستخدم SQL constants من RefactorMixin.
-        نفس السلوك 100% كما في v7.7.42.
-
-        Fallback: إذا لم تكن الاستعلامات متاحة (RefactorMixin غير محمّل)،
-        تُستخدم النسخة المدمجة أدناه (نفس الاستعلامات حرفياً).
         """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
@@ -6911,7 +6325,6 @@ class Database(
                     logger.debug(f"MV refresh spawn: {e}")
 
         if USE_POSTGRES and self._mv_available:
-            # استخدم الثابت من Mixin إن وُجد
             if _R_CHANNELS_TO_PUBLISH_SQL_PG is not None:
                 query = _R_CHANNELS_TO_PUBLISH_SQL_PG
             else:
@@ -6938,14 +6351,9 @@ class Database(
                 query, (now, owner_id, now, limit)
             )
 
-    # =================================================================
-    # ✅ v7.7.43: expire_penalties مبسّطة — تستدعي دالة كل DB
-    # =================================================================
-
     async def expire_penalties(self) -> int:
         """
         ✅ v7.7.43: مبسّطة — تستدعي _expire_penalties_pg/_mysql/_sqlite.
-        نفس السلوك 100% كما في v7.7.42.
         """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
@@ -7238,9 +6646,6 @@ class Database(
 # =====================================================================
 # 3.1) Fallback queries — في حال لم تكن الثوابت متوفرة
 # =====================================================================
-# هذه الدوال تُستدعى فقط إذا كان database_refactor_mixin.py غير محمّل.
-# في الوضع الطبيعي، الثوابت _R_CHANNELS_TO_PUBLISH_SQL_* تكون موجودة.
-# =====================================================================
 
 def _get_pg_query_fallback() -> str:
     return f"""
@@ -7464,7 +6869,7 @@ __all__ = [
     "channels_cache", "groups_cache", "auth_cache", "posts_cache",
     "invalidate_user_cache", "clear_all_caches",
     "get_cache_stats", "cache_cleanup_task", "CACHE_AVAILABLE",
-    "KNOWN_UNIQUE_FALLBACK", "_validate_column_def",
+    "KNOWN_UNIQUE_FALLBACK",
     "_clone_start_data", "_create_pool_with_retry",
     "_FactoryFailed",
     "_sql_get_setting_value",
@@ -7474,7 +6879,12 @@ __all__ = [
     "_convert_placeholders", "_convert_insert_or_ignore",
     "_convert_insert_or_replace", "_convert_upsert",
     "_adapt_params", "_table_exists",
-    "_MIGRATIONS_TYPES", "_compute_migrations_signature",
     "REFACTOR_MIXIN_AVAILABLE",
     "CACHES_MODULE_AVAILABLE",
+    "MIGRATIONS_MIXIN_AVAILABLE",
+    "_MIGRATIONS_TYPES",
+    "_compute_migrations_signature",
+    "_validate_column_def",
+    "_ALLOWED_COLUMN_TYPES",
+    "_ALLOWED_COL_KEYWORDS",
 ]
