@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.18 - Dev Log Diagnostic)
+handlers_message.py - معالجات الرسائل (v7.9.19 - Dev Log Diagnostic)
 =====================================================================
+🆕 v7.9.19 (DEV LOG DIAGNOSTIC):
+    ✅ logging تشخيصي في _handle_global_ban_input عند فشل الإضافة
+    ✅ logging تشخيصي في _handle_group_ban_input عند فشل الإضافة
+    ✅ يسجّل: word + chat_id + user_id (لتسهيل التشخيص)
+    ✅ لا تغيير في السلوك أو التوقيعات (backward-compatible)
+
 🆕 v7.9.18 (DEV LOG DIAGNOSTIC):
     ✅ إضافة تتبّع تشخيصي كامل في _notify_dev_log (علامة 🔔)
     ✅ warning بدل debug عند فشل الإرسال (ليظهر في اللوغ)
     ✅ كل السطور التشخيصية عليها علامة 🔔 (لحذفها لاحقاً)
 
-🆕 v7.9.17 (إشعار قناة سجل المطور):
-    ✅ _notify_dev_log: دالة مساعدة جديدة (محلية — بدون circular import)
-    ✅ _handle_redeem_gift_input: إشعار عند استخدام كود هدية
-       - يُعرض @username + الرقم التعريفي + الكود + المدة
-
+🆕 v7.9.17 (إشعار قناة سجل المطور)
 🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات)
 🆕 v7.9.15 (إصلاح عرض عنوان المسابقة)
 🆕 v7.9.14 (أزرار مدة المسابقة + quiz flow)
@@ -759,11 +761,8 @@ class MessageHandlers:
         UserState.WAIT_CONTEST_TITLE: "_handle_contest_title",
         UserState.WAIT_CONTEST_DESC: "_handle_contest_desc",
         UserState.WAIT_CONTEST_PRIZE: "_handle_contest_prize",
-        # ✅ WAIT_CONTEST_DURATION و WAIT_CONTEST_TYPE:
-        #    button-only → يُعالَجان في handlers_callback.py
         UserState.WAIT_CONTEST_QUESTION: "_handle_contest_question",
         UserState.WAIT_CONTEST_CORRECT_ANSWER: "_handle_contest_correct_answer",
-        # ⚠️ قديم — للتوافق الخلفي
         UserState.WAIT_CONTEST_DATE: "_handle_contest_date",
         UserState.WAIT_CONTEST_ANSWER: "_handle_contest_answer",
         # ══════════════════════════════════════════════════════════════
@@ -2175,6 +2174,9 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_global_ban_input(update, context):
+        """
+        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         word = (update.effective_message.text or "").strip().lower()
@@ -2188,6 +2190,12 @@ class MessageHandlers:
             msg = await _trans('word_exists', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         else:
+            # ✅ v7.9.19: logging تشخيصي
+            logger.warning(
+                f"⚠️ add_banned_word فشل (global): "
+                f"word={word!r}, user={user_id} — "
+                f"راجع سجل database_groups للتفاصيل"
+            )
             msg = await _trans('add_failed', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
@@ -2205,6 +2213,9 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_group_ban_input(update, context):
+        """
+        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('ban_chat')
@@ -2224,6 +2235,12 @@ class MessageHandlers:
             msg = await _trans('word_exists', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         else:
+            # ✅ v7.9.19: logging تشخيصي
+            logger.warning(
+                f"⚠️ add_banned_word فشل (group): "
+                f"word={word!r}, chat_id={chat_id}, user={user_id} — "
+                f"راجع سجل database_groups للتفاصيل"
+            )
             msg = await _trans('add_failed', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
