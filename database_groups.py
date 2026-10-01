@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.9)
+database_groups.py - دوال المجموعات (v7.4.10)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,11 +18,13 @@ GroupsMixin:
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
 
-🆕 v7.4.9 — FIX: add_banned_word (فشل الإضافة عند إضافة كلمات عالمية):
-  ✅ قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS (None/0/غير رقمي → fallback=500)
-  ✅ logging واضح عند رفض الإضافة (سبب + العدد الحالي + الحد)
-  ✅ لا مزيد من الفشل الصامت
+🆕 v7.4.10 — FIX نهائي: add_banned_word (fallback 500 → 10000):
+  ✅ القيمة الافتراضية للحد الأقصى = 10000 (بدل 500)
+  ✅ يحل مشكلة "وصلنا للحد الأقصى (1897/500)"
+  ✅ لا يحتاج تعديل config.py (لكن يمكن ضبطه منه)
+  ✅ logging واضح عند الرفض (كما في v7.4.9)
 
+🆕 v7.4.9 — FIX: قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
 🆕 v7.4.8 — PERFORMANCE-FIX (get_user_groups ~50ms)
 🆕 v7.4.7 — PERFORMANCE-FIX (get_user_groups من 1.59s → ~1s)
 🆕 v7.4.6 — إصلاح إغلاق cursor + توثيق
@@ -41,6 +43,11 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
+
+
+# ✅ v7.4.10: القيمة الافتراضية للحد الأقصى للكلمات المحظورة العالمية
+# (يمكن تجاوزها من config.CONFIG.MAX_GLOBAL_BANNED_WORDS)
+_DEFAULT_MAX_GLOBAL_BANNED_WORDS = 10000
 
 
 class GroupsMixin:
@@ -1255,7 +1262,7 @@ class GroupsMixin:
         self, word: str, chat_id: int, added_by: int
     ) -> Tuple[bool, bool]:
         """
-        ✅ v7.4.9: قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS + logging واضح.
+        ✅ v7.4.10: الحد الافتراضي = 10000 (بدل 500).
 
         يُرجع:
             (True, False)  → أُضيفت بنجاح
@@ -1280,23 +1287,29 @@ class GroupsMixin:
                         default=0,
                     )
 
-                    # ✅ v7.4.9: قراءة آمنة للحد الأقصى
+                    # ✅ v7.4.10: قراءة آمنة + fallback = 10000
                     max_words = getattr(
-                        self.CONFIG, "MAX_GLOBAL_BANNED_WORDS", 500
+                        self.CONFIG,
+                        "MAX_GLOBAL_BANNED_WORDS",
+                        _DEFAULT_MAX_GLOBAL_BANNED_WORDS,
                     )
-                    # fallback: None / 0 / غير رقمي → 500
+                    # fallback: None / 0 / غير رقمي → 10000
                     if not isinstance(max_words, int) or max_words <= 0:
                         logger.warning(
                             f"⚠️ MAX_GLOBAL_BANNED_WORDS غير صالح "
-                            f"({max_words!r}) → استخدام 500"
+                            f"({max_words!r}) → استخدام "
+                            f"{_DEFAULT_MAX_GLOBAL_BANNED_WORDS}"
                         )
-                        max_words = 500
+                        max_words = _DEFAULT_MAX_GLOBAL_BANNED_WORDS
 
                     if count >= max_words:
                         logger.warning(
                             f"⚠️ add_banned_word مرفوض: وصلنا للحد "
                             f"الأقصى ({count}/{max_words}) "
-                            f"word={word!r}"
+                            f"word={word!r}\n"
+                            f"   💡 ارفع الحد: "
+                            f"config.CONFIG.MAX_GLOBAL_BANNED_WORDS "
+                            f"= {max_words * 2} مثلاً"
                         )
                         return False, False
 
