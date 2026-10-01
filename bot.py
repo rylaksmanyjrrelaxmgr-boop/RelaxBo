@@ -2,23 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.16)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.18)
 ================================================================================
-🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY):
-    ✅ #2: SIGTERM handler — الإغلاق اللطيف عند إعادة نشر Render
-           (بدل SIGKILL بعد 30s)، يحفظ الاتصالات ويُكمل المهام الجارية
-    ✅ #3: Safe PORT parsing — fallback آمن بدل الانهيار عند
-           قيمة PORT غير صالحة
-    ✅ #5: `_notify_dev_log` fire-and-forget — إشعار قناة السجل
-           لا يُعطّل رسالة الدفع عند البطء/الفشل
+🆕 v5.5.18 (CRITICAL FIXES — based on v5.5.17 review):
+    ✅ #1 حرجة: `runner.cleanup()` في مسار Webhook — كان مفقوداً!
+           (aiohttp كان يبقى مفتوحاً حتى SIGKILL → لا graceful shutdown)
+    ✅ #2: `watcher_task` داخل `try/finally` — لا تسريب عند الإلغاء
+    ✅ #3: `_watch_runner` — كشف TCPSite مباشر + تحذير واضح عند الفشل
+    ✅ #4: `_collect_admin_ids` — warning فقط عند فشل **كل** الطرق
+           (وليس عند رجوع [] من طريقة ناجحة)
+    ✅ #5: رسالة الإغلاق النهائية "👋 انتهت دورة حياة البوت" بدل "اكتمل الإقلاع"
+    ✅ #6: معالجة `CancelledError` بشكل نمطي (Python 3.8+)
+    ✅ #7: SIGTERM handler مُسجَّل فقط في وضع Webhook
+    ✅ #8: `_watch_runner` — health probe داخلي (يكتشف التعليق أيضاً)
 
-🆕 v5.5.15 (BUG FIXES — aiohttp leak + HTML escape):
-    ✅ #1: aiohttp leak — استخدام `async with session.get() as resp`
-           في `keep_alive` و"تسخين الخادم" لضمان قراءة الـ body
-           وإغلاق الاتصال بشكل صحيح
-    ✅ #2: HTML escape — `contest_cleanup` يُهرّب عنوان المسابقة
-           (`html.escape`) لمنع فشل send_message عند رموز HTML
-
+🆕 v5.5.17 (REVIEW FIXES)
+🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY)
+🆕 v5.5.15 (BUG FIXES — aiohttp leak + HTML escape)
 🆕 v5.5.14 (REMOVE DUPLICATE INDEX CREATION)
 🆕 v5.5.13 (REMOVE DUPLICATE POOL MONITOR)
 🆕 v5.5.12 (POOL DATA DUAL FALLBACK)
@@ -76,7 +76,6 @@ from telegram.ext import (
 from config import CONFIG, PATHS
 
 # ✅ v5.5.11: إضافة TimeUtils — كان مفقوداً ويُسبب NameError صامت
-# ✅ v7.7.43: نفس الاستيراد يعمل مع database.py v7.7.43
 from database import DB, initialize_db, TimeUtils
 
 from handlers import (
@@ -166,6 +165,14 @@ logger = logging.getLogger(__name__)
 # ✅ v5.5.16: مجموعة لتتبّع مهام الإشعارات الخلفية (fire-and-forget)
 # ═══════════════════════════════════════════════════════════════════
 _NOTIFY_TASKS: Set[asyncio.Task] = set()
+
+# ✅ v5.5.17 (#12): timeout انتظار الإشعارات عند الإغلاق (ثوان)
+_NOTIFY_SHUTDOWN_TIMEOUT = 5.0
+
+# ✅ v5.5.18 (#8): إعدادات _watch_runner
+_WATCHER_INTERVAL = 10.0       # فحص كل 10 ثوان
+_WATCHER_HEALTH_TIMEOUT = 5.0  # مهلة health probe
+_WATCHER_MAX_PROBE_FAILURES = 3  # 3 إخفاقات متتالية → إغلاق
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔍 v5.4.1: فحص تحميل AnalyticsMixin
@@ -275,10 +282,6 @@ def _spawn_notify_dev_log(context, text: str) -> None:
     """
     يُشغّل _notify_dev_log في الخلفية دون حجب المتصل.
 
-    الفائدة:
-      • رسالة الدفع لا تنتظر إرسال الإشعار لقناة السجل
-      • فشل/بطء قناة السجل لا يؤثر على تجربة المستخدم
-
     الأمان:
       • يُحفظ مرجع للمهمة في `_NOTIFY_TASKS` لمنع garbage collection
       • `add_done_callback` يُزيل المهمة عند الانتهاء (لا تسريب)
@@ -295,9 +298,6 @@ def _spawn_notify_dev_log(context, text: str) -> None:
 # 🆕 v5.5.0: قوائم الأوامر — module-level constants
 # =====================================================================
 
-# ═══════════════════════════════════════════════════════════════════
-# ✅ الأوامر العامة — تظهر لكل مستخدم في الخاص
-# ═══════════════════════════════════════════════════════════════════
 PUBLIC_COMMANDS = [
     ("start", "🏠 القائمة الرئيسية"),
     ("help", "📚 المساعدة"),
@@ -317,9 +317,6 @@ PUBLIC_COMMANDS = [
     ("auto_recycle", "♻️ تبديل التدوير"),
 ]
 
-# ═══════════════════════════════════════════════════════════════════
-# ✅ الأوامر الإدارية — تظهر للأدمن/المالك/المطورين فقط
-# ═══════════════════════════════════════════════════════════════════
 ADMIN_COMMANDS = [
     ("stats", "📊 الإحصائيات"),
     ("grant", "🎁 منح اشتراك يدوي"),
@@ -339,9 +336,6 @@ ADMIN_COMMANDS = [
     ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
 ]
 
-# ═══════════════════════════════════════════════════════════════════
-# ✅ أوامر المجموعات — تظهر في كل المجموعات
-# ═══════════════════════════════════════════════════════════════════
 GROUP_COMMANDS = [
     ("syncgroup", "🔗 تفعيل المجموعة"),
     ("security", "🛡️ إعدادات الأمان"),
@@ -359,20 +353,15 @@ GROUP_COMMANDS = [
 
 
 # =====================================================================
-# 🆕 v5.5.1: جمع معرّفات الأدمن — يجرّب عدة أسماء دوال
+# 🆕 v5.5.1: جمع معرّفات الأدمن
 # =====================================================================
 
 async def _collect_admin_ids() -> list:
     """
-    جمع كل معرّفات الأدمن الذين يجب أن تظهر لهم الأوامر الإدارية.
+    جمع كل معرّفات الأدمن.
 
-    المصادر:
-      • CONFIG.PRIMARY_OWNER_ID (المالك)
-      • CONFIG.DEVELOPER_IDS (المطورون)
-      • DB.get_admin_list() / get_all_admins() / get_admins() — أول اسم متاح
-
-    Returns:
-        قائمة أعداد صحيحة مرتّبة بدون تكرار.
+    ✅ v5.5.18 (#4): warning فقط عند فشل **كل** الطرق.
+       إذا نجحت طريقة وأعادت [] (لا أدمن)، لا نُطلق تحذيراً كاذباً.
     """
     admin_ids = set()
 
@@ -397,12 +386,16 @@ async def _collect_admin_ids() -> list:
     except Exception:
         pass
 
-    # ─── الأدمن من DB — نحاول عدة أسماء محتملة ───
+    # ─── الأدمن من DB ───
     admin_list_getters = (
-        "get_admin_list",   # ← المستخدم فعلياً في المشروع
-        "get_all_admins",   # ← احتياطي
-        "get_admins",       # ← احتياطي
+        "get_admin_list",
+        "get_all_admins",
+        "get_admins",
     )
+
+    # ✅ v5.5.18 (#4): تمييز "نجحت الطريقة" عن "أعادت أدمن"
+    any_method_succeeded = False
+    last_error = None
 
     for method_name in admin_list_getters:
         if not hasattr(DB, method_name):
@@ -412,8 +405,17 @@ async def _collect_admin_ids() -> list:
             result = method()
             if asyncio.iscoroutine(result):
                 result = await result
+
+            # ✅ نجحت القراءة — حتى لو كانت [] فارغة
+            any_method_succeeded = True
+
             if not result:
-                continue
+                # الفراغ ليس فشلاً — نتوقف هنا (DB لا يحوي أدمن إضافياً)
+                logger.debug(
+                    f"ℹ️ _collect_admin_ids: DB.{method_name}() "
+                    f"أعادت قائمة فارغة (لا أدمن إضافي)"
+                )
+                break
 
             added_from_db = 0
             for a in result:
@@ -430,17 +432,26 @@ async def _collect_admin_ids() -> list:
                 except (TypeError, ValueError):
                     continue
 
-            if added_from_db > 0:
-                logger.debug(
-                    f"✅ _collect_admin_ids: قرأ {added_from_db} "
-                    f"أدمن من DB.{method_name}()"
-                )
-                break
+            logger.debug(
+                f"✅ _collect_admin_ids: قرأ {added_from_db} "
+                f"أدمن من DB.{method_name}()"
+            )
+            break
+
         except Exception as _e:
+            last_error = _e
             logger.debug(
                 f"_collect_admin_ids → DB.{method_name}(): {_e}"
             )
             continue
+
+    # ✅ v5.5.18 (#4): warning فقط عند فشل كل الطرق فعلاً
+    if not any_method_succeeded and last_error is not None:
+        logger.warning(
+            f"⚠️ _collect_admin_ids: فشلت كل الطرق لقراءة "
+            f"الأدمن من DB — آخر خطأ: {last_error}. "
+            f"الأوامر الإدارية ستظهر للمالك والمطورين فقط."
+        )
 
     return sorted(admin_ids)
 
@@ -450,21 +461,7 @@ async def _collect_admin_ids() -> list:
 # =====================================================================
 
 async def refresh_admin_commands(bot, user_id: int, is_admin: bool) -> bool:
-    """
-    تحديث قائمة أوامر مستخدم بعد إضافته/إزالته من الأدمن.
-
-    Args:
-        bot: instance الـ bot
-        user_id: معرّف المستخدم
-        is_admin: True = أضف الأوامر الإدارية | False = ارجع للعامة فقط
-
-    Returns:
-        True إذا نجح، False خلاف ذلك.
-
-    الاستخدام من handlers:
-        from bot import refresh_admin_commands
-        await refresh_admin_commands(context.bot, new_admin_id, True)
-    """
+    """تحديث قائمة أوامر مستخدم بعد إضافته/إزالته من الأدمن."""
     if not user_id:
         return False
     try:
@@ -537,9 +534,6 @@ def _safe_url(url: str) -> str:
 # =====================================================================
 
 def _verify_command_handlers() -> bool:
-    """
-    التحقق من أن كل دالة مطلوبة موجودة في CommandHandlers.
-    """
     required = [
         "start", "help_command", "trial", "subscribe", "support",
         "developer", "stats", "language", "contests", "replies_command",
@@ -575,7 +569,6 @@ def _verify_command_handlers() -> bool:
 # =====================================================================
 
 def _verify_db_config() -> bool:
-    """التحقق من توافق نوع DB المكتشف مع DATABASE_URL."""
     try:
         db_type = getattr(DB, "DB_TYPE", "unknown")
         db_url = os.getenv("DATABASE_URL", "").strip()
@@ -613,7 +606,6 @@ def _verify_db_config() -> bool:
 # =====================================================================
 
 def _verify_group_log_handlers() -> bool:
-    """التحقق من توفر معالجات group_log (غير معطِّل)."""
     if not _GROUP_LOG_AVAILABLE:
         logger.warning(
             f"⚠️ handlers_group_log غير متاح: "
@@ -640,7 +632,6 @@ def _verify_group_log_handlers() -> bool:
 # =====================================================================
 
 def _init_group_log_instance(app) -> bool:
-    """إنشاء وتشغيل GroupLog instance."""
     global _GROUP_LOG_INSTANCE
 
     if not _GROUP_LOG_INIT_AVAILABLE:
@@ -673,7 +664,6 @@ def _init_group_log_instance(app) -> bool:
 
 
 async def _shutdown_group_log() -> None:
-    """إغلاق لطيف لـGroupLog عند إيقاف البوت."""
     global _GROUP_LOG_INSTANCE
 
     if _GROUP_LOG_INSTANCE is None:
@@ -700,7 +690,6 @@ async def _shutdown_group_log() -> None:
 # =====================================================================
 
 async def _validate_invoice_for_payment(user_id: int, payload: str):
-    """التحقق من صحة الفاتورة للدفع."""
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
@@ -745,7 +734,6 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
 
 
 async def pre_checkout(update, context):
-    """معالجة ما قبل الدفع."""
     query = update.pre_checkout_query
     user_id = query.from_user.id
     payload = query.invoice_payload
@@ -791,7 +779,6 @@ async def pre_checkout(update, context):
 
 
 async def successful_payment(update, context):
-    """معالجة الدفع الناجح."""
     user_id = update.effective_user.id
     payment = update.message.successful_payment
     payload = payment.invoice_payload
@@ -835,24 +822,22 @@ async def successful_payment(update, context):
                 logger.info(f"✅ Subscription activated: user={user_id}")
                 await invalidate_user_cache(user_id)
 
-                # ✅ v5.5.16: fire-and-forget (لا يُعطّل الدفع)
+                # fire-and-forget
                 try:
-                    from html import escape as _escape
-
                     _uname = update.effective_user.username or ""
                     _fname = update.effective_user.first_name or ""
                     _username_display = (
                         f"@{_uname}" if _uname else "❌ لا يوجد"
                     )
-                    _plan_display = _escape(str(plan_name or '—'))
+                    _plan_display = _html_escape(str(plan_name or '—'))
                     _price_display = int(total_amount or 0)
 
                     _spawn_notify_dev_log(
                         context,
                         f"💎 <b>اشتراك مدفوع جديد</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"👤 <b>الاسم:</b> {_escape(str(_fname or '—'))}\n"
-                        f"🔗 <b>المعرف:</b> {_escape(_username_display)}\n"
+                        f"👤 <b>الاسم:</b> {_html_escape(str(_fname or '—'))}\n"
+                        f"🔗 <b>المعرف:</b> {_html_escape(_username_display)}\n"
                         f"🆔 <b>الرقم التعريفي:</b> <code>{user_id}</code>\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
                         f"💎 <b>الباقة:</b> {_plan_display}\n"
@@ -871,9 +856,7 @@ async def successful_payment(update, context):
             await safe_send(context.bot, user_id, "❌ حدث خطأ غير متوقع.")
 
     elif payment_type == 'gift':
-        # 🆕 v5.5.3: ترتيب آمن + رسالة HTML نظيفة
         try:
-            # ─── 1) توثيق الدفع أولاً (لا نترك كود "يتيم") ───
             paid = await DB.mark_invoice_paid(
                 invoice['number'], payment_id
             )
@@ -889,7 +872,6 @@ async def successful_payment(update, context):
                 )
                 return
 
-            # ─── 2) إنشاء الكود ───
             code = await DB.create_gift_code(
                 plan_id=plan['id'], creator_id=user_id
             )
@@ -899,7 +881,6 @@ async def successful_payment(update, context):
                     or plan.get('days')
                     or 0
                 )
-                # ─── 3) إرسال برسالة HTML جميلة ───
                 await safe_send(
                     context.bot, user_id,
                     f"🎉 <b>تم شراء كود الهدية بنجاح!</b>\n\n"
@@ -947,12 +928,7 @@ async def health_check(request):
 # =====================================================================
 
 async def keep_alive():
-    """
-    يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة.
-
-    ✅ v5.5.15: إصلاح aiohttp leak — استخدام `async with` على الاستجابة
-               لضمان قراءة body وإغلاق الاتصال.
-    """
+    """يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة."""
     await asyncio.sleep(60)
 
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
@@ -974,7 +950,6 @@ async def keep_alive():
 
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                # ✅ v5.5.15: قراءة body + إغلاق نظيف
                 async with session.get(health_url) as response:
                     await response.read()
                     logger.debug(f"💓 Keep-alive: {response.status}")
@@ -986,18 +961,11 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.9/10/11/12/13/14: مراقبة تلقائية لحالة PostgreSQL Pool
+# ✅ v5.5.9-14: مراقبة تلقائية لحالة PostgreSQL Pool
 # =====================================================================
 
 async def pool_health_monitor() -> None:
-    """
-    ✅ v5.5.9/10/11/12/13/14: يراقب حالة Pool + الاتصالات كل 5 دقائق.
-
-    يسجّل في اللوغ:
-      🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
-      ⚠️ pool DIAG  : نفس المعلومات عند ضغط حقيقي
-    """
-    # ✅ v5.5.11: تأخير أولي — مُلفّف لمنع CancelledError غير الملتقط
+    """يراقب حالة Pool + الاتصالات كل 5 دقائق."""
     try:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
@@ -1006,10 +974,8 @@ async def pool_health_monitor() -> None:
 
     while True:
         try:
-            # تخطّي إذا ليس PostgreSQL
             db_type = getattr(DB, "DB_TYPE", "sqlite")
             if db_type != "postgres":
-                # نستمر لكن نطبع مرة كل 30 دقيقة فقط
                 try:
                     await asyncio.sleep(1800)
                 except asyncio.CancelledError:
@@ -1017,8 +983,6 @@ async def pool_health_monitor() -> None:
                     return
                 continue
 
-            # ═══ قراءة pg_stat_activity ═══
-            # ✅ v5.5.10: waiting يحسب الأقفال الحقيقية فقط
             row = await DB.fetchone(
                 """
                 SELECT 
@@ -1037,7 +1001,6 @@ async def pool_health_monitor() -> None:
                 """
             )
 
-            # استخراج آمن للقيم (row قد يكون dict أو tuple)
             if isinstance(row, dict):
                 data = row
             elif row is None:
@@ -1055,19 +1018,12 @@ async def pool_health_monitor() -> None:
             lock_waits = int(data.get("lock_waits") or 0)
             waiting = int(data.get("waiting") or 0)
 
-            # ═══════════════════════════════════════════════════════════
-            # ✅ v5.5.12: fallback مزدوج لقراءة pool data
-            # ═══════════════════════════════════════════════════════════
-            # القيم الافتراضية (تُستخدم إن فشل المصدران)
             pool_max = 20
             pool_current = total
             pool_in_use = active
 
-            # _pool_data: dict يحوي max_size/current_size/in_use
-            # إن نجح أحد المصادر
             _pool_data: Optional[Dict[str, Any]] = None
 
-            # ── المصدر 1: DB.get_pool_live() (من AnalyticsMixin) ──
             try:
                 if hasattr(DB, "get_pool_live"):
                     _pd_live = await DB.get_pool_live()
@@ -1078,7 +1034,6 @@ async def pool_health_monitor() -> None:
             except Exception as _e:
                 logger.debug(f"pool_health_monitor: get_pool_live: {_e}")
 
-            # ── المصدر 2: DB.get_pool_stats() (من Database مباشرة) ──
             if _pool_data is None:
                 try:
                     if hasattr(DB, "get_pool_stats"):
@@ -1088,7 +1043,6 @@ async def pool_health_monitor() -> None:
                                     "postgres", "mysql"
                                 )
                                 and _pd_stats.get("max_size")):
-                            # نُوحّد المفاتيح لتُطابق get_pool_live
                             _pool_data = {
                                 "max_size": _pd_stats.get("max_size"),
                                 "current_size": _pd_stats.get(
@@ -1101,7 +1055,6 @@ async def pool_health_monitor() -> None:
                         f"pool_health_monitor: get_pool_stats: {_e}"
                     )
 
-            # ── تطبيق القيم إن نجح أي مصدر ──
             if _pool_data is not None:
                 try:
                     pool_max = int(_pool_data.get("max_size") or 20)
@@ -1120,9 +1073,6 @@ async def pool_health_monitor() -> None:
                 (pool_current / pool_max * 100) if pool_max else 0
             )
 
-            # ═══ تحديد المستوى ═══
-            # ✅ v5.5.10: أزلنا waiting>=3 — waiting معلومة فقط
-            # ✅ v5.5.11: idle_in_tx >= 1 (أي transaction معلّق يحجب VACUUM)
             is_stressed = (
                 lock_waits > 0
                 or idle_in_tx >= 1
@@ -1144,10 +1094,8 @@ async def pool_health_monitor() -> None:
             logger.info("🛑 pool_health_monitor أُلغيت")
             raise
         except Exception as e:
-            # لا نطبع stack trace — فقط سطر بسيط
             logger.debug(f"pool_health_monitor: {e}")
 
-        # ═══ الانتظار 5 دقائق ═══
         try:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
@@ -1156,45 +1104,52 @@ async def pool_health_monitor() -> None:
 
 
 # =====================================================================
-# ✅ v5.5.16: helper لحل hostname (موحّد)
+# ✅ v5.5.16/17: helpers لحل hostname / port بأمان
 # =====================================================================
 
 def _resolve_hostname() -> Optional[str]:
     """
     يُحلّ hostname من متغيرات البيئة (Render/Railway/Heroku/custom).
-
-    Returns:
-        hostname نظيف (بلا scheme) أو None.
     """
-    raw = (
-        os.getenv("RENDER_EXTERNAL_HOSTNAME") or
-        os.getenv("RENDER_EXTERNAL_URL") or
-        os.getenv("RAILWAY_PUBLIC_DOMAIN") or
-        os.getenv("HEROKU_APP_NAME") or
-        os.getenv("WEBHOOK_URL")
-    )
-    if not raw:
-        return None
-    raw = raw.strip()
-    if raw.startswith("http"):
-        try:
-            return urlparse(raw).netloc
-        except Exception:
-            return None
-    return raw
+    rh = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if rh:
+        return rh.strip()
 
+    ru = os.getenv("RENDER_EXTERNAL_URL")
+    if ru:
+        ru = ru.strip()
+        if ru.startswith("http"):
+            try:
+                return urlparse(ru).netloc
+            except Exception:
+                pass
+        return ru.rstrip('/')
 
-# =====================================================================
-# ✅ v5.5.16: helper لحل PORT بشكل آمن
-# =====================================================================
+    rw = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    if rw:
+        return rw.strip()
+
+    heroku_app = os.getenv("HEROKU_APP_NAME")
+    if heroku_app:
+        heroku_app = heroku_app.strip()
+        if heroku_app:
+            return f"{heroku_app}.herokuapp.com"
+
+    wh = os.getenv("WEBHOOK_URL")
+    if wh:
+        wh = wh.strip()
+        if wh.startswith("http"):
+            try:
+                return urlparse(wh).netloc
+            except Exception:
+                pass
+        return wh.rstrip('/')
+
+    return None
+
 
 def _resolve_port() -> int:
-    """
-    ✅ v5.5.16: قراءة PORT بشكل آمن — fallback بدل الانهيار.
-
-    Returns:
-        رقم منفذ صالح (1..65535)، أو CONFIG.WEB_PORT عند أي خطأ.
-    """
+    """قراءة PORT بشكل آمن — fallback بدل الانهيار."""
     default_port = int(getattr(CONFIG, "WEB_PORT", 10000))
     raw = os.getenv("PORT")
 
@@ -1203,10 +1158,9 @@ def _resolve_port() -> int:
 
     try:
         port = int(str(raw).strip())
-    except (TypeError, ValueError) as _e:
+    except (TypeError, ValueError):
         logger.error(
-            f"❌ PORT غير صالح ({raw!r}) — استخدام {default_port}",
-            exc_info=False,
+            f"❌ PORT غير صالح ({raw!r}) — استخدام {default_port}"
         )
         return default_port
 
@@ -1217,6 +1171,130 @@ def _resolve_port() -> int:
         return default_port
 
     return port
+
+
+# =====================================================================
+# ✅ v5.5.18 (#3, #8): مراقب انهيار/تعليق Webhook
+# =====================================================================
+
+async def _watch_runner(
+    runner,
+    shutdown_event: asyncio.Event,
+    port: int,
+) -> None:
+    """
+    يراقب خادم Webhook (aiohttp) ويكتشف:
+
+      1) **الانهيار**: socket مغلق (server.sockets فارغة) → إغلاق فوري
+      2) **التعليق**: health probe يفشل 3 مرات متتالية → إغلاق
+
+    ✅ v5.5.18 (#3): كشف TCPSite مباشر (إذا كان setup_webhook يُرجعه)
+    ✅ v5.5.18 (#8): health probe داخلي يكتشف التعليق
+
+    Args:
+        runner: كائن AppRunner أو TCPSite (حسب setup_webhook)
+        shutdown_event: الحدث الذي يُطلق عند الحاجة لإغلاق البوت
+        port: منفذ الخادم (للـ health probe)
+    """
+    try:
+        # ═══════════════════════════════════════════════════════════
+        # ✅ v5.5.18 (#3): كشف موقع TCP بمرونة
+        # ═══════════════════════════════════════════════════════════
+        site = None
+
+        # 1) AppRunner → site
+        if hasattr(runner, "site"):
+            site = runner.site
+        # 2) AppRunner → _site (خاصية داخلية)
+        elif hasattr(runner, "_site"):
+            site = runner._site
+        # 3) Wrapper يحوي runner
+        elif hasattr(runner, "runner") and hasattr(runner.runner, "site"):
+            site = runner.runner.site
+        # 4) ✅ v5.5.18: runner هو TCPSite بنفسه
+        elif hasattr(runner, "_server"):
+            site = runner
+
+        if site is None:
+            logger.warning(
+                "⚠️ _watch_runner: لم أتمكّن من الوصول إلى TCP site "
+                "— مراقبة انهيار Webhook معطّلة. "
+                "تحقق من القيمة المُرجَعة من setup_webhook()."
+            )
+            return
+
+        logger.debug("✅ _watch_runner: بدء المراقبة")
+
+        # ═══════════════════════════════════════════════════════════
+        # ✅ v5.5.18 (#8): عدّاد فشل health probe
+        # ═══════════════════════════════════════════════════════════
+        import aiohttp
+
+        probe_failures = 0
+        health_url = f"http://127.0.0.1:{port}/health"
+
+        while not shutdown_event.is_set():
+            try:
+                # ─── فحص 1: هل socket الخادم حيّ؟ ───
+                server = getattr(site, "_server", None)
+                if server is None:
+                    await asyncio.sleep(2.0)
+                    continue
+
+                if server.sockets is None or len(server.sockets) == 0:
+                    logger.error(
+                        "❌ _watch_runner: خادم Webhook أُغلق بشكل "
+                        "غير متوقع — إيقاف البوت بلطف"
+                    )
+                    shutdown_event.set()
+                    return
+
+                # ─── ✅ v5.5.18 (#8): فحص 2: health probe ───
+                try:
+                    timeout = aiohttp.ClientTimeout(
+                        total=_WATCHER_HEALTH_TIMEOUT
+                    )
+                    async with aiohttp.ClientSession(
+                        timeout=timeout
+                    ) as session:
+                        async with session.get(health_url) as resp:
+                            await resp.read()
+                            if resp.status != 200:
+                                raise RuntimeError(
+                                    f"health status={resp.status}"
+                                )
+                    probe_failures = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as probe_e:
+                    probe_failures += 1
+                    logger.debug(
+                        f"_watch_runner: health probe فشل "
+                        f"({probe_failures}/{_WATCHER_MAX_PROBE_FAILURES}): "
+                        f"{probe_e}"
+                    )
+                    if probe_failures >= _WATCHER_MAX_PROBE_FAILURES:
+                        logger.error(
+                            f"❌ _watch_runner: خادم Webhook لا يستجيب "
+                            f"({probe_failures} مرات متتالية) — "
+                            f"إيقاف البوت بلطف"
+                        )
+                        shutdown_event.set()
+                        return
+
+                # فحص كل 10 ثوان
+                await asyncio.sleep(_WATCHER_INTERVAL)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                logger.debug(f"_watch_runner loop: {_e}")
+                await asyncio.sleep(_WATCHER_INTERVAL)
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as _e:
+        logger.debug(f"_watch_runner: {_e}")
 
 
 # =====================================================================
@@ -1234,7 +1312,6 @@ async def main():
         logger.error(f"❌ {e}")
         raise SystemExit(1)
 
-    # 🔒 v5.0.0: BOT_TOKEN من البيئة إن وُجد
     bot_token = _get_bot_token()
     if not bot_token:
         logger.error("❌ BOT_TOKEN غير محدّد (بيئة أو CONFIG.TOKEN)")
@@ -1243,23 +1320,17 @@ async def main():
     logger.info(f"🌿 {CONFIG.BOT_NAME}")
     logger.info(f"👨‍💼 المالك: {CONFIG.PRIMARY_OWNER_ID}")
 
-    # 🛡️ v5.1.0: فحص دوال الأوامر
     if not _verify_command_handlers():
         logger.error("❌ فشل فحص دوال الأوامر — الخروج")
         raise SystemExit(1)
 
-    # 🛡️ v5.2.0: فحص توافق DB
     if not _verify_db_config():
         logger.error("❌ فشل فحص إعدادات قاعدة البيانات — الخروج")
         raise SystemExit(1)
 
-    # 🛡️ v5.3.0: فحص group_log handlers (غير معطِّل)
     _verify_group_log_handlers()
 
     # ═══ تهيئة قاعدة البيانات ═══
-    # ✅ v5.5.14: create_tables + migrate + secondary_indexes
-    #              تحدث تلقائياً داخل _do_bootstrap_inner
-    #              (database.py v7.7.43 يستدعي _create_secondary_indexes)
     t0 = time.monotonic()
     if hasattr(DB, 'pre_initialize'):
         await DB.pre_initialize()
@@ -1290,9 +1361,7 @@ async def main():
         f"{time.monotonic()-t1:.2f} ثانية"
     )
 
-    # ═══════════════════════════════════════════════════════════════
-    # 🧠 v5.1.0: Warmup الشامل — تحميل كل الموارد مسبقاً
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ Warmup ═══
     t_warmup = time.monotonic()
     try:
         warmup_result = await warmup_all()
@@ -1301,16 +1370,12 @@ async def main():
             f"{time.monotonic()-t_warmup:.2f} ثانية"
         )
     except Exception as e:
-        # ✅ v5.5.15: exc_info=True لرؤية traceback الكامل
         logger.warning(
             f"⚠️ Warmup فشل (سيتم المتابعة): {e}",
             exc_info=True,
         )
 
-    # ✅ v5.5.16: استخدام resolver آمن للـ PORT
     port = _resolve_port()
-
-    # ✅ v5.5.16: استخدام resolver موحّد للـ hostname
     hostname = _resolve_hostname()
 
     # ═══ بناء التطبيق ═══
@@ -1322,7 +1387,7 @@ async def main():
         f"⏱️ تم تهيئة التطبيق في {time.monotonic()-t_app:.2f} ثانية"
     )
 
-    # ========== ✅ v5.3.1: تهيئة group_log ==========
+    # ═══ تهيئة group_log ═══
     if _GROUP_LOG_INIT_AVAILABLE and _GROUP_LOG_AVAILABLE:
         _init_group_log_instance(app)
     else:
@@ -1337,11 +1402,10 @@ async def main():
                 "نظام سجل المجموعات"
             )
 
-    # =================================================================
-    # 🆕 v5.5.0: تسجيل الأوامر بنطاقات صحيحة
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
+    # تسجيل الأوامر
+    # ═════════════════════════════════════════════════════════════
 
-    # ─── 1) حذف Scopes القديمة ───
     for _scope_name, _scope in (
         ("Default", BotCommandScopeDefault()),
         ("AllPrivateChats", BotCommandScopeAllPrivateChats()),
@@ -1353,7 +1417,6 @@ async def main():
         except Exception as _e:
             logger.debug(f"delete {_scope_name} commands: {_e}")
 
-    # ─── 2) الأوامر العامة ───
     try:
         await app.bot.set_my_commands(
             PUBLIC_COMMANDS,
@@ -1366,7 +1429,6 @@ async def main():
     except Exception as _e:
         logger.error(f"❌ فشل تسجيل الأوامر العامة: {_e}")
 
-    # ─── 3) أوامر المجموعات ───
     try:
         await app.bot.set_my_commands(
             GROUP_COMMANDS,
@@ -1379,7 +1441,6 @@ async def main():
     except Exception as _e:
         logger.error(f"❌ فشل تسجيل أوامر المجموعات: {_e}")
 
-    # ─── 4) الأوامر الإدارية — لكل أدمن منفرداً ───
     _admin_ids = await _collect_admin_ids()
     _registered_admins = 0
     _failed_admins = 0
@@ -1408,7 +1469,9 @@ async def main():
         f"(فشل {_failed_admins})"
     )
 
-    # ========== تسجيل المعالجات ==========
+    # ═════════════════════════════════════════════════════════════
+    # تسجيل المعالجات
+    # ═════════════════════════════════════════════════════════════
     app.add_handler(CommandHandler("start", CommandHandlers.start))
     app.add_handler(CommandHandler("help", CommandHandlers.help_command))
     app.add_handler(CommandHandler("trial", CommandHandlers.trial))
@@ -1437,7 +1500,6 @@ async def main():
     app.add_handler(CommandHandler("unban", CommandHandlers.unban))
     app.add_handler(CommandHandler("pin", CommandHandlers.pin))
 
-    # أوامر المشرفين المخفيين
     app.add_handler(CommandHandler("register_hidden_owner", CommandHandlers.register_hidden_owner))
     app.add_handler(CommandHandler("remove_hidden_owner", CommandHandlers.remove_hidden_owner))
     app.add_handler(CommandHandler("add_hidden_admin", CommandHandlers.add_hidden_admin))
@@ -1461,29 +1523,24 @@ async def main():
     app.add_handler(CommandHandler("channels", CommandHandlers.channels))
     app.add_handler(CommandHandler("posts", CommandHandlers.posts))
 
-    # ✅ v5.4.2: أوامر تشخيص قاعدة البيانات (للمطور)
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # معالجات الدفع
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-    # ═══ NAV_FIX أولاً (group=-10) ═══
     try:
         register_nav_fix(app)
         logger.info("✅ NAV_FIX: معالج الإغلاق/الرجوع مُسجّل")
     except Exception as e:
         logger.error(f"❌ فشل تسجيل NAV_FIX: {e}", exc_info=True)
 
-    # ═══ قائمة القنوات ═══
     try:
         register_channels_list_handlers(app)
         logger.info("✅ handlers قائمة القنوات مُسجَّل")
     except Exception as e:
         logger.error(f"❌ فشل تسجيل handlers القنوات: {e}", exc_info=True)
 
-    # ═══ ✅ v5.3.0: معالجات سجل قناة المجموعات ═══
     if _GROUP_LOG_AVAILABLE:
         try:
             register_group_log_handlers(app)
@@ -1498,10 +1555,8 @@ async def main():
             "⚠️ group_log غير متاح — زر قناة السجل لن يعمل"
         )
 
-    # معالج الأزرار العام
     app.add_handler(CallbackQueryHandler(CallbackHandlers.handle))
 
-    # معالجات الرسائل
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
          filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL |
@@ -1526,18 +1581,13 @@ async def main():
     app.add_handler(ChatJoinRequestHandler(MessageHandlers.handle_join_request))
     app.add_error_handler(ErrorHandler.handle_error)
 
-    # ═══ ChatMemberHandler ═══
     chat_member.register(app)
     logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
 
-    # ========== المهام الخلفية ==========
+    # ═════════════════════════════════════════════════════════════
+    # المهام الخلفية
+    # ═════════════════════════════════════════════════════════════
     async def run_task_with_retry(task_func, *args, task_name=""):
-        """
-        ✅ v5.2.0: تشغيل المهمة مع إعادة محاولة + تقرير دوري.
-
-        يُستخدم للمهام التي لا تُدير أخطاءها داخليًا.
-        أي استثناء → تسجيل + إعادة تشغيل بعد backoff متزايد.
-        """
         consecutive_failures = 0
         while True:
             try:
@@ -1570,30 +1620,8 @@ async def main():
                 logger.error(f"❌ cleanup_locks failed: {e}")
                 await asyncio.sleep(60)
 
-    # ✅ v5.5.6: إعلان فائزين تلقائي (كل ساعة)
     async def contest_cleanup():
-        """
-        يُعلن الفائزين تلقائيًا للمسابقات المنتهية.
-
-        ✅ v5.5.15: HTML escape على عنوان المسابقة لتفادي فشل
-                   إرسال الرسالة عند وجود رموز `<`, `>`, `&`.
-
-        السلوك:
-          • انتظار 5 دقائق أولي عند الإقلاع (منح bootstrap فرصة)
-          • كل ساعة:
-              ① DB.auto_declare_expired_contests()
-                  - يعلن فائزين للمسابقات المنتهية التي فيها مشاركون
-                  - يُلغي المسابقات المنتهية بدون مشاركين
-              ② إشعار كل فائز برسالة تهنئة
-          • يعالج أخطاءه داخليًا (لا يرمي) → أي فشل عابر لا يُعيد
-            تنفيذ الـ sleep(300) الأولي
-          • يُلغى بشكل نظيف عند إيقاف البوت
-
-        يعتمد على:
-          • database_contests.py → auto_declare_expired_contests()
-          • يُدار مباشرة عبر asyncio.create_task
-        """
-        # انتظار أولي — يُنفَّذ مرة واحدة فقط عند الإقلاع
+        """يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة)."""
         try:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
@@ -1601,7 +1629,6 @@ async def main():
 
         while True:
             try:
-                # ─── 1) الإعلان التلقائي ───
                 winners = await DB.auto_declare_expired_contests()
 
                 if winners:
@@ -1610,11 +1637,9 @@ async def main():
                         f"{len(winners)} فائزًا تلقائيًا"
                     )
 
-                    # ─── 2) إشعار كل فائز ───
                     for w in winners:
                         winner_id = w.get("winner_id")
                         raw_title = w.get("title") or "مسابقة"
-                        # ✅ v5.5.15: HTML escape
                         title = _html_escape(str(raw_title))
                         if winner_id is None:
                             continue
@@ -1632,11 +1657,9 @@ async def main():
                                 parse_mode="HTML",
                             )
                         except Exception as ne:
-                            # المستخدم قد حظر البوت أو chat غير صالح
                             logger.debug(
                                 f"إشعار الفائز {winner_id} فشل: {ne}"
                             )
-                        # مهلة صغيرة بين الإشعارات لتجنّب rate limit
                         try:
                             await asyncio.sleep(0.5)
                         except asyncio.CancelledError:
@@ -1652,7 +1675,7 @@ async def main():
                 )
 
             try:
-                await asyncio.sleep(3600)  # كل ساعة
+                await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 raise
 
@@ -1669,16 +1692,12 @@ async def main():
         asyncio.create_task(run_task_with_retry(BackgroundTasks.cleanup_old_data, task_name="cleanup_old_data")),
         asyncio.create_task(run_task_with_retry(cache_cleanup_task, task_name="cache_cleanup")),
         asyncio.create_task(run_task_with_retry(cleanup_locks, task_name="cleanup_locks")),
-        # ✅ v5.2.0: تنظيف دوري للـRateLimiter وsec_auth_cache
         asyncio.create_task(
             run_task_with_retry(
                 GroupRateLimiterManager.periodic_cleanup_task,
                 task_name="periodic_cleanup"
             )
         ),
-        # ✅ v5.5.13: حُذف BackgroundTasks.monitor_pool (المكرر)
-        # السبب: pool_health_monitor يغطّيه بشكل أفضل وأشمل
-        # monitor_pool_alert يبقى (غرضه مختلف: إشعارات استباقية للأدمن)
         asyncio.create_task(
             run_task_with_retry(
                 BackgroundTasks.monitor_pool_alert,
@@ -1686,18 +1705,10 @@ async def main():
                 task_name="monitor_pool_alert"
             )
         ),
-        # ✅ v5.5.6: إعلان فائزين تلقائي (كل ساعة)
-        # ملاحظة: لا نستخدم run_task_with_retry هنا لأن contest_cleanup
-        # تُدير أخطاءها داخليًا (لا ترمي) → يُمنع إعادة تنفيذ sleep(300).
         asyncio.create_task(contest_cleanup()),
-
-        # ✅ v5.5.9/10/11/12/13: مراقبة تلقائية لحالة Pool (كل 5 دقائق)
-        # هذه هي المصدر الوحيد للمراقبة الدورية الآن
-        # (بعد حذف monitor_pool المكرر في v5.5.13)
         asyncio.create_task(pool_health_monitor()),
     ]
 
-    # ✅ v5.4.3: الصيانة الدورية لقاعدة البيانات (كل 24 ساعة)
     if _MAINTENANCE_AVAILABLE and callable(_maintenance_loop):
         try:
             owner_id = int(CONFIG.PRIMARY_OWNER_ID)
@@ -1711,8 +1722,8 @@ async def main():
         tasks.append(asyncio.create_task(
             run_task_with_retry(
                 _maintenance_loop,
-                app.bot,        # للإشعار
-                owner_id,       # معرّف المالك
+                app.bot,
+                owner_id,
                 task_name="maintenance"
             )
         ))
@@ -1728,34 +1739,43 @@ async def main():
 
     logger.info(f"✅ تم تشغيل {len(tasks)} مهمة خلفية")
 
-    # =================================================================
-    # ✅ v5.5.16: SIGTERM handler — إغلاق لطيف على Render
-    # =================================================================
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v5.5.18 (#7): SIGTERM handler — Webhook فقط
+    # ═════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
-    def _on_sigterm():
-        logger.info(
-            "🛑 تلقّيت SIGTERM — بدء الإغلاق اللطيف"
+    if hostname:
+        # ✅ v5.5.18 (#7): مُسجَّل فقط في وضع Webhook
+        def _on_sigterm():
+            logger.info(
+                "🛑 تلقّيت SIGTERM — بدء الإغلاق اللطيف"
+            )
+            _shutdown_event.set()
+
+        try:
+            _loop = asyncio.get_running_loop()
+            for _sig in (signal.SIGTERM,):
+                try:
+                    _loop.add_signal_handler(_sig, _on_sigterm)
+                    logger.debug(
+                        f"✅ تم تسجيل handler لـ {_sig.name}"
+                    )
+                except (NotImplementedError, RuntimeError, ValueError) as _e:
+                    logger.debug(
+                        f"add_signal_handler({_sig.name}) غير مدعوم: {_e}"
+                    )
+        except Exception as _e:
+            logger.debug(f"SIGTERM setup: {_e}")
+    else:
+        logger.debug(
+            "ℹ️ وضع Polling — PTB يدير SIGTERM/SIGINT داخلياً"
         )
-        _shutdown_event.set()
 
-    try:
-        _loop = asyncio.get_running_loop()
-        for _sig in (signal.SIGTERM,):
-            try:
-                _loop.add_signal_handler(_sig, _on_sigterm)
-                logger.debug(
-                    f"✅ تم تسجيل handler لـ {_sig.name}"
-                )
-            except (NotImplementedError, RuntimeError, ValueError) as _e:
-                # Windows أو loop مغلق → تجاهل
-                logger.debug(
-                    f"add_signal_handler({_sig.name}) غير مدعوم: {_e}"
-                )
-    except Exception as _e:
-        logger.debug(f"SIGTERM setup: {_e}")
+    # ═════════════════════════════════════════════════════════════
+    # بدء التشغيل
+    # ═════════════════════════════════════════════════════════════
+    app_shutdown_done = False  # v5.5.17 (#3)
 
-    # ========== بدء التشغيل ==========
     try:
         if hostname:
             webhook_url = f"https://{hostname}/{bot_token}"
@@ -1771,7 +1791,7 @@ async def main():
 
             runner = await setup_webhook(app, port)
 
-            # ✅ v5.5.15: تسخين الخادم — إصلاح aiohttp leak
+            # ✅ v5.5.15: تسخين الخادم
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
@@ -1783,10 +1803,41 @@ async def main():
             except Exception as _e:
                 logger.debug(f"تسخين الخادم: {_e}")
 
-            # ✅ v5.5.16: انتظار إشارة الإغلاق (SIGTERM/KeyboardInterrupt)
-            # بدل `asyncio.Event().wait()` التي لا تُلغى أبداً.
-            await _shutdown_event.wait()
-            logger.info("📴 تم استلام إشارة الإغلاق — إنهاء الخدمات...")
+            # ✅ v5.5.18 (#2): watcher_task داخل try/finally
+            watcher_task = None
+            try:
+                watcher_task = asyncio.create_task(
+                    _watch_runner(runner, _shutdown_event, port)
+                )
+
+                # ✅ v5.5.16: انتظار إشارة الإغلاق
+                await _shutdown_event.wait()
+                logger.info(
+                    "📴 تم استلام إشارة الإغلاق — إنهاء الخدمات..."
+                )
+            finally:
+                # ✅ v5.5.18 (#2): إلغاء watcher_task دائماً
+                if watcher_task is not None:
+                    watcher_task.cancel()
+                    try:
+                        await watcher_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as _e:
+                        logger.debug(f"watcher_task: {_e}")
+
+                # ✅ v5.5.18 (#1): runner.cleanup() — كان مفقوداً!
+                try:
+                    await runner.cleanup()
+                    logger.info(
+                        "✅ aiohttp runner: تم الإغلاق النظيف"
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as _e:
+                    logger.debug(
+                        f"runner.cleanup (webhook): {_e}"
+                    )
         else:
             logger.info("⚠️ وضع Polling (لا يوجد hostname)")
             runner = await setup_webhook(app, port)
@@ -1795,45 +1846,65 @@ async def main():
                     drop_pending_updates=True,
                     allowed_updates=ALLOWED_UPDATES,
                 )
+                # ✅ v5.5.17 (#3): run_polling أغلق التطبيق داخلياً
+                app_shutdown_done = True
             finally:
-                await runner.cleanup()
+                try:
+                    await runner.cleanup()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as _e:
+                    logger.debug(f"runner.cleanup (polling): {_e}")
     finally:
-        # ✅ v5.3.1: إغلاق GroupLog بلطف أولاً
+        # ═══ إغلاق GroupLog بلطف ═══
         try:
             await _shutdown_group_log()
+        except asyncio.CancelledError:
+            raise
         except Exception as _e:
             logger.debug(f"_shutdown_group_log: {_e}")
 
-        # ✅ v5.5.16: انتظار مهام الإشعارات الخلفية (بحد أقصى 3 ثوان)
+        # ═══ انتظار مهام الإشعارات الخلفية ═══
         if _NOTIFY_TASKS:
             logger.info(
                 f"⏳ انتظار {len(_NOTIFY_TASKS)} مهمة إشعار... "
-                f"(بحد أقصى 3 ثوان)"
+                f"(بحد أقصى {_NOTIFY_SHUTDOWN_TIMEOUT}s)"
             )
             try:
                 await asyncio.wait_for(
                     asyncio.gather(
                         *_NOTIFY_TASKS, return_exceptions=True
                     ),
-                    timeout=3.0,
+                    timeout=_NOTIFY_SHUTDOWN_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                logger.debug("⚠️ انتهت مهلة انتظار الإشعارات — إلغاء")
+                logger.debug(
+                    "⚠️ انتهت مهلة انتظار الإشعارات — إلغاء المتبقي"
+                )
                 for _t in list(_NOTIFY_TASKS):
                     _t.cancel()
+            except asyncio.CancelledError:
+                raise
 
-        # إلغاء المهام الخلفية
+        # ═══ إلغاء المهام الخلفية ═══
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # إغلاق التطبيق
-        try:
-            await app.shutdown()
-        except Exception as _e:
-            logger.debug(f"app.shutdown: {_e}")
+        # ═══ app.shutdown() — مرة واحدة فقط ═══
+        if not app_shutdown_done:
+            try:
+                await app.shutdown()
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                logger.debug(f"app.shutdown: {_e}")
 
-    logger.info(f"✅ اكتمل الإقلاع في {time.monotonic()-t_start:.2f} ثانية")
+    # ✅ v5.5.18 (#5): رسالة واضحة (بدل "اكتمل الإقلاع")
+    logger.info(
+        f"👋 انتهت دورة حياة البوت "
+        f"({time.monotonic() - t_start:.2f}s)"
+    )
 
 
 if __name__ == "__main__":
