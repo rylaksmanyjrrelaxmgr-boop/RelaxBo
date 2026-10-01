@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.5.3)
+handlers_callback.py - معالج الأزرار (v9.5.4)
 =====================================================================
+🆕 v9.5.4 — إصلاح Regression + تحسينات:
+    ✅ BUG-1: إزالة _html.escape من _show_post_list (النص plain
+       بدون parse_mode='HTML' كان يعرض &lt; &gt; حرفياً)
+    ✅ OBS-1: settings.setdefault('_ts', ...) في _handle_auto_reply
+       (يضمن تنظيف كاش ars_* حتى للجلسات القديمة)
+
 🆕 v9.5.3 — إصلاحات التدقيق الشامل:
     ✅ C1: استخراج _render_auto_reply_menu (إزالة ازدواجية)
     ✅ C2: _publish_all يُبطل posts_cache لكل قناة الآن
@@ -17,7 +23,6 @@ handlers_callback.py - معالج الأزرار (v9.5.3)
     ✅ M6: فرز لغات الترجمة أبجدياً
     ✅ N1: إزالة فحص مكرر لـ data فارغ
     ✅ N2: تنظيف مفاتيح ars_* في _cleanup_user_data
-    ✅ N3: _html.escape على معاينة نص المنشور
     ✅ N4: تخطي فحص bot_can_restrict لـ panel_close
     ✅ N5: نقل import tempfile إلى الأعلى
     ✅ N9: تفريغ كاش ars_* عند تغيير اللغة
@@ -3881,9 +3886,9 @@ class CallbackHandlers:
             pid = pd.get('id')
             if pid is None:
                 continue
-            # ✅ v9.5.3 (N3): HTML escape على معاينة النص
-            preview = _html.escape(
-                str(pd.get('text') or '')[:30])
+            # ✅ v9.5.4 (BUG-1): النص plain — لا escape (بدون
+            # parse_mode='HTML' في safe_edit). النص يُعرض كما هو.
+            preview = str(pd.get('text') or '')[:30]
             text += f"🆔 {pid}: {preview}\n"
             kb.append([InlineKeyboardButton(
                 f"🗑️ {pid}",
@@ -6979,12 +6984,13 @@ class CallbackHandlers:
                         chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
+                # ✅ v9.5.4 (OBS-1): ضمان وجود _ts للتنظيف الدوري
+                settings.setdefault('_ts', time.monotonic())
                 new_status = 1 - _coerce_int(
                     settings.get('enabled', 0))
                 await DB.update_auto_reply_settings(
                     chat_id, enabled=new_status)
                 settings['enabled'] = new_status
-                # ✅ v9.5.3 (N2): timestamp للتنظيف الدوري
                 settings['_ts'] = time.monotonic()
                 context.user_data[cache_key] = settings
                 kb = KeyboardFactory.build(
@@ -7031,6 +7037,8 @@ class CallbackHandlers:
                         chat_id) or {}
                     if not isinstance(settings, dict):
                         settings = _row_to_dict(settings) or {}
+                # ✅ v9.5.4 (OBS-1): ضمان وجود _ts
+                settings.setdefault('_ts', time.monotonic())
                 new_status = 1 - _coerce_int(
                     settings.get('only_admins', 0))
                 await DB.update_auto_reply_settings(
