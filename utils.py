@@ -2,17 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.14 - Contest Duration Buttons)
+utils.py - الأدوات المساعدة للبوت (v7.9.15 - Critical Integration Fixes)
 =================================================================================
-🆕 v7.9.14 (أزرار مدة المسابقة بدل التاريخ النصي):
-    ✅ UserState: 4 حالات جديدة لدعم quiz بأزرار
-       - WAIT_CONTEST_DURATION:   🎯 اختيار المدة بالأزرار
-       - WAIT_CONTEST_TYPE:       🎯 اختيار النوع (raffle/quiz)
-       - WAIT_CONTEST_QUESTION:   ❓ استقبال السؤال (quiz فقط)
-       - WAIT_CONTEST_CORRECT_ANSWER: ✅ استقبال الإجابة الصحيحة
-    ✅ WAIT_CONTEST_DATE يبقى للتوافق الخلفي (يمكن حذفه لاحقاً)
-    ✅ لا تغيير على أي منطق آخر — كل السلوك محفوظ 100%
+🆕 v7.9.15 (CRITICAL INTEGRATION FIXES — based on review of v5.5.18):
+    ✅ #1 حرجة: `setup_webhook` يُرفق `site` بـ `runner`
+           → يُصلح `_watch_runner` في bot.py الذي كان معطّلاً صامتاً
+    ✅ #2 حرجة: `apply_penalty` — حماية `DB.VALID_PENALTY_TYPES`
+           من AttributeError مع fallback مجموعة ثابتة
+    ✅ #3: `ErrorHandler.handle_error` — fallback لـ stderr
+           (بدل الابتلاع الكامل عند فشل logger نفسه)
+    ✅ #4: `safe_send` — عند RateLimiter timeout → report_429
+           (بدل تجاوز الحماية → 429 من Telegram)
+    ✅ #5: `_publish_single_channel` — تسجيل واضح عند فشل
+           mark_published بعد نجاح النشر (خطر نشر مزدوج)
+    ✅ #6: `fetch_json_from_url` — حماية SSRF (whitelist hosts)
+    ✅ #7: `_group_admins_cache` — حذف عشوائي بدل sort (أداء)
+    ✅ #8: `webhook_handler` — content-type مع charset tolerance
 
+🆕 v7.9.14 (Contest Duration Buttons)
 🆕 v7.9.13 (استعادة سلوك النشر الفوري)
 🆕 v7.9.11 (دمج معاملات النشر)
 🆕 v7.9.10 (إصلاح Forbidden في safe_send)
@@ -37,7 +44,9 @@ import logging
 import random
 import importlib
 import threading
+import sys
 from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any, Union, Callable, Awaitable
 from enum import Enum, auto
@@ -62,6 +71,23 @@ from config import CONFIG, PATHS
 from database import DB
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.9.15 (#6): whitelist لـ fetch_json_from_url (حماية SSRF)
+# ═══════════════════════════════════════════════════════════════════
+_ALLOWED_JSON_HOSTS: frozenset = frozenset({
+    "raw.githubusercontent.com",
+    "gist.githubusercontent.com",
+    "api.github.com",
+    "github.com",
+})
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.9.15 (#2): fallback لمعرّفات العقوبات الصالحة
+# ═══════════════════════════════════════════════════════════════════
+_FALLBACK_PENALTY_TYPES: frozenset = frozenset({
+    "ban", "mute", "kick", "warn", "restrict", "unban",
+})
 
 # =====================================================================
 # 0. 🧠 SmartCache
@@ -111,6 +137,7 @@ class SmartCache:
                     return value
 
                 loaded = await loader()
+                # ملاحظة: None لا يُخزَّن (لتجنّب negative caching دائم)
                 if loaded is not None:
                     await self.set(key, loaded, ttl)
                 return loaded
@@ -696,14 +723,14 @@ class UserState(Enum):
     WAIT_CONTEST_DESC = auto()
     WAIT_CONTEST_PRIZE = auto()
     # ✅ جديد — يُعالَج في handlers_callback.py عبر أزرار
-    WAIT_CONTEST_DURATION = auto()          # 🎯 أزرار المدة
-    WAIT_CONTEST_TYPE = auto()              # 🎯 أزرار النوع (raffle/quiz)
+    WAIT_CONTEST_DURATION = auto()
+    WAIT_CONTEST_TYPE = auto()
     # ✅ جديد — quiz flow
-    WAIT_CONTEST_QUESTION = auto()          # ❓ استقبال السؤال
-    WAIT_CONTEST_CORRECT_ANSWER = auto()    # ✅ استقبال الإجابة الصحيحة
+    WAIT_CONTEST_QUESTION = auto()
+    WAIT_CONTEST_CORRECT_ANSWER = auto()
     # ⚠️ قديم — للتوافق الخلفي (يمكن حذفه لاحقاً)
     WAIT_CONTEST_DATE = auto()
-    WAIT_CONTEST_ANSWER = auto()            # يستخدمه المشارك العادي
+    WAIT_CONTEST_ANSWER = auto()
     # ══════════════════════════════════════════════════════════════
 
     WAIT_MAX_LEN = auto()
@@ -2091,6 +2118,8 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
     """
     ✅ v7.9.10: التعامل مع Forbidden كخطأ دائم (بدون retry).
+    ✅ v7.9.15 (#4): عند RateLimiter timeout → report_429
+                    (بدل تجاوز الحماية → 429 من Telegram).
     """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
@@ -2099,9 +2128,11 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
         return None
 
     try:
-        await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=2.0)
+        await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=5.0)
     except asyncio.TimeoutError:
-        logger.debug("⚠️ RATE_LIMITER timeout")
+        # ✅ v7.9.15 (#4): خفّض المعدل استباقياً بدل تجاوز الحماية
+        RATE_LIMITER.report_429()
+        logger.warning("⚠️ RATE_LIMITER timeout — تم تخفيض المعدل استباقياً")
 
     text = TextUtils.sanitize(text, max_len=4096) if text else ""
     media_type = None
@@ -2814,7 +2845,11 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
                         chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
-    """✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username."""
+    """
+    ✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username.
+
+    ✅ v7.9.15 (#2): حماية DB.VALID_PENALTY_TYPES من AttributeError.
+    """
     def T(key: str, **kw) -> str:
         return _penalty_t(key, lang, **kw)
 
@@ -2874,7 +2909,15 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     full_msg = "\n".join(lines)
 
-    if penalty in DB.VALID_PENALTY_TYPES:
+    # ✅ v7.9.15 (#2): حماية DB.VALID_PENALTY_TYPES
+    try:
+        _valid_types = getattr(DB, "VALID_PENALTY_TYPES", None)
+        if _valid_types is None:
+            _valid_types = _FALLBACK_PENALTY_TYPES
+    except Exception:
+        _valid_types = _FALLBACK_PENALTY_TYPES
+
+    if penalty in _valid_types:
         try:
             await DB.add_penalty(
                 user_id=user_id, chat_id=chat_id, penalty_type=penalty,
@@ -2882,10 +2925,17 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                 username=username, first_name=first_name, chat_name=chat_name,
             )
         except TypeError:
-            await DB.add_penalty(
-                user_id=user_id, chat_id=chat_id, penalty_type=penalty,
-                duration=duration, reason=reason, issued_by=moderator,
-            )
+            # fallback — قاعدة بيانات قديمة بدون الأعمدة الإضافية
+            try:
+                await DB.add_penalty(
+                    user_id=user_id, chat_id=chat_id, penalty_type=penalty,
+                    duration=duration, reason=reason, issued_by=moderator,
+                )
+            except Exception as _e:
+                logger.debug(f"add_penalty (fallback) فشل: {_e}")
+        except Exception as _e:
+            logger.debug(f"add_penalty فشل: {_e}")
+
     if moderator:
         try:
             await DB.add_admin_log(chat_id, moderator, penalty, user_id, reason)
@@ -2995,6 +3045,25 @@ async def import_auto_replies(chat_id: int,
 
 
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
+    """
+    ✅ v7.9.15 (#6): حماية SSRF — whitelist للنطاقات المسموحة.
+
+    فقط نطاقات GitHub المسموحة للاستيراد من المستودعات العامة.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            logger.warning(f"⛔ مخطط غير مسموح: {parsed.scheme}")
+            return None
+        if parsed.hostname not in _ALLOWED_JSON_HOSTS:
+            logger.warning(
+                f"⛔ URL غير مسموح (SSRF protection): {parsed.hostname}"
+            )
+            return None
+    except Exception as e:
+        logger.warning(f"⛔ URL غير صالح: {e}")
+        return None
+
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -3248,14 +3317,19 @@ class BackgroundTasks:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
 
+            # ✅ v7.9.15 (#7): حذف عشوائي بدل sort (O(n) بدل O(n log n))
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
-                sorted_items = sorted(
-                    BackgroundTasks._group_admins_cache.items(),
-                    key=lambda x: x[1][0],
-                )
-                for k, _ in sorted_items[: BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5]:
-                    BackgroundTasks._group_admins_cache.pop(k, None)
-                    BackgroundTasks._group_admins_access_count.pop(k, None)
+                evict_count = max(1, BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5)
+                # حماية chat_id الحالي من الحذف
+                candidates = [k for k in BackgroundTasks._group_admins_cache.keys()
+                              if k != chat_id]
+                if candidates:
+                    to_remove = random.sample(
+                        candidates, min(evict_count, len(candidates))
+                    )
+                    for k in to_remove:
+                        BackgroundTasks._group_admins_cache.pop(k, None)
+                        BackgroundTasks._group_admins_access_count.pop(k, None)
 
             BackgroundTasks._group_admins_cache[chat_id] = (now, admin_ids)
             BackgroundTasks._group_admins_access_count[chat_id] = 1
@@ -3328,6 +3402,8 @@ class BackgroundTasks:
                                        has_sub: bool = None) -> bool:
         """
         ✅ v7.9.13: السلوك مطابق 100% لـ v7.9.11.
+        ✅ v7.9.15 (#5): تسجيل واضح عند فشل mark_published بعد
+                        نجاح النشر (خطر نشر مزدوج).
         """
         user_id = None
         try:
@@ -3346,7 +3422,16 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                await DB.mark_published_and_advance(ch['id'], post['id'])
+                # ✅ v7.9.15 (#5): حماية من خطر النشر المزدوج
+                try:
+                    await DB.mark_published_and_advance(ch['id'], post['id'])
+                except Exception as _e:
+                    logger.error(
+                        f"⚠️ نُشر في {ch['channel_id']} لكن فشل "
+                        f"mark_published_and_advance: {_e} — "
+                        f"خطر نشر مزدوج في الدورة التالية"
+                    )
+                    # على الرغم من الفشل، نُعيد True (النشر نجح فعلاً)
                 if published_count == 0 or recycled:
                     if user_id:
                         with suppress(Exception):
@@ -3724,6 +3809,13 @@ _webhook_app = None
 
 
 async def setup_webhook(app, port: int):
+    """
+    يُنشئ ويُشغّل خادم aiohttp للـ webhook + health check.
+
+    ✅ v7.9.15 (#1): يُرفق `site` (TCPSite) بكائن `runner` ليتمكّن
+       `_watch_runner` في bot.py من مراقبة انهيار/تعليق الخادم.
+       بدون هذا الإرفاق، المراقبة كانت معطّلة صامتاً.
+    """
     global _webhook_app
     _webhook_app = app
     web_app = web.Application()
@@ -3732,10 +3824,22 @@ async def setup_webhook(app, port: int):
     web_app.router.add_post(f"/{CONFIG.TOKEN}", webhook_handler)
     web_app.router.add_get('/{tail:.*}', lambda r: web.Response(text="OK", status=200))
     web_app.router.add_post('/{tail:.*}', lambda r: web.Response(text="OK", status=200))
+
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+
+    # ✅ v7.9.15 (#1): إرفاق site بـ runner (عقد موثّق)
+    # يُستخدم من bot.py::_watch_runner لمراقبة صحة الخادم
+    try:
+        # type: ignore[attr-defined]
+        runner.site = site
+        # type: ignore[attr-defined]
+        runner.tcp_site = site
+    except Exception as _e:
+        logger.debug(f"تعذّر إرفاق site بـ runner: {_e}")
+
     logger.info(f"✅ Webhook on port {port}")
     return runner
 
@@ -3746,8 +3850,13 @@ async def webhook_handler(request):
         logger.error("❌ Webhook app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
-        if request.content_type != 'application/json':
-            logger.warning("⚠️ Webhook request with non-JSON content")
+        # ✅ v7.9.15 (#8): تجاهل charset والمعاملات الإضافية
+        raw_ct = request.content_type or ''
+        ct = raw_ct.split(';')[0].strip().lower()
+        if ct != 'application/json':
+            logger.warning(
+                f"⚠️ Webhook request with non-JSON content: {raw_ct!r}"
+            )
             return web.Response(status=400, text="Bad Request")
         data = await request.json()
         await _webhook_app.process_update(Update.de_json(data, _webhook_app.bot))
@@ -3763,6 +3872,9 @@ async def webhook_handler(request):
 class ErrorHandler:
     @staticmethod
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.9.15 (#3): fallback لـ stderr عند فشل logger نفسه.
+        """
         try:
             error_msg = str(context.error)
             if update:
@@ -3789,7 +3901,14 @@ class ErrorHandler:
             except Exception:
                 pass
         except Exception:
-            pass
+            # ✅ v7.9.15 (#3): آخر خط دفاع — لا نستخدم logger (قد يكون هو السبب)
+            try:
+                print(
+                    f"CRITICAL ErrorHandler failure: {context.error}",
+                    file=sys.stderr
+                )
+            except Exception:
+                pass
 
 # =====================================================================
 # تصدير
