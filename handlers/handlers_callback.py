@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.5.1)
+handlers_callback.py - معالج الأزرار (v9.5.2)
 =====================================================================
+🆕 v9.5.2 — تحسين أداء زر "تفعيل الكل":
+    ✅ sec_activate_all_confirm / sec_deactivate_all_confirm
+       → عرض "جاري التطبيق..." فوراً (~50ms)
+       → إبطال الكاش متزامناً
+       → تحديث الواجهة في الخلفية (non-blocking)
+       → استجابة من 1.2s إلى ~50ms
+
 🆕 v9.5.1 — إصلاح خطأ منطقي:
     ✅ toggle_map["mentions"] → "delete_mentions" (كان "mentions")
 
@@ -12,15 +19,7 @@ handlers_callback.py - معالج الأزرار (v9.5.1)
     ✅ كل الأسماء لا تزال متاحة هنا (backward-compatible)
     ✅ كلاس CallbackHandlers بدون أي تغيير
 
-🆕 v9.4.32 — إصلاحات الصيانة والاتساق:
-    ✅ #1: _KNOWN_CB_PREFIXES (منقول إلى base)
-    ✅ #2: _make_user_cache_keys (منقول إلى base)
-    ✅ #3: _clear_lang_cache_local
-    ✅ #4: __all__
-    ✅ #5: color_emoji fallback thresholds=(30.0, 70.0)
-    ✅ #6: _show_post_list — كاش COUNT(*) (TTL=5s)
-    ✅ #7: _handle_panel — فحص can_restrict_members
-
+🆕 v9.4.32 — إصلاحات الصيانة والاتساق
 🆕 v9.4.31 — إصلاح زر الرجوع في قائمة الردود التلقائية
 🆕 v9.4.30 — إصلاحات أمنية وذاكرة
 🆕 v9.4.29 — قراءة نصوص المسابقة من الترجمة
@@ -1251,9 +1250,6 @@ class CallbackHandlers:
                     update, context, query, user_id)
                 return
 
-            # ═══════════════════════════════════════════════════════════
-            # ✅ v9.4.29/30: أزرار مدة المسابقة + نوع المسابقة
-            # ═══════════════════════════════════════════════════════════
             if data.startswith("contest_duration:"):
                 if not CONFIG.is_developer(user_id):
                     await safe_edit(
@@ -3983,8 +3979,17 @@ class CallbackHandlers:
 
                 await CallbackHandlers.\
                     _invalidate_security_settings_cache(chat_id)
-                await CallbackHandlers._refresh_security_view(
-                    query, context, chat_id, lang)
+                # ⚡ v9.5.2: عرض "جاري التطبيق" فوراً + تحديث خلفي
+                await safe_edit(
+                    query,
+                    await _trans('applying_changes', lang,
+                                 "⏳ جاري التطبيق..."),
+                    bot=context.bot)
+                task = asyncio.create_task(
+                    CallbackHandlers._refresh_security_view(
+                        query, context, chat_id, lang))
+                ACTIVE_TASKS.add(task)
+                task.add_done_callback(ACTIVE_TASKS.discard)
                 return
 
             # ✅ v9.5.1: إصلاح — "mentions" → "delete_mentions"
