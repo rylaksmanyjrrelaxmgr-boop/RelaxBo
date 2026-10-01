@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.8)
+database_groups.py - دوال المجموعات (v7.4.9)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,30 +18,13 @@ GroupsMixin:
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
 
-🆕 v7.4.8 — PERFORMANCE-FIX (get_user_groups من 1.03s → ~50ms):
-  ✅ PostgreSQL query: انفصل إلى استعلامين بسيطين + دمج Python
-     • الاستعلام 1: SELECT ... FROM bot_groups WHERE added_by = $1
-     • الاستعلام 2: SELECT ... FROM bot_groups WHERE chat_id IN (subqueries)
-     • الدمج في Python باستخدام set للـ dedup — O(1) lookup
-     • لا UNION على الإطلاق → لا Sort/HashAggregate
-     • كل subquery يستخدم فهرس مباشر (كلها موجودة)
-     - النتيجة: من 6 Sort/HashAggregate → 0
+🆕 v7.4.9 — FIX: add_banned_word (فشل الإضافة عند إضافة كلمات عالمية):
+  ✅ قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS (None/0/غير رقمي → fallback=500)
+  ✅ logging واضح عند رفض الإضافة (سبب + العدد الحالي + الحد)
+  ✅ لا مزيد من الفشل الصامت
 
-  ✅ SQLite query: نفس النمط (2 استعلامات + دمج Python)
-
-  ✅ الفهارس المُستخدَمة (كلها موجودة):
-     - idx_bot_groups_added_by
-     - idx_user_groups_link_user_id
-     - idx_hidden_owner_groups_owner_id
-     - idx_hidden_admins_admin_id
-     - idx_group_admins_user_id
-     - idx_anonymous_admins_user_id
-     - idx_anonymous_admins_anonymous_id
-
-🆕 v7.4.7 — PERFORMANCE-FIX (get_user_groups من 1.59s → ~1s):
-  ✅ PostgreSQL query: إعادة كتابة كاملة
-  ✅ SQLite query: نفس النمط
-
+🆕 v7.4.8 — PERFORMANCE-FIX (get_user_groups ~50ms)
+🆕 v7.4.7 — PERFORMANCE-FIX (get_user_groups من 1.59s → ~1s)
 🆕 v7.4.6 — إصلاح إغلاق cursor + توثيق
 🆕 v7.4.5 — قناة السجل للمجموعة (DB-native)
 🆕 v7.4.4 — دعم conn للتوحيد
@@ -1272,11 +1255,20 @@ class GroupsMixin:
         self, word: str, chat_id: int, added_by: int
     ) -> Tuple[bool, bool]:
         """
-        ✅ v7.4.3: cache invalidation بعد commit
+        ✅ v7.4.9: قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS + logging واضح.
+
+        يُرجع:
+            (True, False)  → أُضيفت بنجاح
+            (False, True)  → موجودة مسبقاً
+            (False, False) → رُفضت (سبب آخر — يُسجَّل)
         """
         try:
             word = word.strip().lower()
             if not word:
+                logger.warning(
+                    f"⚠️ add_banned_word: word فارغة "
+                    f"(chat_id={chat_id}, added_by={added_by})"
+                )
                 return False, False
 
             async with self.transaction() as conn:
@@ -1287,10 +1279,27 @@ class GroupsMixin:
                         "WHERE chat_id = -1",
                         default=0,
                     )
-                    if count >= getattr(
+
+                    # ✅ v7.4.9: قراءة آمنة للحد الأقصى
+                    max_words = getattr(
                         self.CONFIG, "MAX_GLOBAL_BANNED_WORDS", 500
-                    ):
+                    )
+                    # fallback: None / 0 / غير رقمي → 500
+                    if not isinstance(max_words, int) or max_words <= 0:
+                        logger.warning(
+                            f"⚠️ MAX_GLOBAL_BANNED_WORDS غير صالح "
+                            f"({max_words!r}) → استخدام 500"
+                        )
+                        max_words = 500
+
+                    if count >= max_words:
+                        logger.warning(
+                            f"⚠️ add_banned_word مرفوض: وصلنا للحد "
+                            f"الأقصى ({count}/{max_words}) "
+                            f"word={word!r}"
+                        )
                         return False, False
+
                 try:
                     if self.USE_POSTGRES:
                         await self._execute_with_conn(
@@ -1322,6 +1331,10 @@ class GroupsMixin:
                 except Exception as e:
                     if "unique" in str(e).lower() or \
                        "duplicate" in str(e).lower():
+                        logger.info(
+                            f"ℹ️ add_banned_word: كلمة مكررة "
+                            f"({word!r}, chat_id={chat_id})"
+                        )
                         return False, True
                     raise
 
@@ -1329,6 +1342,10 @@ class GroupsMixin:
             await self._invalidate_banned_words_local_cache(chat_id)
             if self.CACHE_AVAILABLE:
                 await self.banned_words_cache.invalidate(chat_id)
+            logger.info(
+                f"✅ أُضيفت كلمة محظورة: {word!r} "
+                f"(chat_id={chat_id}, by={added_by})"
+            )
             return True, False
         except Exception as e:
             logger.error(
