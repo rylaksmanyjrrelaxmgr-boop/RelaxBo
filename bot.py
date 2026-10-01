@@ -2,40 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.14)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.16)
 ================================================================================
-🆕 v5.5.14 (REMOVE DUPLICATE INDEX CREATION):
-    ✅ حذف ensure_performance_indexes + _PERFORMANCE_INDEXES (كانت مكررة)
-       السبب: database.py v7.7.43 يستدعي _create_secondary_indexes
-              تلقائياً في _do_bootstrap_inner → نفس الـ 6 فهارس
-       الفائدة:
-         • توفير ~0.5s في الإقلاع
-         • تقليل سطر اللوغ المكرر
-         • صفر تضارب (نفس الفهارس كانت تُفحص مرتين)
-       ملاحظة: كانت تُظهر خطأً "6 مُنشأ" بينما mixin قال "✅0 ⏭️6"
-              السبب: CREATE INDEX ... IF NOT EXISTS لا يرمي استثناء
-                     عندما يكون الفهرس موجوداً، لذا try/except لا يُميّز
+🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY):
+    ✅ #2: SIGTERM handler — الإغلاق اللطيف عند إعادة نشر Render
+           (بدل SIGKILL بعد 30s)، يحفظ الاتصالات ويُكمل المهام الجارية
+    ✅ #3: Safe PORT parsing — fallback آمن بدل الانهيار عند
+           قيمة PORT غير صالحة
+    ✅ #5: `_notify_dev_log` fire-and-forget — إشعار قناة السجل
+           لا يُعطّل رسالة الدفع عند البطء/الفشل
 
-🆕 v5.5.13 (REMOVE DUPLICATE POOL MONITOR):
-    ✅ حذف BackgroundTasks.monitor_pool (المكرر)
-       - كان يُسجّل "🟢 Pool: 0/20 (0.0%)" كل 30 ثانية
-       - pool_health_monitor يغطّيه بشكل أفضل (تقرير شامل كل 5 دقائق)
-       - monitor_pool_alert يبقى (غرضه مختلف: إشعارات استباقية للأدمن)
+🆕 v5.5.15 (BUG FIXES — aiohttp leak + HTML escape):
+    ✅ #1: aiohttp leak — استخدام `async with session.get() as resp`
+           في `keep_alive` و"تسخين الخادم" لضمان قراءة الـ body
+           وإغلاق الاتصال بشكل صحيح
+    ✅ #2: HTML escape — `contest_cleanup` يُهرّب عنوان المسابقة
+           (`html.escape`) لمنع فشل send_message عند رموز HTML
 
-🆕 v5.5.12 (POOL DATA DUAL FALLBACK):
-    ✅ pool_health_monitor: fallback مزدوج لقراءة pool data
-       - المصدر 1: DB.get_pool_live() (من AnalyticsMixin)
-       - المصدر 2: DB.get_pool_stats() (من Database مباشرة)
-       - المصدر 3: القيم الافتراضية (total/active من pg_stat_activity)
-
-🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES):
-    ✅ ensure_performance_indexes(): إنشاء الفهارس الحرجة تلقائياً عند الإقلاع
-       (حُذفت في v5.5.14 — تكفّلت database.py v7.7.43 بها)
-    ✅ إصلاح حرج: استيراد TimeUtils من database
-    ✅ pool_health_monitor: لفّ sleep(120) في try/except CancelledError
-    ✅ idle_in_tx: >=1 بدل >=3
-    ✅ _collect_admin_ids: تسجيل اسم الدالة
-
+🆕 v5.5.14 (REMOVE DUPLICATE INDEX CREATION)
+🆕 v5.5.13 (REMOVE DUPLICATE POOL MONITOR)
+🆕 v5.5.12 (POOL DATA DUAL FALLBACK)
+🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES)
 🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS)
 🆕 v5.5.9 (AUTO POOL HEALTH MONITOR)
 🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT)
@@ -64,8 +51,11 @@ import os
 import logging
 import traceback
 import json
+import signal
 import time
+from html import escape as _html_escape
 from urllib.parse import urlparse
+from typing import Set
 from aiohttp import web
 
 # ✅ v5.5.12: imports للـ typing (يُستخدم في pool_health_monitor)
@@ -173,6 +163,11 @@ logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
+# ✅ v5.5.16: مجموعة لتتبّع مهام الإشعارات الخلفية (fire-and-forget)
+# ═══════════════════════════════════════════════════════════════════
+_NOTIFY_TASKS: Set[asyncio.Task] = set()
+
+# ═══════════════════════════════════════════════════════════════════
 # 🔍 v5.4.1: فحص تحميل AnalyticsMixin
 # ═══════════════════════════════════════════════════════════════════
 try:
@@ -270,6 +265,30 @@ ALLOWED_UPDATES = [
 
 # ✅ v5.3.1: مرجع عالمي لـgroup_log للإغلاق اللطيف
 _GROUP_LOG_INSTANCE = None
+
+
+# =====================================================================
+# ✅ v5.5.16: helper آمن لـ _notify_dev_log (fire-and-forget)
+# =====================================================================
+
+def _spawn_notify_dev_log(context, text: str) -> None:
+    """
+    يُشغّل _notify_dev_log في الخلفية دون حجب المتصل.
+
+    الفائدة:
+      • رسالة الدفع لا تنتظر إرسال الإشعار لقناة السجل
+      • فشل/بطء قناة السجل لا يؤثر على تجربة المستخدم
+
+    الأمان:
+      • يُحفظ مرجع للمهمة في `_NOTIFY_TASKS` لمنع garbage collection
+      • `add_done_callback` يُزيل المهمة عند الانتهاء (لا تسريب)
+    """
+    try:
+        task = asyncio.create_task(_notify_dev_log(context, text))
+        _NOTIFY_TASKS.add(task)
+        task.add_done_callback(_NOTIFY_TASKS.discard)
+    except Exception as _e:
+        logger.debug(f"_spawn_notify_dev_log: {_e}")
 
 
 # =====================================================================
@@ -443,7 +462,7 @@ async def refresh_admin_commands(bot, user_id: int, is_admin: bool) -> bool:
         True إذا نجح، False خلاف ذلك.
 
     الاستخدام من handlers:
-        from main import refresh_admin_commands
+        from bot import refresh_admin_commands
         await refresh_admin_commands(context.bot, new_admin_id, True)
     """
     if not user_id:
@@ -816,7 +835,7 @@ async def successful_payment(update, context):
                 logger.info(f"✅ Subscription activated: user={user_id}")
                 await invalidate_user_cache(user_id)
 
-                # ✅ v5.5.8: إشعار قناة سجل المطور — دفع حقيقي فقط
+                # ✅ v5.5.16: fire-and-forget (لا يُعطّل الدفع)
                 try:
                     from html import escape as _escape
 
@@ -828,7 +847,7 @@ async def successful_payment(update, context):
                     _plan_display = _escape(str(plan_name or '—'))
                     _price_display = int(total_amount or 0)
 
-                    await _notify_dev_log(
+                    _spawn_notify_dev_log(
                         context,
                         f"💎 <b>اشتراك مدفوع جديد</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -841,9 +860,8 @@ async def successful_payment(update, context):
                         f"📅 <b>الوقت:</b> {TimeUtils.mecca_iso()}",
                     )
                 except Exception as _e:
-                    logger.warning(
-                        f"notify dev log (subscription): {_e}",
-                        exc_info=True,
+                    logger.debug(
+                        f"spawn notify dev log (subscription): {_e}"
                     )
             else:
                 await safe_send(context.bot, user_id, "❌ حدث خطأ في معالجة الدفع.")
@@ -929,7 +947,12 @@ async def health_check(request):
 # =====================================================================
 
 async def keep_alive():
-    """يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة."""
+    """
+    يرسل طلب ping كل 5 دقائق لمنع Render من إيقاف الخدمة.
+
+    ✅ v5.5.15: إصلاح aiohttp leak — استخدام `async with` على الاستجابة
+               لضمان قراءة body وإغلاق الاتصال.
+    """
     await asyncio.sleep(60)
 
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
@@ -951,7 +974,9 @@ async def keep_alive():
 
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                # ✅ v5.5.15: قراءة body + إغلاق نظيف
                 async with session.get(health_url) as response:
+                    await response.read()
                     logger.debug(f"💓 Keep-alive: {response.status}")
         except asyncio.CancelledError:
             logger.info("🛑 keep_alive تم إلغاؤه")
@@ -971,30 +996,6 @@ async def pool_health_monitor() -> None:
     يسجّل في اللوغ:
       🟢 pool HEALTH: total=N active=N idle_tx=N lock_waits=N waiting=N util=N%
       ⚠️ pool DIAG  : نفس المعلومات عند ضغط حقيقي
-
-    ✅ v5.5.10: 
-      - waiting الآن يحسب الأقفال الحقيقية فقط
-        (Lock, LWLock, BufferPin) — لا ClientRead/IO
-      - waiting لم يعد يفعّل ⚠️ (معلومة فقط)
-
-    ✅ v5.5.11:
-      - sleep(120) الأولي داخل try/except CancelledError
-        (كان يُسجّل كخطأ عند الإلغاء المبكر)
-      - idle_in_tx: >=1 بدل >=3 — أي idle in transaction يحجب
-        VACUUM ويستنزف pool، لذلك نُنبّه فوراً
-
-    ✅ v5.5.12:
-      - fallback مزدوج لقراءة pool data:
-          1) DB.get_pool_live() (من AnalyticsMixin)
-          2) DB.get_pool_stats() (من Database مباشرة)
-          3) القيم الافتراضية (total/active من pg_stat_activity)
-
-    ✅ v5.5.13:
-      - هذه الدالة هي المصدر الوحيد للمراقبة الدورية الآن
-        (حُذف monitor_pool المكرر من قائمة المهام)
-
-    ✅ v5.5.14:
-      - لا تغيير على هذه الدالة — فقط تحديث docstring
     """
     # ✅ v5.5.11: تأخير أولي — مُلفّف لمنع CancelledError غير الملتقط
     try:
@@ -1155,6 +1156,70 @@ async def pool_health_monitor() -> None:
 
 
 # =====================================================================
+# ✅ v5.5.16: helper لحل hostname (موحّد)
+# =====================================================================
+
+def _resolve_hostname() -> Optional[str]:
+    """
+    يُحلّ hostname من متغيرات البيئة (Render/Railway/Heroku/custom).
+
+    Returns:
+        hostname نظيف (بلا scheme) أو None.
+    """
+    raw = (
+        os.getenv("RENDER_EXTERNAL_HOSTNAME") or
+        os.getenv("RENDER_EXTERNAL_URL") or
+        os.getenv("RAILWAY_PUBLIC_DOMAIN") or
+        os.getenv("HEROKU_APP_NAME") or
+        os.getenv("WEBHOOK_URL")
+    )
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw.startswith("http"):
+        try:
+            return urlparse(raw).netloc
+        except Exception:
+            return None
+    return raw
+
+
+# =====================================================================
+# ✅ v5.5.16: helper لحل PORT بشكل آمن
+# =====================================================================
+
+def _resolve_port() -> int:
+    """
+    ✅ v5.5.16: قراءة PORT بشكل آمن — fallback بدل الانهيار.
+
+    Returns:
+        رقم منفذ صالح (1..65535)، أو CONFIG.WEB_PORT عند أي خطأ.
+    """
+    default_port = int(getattr(CONFIG, "WEB_PORT", 10000))
+    raw = os.getenv("PORT")
+
+    if raw is None or str(raw).strip() == "":
+        return default_port
+
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError) as _e:
+        logger.error(
+            f"❌ PORT غير صالح ({raw!r}) — استخدام {default_port}",
+            exc_info=False,
+        )
+        return default_port
+
+    if port < 1 or port > 65535:
+        logger.error(
+            f"❌ PORT خارج النطاق ({port}) — استخدام {default_port}"
+        )
+        return default_port
+
+    return port
+
+
+# =====================================================================
 # المهمة الرئيسية
 # =====================================================================
 
@@ -1236,21 +1301,17 @@ async def main():
             f"{time.monotonic()-t_warmup:.2f} ثانية"
         )
     except Exception as e:
-        logger.warning(f"⚠️ Warmup فشل (سيتم المتابعة): {e}")
+        # ✅ v5.5.15: exc_info=True لرؤية traceback الكامل
+        logger.warning(
+            f"⚠️ Warmup فشل (سيتم المتابعة): {e}",
+            exc_info=True,
+        )
 
-    # ═══ المنفذ ═══
-    port = int(os.getenv("PORT", CONFIG.WEB_PORT))
+    # ✅ v5.5.16: استخدام resolver آمن للـ PORT
+    port = _resolve_port()
 
-    # ═══ عنوان Webhook ═══
-    hostname = (
-        os.getenv("RENDER_EXTERNAL_HOSTNAME") or
-        os.getenv("RENDER_EXTERNAL_URL") or
-        os.getenv("RAILWAY_PUBLIC_DOMAIN") or
-        os.getenv("HEROKU_APP_NAME") or
-        os.getenv("WEBHOOK_URL")
-    )
-    if hostname and hostname.startswith("http"):
-        hostname = urlparse(hostname).netloc
+    # ✅ v5.5.16: استخدام resolver موحّد للـ hostname
+    hostname = _resolve_hostname()
 
     # ═══ بناء التطبيق ═══
     t_app = time.monotonic()
@@ -1514,6 +1575,9 @@ async def main():
         """
         يُعلن الفائزين تلقائيًا للمسابقات المنتهية.
 
+        ✅ v5.5.15: HTML escape على عنوان المسابقة لتفادي فشل
+                   إرسال الرسالة عند وجود رموز `<`, `>`, `&`.
+
         السلوك:
           • انتظار 5 دقائق أولي عند الإقلاع (منح bootstrap فرصة)
           • كل ساعة:
@@ -1549,7 +1613,9 @@ async def main():
                     # ─── 2) إشعار كل فائز ───
                     for w in winners:
                         winner_id = w.get("winner_id")
-                        title = w.get("title") or "مسابقة"
+                        raw_title = w.get("title") or "مسابقة"
+                        # ✅ v5.5.15: HTML escape
+                        title = _html_escape(str(raw_title))
                         if winner_id is None:
                             continue
                         try:
@@ -1662,6 +1728,33 @@ async def main():
 
     logger.info(f"✅ تم تشغيل {len(tasks)} مهمة خلفية")
 
+    # =================================================================
+    # ✅ v5.5.16: SIGTERM handler — إغلاق لطيف على Render
+    # =================================================================
+    _shutdown_event = asyncio.Event()
+
+    def _on_sigterm():
+        logger.info(
+            "🛑 تلقّيت SIGTERM — بدء الإغلاق اللطيف"
+        )
+        _shutdown_event.set()
+
+    try:
+        _loop = asyncio.get_running_loop()
+        for _sig in (signal.SIGTERM,):
+            try:
+                _loop.add_signal_handler(_sig, _on_sigterm)
+                logger.debug(
+                    f"✅ تم تسجيل handler لـ {_sig.name}"
+                )
+            except (NotImplementedError, RuntimeError, ValueError) as _e:
+                # Windows أو loop مغلق → تجاهل
+                logger.debug(
+                    f"add_signal_handler({_sig.name}) غير مدعوم: {_e}"
+                )
+    except Exception as _e:
+        logger.debug(f"SIGTERM setup: {_e}")
+
     # ========== بدء التشغيل ==========
     try:
         if hostname:
@@ -1678,16 +1771,22 @@ async def main():
 
             runner = await setup_webhook(app, port)
 
-            # تسخين الخادم
+            # ✅ v5.5.15: تسخين الخادم — إصلاح aiohttp leak
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
-                    await session.get(f"http://127.0.0.1:{port}/health")
-                    logger.info("🔥 تم تسخين الخادم بنجاح")
-            except Exception:
-                pass
+                    async with session.get(
+                        f"http://127.0.0.1:{port}/health"
+                    ) as resp:
+                        await resp.read()
+                logger.info("🔥 تم تسخين الخادم بنجاح")
+            except Exception as _e:
+                logger.debug(f"تسخين الخادم: {_e}")
 
-            await asyncio.Event().wait()
+            # ✅ v5.5.16: انتظار إشارة الإغلاق (SIGTERM/KeyboardInterrupt)
+            # بدل `asyncio.Event().wait()` التي لا تُلغى أبداً.
+            await _shutdown_event.wait()
+            logger.info("📴 تم استلام إشارة الإغلاق — إنهاء الخدمات...")
         else:
             logger.info("⚠️ وضع Polling (لا يوجد hostname)")
             runner = await setup_webhook(app, port)
@@ -1700,7 +1799,28 @@ async def main():
                 await runner.cleanup()
     finally:
         # ✅ v5.3.1: إغلاق GroupLog بلطف أولاً
-        await _shutdown_group_log()
+        try:
+            await _shutdown_group_log()
+        except Exception as _e:
+            logger.debug(f"_shutdown_group_log: {_e}")
+
+        # ✅ v5.5.16: انتظار مهام الإشعارات الخلفية (بحد أقصى 3 ثوان)
+        if _NOTIFY_TASKS:
+            logger.info(
+                f"⏳ انتظار {len(_NOTIFY_TASKS)} مهمة إشعار... "
+                f"(بحد أقصى 3 ثوان)"
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *_NOTIFY_TASKS, return_exceptions=True
+                    ),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("⚠️ انتهت مهلة انتظار الإشعارات — إلغاء")
+                for _t in list(_NOTIFY_TASKS):
+                    _t.cancel()
 
         # إلغاء المهام الخلفية
         for t in tasks:
@@ -1708,7 +1828,10 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # إغلاق التطبيق
-        await app.shutdown()
+        try:
+            await app.shutdown()
+        except Exception as _e:
+            logger.debug(f"app.shutdown: {_e}")
 
     logger.info(f"✅ اكتمل الإقلاع في {time.monotonic()-t_start:.2f} ثانية")
 
