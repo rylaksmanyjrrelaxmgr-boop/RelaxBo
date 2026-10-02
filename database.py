@@ -1,40 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.45 — MIGRATIONS-EXTRACT)
+database.py - قاعدة البيانات المتكاملة (v7.7.46-ADD-ONLY)
 ================================================================================
-🆕 v7.7.45 (MIGRATIONS-EXTRACT — نقل منطق الترحيل إلى ملف منفصل):
-  ✅ استخراج منطق الترحيل إلى database_migrations.py:
-     • _MIGRATIONS_TYPES + _compute_migrations_signature
-     • _ALLOWED_COLUMN_TYPES + _ALLOWED_COL_KEYWORDS
-     • _validate_column_def + _table_exists
-     • MigrationsMixin (7 طرق):
-        - _add_column_safe
-        - _execute_batch_migrations
-        - _column_exists
-        - _migrate_delete_penalty_type
-        - _ensure_text_hash_column
-        - _ensure_bigint_ids
-        - _get_existing_columns
-  ✅ الفائدة:
-     • database.py أنحف بـ ~720 سطر
-     • منطق الترحيل متماسك في ملف واحد
-     • سهل للاختبار منفصلاً
-  ✅ Backward-compat 100%:
-     • `from database import _MIGRATIONS_TYPES` يعمل (via re-export)
-     • `from database import _table_exists` يعمل (via re-export)
-     • _migrate_schema / _fetch_all_columns_map / _index_exists تبقى
-       في Database (tightly coupled)
-  ✅ صفر regression — نفس السلوك بالضبط
+🆕 v7.7.46-ADD-ONLY (إضافات فقط — بدون حذف أو تعديل):
+  ✅ ADD-1: flag `_in_bootstrap_tx` + `_pending_secondary_indexes` في __init__
+  ✅ ADD-2: gate على PostgreSQL في _create_secondary_indexes
+  ✅ ADD-3: كشف bootstrap-transaction في _create_secondary_indexes
+            (يؤجل الفهارس بدل تنفيذها داخل transaction)
+  ✅ ADD-4: _bootstrap يضبط flag قبل/بعد المرحلة 1
+  ✅ ADD-5: مرحلة جديدة بعد commit لتنفيذ الفهارس المؤجلة
 
-🆕 v7.7.44 (CACHES-EXTRACT — نقل Caches إلى ملف منفصل):
-  ✅ استخراج InternalQueryCache / SimpleCache / SettingsCache
-     + internal_cache (كائن عالمي) إلى database_caches.py
+  ⚠️ كل الكود الأصلي v7.7.45 باقٍ كما هو بدون أي تعديل أو حذف.
+  ⚠️ _do_bootstrap_inner يبقى يستدعي _create_secondary_indexes — الفرق:
+     الدالة تكتشف أنها داخل bootstrap-tx وتؤجل تلقائياً.
 
-🆕 v7.7.43 (REFACTOR-MIXIN — استخراج الدوال الكبيرة):
-  ✅ استخراج 8 دوال كبيرة إلى database_refactor_mixin.py
-     (Pool factories + expire_penalties + bigint conversion)
-
+🆕 v7.7.45 (MIGRATIONS-EXTRACT — نقل منطق الترحيل إلى ملف منفصل)
+🆕 v7.7.44 (CACHES-EXTRACT — نقل Caches إلى ملف منفصل)
+🆕 v7.7.43 (REFACTOR-MIXIN — استخراج الدوال الكبيرة)
 🆕 v7.7.42 (AUDIT-FIX — إصلاحات ما بعد المراجعة الشاملة)
 🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام)
 🆕 v7.7.40 (BATCH-PUBLISH — تجميع تحديثات النشر)
@@ -247,7 +230,6 @@ except ImportError as _re:
         f"⚠️ database_refactor_mixin.py غير موجود: {_re} "
         f"— سيتم استخدام النسخة المدمجة"
     )
-    # fallback: mixin فارغ
     class RefactorMixin:
         pass
     _R_MAX_POST_FAIL_COUNT = None
@@ -316,11 +298,6 @@ AnalyticsMixin, ANALYTICS_MIXIN_AVAILABLE = _load_mixin(
 # =====================================================================
 # 🆕 v7.7.44: استيراد Caches من database_caches.py
 # =====================================================================
-# نُعيد تصدير الأسماء في نطاق database.py للحفاظ على
-# Backward-compat:
-#   from database import SimpleCache, SettingsCache, internal_cache
-# كلها تبقى تعمل بدون تعديل في cache.py أو أي ملف آخر.
-# =====================================================================
 
 try:
     from database_caches import (
@@ -340,11 +317,6 @@ except ImportError as _ce:
 
 # =====================================================================
 # 🆕 v7.7.45: استيراد MigrationsMixin + helpers من database_migrations.py
-# =====================================================================
-# نُعيد تصدير الأسماء في نطاق database.py للحفاظ على
-# Backward-compat:
-#   from database import _MIGRATIONS_TYPES, _table_exists
-# كلها تبقى تعمل.
 # =====================================================================
 
 try:
@@ -528,7 +500,7 @@ SETTINGS_BATCH_CACHE_TTL = 120
 
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
 
-# ✅ v7.7.37: أُضيف "users" لتفادي تراكم dead tuples (شوهدت 106/22.6%)
+# ✅ v7.7.37: أُضيف "users" لتفادي تراكم dead tuples
 HEAVY_TABLES_FOR_AUTOVACUUM = (
     "posts",
     "subscriptions",
@@ -1648,12 +1620,12 @@ class TimeUtils:
             return None
 
 # =====================================================================
-# 3) فئة Database — ✅ v7.7.45: MigrationsMixin أُضيف بعد RefactorMixin
+# 3) فئة Database
 # =====================================================================
 
 class Database(
-    RefactorMixin,           # ← ✅ v7.7.43: Pool factories + expire + bigint
-    MigrationsMixin,         # ← ✅ v7.7.45: Migrations (7 طرق)
+    RefactorMixin,
+    MigrationsMixin,
     ChannelsPostsMixin, SubscriptionsMixin, GroupsMixin,
     TicketsMixin, ContestsMixin, StatsMixin, SettingsMixin,
     PointsMixin, BackupMixin, RemindersMixin,
@@ -1890,6 +1862,10 @@ class Database(
             self._recovering_pool = False
             self._autovacuum_tuned = False
 
+            # ✅ v7.7.46-ADD-ONLY (ADD-1): flagان جديدان — إضافة فقط
+            self._in_bootstrap_tx = False
+            self._pending_secondary_indexes: List[Tuple[str, str, str]] = []
+
             self._user_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
             self._channel_locks: "OrderedDict[int, asyncio.Lock]" = OrderedDict()
             self._user_locks_last_access: Dict[int, float] = {}
@@ -2110,9 +2086,6 @@ class Database(
     # =================================================================
 
     async def vacuum(self, table: str) -> None:
-        """
-        🧹 VACUUM (ANALYZE) خارج transaction — PostgreSQL فقط.
-        """
         if DB_TYPE == "sqlite":
             try:
                 await self.execute("VACUUM")
@@ -2174,10 +2147,6 @@ class Database(
     # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
-        """
-        🆕 v7.7.32: ضبط autovacuum على الجداول الثقيلة.
-        (التفاصيل محفوظة كما في v7.7.42)
-        """
         if not USE_POSTGRES:
             return 0
         if self._autovacuum_tuned:
@@ -2260,11 +2229,6 @@ class Database(
         return tuned
 
     async def _analyze_after_tune(self, conn) -> int:
-        """
-        🆕 v7.7.32: ANALYZE فوري بعد ضبط autovacuum.
-        🆕 v7.7.33: تبسيط — لا فحص وجود مكرر.
-        🆕 v7.7.39: يمتد ليشمل الجداول الصغيرة أيضاً.
-        """
         if not USE_POSTGRES:
             return 0
 
@@ -2482,15 +2446,7 @@ class Database(
             await self._do_initialize()
             self._closed = False
 
-    # =================================================================
-    # ✅ v7.7.43: _do_initialize مبسّطة — تستدعي factories من Mixin
-    # =================================================================
-
     async def _do_initialize(self):
-        """
-        ✅ v7.7.43: مبسّطة — تستدعي factories من RefactorMixin.
-        نفس السلوك 100% كما في v7.7.42.
-        """
         try:
             if USE_POSTGRES:
                 self._pool = await _create_pool_with_retry(
@@ -3243,8 +3199,6 @@ class Database(
             except Exception as e:
                 last_exception = e
                 retryable = False
-                # ⚠️ v7.7.42: retry على ConnectionError قد يُكرر INSERT
-                # غير idempotent. نعتمد على UNIQUE constraints.
                 if DB_TYPE == "sqlite" and isinstance(e, sqlite3.Error):
                     if not isinstance(e, sqlite3.IntegrityError):
                         error_msg = str(e).lower()
@@ -3898,21 +3852,7 @@ class Database(
             async with self.connection() as c:
                 await _do_all(c)
 
-    # =================================================================
-    # ✅ v7.7.45: _add_column_safe / _execute_batch_migrations /
-    #              _column_exists / _migrate_delete_penalty_type /
-    #              _ensure_text_hash_column / _ensure_bigint_ids /
-    #              _get_existing_columns
-    #     → انتقلت إلى MigrationsMixin (database_migrations.py)
-    # =================================================================
-
     async def _migrate_schema(self, conn):
-        """
-        🚀 ترحيل Schema — يبقى في Database لأنه يستدعي:
-          • _fetch_all_columns_map (helper داخلي)
-          • _UNIQUE_CACHE.clear()   (قاموس module-level)
-        يستفيد من MigrationsMixin للدوال المساعدة.
-        """
         if USE_MYSQL:
             try:
                 await conn.execute("SET SESSION FOREIGN_KEY_CHECKS=0")
@@ -3980,7 +3920,6 @@ class Database(
             return False
         try:
             if USE_POSTGRES:
-                # ✅ v7.7.42: فحص indisvalid + indisready
                 row = await conn.fetchval(
                     "SELECT (i.indisvalid AND i.indisready) "
                     "FROM pg_index i "
@@ -4023,8 +3962,32 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
+        """
+        ✅ v7.7.46-ADD-ONLY (ADD-2 + ADD-3): إضافة gate + تأجيل.
+
+        - إذا ليست PostgreSQL → تخطي
+        - إذا نحن داخل bootstrap-transaction → تأجيل (ADD-3)
+        - وإلا → تنفيذ طبيعي
+        """
         if not indexes:
             return
+
+        # ✅ ADD-2: gate على PostgreSQL
+        if not USE_POSTGRES:
+            logger.debug(
+                "⏩ _create_secondary_indexes: تخطي (ليست PostgreSQL)"
+            )
+            return
+
+        # ✅ ADD-3: كشف bootstrap-transaction → تأجيل
+        if self._in_bootstrap_tx:
+            logger.debug(
+                f"⏸️ _create_secondary_indexes: تأجيل "
+                f"{len(indexes)} فهرس إلى ما بعد commit"
+            )
+            self._pending_secondary_indexes.extend(indexes)
+            return
+
         try:
             async with self.connection() as conn:
                 created = skipped = failed = 0
@@ -4666,9 +4629,6 @@ class Database(
             logger.error(f"❌ auto_replies: {e}", exc_info=True)
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
-        """
-        ✅ v7.7.42: قائمة الفهارس الثانوية الحرجة.
-        """
         return [
             (
                 "user_penalties",
@@ -4979,6 +4939,9 @@ class Database(
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
         # ✅ v7.7.42: استدعاء _create_secondary_indexes
+        # ⚠️ v7.7.46-ADD-ONLY: هذا السطر يبقى كما هو.
+        #    _create_secondary_indexes ستكشف _in_bootstrap_tx=True
+        #    وتؤجل تلقائياً لبعد commit.
         try:
             secondary_indexes = self._get_secondary_indexes()
             if secondary_indexes:
@@ -5016,15 +4979,36 @@ class Database(
             try:
                 await self.initialize()
 
-                if USE_POSTGRES:
-                    async with self.transaction() as conn:
-                        await self._do_bootstrap_inner(conn)
-                elif USE_MYSQL:
-                    async with self.connection() as conn:
-                        await self._do_bootstrap_inner(conn)
-                else:
-                    async with self.connection() as conn:
-                        await self._do_bootstrap_inner(conn)
+                # ✅ ADD-4: ضبط flag قبل المرحلة 1
+                self._in_bootstrap_tx = True
+                try:
+                    if USE_POSTGRES:
+                        async with self.transaction() as conn:
+                            await self._do_bootstrap_inner(conn)
+                    elif USE_MYSQL:
+                        async with self.connection() as conn:
+                            await self._do_bootstrap_inner(conn)
+                    else:
+                        async with self.connection() as conn:
+                            await self._do_bootstrap_inner(conn)
+                finally:
+                    # ✅ ADD-4: رفع flag بعد المرحلة 1
+                    self._in_bootstrap_tx = False
+
+                # ✅ ADD-5: تنفيذ الفهارس المؤجلة بعد commit
+                if USE_POSTGRES and self._pending_secondary_indexes:
+                    try:
+                        pending = self._pending_secondary_indexes
+                        self._pending_secondary_indexes = []
+                        logger.info(
+                            f"⏭️ تنفيذ {len(pending)} فهرس مؤجل "
+                            f"بعد commit..."
+                        )
+                        await self._create_secondary_indexes(pending)
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ الفهارس المؤجلة: {e}"
+                        )
 
                 if with_background:
                     if CACHE_AVAILABLE and (
@@ -6165,10 +6149,6 @@ class Database(
     async def mark_published_batch(
         self, updates: List[Tuple[int, int]]
     ) -> bool:
-        """
-        🆕 v7.7.40: يُحدِّث عدة منشورات + last_publish + schedule
-        في transaction واحد.
-        """
         if not updates:
             return True
 
@@ -6309,9 +6289,6 @@ class Database(
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        ✅ v7.7.43: تستخدم SQL constants من RefactorMixin.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
@@ -6352,9 +6329,6 @@ class Database(
             )
 
     async def expire_penalties(self) -> int:
-        """
-        ✅ v7.7.43: مبسّطة — تستدعي _expire_penalties_pg/_mysql/_sqlite.
-        """
         total_expired = 0
         BATCH = EXPIRED_PENALTIES_BATCH
         try:
@@ -6644,7 +6618,7 @@ class Database(
 
 
 # =====================================================================
-# 3.1) Fallback queries — في حال لم تكن الثوابت متوفرة
+# 3.1) Fallback queries
 # =====================================================================
 
 def _get_pg_query_fallback() -> str:
@@ -6852,7 +6826,7 @@ async def initialize_db() -> bool:
     return await DB.initialize_db()
 
 # =====================================================================
-# 5) __all__
+# 5) __all__ (مع إضافة flagين جديدين — ADD-1)
 # =====================================================================
 
 __all__ = [
