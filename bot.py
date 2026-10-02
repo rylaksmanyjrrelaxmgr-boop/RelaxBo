@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.18)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.19)
 ================================================================================
+🆕 v5.5.19 (MEMBERSHIP INTEGRATION):
+    ✅ MEM-1: استيراد register_membership_handlers مع fallback
+    ✅ MEM-2: _verify_membership_handler() للفحص المبكر
+    ✅ MEM-3: تسجيل MembershipHandler بعد chat_member.register()
+    ✅ MEM-4: تقارير إضافة البوت لقناة السجل جاهزة
+
 🆕 v5.5.18 (CRITICAL FIXES — based on v5.5.17 review):
     ✅ #1 حرجة: `runner.cleanup()` في مسار Webhook — كان مفقوداً!
            (aiohttp كان يبقى مفتوحاً حتى SIGKILL → لا graceful shutdown)
@@ -84,6 +90,25 @@ from handlers import (
     MessageHandlers,
     chat_member,
 )
+
+# ✅ v5.5.19 (MEM-1): استيراد register_membership_handlers
+#    (مراقبة إضافة البوت للمجموعات/القنوات)
+try:
+    from handlers_callback import register_membership_handlers
+    _MEMBERSHIP_AVAILABLE = True
+    _MEMBERSHIP_IMPORT_ERROR = None
+except ImportError:
+    try:
+        from handlers.handlers_callback import (
+            register_membership_handlers,
+        )
+        _MEMBERSHIP_AVAILABLE = True
+        _MEMBERSHIP_IMPORT_ERROR = None
+    except ImportError as _e:
+        register_membership_handlers = None
+        _MEMBERSHIP_AVAILABLE = False
+        _MEMBERSHIP_IMPORT_ERROR = str(_e)
+
 # ✅ v4: قائمة القنوات
 from handlers.handlers_channels_list import register_channels_list_handlers
 # ✅ v4.1: إصلاح التنقل
@@ -259,6 +284,20 @@ if _DEV_LOG_AVAILABLE:
 else:
     logger.warning(
         "⚠️ _notify_dev_log غير متاح — لن تُرسل إشعارات الدفع"
+    )
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v5.5.19 (MEM-1): فحص توفر MembershipHandler
+# ═══════════════════════════════════════════════════════════════════
+if _MEMBERSHIP_AVAILABLE:
+    logger.info(
+        "✅ register_membership_handlers متاح — "
+        "تقارير إضافة البوت جاهزة"
+    )
+else:
+    logger.warning(
+        f"⚠️ register_membership_handlers غير متاح: "
+        f"{_MEMBERSHIP_IMPORT_ERROR}"
     )
 
 ALLOWED_UPDATES = [
@@ -625,6 +664,27 @@ def _verify_group_log_handlers() -> bool:
     except Exception as e:
         logger.warning(f"⚠️ فحص group_log فشل: {e}")
         return False
+
+
+# =====================================================================
+# 🛡️ v5.5.19 (MEM-2): فحص توفر MembershipHandler
+# =====================================================================
+
+def _verify_membership_handler() -> bool:
+    """فحص توفر register_membership_handlers."""
+    if not _MEMBERSHIP_AVAILABLE:
+        logger.warning(
+            f"⚠️ MembershipHandler غير متاح: "
+            f"{_MEMBERSHIP_IMPORT_ERROR}"
+        )
+        return False
+    if not callable(register_membership_handlers):
+        logger.warning(
+            "⚠️ register_membership_handlers غير قابل للاستدعاء"
+        )
+        return False
+    logger.info("✅ MembershipHandler متاح")
+    return True
 
 
 # =====================================================================
@@ -1329,6 +1389,8 @@ async def main():
         raise SystemExit(1)
 
     _verify_group_log_handlers()
+    # ✅ v5.5.19 (MEM-2): فحص MembershipHandler
+    _verify_membership_handler()
 
     # ═══ تهيئة قاعدة البيانات ═══
     t0 = time.monotonic()
@@ -1583,6 +1645,28 @@ async def main():
 
     chat_member.register(app)
     logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
+
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v5.5.19 (MEM-3): تسجيل MembershipHandler
+    # ═════════════════════════════════════════════════════════════
+    if _MEMBERSHIP_AVAILABLE and callable(register_membership_handlers):
+        try:
+            register_membership_handlers(app)
+            logger.info(
+                "✅ MembershipHandler مُفعّل — "
+                "تقارير إضافة البوت جاهزة"
+            )
+        except Exception as _e:
+            logger.error(
+                f"❌ فشل تسجيل MembershipHandler: {_e}",
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            f"⚠️ MembershipHandler غير متاح — "
+            f"لن تُرسل تقارير إضافة البوت: "
+            f"{_MEMBERSHIP_IMPORT_ERROR}"
+        )
 
     # ═════════════════════════════════════════════════════════════
     # المهام الخلفية
