@@ -2,17 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.7.0-final)
+handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v2)
 =====================================================================
+🆕 v9.7.0-final-fixed-v2 — إصلاحات نهائية:
+    ✅ FIX-1: _show_metrics_dashboard تستخدم _trans بالكامل
+    ✅ FIX-2: RetryAfter يُحرّر _half_open_in_flight
+    ✅ FIX-3: توحيد circuits_count (أوضح من circuits_alive)
+    ✅ FIX-4: تصحيح تعليقات مضللة
+
 🆕 v9.7.0-final — إصلاحات ما بعد المراجعة:
     ✅ C1: timeout 60s لـ _half_open_in_flight
-       → لا تُقفل الدائرة للأبد عند فشل غير متوقع
     ✅ C2: last_activity + prune بالعمر (1 ساعة)
-       → لا تراكم للقواطع الخاملة
     ✅ M1: record_permanent_failure() لـ Forbidden
-       → فتح فوري للدائرة عند طرد البوت
     ✅ M2: eviction O(n) لـ top_callbacks
-       → أسرع، أبسط
     ✅ M3: circuit_opened metric عند الانتقال closed→open
     ✅ N1: عرض الدوائر المفتوحة حالياً في Dashboard
 
@@ -241,7 +243,7 @@ _CONTROL_CHARS_MAP[0x7f] = ' '
 
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ v9.7.0 (CB-1) + v9.7.0-final (C1/C2/M1): CircuitBreaker
+# ✅ v9.7.0 (CB-1) + v9.7.0-final (C1/C2/M1) + fixed (FIX-2)
 # ═════════════════════════════════════════════════════════════════════
 
 class CircuitBreaker:
@@ -258,6 +260,8 @@ class CircuitBreaker:
     يمنع القفل الأبدي عند خطأ غير متوقع.
     ✅ v9.7.0-final (C2): last_activity timestamp للprune.
     ✅ v9.7.0-final (M1): record_permanent_failure() لفتح فوري.
+    ✅ v9.7.0-final-fixed-v2 (FIX-2): release_half_open() —
+    لتحرير المحاولة بعد RetryAfter بدون تسجيل فشل/نجاح.
     """
     __slots__ = ('failures', 'threshold', 'recovery',
                  'opened_at', '_half_open_in_flight',
@@ -336,6 +340,17 @@ class CircuitBreaker:
         self.last_activity = time.monotonic()
         if prev < self.threshold:
             _metrics_inc('circuit_opened')
+
+    def release_half_open(self) -> None:
+        """
+        ✅ FIX-2: تحرير _half_open_in_flight بدون تسجيل فشل/نجاح.
+
+        يُستخدم بعد RetryAfter (rate-limit) — لأن الانتظار ليس
+        خطأ دائماً ولا نجاحاً، لكن يجب السماح بمحاولة جديدة فوراً
+        عند انتهاء المهلة المطلوبة من Telegram.
+        """
+        self._half_open_in_flight = False
+        self.last_activity = time.monotonic()
 
 
 # ✅ v9.7.0 (CB-2): قواطع لكل قناة
@@ -2039,12 +2054,15 @@ class CallbackHandlers:
             pass
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ v9.7.0 (MET-4) + v9.7.0-final (N1): Live Metrics Dashboard
+    # ✅ v9.7.0 (MET-4) + v9.7.0-final (N1)
+    # ✅ v9.7.0-final-fixed-v2 (FIX-1): Dashboard مترجمة بالكامل
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_metrics_dashboard(query, context, user_id, lang):
-        """لوحة المؤشرات اللحظية."""
+        """
+        ✅ FIX-1: جميع النصوص تمر عبر _trans() → مترجمة بالكامل.
+        """
         try:
             snap = _metrics_snapshot()
             uptime = max(
@@ -2082,7 +2100,8 @@ class CallbackHandlers:
 
             circ_open = int(snap.get('circuit_opened', 0))
             circ_block = int(snap.get('circuit_blocked', 0))
-            circuits_alive = len(_publish_circuits)
+            # ✅ FIX-3: اسم أوضح (كان circuits_alive)
+            circuits_count = len(_publish_circuits)
 
             # ✅ N1: عرض الدوائر المفتوحة حالياً
             now_open = sum(
@@ -2101,52 +2120,191 @@ class CallbackHandlers:
             for name, cnt in top_sorted:
                 top_lines.append(
                     f"   • <code>{_html.escape(name[:25])}</code> → {cnt}")
-            top_block = "\n".join(top_lines) if top_lines else "   <i>—</i>"
+            top_block = ("\n".join(top_lines)
+                         if top_lines
+                         else await _trans(
+                             'metrics_top_callbacks_empty',
+                             lang, "   <i>—</i>"))
 
+            # ═══════════════════════════════════════════════════════
+            # بناء النص باستخدام _trans (مترجم بالكامل) — FIX-1
+            # ═══════════════════════════════════════════════════════
             text = (
-                "📊 <b>Live Metrics</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"⏱️ <b>Uptime:</b> {hours}h {minutes}m {seconds}s\n\n"
+                await _trans('metrics_live_title', lang,
+                             "📊 <b>Live Metrics</b>")
+                + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-                "📞 <b>Callbacks</b>\n"
-                f"   📈 Total: <b>{cb_total}</b>\n"
-                f"   ✅ Success rate: <b>{cb_success_rate:.1f}%</b>\n"
-                f"   ❌ Failed: {cb_failed}\n"
-                f"   ⚠️ Rate-limited: {cb_rl}\n\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_uptime', lang,
+                        "⏱️ <b>Uptime:</b> {hours}h {minutes}m {seconds}s"),
+                    hours=hours, minutes=minutes, seconds=seconds)
+                + "\n\n"
 
-                "⚡ <b>Latency</b>\n"
-                f"   🟢 &lt;100ms: {fast} ({fast/lat_total*100:.0f}%)\n"
-                f"   🟡 100ms-1s: {mid} ({mid/lat_total*100:.0f}%)\n"
-                f"   🔴 &gt;1s: {slow} ({slow/lat_total*100:.0f}%)\n\n"
+                + await _trans(
+                    'metrics_callbacks_section', lang,
+                    "📞 <b>Callbacks</b>")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_callbacks_total', lang,
+                        "   📈 Total: <b>{count}</b>"),
+                    count=cb_total)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_callbacks_success_rate', lang,
+                        "   ✅ Success rate: <b>{rate}%</b>"),
+                    rate=f"{cb_success_rate:.1f}")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_callbacks_failed', lang,
+                        "   ❌ Failed: {count}"),
+                    count=cb_failed)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_callbacks_rate_limited', lang,
+                        "   ⚠️ Rate-limited: {count}"),
+                    count=cb_rl)
+                + "\n\n"
 
-                "🔐 <b>Auth Cache</b>\n"
-                f"   ✅ Hits: {auth_hits} ({auth_hits/auth_total*100:.0f}%)\n"
-                f"   ❌ Misses: {auth_miss}\n"
-                f"   🛡️ Neg hits: {auth_neg}\n"
-                f"   ⚠️ API failures: {auth_fail}\n\n"
+                + await _trans(
+                    'metrics_latency_section', lang,
+                    "⚡ <b>Latency</b>")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_latency_fast', lang,
+                        "   🟢 <100ms: {count} ({percent}%)"),
+                    count=fast, percent=f"{fast/lat_total*100:.0f}")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_latency_mid', lang,
+                        "   🟡 100ms-1s: {count} ({percent}%)"),
+                    count=mid, percent=f"{mid/lat_total*100:.0f}")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_latency_slow', lang,
+                        "   🔴 >1s: {count} ({percent}%)"),
+                    count=slow, percent=f"{slow/lat_total*100:.0f}")
+                + "\n\n"
 
-                "📤 <b>Publishes</b>\n"
-                f"   ✅ Success: {pub_ok} ({pub_ok/pub_total*100:.0f}%)\n"
-                f"   ❌ Failed: {pub_fail}\n"
-                f"   🚫 Forbidden: {pub_forb}\n"
-                f"   ⏱️ Rate-limited: {pub_rl}\n\n"
+                + await _trans(
+                    'metrics_auth_section', lang,
+                    "🔐 <b>Auth Cache</b>")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_auth_hits', lang,
+                        "   ✅ Hits: {count} ({percent}%)"),
+                    count=auth_hits,
+                    percent=f"{auth_hits/auth_total*100:.0f}")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_auth_misses', lang,
+                        "   ❌ Misses: {count}"),
+                    count=auth_miss)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_auth_neg_hits', lang,
+                        "   🛡️ Neg hits: {count}"),
+                    count=auth_neg)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_auth_api_failures', lang,
+                        "   ⚠️ API failures: {count}"),
+                    count=auth_fail)
+                + "\n\n"
 
-                "🔌 <b>Circuit Breakers</b>\n"
-                f"   📡 Active: {circuits_alive}\n"
-                f"   🔴 Opened now: <b>{now_open}</b>\n"
-                f"   🟡 Half-open now: {now_half}\n"
-                f"   🟠 Opened (total): {circ_open}\n"
-                f"   🚫 Blocked: {circ_block}\n\n"
+                + await _trans(
+                    'metrics_publishes_section', lang,
+                    "📤 <b>Publishes</b>")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_publishes_success', lang,
+                        "   ✅ Success: {count} ({percent}%)"),
+                    count=pub_ok,
+                    percent=f"{pub_ok/pub_total*100:.0f}")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_publishes_failed', lang,
+                        "   ❌ Failed: {count}"),
+                    count=pub_fail)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_publishes_forbidden', lang,
+                        "   🚫 Forbidden: {count}"),
+                    count=pub_forb)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_publishes_rate_limited', lang,
+                        "   ⏱️ Rate-limited: {count}"),
+                    count=pub_rl)
+                + "\n\n"
 
-                "🏆 <b>Top Callbacks</b>\n"
-                f"{top_block}"
+                + await _trans(
+                    'metrics_circuits_section', lang,
+                    "🔌 <b>Circuit Breakers</b>")
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_circuits_active', lang,
+                        "   📡 Active: {count}"),
+                    count=circuits_count)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_circuits_opened_now', lang,
+                        "   🔴 Opened now: <b>{count}</b>"),
+                    count=now_open)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_circuits_half_open_now', lang,
+                        "   🟡 Half-open now: {count}"),
+                    count=now_half)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_circuits_opened_total', lang,
+                        "   🟠 Opened (total): {count}"),
+                    count=circ_open)
+                + "\n"
+                + _fmt(
+                    await _trans(
+                        'metrics_circuits_blocked', lang,
+                        "   🚫 Blocked: {count}"),
+                    count=circ_block)
+                + "\n\n"
+
+                + await _trans(
+                    'metrics_top_callbacks_section', lang,
+                    "🏆 <b>Top Callbacks</b>")
+                + "\n"
+                + top_block
             )
 
+            # ✅ الأزرار مترجمة أيضاً
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
-                    "🔄 تحديث", callback_data="admin_metrics_live")],
+                    await _trans('metrics_refresh_btn',
+                                 lang, "🔄 تحديث"),
+                    callback_data="admin_metrics_live")],
                 [InlineKeyboardButton(
-                    "♻️ إعادة تعيين", callback_data="admin_metrics_reset")],
+                    await _trans('metrics_reset_btn',
+                                 lang, "♻️ إعادة تعيين"),
+                    callback_data="admin_metrics_reset")],
                 [InlineKeyboardButton(
                     KeyboardFactory.get_text("back", lang),
                     callback_data=CB.ADMIN)],
@@ -4238,7 +4396,8 @@ class CallbackHandlers:
         return None, False
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ v9.7.0 (CB-3) + v9.7.0-final (M1, M3): _publish_single
+    # ✅ v9.7.0 (CB-3) + v9.7.0-final (M1, M3)
+    # ✅ v9.7.0-final-fixed-v2 (FIX-2): RetryAfter يُحرّر half_open
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -4340,7 +4499,11 @@ class CallbackHandlers:
                 logger.warning(
                     f"⏱️ RetryAfter={delay:.0f}s كبير — "
                     f"لن أنتظر داخل الـ semaphore")
-            # RetryAfter لا يُسجَّل كـ circuit failure
+
+            # ✅ FIX-2: تحرير half_open حتى لا تُجمّد الدائرة
+            # RetryAfter = rate-limit مؤقت، وليس فشلاً دائماً.
+            circuit.release_half_open()
+
             _metrics_inc('publishes_rate_limited')
             if post_id:
                 try:
