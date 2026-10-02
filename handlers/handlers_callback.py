@@ -2,33 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.6.0-final)
+handlers_callback.py - معالج الأزرار (v9.7.0-final)
 =====================================================================
-🆕 v9.6.0-final — الإصدار المستقر النهائي:
-    ✅ Patch-1: سقف backoff يصل إلى _SEC_AUTH_NEG_MAX (60s)
-       min(fails+1, 6) بدل 5 → 6 مستويات
-    ✅ Patch-2: prune الأقفال في _show_main_menu_inline
-       → تنظيف فعّال حتى للحمل المنخفض (<500 callback)
-    ✅ Patch-3: حذف 'delete_penalty_dur' من _back_map
-       (لا مسار يصل إليه — كود نظيف)
-    ✅ Patch-4: تنظيف إضافي في _show_groups_list
-       → _prune_sec_auth_cache + _prune_kicked_notify_state
+🆕 v9.7.0-final — إصلاحات ما بعد المراجعة:
+    ✅ C1: timeout 60s لـ _half_open_in_flight
+       → لا تُقفل الدائرة للأبد عند فشل غير متوقع
+    ✅ C2: last_activity + prune بالعمر (1 ساعة)
+       → لا تراكم للقواطع الخاملة
+    ✅ M1: record_permanent_failure() لـ Forbidden
+       → فتح فوري للدائرة عند طرد البوت
+    ✅ M2: eviction O(n) لـ top_callbacks
+       → أسرع، أبسط
+    ✅ M3: circuit_opened metric عند الانتقال closed→open
+    ✅ N1: عرض الدوائر المفتوحة حالياً في Dashboard
 
-🆕 v9.6.0-stable — الإصدار المستقر:
-    ✅ M2-10: استبدال WeakValueDictionary بـ Dict + prune ذكي
-    ✅ M3-10: exponential backoff للكاش السلبي (3s → 60s)
-    ✅ N3-10: _cleanup_user_data في _show_main_menu_inline
-    ✅ M4-10: logger.debug بدل logger.info في _publish_all
-    ✅ M1-10: _prune_kicked_notify_state عند كل قائمة رئيسية
-    ✅ N5-10: translate بدل re.sub في _show_post_list
-    ✅ N7-10: فحص نوع bot_data في _prune_kicked_notify_state
-    ✅ N8-10: delete_penalty في _back_map احتياطاً
-    ✅ N9-10: تعليق وقائي sec_penalty_durations
+🆕 v9.7.0 — Circuit Breaker + Live Metrics:
+    ✅ CB-1: CircuitBreaker class (per-channel)
+    ✅ CB-2: _publish_circuits + prune
+    ✅ CB-3: تكامل في _publish_single
+    ✅ MET-1..5: Live Metrics Dashboard + زر admin
 
-🆕 v9.5.10 — إصلاحات المراجعة النهائية:
-    ✅ M4-9, N6-9, NEW-1-9, M3-9
-🆕 v9.5.9 — إصلاحات المراجعة النقدية:
-    ✅ C-NEW-2, C-NEW-3, M-NEW-2/3/4/5, N-NEW-1/3/6/7, NEW-Z
+🆕 v9.6.0-final — الإصدار المستقر:
+    ✅ Patch-1..4: backoff 60s، prune أوسع، حذف ميت، تنظيف إضافي
+🆕 v9.6.0-stable — M2-10/M3-10/N3-10/M4-10/M1-10/N5-10/N7-10/N8-10/N9-10
+🆕 v9.5.10 — M4-9, N6-9, NEW-1-9, M3-9
+🆕 v9.5.9 — C-NEW-2/3, M-NEW-2..5, N-NEW-1/3/6/7, NEW-Z
 🆕 v9.5.8-final — FIX-4
 🆕 v9.5.7 — C1-EXT, WEAK-LOCKS, DEBOUNCE-FIX, COUNTER-CLEANUP
 🆕 v9.5.6 — إصلاحات تدقيق المراجعة الشاملة
@@ -219,13 +217,11 @@ _publish_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PUBLISH)
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 
 # ✅ v9.6.0 (M3-10): كاش سلبي بـ exponential backoff
-# البنية: key -> (until_timestamp, fail_count)
 _sec_auth_neg_cache: Dict[Tuple[int, int], Tuple[float, int]] = {}
-_SEC_AUTH_NEG_BASE = 3.0   # فشل #1: 3s
-_SEC_AUTH_NEG_MAX = 60.0   # السقف الأقصى
+_SEC_AUTH_NEG_BASE = 3.0
+_SEC_AUTH_NEG_MAX = 60.0
 
-# ✅ v9.6.0 (M2-10): Dict عادي بدل WeakValueDictionary
-# الأقفال تُنظَّف عبر _prune_sec_auth_cache (فقط غير المُقفَلة)
+# ✅ v9.6.0 (M2-10): Dict عادي + prune ذكي للأقفال
 _sec_auth_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
 
 _security_stats_cache_local: SmartCache = SmartCache(
@@ -235,19 +231,257 @@ _post_count_cache: SmartCache = SmartCache(
     ttl=POST_COUNT_CACHE_TTL, max_size=POST_COUNT_CACHE_MAX_SIZE)
 
 _SEC_AUTH_PRUNE_EVERY = 500
-
-# ✅ v9.5.6 (C2): حد أقصى للنوم داخل _publish_single عند RetryAfter
 _MAX_INLINE_SLEEP = 30.0
-
-# ✅ v9.5.6 (NEW-5): مدة debounce لإشعارات الطرد (بالثواني)
 _KICKED_NOTIFY_DEBOUNCE = 300
-
-# ✅ v9.5.7 (COUNTER-CLEANUP): حد أقصى لعدّاد المستخدم
 _CB_USER_COUNTER_MAX = 100_000
 
-# ✅ v9.6.0 (N5-10): جدول ترجمة لمحارف التحكم (أسرع من re.sub)
+# ✅ v9.6.0 (N5-10): جدول ترجمة لمحارف التحكم
 _CONTROL_CHARS_MAP = {i: ' ' for i in range(0x20)}
 _CONTROL_CHARS_MAP[0x7f] = ' '
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.7.0 (CB-1) + v9.7.0-final (C1/C2/M1): CircuitBreaker
+# ═════════════════════════════════════════════════════════════════════
+
+class CircuitBreaker:
+    """
+    ✅ v9.7.0: قاطع دائرة per-channel.
+
+    States:
+      closed --(threshold failures)--> open
+      open --(recovery elapsed)--> half_open (محاولة واحدة)
+      half_open --(success)--> closed
+      half_open --(failure)--> open (reset timer)
+
+    ✅ v9.7.0-final (C1): timeout 60s لـ _half_open_in_flight —
+    يمنع القفل الأبدي عند خطأ غير متوقع.
+    ✅ v9.7.0-final (C2): last_activity timestamp للprune.
+    ✅ v9.7.0-final (M1): record_permanent_failure() لفتح فوري.
+    """
+    __slots__ = ('failures', 'threshold', 'recovery',
+                 'opened_at', '_half_open_in_flight',
+                 '_half_open_started', 'last_activity')
+
+    # ✅ C1: مهلة المحاولة half_open (بالثواني)
+    HALF_OPEN_TIMEOUT = 60.0
+
+    def __init__(self, threshold: int = 5, recovery: float = 300.0):
+        self.failures = 0
+        self.threshold = threshold
+        self.recovery = recovery
+        self.opened_at = 0.0
+        self._half_open_in_flight = False
+        self._half_open_started = 0.0
+        self.last_activity = time.monotonic()
+
+    @property
+    def state(self) -> str:
+        if self.failures < self.threshold:
+            return "closed"
+        if time.monotonic() - self.opened_at < self.recovery:
+            return "open"
+        return "half_open"
+
+    def is_open(self) -> bool:
+        """يُعيد True إذا كانت الدائرة ترفض الطلبات حالياً."""
+        if self.failures < self.threshold:
+            return False
+        elapsed = time.monotonic() - self.opened_at
+        if elapsed < self.recovery:
+            return True
+
+        # ✅ C1: half_open مع timeout — لو المحاولة السابقة علّقت
+        if self._half_open_in_flight:
+            if (time.monotonic() - self._half_open_started
+                    > self.HALF_OPEN_TIMEOUT):
+                # محاولة قديمة علّقت → اسمح بمحاولة جديدة
+                logger.warning(
+                    f"⏱️ Circuit half_open timeout "
+                    f"({self.HALF_OPEN_TIMEOUT:.0f}s) — إعادة تعيين")
+                self._half_open_in_flight = False
+            else:
+                return True
+
+        self._half_open_in_flight = True
+        self._half_open_started = time.monotonic()
+        return False
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self._half_open_in_flight = False
+        self.last_activity = time.monotonic()
+
+    def record_failure(self) -> None:
+        prev = self.failures
+        self.failures += 1
+        self._half_open_in_flight = False
+        self.last_activity = time.monotonic()
+        if self.failures >= self.threshold:
+            self.opened_at = time.monotonic()
+        # ✅ M3: زيادة circuit_opened عند الانتقال closed→open
+        if (self.failures >= self.threshold
+                and prev < self.threshold):
+            _metrics_inc('circuit_opened')
+
+    def record_permanent_failure(self) -> None:
+        """
+        ✅ M1: فشل دائم (Forbidden = البوت مطرود) →
+        يفتح الدائرة فوراً بغض النظر عن العدد.
+        """
+        prev = self.failures
+        self.failures = self.threshold
+        self.opened_at = time.monotonic()
+        self._half_open_in_flight = False
+        self.last_activity = time.monotonic()
+        if prev < self.threshold:
+            _metrics_inc('circuit_opened')
+
+
+# ✅ v9.7.0 (CB-2): قواطع لكل قناة
+_publish_circuits: Dict[int, CircuitBreaker] = {}
+
+# ✅ C2: عمر القاطع الخامل قبل الحذف (بالثواني)
+_CIRCUIT_STALE_AGE = 3600.0
+
+
+def _get_publish_circuit(ch_db_id: int) -> CircuitBreaker:
+    """يحصل على CircuitBreaker للقناة، أو يُنشئه."""
+    cb = _publish_circuits.get(ch_db_id)
+    if cb is None:
+        cb = CircuitBreaker(threshold=5, recovery=300.0)
+        _publish_circuits[ch_db_id] = cb
+    return cb
+
+
+def _prune_publish_circuits() -> int:
+    """
+    ✅ v9.7.0 (CB-2): يحذف القواطع المُغلقة بدون فشل.
+    ✅ C2: يحذف أيضاً القواطع الخاملة (last_activity > 1h).
+    Returns: عدد القواطع المحذوفة.
+    """
+    removed = 0
+    try:
+        now = time.monotonic()
+        for ch_id in list(_publish_circuits.keys()):
+            cb = _publish_circuits.get(ch_id)
+            if cb is None:
+                continue
+            # حالة 1: closed بدون فشل
+            if cb.state == "closed" and cb.failures == 0:
+                _publish_circuits.pop(ch_id, None)
+                removed += 1
+                continue
+            # ✅ C2: خامل منذ أكثر من ساعة → احذفه
+            if now - cb.last_activity > _CIRCUIT_STALE_AGE:
+                _publish_circuits.pop(ch_id, None)
+                removed += 1
+        if removed:
+            logger.debug(
+                f"🧹 _publish_circuits prune: حُذف {removed} قاطع "
+                f"(المتبقي: {len(_publish_circuits)})")
+    except Exception:
+        pass
+    return removed
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.7.0 (MET-1): Live Metrics
+# ═════════════════════════════════════════════════════════════════════
+
+_metrics: Dict[str, Any] = {
+    'started_at': time.monotonic(),
+    'callbacks_total': 0,
+    'callbacks_failed': 0,
+    'callbacks_rate_limited': 0,
+    'callbacks_latency': {'<100ms': 0, '100ms-1s': 0, '>1s': 0},
+    'top_callbacks': {},
+    'auth_cache_hits': 0,
+    'auth_cache_misses': 0,
+    'auth_neg_cache_hits': 0,
+    'auth_api_failures': 0,
+    'publishes_success': 0,
+    'publishes_failed': 0,
+    'publishes_forbidden': 0,
+    'publishes_rate_limited': 0,
+    'circuit_opened': 0,
+    'circuit_blocked': 0,
+}
+
+_TOP_CALLBACKS_MAX = 100
+
+
+def _metrics_inc(key: str, delta: int = 1) -> None:
+    """زيادة عدّاد (آمن تماماً)."""
+    try:
+        _metrics[key] = _metrics.get(key, 0) + delta
+    except Exception:
+        pass
+
+
+def _metrics_top_cb(base_data: str) -> None:
+    """
+    ✅ v9.7.0 (MET-3): يتتبّع استخدام الأزرار.
+    ✅ M2: eviction O(n) بسيط بدل O(n log n).
+    """
+    try:
+        top = _metrics['top_callbacks']
+        top[base_data] = top.get(base_data, 0) + 1
+        if len(top) > _TOP_CALLBACKS_MAX:
+            # ✅ M2: امسح نصف القاموس (الأقدم في Python 3.7+)
+            keys = list(top.keys())
+            for k in keys[:len(keys) // 2]:
+                top.pop(k, None)
+    except Exception:
+        pass
+
+
+def _metrics_latency(elapsed: float) -> None:
+    """يُصنِّف زمن المعالجة في 3 دلاء."""
+    try:
+        buckets = _metrics['callbacks_latency']
+        if elapsed < 0.1:
+            buckets['<100ms'] += 1
+        elif elapsed < 1.0:
+            buckets['100ms-1s'] += 1
+        else:
+            buckets['>1s'] += 1
+    except Exception:
+        pass
+
+
+def _metrics_snapshot() -> Dict[str, Any]:
+    """لقطة مستقلة (dict copy)."""
+    try:
+        snap = dict(_metrics)
+        snap['top_callbacks'] = dict(_metrics.get('top_callbacks', {}))
+        snap['callbacks_latency'] = dict(_metrics.get('callbacks_latency', {}))
+        return snap
+    except Exception:
+        return {}
+
+
+def _metrics_reset() -> None:
+    """إعادة تعيين العدّادات."""
+    try:
+        _metrics['callbacks_total'] = 0
+        _metrics['callbacks_failed'] = 0
+        _metrics['callbacks_rate_limited'] = 0
+        _metrics['callbacks_latency'] = {'<100ms': 0, '100ms-1s': 0, '>1s': 0}
+        _metrics['top_callbacks'] = {}
+        _metrics['auth_cache_hits'] = 0
+        _metrics['auth_cache_misses'] = 0
+        _metrics['auth_neg_cache_hits'] = 0
+        _metrics['auth_api_failures'] = 0
+        _metrics['publishes_success'] = 0
+        _metrics['publishes_failed'] = 0
+        _metrics['publishes_forbidden'] = 0
+        _metrics['publishes_rate_limited'] = 0
+        _metrics['circuit_opened'] = 0
+        _metrics['circuit_blocked'] = 0
+        _metrics['started_at'] = time.monotonic()
+    except Exception:
+        pass
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -255,17 +489,6 @@ _CONTROL_CHARS_MAP[0x7f] = ' '
 # ═════════════════════════════════════════════════════════════════════
 
 def _match_cb(data: str, *candidates) -> bool:
-    """
-    ✅ v9.5.9: يطابق `data` مع قائمة مرشّحات بأمان.
-
-    - يتجاهل None و "" (لأن getattr قد يرجع None).
-    - يمنع مطابقة ``data == ""`` (نظرياً مستحيل بسبب فحص `if not data`).
-    - يقبل المرشّحات كنصوص أو ثوابت CB.
-
-    أمثلة:
-        _match_cb(data, getattr(CB, 'ADMIN_SEND_UPDATE', None),
-                  "admin_send_update")
-    """
     if not data:
         return False
     for c in candidates:
@@ -282,13 +505,11 @@ def _match_cb(data: str, *candidates) -> bool:
 
 def _clear_lang_cache_local(context) -> None:
     mod = sys.modules.get('handlers_message')
-
     if mod is None:
         for _name in list(sys.modules.keys()):
             if _name == 'handlers_message' or _name.endswith('.handlers_message'):
                 mod = sys.modules[_name]
                 break
-
     if mod is None:
         try:
             mod = importlib.import_module('handlers_message')
@@ -298,7 +519,6 @@ def _clear_lang_cache_local(context) -> None:
                     '.handlers_message', package=__package__)
             except (ImportError, TypeError, ValueError):
                 mod = None
-
     if mod is not None:
         _clc = getattr(mod, 'clear_lang_cache', None)
         if callable(_clc):
@@ -307,7 +527,6 @@ def _clear_lang_cache_local(context) -> None:
                 return
             except Exception as e:
                 logger.debug(f"_clear_lang_cache_local call: {e}")
-
     try:
         if context is not None and hasattr(context, 'user_data'):
             for _k in ('lang', 'translation_cache',
@@ -422,19 +641,9 @@ async def _render_auto_reply_menu(
 
 # ═════════════════════════════════════════════════════════════════════
 # ✅ v9.5.5 (NEW): إشعار مالك القناة عند طرد البوت
-# ✅ v9.5.6 (NEW-2, NEW-5): logging أفضل + debounce
-# ✅ v9.5.7 (DEBOUNCE-FIX): تسجيل الطابع الزمني بعد نجاح الإرسال
 # ═════════════════════════════════════════════════════════════════════
 
 async def _notify_channel_owner_kicked(context, ch_db_id: int) -> None:
-    """
-    ✅ v9.5.5: يُرسل رسالة لمالك القناة عند طرد البوت منها.
-    ✅ v9.5.6 (NEW-5): debounce — لا يُرسل أكثر من مرة كل
-    _KICKED_NOTIFY_DEBOUNCE ثانية لنفس القناة.
-    ✅ v9.5.6 (NEW-2): logging أوضح عند الفشل.
-    ✅ v9.5.7 (DEBOUNCE-FIX): debounce timestamp يُسجَّل بعد نجاح
-    الإرسال فقط.
-    """
     notify_key = f"_kicked_notify_{ch_db_id}"
     try:
         try:
@@ -502,20 +711,10 @@ async def _notify_channel_owner_kicked(context, ch_db_id: int) -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ v9.5.9 (N-NEW-1): تنظيف دوري لـ _kicked_notify_* من bot_data
-# ✅ v9.6.0 (N7-10): فحص نوع bot_data
+# ✅ v9.5.9 (N-NEW-1) / v9.6.0 (N7-10): prune kicked_notify
 # ═════════════════════════════════════════════════════════════════════
 
 def _prune_kicked_notify_state(context, now: float) -> int:
-    """
-    🧹 يحذف إدخالات _kicked_notify_* القديمة من bot_data.
-
-    ✅ v9.6.0 (N7-10): فحص نوع bot_data (dict) قبل الاستخدام.
-    الاحتفاظ = _KICKED_NOTIFY_DEBOUNCE * 10 (50 دقيقة).
-    ملاحظة: bot_data مشترك عالمياً في PTB — التنظيف يؤثر على
-    كل المستخدمين.
-    Returns: عدد المدخلات المحذوفة.
-    """
     if context is None:
         return 0
     bot_data = getattr(context, 'bot_data', None)
@@ -763,26 +962,15 @@ async def _resolve_sec_chat_id(context, data: str) -> Optional[int]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ v9.4.30: prune لـ _sec_auth_cache
-# ✅ v9.5.6 (C1): لا يحذف الأقفال
-# ✅ v9.5.7 (WEAK-LOCKS): الأقفال الآن WeakValueDictionary (ملغى)
-# ✅ v9.5.9 (C-NEW-2): يـprune أيضاً _sec_auth_neg_cache
-# ✅ v9.6.0 (M2-10): Dict عادي + prune ذكي للأقفال غير المُقفَلة
+# prune الكاشات (إيجابي/سلبي/أقفال/قواطع)
 # ═════════════════════════════════════════════════════════════════════
 
 def _prune_sec_auth_cache(now: float) -> int:
     """
-    🧹 تنظيف كاشات المصادقة:
-      1) _sec_auth_cache: المنتهية + الأقدم عند التجاوز
-      2) _sec_auth_neg_cache: المنتهية فقط
-      3) _sec_auth_locks (v9.6.0): الأقفال غير المُقفَلة التي
-         لا يوجد لها entry في _sec_auth_cache
-
-    Returns: عدد entries المحذوفة من _sec_auth_cache.
+    🧹 تنظيف كاشات المصادقة + قواطع النشر.
     """
     removed = 0
 
-    # 1) الكاش الإيجابي
     expired_keys = [
         k for k, (_, ts) in _sec_auth_cache.items()
         if now - ts >= SEC_AUTH_CACHE_TTL
@@ -804,7 +992,6 @@ def _prune_sec_auth_cache(now: float) -> int:
             f"(المتبقي: {len(_sec_auth_cache)})"
         )
 
-    # 2) الكاش السلبي — البنية الجديدة (until, fail_count)
     expired_neg = []
     for k, val in _sec_auth_neg_cache.items():
         try:
@@ -817,14 +1004,11 @@ def _prune_sec_auth_cache(now: float) -> int:
     for k in expired_neg:
         _sec_auth_neg_cache.pop(k, None)
 
-    # 3) ✅ v9.6.0 (M2-10): تنظيف الأقفال غير المُقفَلة
-    #    التي لا يوجد لها entry في أي من الكاشين
     locks_pruned = 0
     for k in list(_sec_auth_locks.keys()):
         lock = _sec_auth_locks.get(k)
         if lock is None:
             continue
-        # احذف فقط إن كان غير مُقفَل + لا entry في الكاشات
         if (not lock.locked()
                 and k not in _sec_auth_cache
                 and k not in _sec_auth_neg_cache):
@@ -836,40 +1020,37 @@ def _prune_sec_auth_cache(now: float) -> int:
             f"(المتبقي: {len(_sec_auth_locks)})"
         )
 
+    try:
+        _prune_publish_circuits()
+    except Exception:
+        pass
+
     return removed
 
 
 async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
-    """
-    ✅ v9.5.3 (M1): قفل خفيف لكل مفتاح لمنع السباق.
-    ✅ v9.5.6 (NEW-2): لا يُخزّن False عند فشل الشبكة.
-    ✅ v9.5.9 (C-NEW-2): كاش سلبي قصير عند فشل API.
-    ✅ v9.5.10 (M4-9): TTL الكاش السلبي.
-    ✅ v9.6.0 (M3-10): exponential backoff (3s → 60s).
-    ✅ v9.6.0-final (Patch-1): 6 مستويات للوصول للسقف.
-    ✅ v9.6.0 (M2-10): Dict عادي + setdefault آمن.
-    """
     if chat_id is None:
         return False
     key = (user_id, chat_id)
     now = time.monotonic()
 
-    # كاش إيجابي
     cached = _sec_auth_cache.get(key)
     if cached and now - cached[1] < SEC_AUTH_CACHE_TTL:
+        _metrics_inc('auth_cache_hits')
         return cached[0]
 
-    # ✅ v9.6.0 (M3-10): كاش سلبي بـ exponential backoff
     neg_val = _sec_auth_neg_cache.get(key)
     if neg_val is not None:
         try:
             until = neg_val[0] if isinstance(neg_val, tuple) else neg_val
             if until > now:
+                _metrics_inc('auth_neg_cache_hits')
                 return False
         except Exception:
             pass
 
-    # ✅ v9.6.0 (M2-10): Dict عادي — setdefault آمن
+    _metrics_inc('auth_cache_misses')
+
     lock = _sec_auth_locks.get(key)
     if lock is None:
         new_lock = asyncio.Lock()
@@ -880,7 +1061,6 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
         cached = _sec_auth_cache.get(key)
         if cached and now - cached[1] < SEC_AUTH_CACHE_TTL:
             return cached[0]
-        # فحص مزدوج للكاش السلبي
         neg_val = _sec_auth_neg_cache.get(key)
         if neg_val is not None:
             try:
@@ -898,7 +1078,6 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
             result = await is_authorized_in_group(
                 context.bot, chat_id, user_id)
         except Exception as e:
-            # ✅ v9.6.0 (M3-10): exponential backoff
             prev = _sec_auth_neg_cache.get(key)
             fails = 0
             if prev is not None and isinstance(prev, tuple):
@@ -906,14 +1085,13 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
                     fails = int(prev[1])
                 except Exception:
                     fails = 0
-            # ✅ v9.6.0-final (Patch-1): 6 بدل 5 للوصول إلى السقف (60s)
-            # fails=6 → 3×2⁵=96s مقيداً بـ _SEC_AUTH_NEG_MAX=60
             new_fails = min(fails + 1, 6)
             ttl = min(
                 _SEC_AUTH_NEG_BASE * (2 ** (new_fails - 1)),
                 _SEC_AUTH_NEG_MAX,
             )
             _sec_auth_neg_cache[key] = (now + ttl, new_fails)
+            _metrics_inc('auth_api_failures')
             logger.warning(
                 f"⚠️ is_authorized فشل "
                 f"(كاش سلبي {ttl:.1f}s، فشل #{new_fails}): "
@@ -922,22 +1100,14 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
             return False
 
         _sec_auth_cache[key] = (result, now)
-        # ✅ v9.5.9: نظّف الكاش السلبي عند النجاح
         _sec_auth_neg_cache.pop(key, None)
         return result
 
 
 def _invalidate_sec_auth_cache(chat_id: int = None) -> None:
-    """
-    ✅ v9.5.7 (C1-EXT): لا يحذف الأقفال المُستخدمة.
-    ✅ v9.5.9 (C-NEW-2): الكاش السلبي يُفرَّغ.
-    ✅ v9.5.10 (M3-9): تصحيح التعليق.
-    ✅ v9.6.0 (M2-10): الأقفال Dict عادي — نحذف غير المُقفَلة فقط.
-    """
     if chat_id is None:
         _sec_auth_cache.clear()
         _sec_auth_neg_cache.clear()
-        # احذف الأقفال غير المُقفَلة فقط
         for k in list(_sec_auth_locks.keys()):
             lock = _sec_auth_locks.get(k)
             if lock is not None and not lock.locked():
@@ -1048,6 +1218,8 @@ class CallbackHandlers:
         user_id = user.id
         now_time = time.monotonic()
 
+        _metrics_inc('callbacks_total')
+
         last_cb_key = f"last_cb_{user_id}"
         last_time = context.user_data.get(last_cb_key, 0)
         if now_time - last_time < CALLBACK_MIN_INTERVAL:
@@ -1082,6 +1254,7 @@ class CallbackHandlers:
         rate_data['count'] = rate_data.get('count', 0) + 1
         context.user_data[rate_key] = rate_data
         if rate_data['count'] > CallbackHandlers.RATE_LIMIT_PER_MINUTE:
+            _metrics_inc('callbacks_rate_limited')
             await _safe_answer(query, "⚠️", show_alert=True)
             return
 
@@ -1102,6 +1275,7 @@ class CallbackHandlers:
                 return
         except Exception as e:
             logger.error(f"❌ param outer: {e}", exc_info=True)
+            _metrics_inc('callbacks_failed')
             try:
                 await safe_edit(
                     query,
@@ -1116,6 +1290,8 @@ class CallbackHandlers:
             parts = data.split(':', 1)
             if parts[0] in _KNOWN_CB_PREFIXES:
                 base_data = parts[0]
+
+        _metrics_top_cb(base_data)
 
         try:
             if base_data in (CB.MAIN, CB.BACK):
@@ -1826,20 +2002,16 @@ class CallbackHandlers:
                 logger.error(f"❌ BadRequest: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"❌ Callback error: {e}", exc_info=True)
+            _metrics_inc('callbacks_failed')
         finally:
             elapsed = time.monotonic() - start_time
+            _metrics_latency(elapsed)
             if elapsed > 1.0:
                 logger.warning(
                     f"🐢 Slow button {data[:30]} — {elapsed:.2f}s")
 
     @staticmethod
     def _cleanup_user_data(context) -> None:
-        """
-        ✅ v9.5.7 (COUNTER-CLEANUP): تصفير _cb_user_counter.
-        ✅ v9.5.9 (N-NEW-7): logging عند التصفير.
-        ✅ v9.6.0 (N3-10): يُستدعى الآن من _show_main_menu_inline
-        لضمان تنظيف فعّال.
-        """
         try:
             now = time.monotonic()
             keys_to_del = []
@@ -1865,6 +2037,131 @@ class CallbackHandlers:
                 context.user_data.pop(k, None)
         except Exception:
             pass
+
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.7.0 (MET-4) + v9.7.0-final (N1): Live Metrics Dashboard
+    # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _show_metrics_dashboard(query, context, user_id, lang):
+        """لوحة المؤشرات اللحظية."""
+        try:
+            snap = _metrics_snapshot()
+            uptime = max(
+                0.0,
+                time.monotonic() - snap.get(
+                    'started_at', time.monotonic()))
+            hours = int(uptime // 3600)
+            minutes = int((uptime % 3600) // 60)
+            seconds = int(uptime % 60)
+
+            cb_total = int(snap.get('callbacks_total', 0))
+            cb_failed = int(snap.get('callbacks_failed', 0))
+            cb_rl = int(snap.get('callbacks_rate_limited', 0))
+            cb_success_rate = (
+                ((cb_total - cb_failed) / cb_total * 100)
+                if cb_total > 0 else 100.0)
+
+            lat = snap.get('callbacks_latency', {}) or {}
+            fast = int(lat.get('<100ms', 0))
+            mid = int(lat.get('100ms-1s', 0))
+            slow = int(lat.get('>1s', 0))
+            lat_total = max(1, fast + mid + slow)
+
+            auth_hits = int(snap.get('auth_cache_hits', 0))
+            auth_miss = int(snap.get('auth_cache_misses', 0))
+            auth_neg = int(snap.get('auth_neg_cache_hits', 0))
+            auth_fail = int(snap.get('auth_api_failures', 0))
+            auth_total = max(1, auth_hits + auth_miss)
+
+            pub_ok = int(snap.get('publishes_success', 0))
+            pub_fail = int(snap.get('publishes_failed', 0))
+            pub_forb = int(snap.get('publishes_forbidden', 0))
+            pub_rl = int(snap.get('publishes_rate_limited', 0))
+            pub_total = max(1, pub_ok + pub_fail)
+
+            circ_open = int(snap.get('circuit_opened', 0))
+            circ_block = int(snap.get('circuit_blocked', 0))
+            circuits_alive = len(_publish_circuits)
+
+            # ✅ N1: عرض الدوائر المفتوحة حالياً
+            now_open = sum(
+                1 for cb in _publish_circuits.values()
+                if cb.state == "open"
+            )
+            now_half = sum(
+                1 for cb in _publish_circuits.values()
+                if cb.state == "half_open"
+            )
+
+            top = snap.get('top_callbacks', {}) or {}
+            top_sorted = sorted(
+                top.items(), key=lambda x: x[1], reverse=True)[:5]
+            top_lines = []
+            for name, cnt in top_sorted:
+                top_lines.append(
+                    f"   • <code>{_html.escape(name[:25])}</code> → {cnt}")
+            top_block = "\n".join(top_lines) if top_lines else "   <i>—</i>"
+
+            text = (
+                "📊 <b>Live Metrics</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏱️ <b>Uptime:</b> {hours}h {minutes}m {seconds}s\n\n"
+
+                "📞 <b>Callbacks</b>\n"
+                f"   📈 Total: <b>{cb_total}</b>\n"
+                f"   ✅ Success rate: <b>{cb_success_rate:.1f}%</b>\n"
+                f"   ❌ Failed: {cb_failed}\n"
+                f"   ⚠️ Rate-limited: {cb_rl}\n\n"
+
+                "⚡ <b>Latency</b>\n"
+                f"   🟢 &lt;100ms: {fast} ({fast/lat_total*100:.0f}%)\n"
+                f"   🟡 100ms-1s: {mid} ({mid/lat_total*100:.0f}%)\n"
+                f"   🔴 &gt;1s: {slow} ({slow/lat_total*100:.0f}%)\n\n"
+
+                "🔐 <b>Auth Cache</b>\n"
+                f"   ✅ Hits: {auth_hits} ({auth_hits/auth_total*100:.0f}%)\n"
+                f"   ❌ Misses: {auth_miss}\n"
+                f"   🛡️ Neg hits: {auth_neg}\n"
+                f"   ⚠️ API failures: {auth_fail}\n\n"
+
+                "📤 <b>Publishes</b>\n"
+                f"   ✅ Success: {pub_ok} ({pub_ok/pub_total*100:.0f}%)\n"
+                f"   ❌ Failed: {pub_fail}\n"
+                f"   🚫 Forbidden: {pub_forb}\n"
+                f"   ⏱️ Rate-limited: {pub_rl}\n\n"
+
+                "🔌 <b>Circuit Breakers</b>\n"
+                f"   📡 Active: {circuits_alive}\n"
+                f"   🔴 Opened now: <b>{now_open}</b>\n"
+                f"   🟡 Half-open now: {now_half}\n"
+                f"   🟠 Opened (total): {circ_open}\n"
+                f"   🚫 Blocked: {circ_block}\n\n"
+
+                "🏆 <b>Top Callbacks</b>\n"
+                f"{top_block}"
+            )
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔄 تحديث", callback_data="admin_metrics_live")],
+                [InlineKeyboardButton(
+                    "♻️ إعادة تعيين", callback_data="admin_metrics_reset")],
+                [InlineKeyboardButton(
+                    KeyboardFactory.get_text("back", lang),
+                    callback_data=CB.ADMIN)],
+            ])
+
+            await safe_edit(
+                query, text, reply_markup=kb,
+                parse_mode='HTML', bot=context.bot)
+        except Exception as e:
+            logger.error(
+                f"_show_metrics_dashboard: {e}", exc_info=True)
+            await safe_edit(
+                query,
+                await _trans('error_occurred', lang, "❌"),
+                bot=context.bot)
 
     # ═════════════════════════════════════════════════════════════
     # قناة التحديثات
@@ -2120,10 +2417,6 @@ class CallbackHandlers:
         query, context, chat_id, lang, settings,
         expected_msg_id: Optional[int] = None,
     ):
-        """
-        ✅ v9.5.9 (NEW-Z): فحص message_id قبل التعديل
-        → لا يعدّل رسالة جديدة (بعد تنقل المستخدم).
-        """
         try:
             if expected_msg_id is not None:
                 try:
@@ -2218,25 +2511,19 @@ class CallbackHandlers:
 
     # ═════════════════════════════════════════════════════════════
     # القائمة الرئيسية
-    # ✅ v9.6.0 (N3-10): _cleanup_user_data + _prune_kicked_notify_state
-    # ✅ v9.6.0-final (Patch-2): + _prune_sec_auth_cache
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _show_main_menu_inline(query, context, user_id) -> bool:
         try:
-            # ✅ v9.6.0 (N3-10): نظّف user_data عند العودة للقائمة
             try:
                 CallbackHandlers._cleanup_user_data(context)
             except Exception:
                 pass
-            # ✅ v9.6.0 (M1-10): نظّف kicked_notify عند العودة للقائمة
             try:
                 _prune_kicked_notify_state(context, time.monotonic())
             except Exception:
                 pass
-            # ✅ v9.6.0-final (Patch-2): نظّف كاشات المصادقة أيضاً
-            # (للحمل المنخفض حيث لا يصل العدّاد لـ 500)
             try:
                 _prune_sec_auth_cache(time.monotonic())
             except Exception:
@@ -2627,8 +2914,6 @@ class CallbackHandlers:
                     'delete_penalty')
                 return True
 
-            # ⚠️ v9.6.0 (N9-10): يجب أن يسبق sec_penalty_ العام
-            # (لأن startswith("sec_penalty_") يطابق "sec_penalty_durations:")
             if data.startswith("sec_penalty_durations:"):
                 parts = data.split(":")
                 if len(parts) != 2:
@@ -3834,8 +4119,6 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
-        # ✅ v9.6.0-final (Patch-4): تنظيف دوري إضافي عند عرض قائمة المجموعات
-        # (يضمن التنظيف حتى لو لم يعد المستخدم للقائمة الرئيسية)
         try:
             now_t = time.monotonic()
             _prune_sec_auth_cache(now_t)
@@ -3954,6 +4237,10 @@ class CallbackHandlers:
             return as_dict, False
         return None, False
 
+    # ═════════════════════════════════════════════════════════════
+    # ✅ v9.7.0 (CB-3) + v9.7.0-final (M1, M3): _publish_single
+    # ═════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _publish_single(
         context, bot, ch_db_id, ch_tele, post
@@ -3964,6 +4251,16 @@ class CallbackHandlers:
             post = _row_to_dict(post)
         if not isinstance(post, dict):
             return False
+
+        # ✅ v9.7.0 (CB-3): فحص Circuit Breaker قبل المحاولة
+        circuit = _get_publish_circuit(ch_db_id)
+        if circuit.is_open():
+            _metrics_inc('circuit_blocked')
+            logger.debug(
+                f"🔴 circuit open for ch_db_id={ch_db_id} "
+                f"(state={circuit.state}, failures={circuit.failures})")
+            return False
+
         post_id = post.get('id')
         try:
             text = post.get('text', '') or ''
@@ -4020,7 +4317,12 @@ class CallbackHandlers:
                 await DB.mark_post_published(post_id)
             await DB.update_last_publish(ch_db_id)
             await DB.update_next_publish(ch_db_id)
+
+            # ✅ نجاح → إغلاق الدائرة + metrics
+            circuit.record_success()
+            _metrics_inc('publishes_success')
             return True
+
         except RetryAfter as e:
             delay = e.retry_after
             if isinstance(delay, timedelta):
@@ -4038,12 +4340,15 @@ class CallbackHandlers:
                 logger.warning(
                     f"⏱️ RetryAfter={delay:.0f}s كبير — "
                     f"لن أنتظر داخل الـ semaphore")
+            # RetryAfter لا يُسجَّل كـ circuit failure
+            _metrics_inc('publishes_rate_limited')
             if post_id:
                 try:
                     await DB.increment_post_fail(post_id)
                 except Exception:
                     pass
             return False
+
         except Forbidden:
             try:
                 await DB.execute(
@@ -4056,6 +4361,13 @@ class CallbackHandlers:
                     await DB.increment_post_fail(post_id)
                 except Exception:
                     pass
+
+            # ✅ M1: Forbidden = فشل دائم → يفتح الدائرة فوراً
+            circuit.record_permanent_failure()
+            _metrics_inc('publishes_forbidden')
+            _metrics_inc('publishes_failed')
+
+            # إشعار المالك (مع debounce)
             try:
                 _task = asyncio.create_task(
                     _notify_channel_owner_kicked(context, ch_db_id))
@@ -4064,6 +4376,7 @@ class CallbackHandlers:
             except Exception:
                 pass
             return False
+
         except Exception as e:
             logger.error(f"❌ publish: {e}", exc_info=True)
             if post_id:
@@ -4071,17 +4384,14 @@ class CallbackHandlers:
                     await DB.increment_post_fail(post_id)
                 except Exception:
                     pass
+
+            # خطأ عام → فشل circuit
+            circuit.record_failure()
+            _metrics_inc('publishes_failed')
             return False
 
     @staticmethod
     async def _publish_all(context, bot, user_id, channels):
-        """
-        ✅ v9.5.3 (C2): إبطال كاش لكل قناة.
-        ✅ v9.5.3 (C3): معالجة RATE_LIMITER timeout.
-        ✅ v9.5.6 (M5): النوم خارج الـ semaphore.
-        ✅ v9.5.9 (C-NEW-3): إلغاء نظيف عند CancelledError.
-        ✅ v9.6.0 (M4-10): logger.debug بدل logger.info.
-        """
         lang = 'ar'
         try:
             lang = await DB.get_user_language(user_id) or 'ar'
@@ -4170,7 +4480,6 @@ class CallbackHandlers:
                         *batch_tasks,
                         return_exceptions=True)
                 except asyncio.CancelledError:
-                    # ✅ v9.6.0 (M4-10): debug بدل info
                     logger.debug(
                         f"🛑 _publish_all أُلغي "
                         f"(user={user_id}) — تنظيف "
@@ -4228,7 +4537,6 @@ class CallbackHandlers:
                 await _invalidate_post_count_cache(cid)
 
         except asyncio.CancelledError:
-            # ✅ v9.6.0 (M4-10): debug بدل info
             logger.debug(
                 f"🛑 _publish_all أُلغي خارجياً "
                 f"(user={user_id})")
@@ -4351,10 +4659,6 @@ class CallbackHandlers:
     async def _show_post_list(
         update, context, query, user_id, lang=None
     ):
-        """
-        ✅ v9.5.9 (N-NEW-3): تعقيم \x00-\x1f في المعاينة.
-        ✅ v9.6.0 (N5-10): translate بدل re.sub (أسرع 5-10×).
-        """
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         active = await DB.get_active_channel(user_id)
@@ -4410,7 +4714,6 @@ class CallbackHandlers:
             if pid is None:
                 continue
             raw_preview = str(pd.get('text') or '')
-            # ✅ v9.6.0 (N5-10): translate أسرع من re.sub
             preview = raw_preview.translate(
                 _CONTROL_CHARS_MAP)[:30]
             text += f"🆔 {pid}: {preview}\n"
@@ -5269,11 +5572,6 @@ class CallbackHandlers:
     async def _show_penalty_type_selection(
         update, context, query, chat_id, lang, setting_key
     ):
-        """
-        ✅ v9.5.9 (M-NEW-5): زر رجوع ديناميكي حسب setting_key.
-        ✅ v9.6.0 (N8-10): delete_penalty في الخريطة احتياطاً.
-        ✅ v9.6.0-final (Patch-3): حُذف 'delete_penalty_dur' (زائد).
-        """
         penalty_types = [
             (await _trans('mute_btn', lang, "🔇"), "mute"),
             (await _trans('ban_btn', lang, "🚫"), "ban"),
@@ -5286,7 +5584,6 @@ class CallbackHandlers:
             callback = f"sec_set_{setting_key}:{chat_id}:{ptype}"
             kb.append([InlineKeyboardButton(
                 label, callback_data=callback)])
-        # ✅ v9.6.0-final (Patch-3): delete_penalty فقط (حُذف delete_penalty_dur)
         _back_map = {
             'antiflood_penalty':  f"sec_antiflood_settings:{chat_id}",
             'night_action':       f"sec_night_settings:{chat_id}",
@@ -5346,10 +5643,6 @@ class CallbackHandlers:
     async def _show_penalty_durations(
         update, context, query, chat_id, lang, penalty_type='mute'
     ):
-        """
-        ✅ v9.5.9 (M-NEW-4): زر رجوع دقيق حسب penalty_type.
-        ✅ v9.5.9 (N-NEW-6): حذف فرع warn_penalty_duration (ميت).
-        """
         if penalty_type == 'kick':
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
@@ -5387,7 +5680,6 @@ class CallbackHandlers:
                         f"{chat_id}:{secs2}")))
             kb.append(row)
 
-        # ✅ v9.5.9 (M-NEW-4): خريطة رجوع دقيقة حسب السياق
         _back_map = {
             'warn_penalty':   f"sec_warn:{chat_id}",
             'delete_penalty': f"sec_del_pen:{chat_id}",
@@ -5615,6 +5907,18 @@ class CallbackHandlers:
         data = query.data
 
         try:
+            # ✅ v9.7.0 (MET-5): زر Live Metrics
+            if data == "admin_metrics_live":
+                await CallbackHandlers._show_metrics_dashboard(
+                    query, context, user_id, lang)
+                return
+
+            if data == "admin_metrics_reset":
+                _metrics_reset()
+                await CallbackHandlers._show_metrics_dashboard(
+                    query, context, user_id, lang)
+                return
+
             if _match_cb(
                 data,
                 getattr(CB, 'ADMIN_UPDATE_CH_BTN', None),
@@ -7473,11 +7777,6 @@ class CallbackHandlers:
     async def _handle_auto_reply(
         update, context, query, user_id, lang=None
     ):
-        """
-        ✅ v9.5.9 (N-NEW-6): حذف فرع sec_ الميت.
-        (لا مسار يوصل `sec_*` إلى هذه الدالة — تُعالج في
-        `_handle_security`.)
-        """
         if not lang:
             lang = await DB.get_user_language(user_id) or 'ar'
         data = query.data
@@ -8365,6 +8664,14 @@ __all__ = [
     "_match_cb",
     "_prune_kicked_notify_state",
 
+    "CircuitBreaker",
+    "_metrics",
+    "_metrics_snapshot",
+    "_metrics_reset",
+    "_publish_circuits",
+    "_prune_publish_circuits",
+    "_get_publish_circuit",
+
     "_ANALYTICS_ALIASES",
     "CONTEST_DURATIONS",
     "_KNOWN_CB_PREFIXES",
@@ -8373,6 +8680,8 @@ __all__ = [
     "_CB_USER_COUNTER_MAX",
     "_SEC_AUTH_NEG_BASE",
     "_SEC_AUTH_NEG_MAX",
+    "_CIRCUIT_STALE_AGE",
+    "_TOP_CALLBACKS_MAX",
 
     "ACTIVE_TASKS",
     "settings_cache",
