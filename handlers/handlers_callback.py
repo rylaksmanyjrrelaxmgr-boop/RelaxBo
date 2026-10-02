@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v2)
+handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v3)
 =====================================================================
+🆕 v9.7.0-final-fixed-v3 — دمج handlers_membership:
+    ✅ MEM-1: مراقبة إضافة البوت للمجموعات/القنوات
+    ✅ MEM-2: إرسال تقرير لقناة السجل (مع Debounce 30s)
+    ✅ MEM-3: حفظ في جدول bot_addition_log
+    ✅ MEM-4: أزرار تفاعلية + صورة الدردشة
+    ✅ MEM-5: register_membership_handlers() للتسجيل الموحّد
+
 🆕 v9.7.0-final-fixed-v2 — إصلاحات نهائية:
     ✅ FIX-1: _show_metrics_dashboard تستخدم _trans بالكامل
     ✅ FIX-2: RetryAfter يُحرّر _half_open_in_flight
@@ -62,7 +69,7 @@ from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     LabeledPrice, ChatPermissions
 )
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ChatMemberHandler
 from telegram.error import BadRequest, RetryAfter, Forbidden
 
 from config import CONFIG, PATHS
@@ -240,6 +247,476 @@ _CB_USER_COUNTER_MAX = 100_000
 # ✅ v9.6.0 (N5-10): جدول ترجمة لمحارف التحكم
 _CONTROL_CHARS_MAP = {i: ' ' for i in range(0x20)}
 _CONTROL_CHARS_MAP[0x7f] = ' '
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v1.0.1 (MEM-1..5) — مراقبة إضافة البوت (مدموج)
+# ═════════════════════════════════════════════════════════════════════
+
+# مدة منع تكرار التقرير (بالثواني)
+_MEMBERSHIP_DEBOUNCE_SECONDS = 30.0
+
+# عمر الإدخال قبل التنظيف التلقائي
+_MEMBERSHIP_DEBOUNCE_STALE_AGE = _MEMBERSHIP_DEBOUNCE_SECONDS * 20
+
+# حالة البوت قبل الإضافة
+_MEMBERSHIP_OUT_STATUSES = frozenset(('left', 'kicked'))
+
+# حالة البوت بعد الإضافة
+_MEMBERSHIP_IN_STATUSES = frozenset(('member', 'administrator'))
+
+# cache: chat_id → آخر وقت إرسال
+_membership_recent_reports: Dict[int, float] = {}
+
+# حالة الجدول
+_membership_table_created: bool = False
+
+
+async def _membership_ensure_table() -> None:
+    """إنشاء جدول bot_addition_log مرة واحدة فقط."""
+    global _membership_table_created
+    if _membership_table_created:
+        return
+    try:
+        await DB.execute(
+            "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "chat_id INTEGER NOT NULL, "
+            "chat_title TEXT, "
+            "chat_type TEXT, "
+            "chat_username TEXT, "
+            "added_by_id INTEGER NOT NULL, "
+            "added_by_name TEXT, "
+            "added_by_username TEXT, "
+            "bot_status TEXT, "
+            "added_at TEXT NOT NULL"
+            ")"
+        )
+        _membership_table_created = True
+        logger.debug("✅ جدول bot_addition_log جاهز")
+    except Exception as e:
+        logger.debug(
+            f"_membership_ensure_table: {type(e).__name__}: {e}")
+
+
+def _membership_should_send(chat_id: int) -> bool:
+    """يمنع إرسال تقرير مكرر خلال 30 ثانية."""
+    if chat_id is None:
+        return False
+    now = time.monotonic()
+    last = _membership_recent_reports.get(chat_id, 0.0)
+    if now - last < _MEMBERSHIP_DEBOUNCE_SECONDS:
+        logger.debug(
+            f"⏭️ membership report debounced for chat {chat_id} "
+            f"(elapsed={now - last:.1f}s)")
+        return False
+    _membership_recent_reports[chat_id] = now
+    return True
+
+
+def _membership_prune_reports() -> int:
+    """تنظيف الإدخالات القديمة من cache."""
+    removed = 0
+    try:
+        now = time.monotonic()
+        for k in list(_membership_recent_reports.keys()):
+            if now - _membership_recent_reports[k] > \
+                    _MEMBERSHIP_DEBOUNCE_STALE_AGE:
+                _membership_recent_reports.pop(k, None)
+                removed += 1
+        if removed:
+            logger.debug(
+                f"🧹 _membership_recent_reports prune: "
+                f"حُذف {removed} إدخال")
+    except Exception:
+        pass
+    return removed
+
+
+def _membership_safe_html(value: Any, default: str = "") -> str:
+    """تحويل آمن إلى HTML."""
+    try:
+        if value is None:
+            return default
+        return _html.escape(str(value))
+    except Exception:
+        return default
+
+
+def _membership_build_user_link(
+    user_id: int, username: Optional[str] = None
+) -> str:
+    """بناء رابط للمستخدم."""
+    try:
+        if username:
+            clean = str(username).lstrip('@')
+            if clean:
+                return f"https://t.me/{clean}"
+        return f"tg://user?id={user_id}"
+    except Exception:
+        return f"tg://user?id={user_id}"
+
+
+async def _membership_get_log_channel() -> Optional[str]:
+    """جلب معرّف قناة السجل."""
+    # الطريقة 1: DB.get_log_channel()
+    try:
+        if hasattr(DB, 'get_log_channel'):
+            value = await DB.get_log_channel()
+            if value:
+                return str(value).strip()
+    except Exception as e:
+        logger.debug(f"DB.get_log_channel() failed: {e}")
+
+    # الطريقة 2: DB.get_setting()
+    try:
+        if hasattr(DB, 'get_setting'):
+            value = await DB.get_setting(
+                'log_channel', default='')
+            if value:
+                return str(value).strip()
+    except Exception as e:
+        logger.debug(f"DB.get_setting failed: {e}")
+
+    # الطريقة 3: استعلام مباشر
+    try:
+        row = await DB.fetchone(
+            "SELECT value FROM settings "
+            "WHERE key='log_channel' LIMIT 1"
+        )
+        if row:
+            if hasattr(row, 'get'):
+                value = row.get('value')
+            elif isinstance(row, (list, tuple)) and len(row) > 0:
+                value = row[0]
+            else:
+                value = None
+            if value:
+                return str(value).strip()
+    except Exception as e:
+        logger.debug(f"direct query failed: {e}")
+
+    return None
+
+
+async def _membership_save_to_db(
+    chat_id: int,
+    chat_title: str,
+    chat_type: str,
+    chat_username: Optional[str],
+    added_by_id: int,
+    added_by_name: str,
+    added_by_username: Optional[str],
+    bot_status: str,
+) -> bool:
+    """حفظ حدث الإضافة في قاعدة البيانات."""
+    try:
+        await _membership_ensure_table()
+        await DB.execute(
+            "INSERT INTO bot_addition_log "
+            "(chat_id, chat_title, chat_type, chat_username, "
+            " added_by_id, added_by_name, added_by_username, "
+            " bot_status, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat_id,
+                chat_title or '',
+                chat_type or '',
+                chat_username or '',
+                added_by_id,
+                added_by_name or '',
+                added_by_username or '',
+                bot_status or '',
+                TimeUtils.sql_iso(),
+            )
+        )
+        return True
+    except Exception as e:
+        logger.debug(
+            f"_membership_save_to_db failed: "
+            f"{type(e).__name__}: {e}")
+        return False
+
+
+def _membership_build_report_text(chat, user, new_status: str) -> str:
+    """بناء نص التقرير."""
+    is_channel = (chat.type == "channel")
+    chat_type_emoji = "📡" if is_channel else "👥"
+    chat_type_name = "قناة" if is_channel else "مجموعة"
+
+    chat_title = _membership_safe_html(chat.title, "بدون اسم")
+    chat_id = chat.id
+    chat_type = chat.type or 'unknown'
+    chat_username = getattr(chat, 'username', None)
+
+    adder_id = user.id
+    adder_name = _membership_safe_html(
+        getattr(user, 'full_name', None)
+        or getattr(user, 'first_name', None)
+        or "بدون اسم"
+    )
+    adder_username = getattr(user, 'username', None)
+    adder_username_display = (
+        f"@{adder_username}" if adder_username else "—"
+    )
+    adder_link = _membership_build_user_link(adder_id, adder_username)
+
+    new_status_label = (
+        "مشرف ✅" if new_status == "administrator"
+        else "عضو ✅"
+    )
+
+    text = (
+        f"🆕 <b>تمت إضافة البوت إلى {chat_type_name} جديدة!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{chat_type_emoji} <b>معلومات {chat_type_name}:</b>\n"
+        f"   • الاسم: <b>{chat_title}</b>\n"
+        f"   • المعرف: <code>{chat_id}</code>\n"
+        f"   • النوع: <code>{_membership_safe_html(chat_type)}</code>\n"
+        f"   • صلاحية البوت: {new_status_label}\n"
+    )
+
+    if chat_username:
+        clean_cu = str(chat_username).lstrip('@')
+        text += f"   • الرابط: https://t.me/{clean_cu}\n"
+
+    text += (
+        "\n"
+        f"👤 <b>من أضاف البوت:</b>\n"
+        f"   • الاسم: <b>{adder_name}</b>\n"
+        f"   • المعرف: {_membership_safe_html(adder_username_display)}\n"
+        f"   • الـ ID: <code>{adder_id}</code>\n"
+        f"   • رابط: {_membership_safe_html(adder_link)}\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 <b>الوقت:</b> {_membership_safe_html(TimeUtils.mecca_iso())}"
+    )
+    return text
+
+
+def _membership_build_keyboard(
+    chat, user
+) -> Optional[InlineKeyboardMarkup]:
+    """بناء الأزرار التفاعلية."""
+    rows = []
+    chat_username = getattr(chat, 'username', None)
+    if chat_username:
+        try:
+            clean = str(chat_username).lstrip('@')
+            if clean:
+                rows.append([InlineKeyboardButton(
+                    "🔗 فتح المحادثة",
+                    url=f"https://t.me/{clean}",
+                )])
+        except Exception:
+            pass
+
+    try:
+        user_username = getattr(user, 'username', None)
+        user_link = _membership_build_user_link(
+            user.id, user_username)
+        rows.append([InlineKeyboardButton(
+            "👤 معلومات المُضيف",
+            url=user_link,
+        )])
+    except Exception:
+        pass
+
+    if not rows:
+        return None
+    try:
+        return InlineKeyboardMarkup(rows)
+    except Exception:
+        return None
+
+
+async def _membership_try_get_photo(
+    bot, chat, chat_type: str
+) -> Optional[str]:
+    """محاولة جلب صورة الدردشة."""
+    try:
+        photo = getattr(chat, 'photo', None)
+        if photo is not None:
+            file_id = getattr(photo, 'big_file_id', None)
+            if file_id:
+                return file_id
+
+        if chat_type in ('group', 'supergroup'):
+            try:
+                full_chat = await bot.get_chat(chat.id)
+                photo = getattr(full_chat, 'photo', None)
+                if photo is not None:
+                    return getattr(photo, 'big_file_id', None)
+            except Exception as e:
+                logger.debug(
+                    f"_membership_try_get_photo get_chat: {e}")
+    except Exception as e:
+        logger.debug(f"_membership_try_get_photo: {e}")
+    return None
+
+
+async def handle_my_chat_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """
+    مراقبة إضافة البوت للمجموعات/القنوات.
+
+    يُرسل تقريراً لقناة السجل + يحفظ في DB.
+    """
+    result = update.my_chat_member
+    if result is None:
+        return
+
+    try:
+        old_status = result.old_chat_member.status
+        new_status = result.new_chat_member.status
+    except Exception as e:
+        logger.debug(f"my_chat_member status parse: {e}")
+        return
+
+    was_out = old_status in _MEMBERSHIP_OUT_STATUSES
+    is_in = new_status in _MEMBERSHIP_IN_STATUSES
+    if not (was_out and is_in):
+        logger.debug(
+            f"⏭️ my_chat_member ignored "
+            f"(old={old_status}, new={new_status})")
+        return
+
+    chat = result.chat
+    user = result.from_user
+    if not chat or not user:
+        return
+    if chat.type == "private":
+        return
+
+    if not _membership_should_send(chat.id):
+        return
+    _membership_prune_reports()
+
+    # حفظ في DB
+    try:
+        await _membership_save_to_db(
+            chat_id=chat.id,
+            chat_title=chat.title or '',
+            chat_type=chat.type or '',
+            chat_username=getattr(chat, 'username', None),
+            added_by_id=user.id,
+            added_by_name=(
+                getattr(user, 'full_name', None) or ''
+            ),
+            added_by_username=getattr(user, 'username', None),
+            bot_status=new_status,
+        )
+    except Exception as e:
+        logger.debug(f"membership save_to_db outer: {e}")
+
+    # جلب قناة السجل
+    log_channel = await _membership_get_log_channel()
+    if not log_channel:
+        logger.debug(
+            "No log channel configured; skipping report")
+        return
+
+    # بناء التقرير
+    try:
+        text = _membership_build_report_text(chat, user, new_status)
+    except Exception as e:
+        logger.error(
+            f"_membership_build_report_text: {e}", exc_info=True)
+        return
+
+    try:
+        keyboard = _membership_build_keyboard(chat, user)
+    except Exception:
+        keyboard = None
+
+    photo_id = None
+    try:
+        photo_id = await _membership_try_get_photo(
+            context.bot, chat, chat.type or '')
+    except Exception:
+        photo_id = None
+
+    sent = False
+
+    # محاولة 1: مع الصورة
+    if photo_id:
+        try:
+            await context.bot.send_photo(
+                chat_id=log_channel,
+                photo=photo_id,
+                caption=text,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            sent = True
+            logger.info(
+                f"📬 تقرير الإضافة (مع صورة) "
+                f"chat={chat.id}, adder={user.id}")
+        except Exception as e:
+            logger.debug(f"send_photo fallback: {e}")
+            sent = False
+
+    # محاولة 2: نصية مع أزرار
+    if not sent:
+        try:
+            await context.bot.send_message(
+                chat_id=log_channel,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+            sent = True
+            logger.info(
+                f"📬 تقرير الإضافة "
+                f"chat={chat.id}, adder={user.id}")
+        except Exception as e:
+            logger.error(
+                f"❌ فشل إرسال تقرير الإضافة: "
+                f"{type(e).__name__}: {e}")
+            sent = False
+
+    # محاولة 3: بدون أزرار
+    if not sent:
+        try:
+            await context.bot.send_message(
+                chat_id=log_channel,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+            logger.info(
+                f"📬 تقرير الإضافة (بدون أزرار) chat={chat.id}")
+        except Exception as e:
+            logger.error(
+                f"❌ فشل إرسال التقرير (بدون أزرار): "
+                f"{type(e).__name__}: {e}")
+
+
+def register_membership_handlers(application) -> None:
+    """
+    تسجيل ChatMemberHandler في Application.
+
+    استخدمها في main.py:
+        from handlers_callback import register_membership_handlers
+        register_membership_handlers(application)
+    """
+    try:
+        handler = ChatMemberHandler(
+            handle_my_chat_member,
+            ChatMemberHandler.MY_CHAT_MEMBER,
+        )
+        application.add_handler(handler, group=-1)
+        logger.info(
+            "✅ تم تسجيل ChatMemberHandler "
+            "(مراقبة إضافة البوت)")
+    except Exception as e:
+        logger.error(
+            f"❌ فشل تسجيل ChatMemberHandler: "
+            f"{type(e).__name__}: {e}",
+            exc_info=True)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -8808,6 +9285,26 @@ class CallbackHandlers:
 
 __all__ = [
     "CallbackHandlers",
+
+    # ✅ v1.0.1 (MEM-1..5) — مراقبة إضافة البوت
+    "handle_my_chat_member",
+    "register_membership_handlers",
+    "_membership_should_send",
+    "_membership_prune_reports",
+    "_membership_get_log_channel",
+    "_membership_save_to_db",
+    "_membership_ensure_table",
+    "_membership_build_report_text",
+    "_membership_build_keyboard",
+    "_membership_try_get_photo",
+    "_membership_safe_html",
+    "_membership_build_user_link",
+    "_membership_recent_reports",
+    "_membership_table_created",
+    "_MEMBERSHIP_DEBOUNCE_SECONDS",
+    "_MEMBERSHIP_DEBOUNCE_STALE_AGE",
+    "_MEMBERSHIP_OUT_STATUSES",
+    "_MEMBERSHIP_IN_STATUSES",
 
     "_invalidate_sec_auth_cache",
     "_invalidate_after_channel_change",
