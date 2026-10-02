@@ -107,6 +107,9 @@
     "admin_payment_logs": "📊 سجلات الدفع",
     "admin_grant_free": "🎁 منح مجاني",
 
+    "admin_metrics_live": "📊 Live Metrics",
+    "admin_metrics_reset": "♻️ إعادة تعيين",
+
     "analytics_title": "📊 <b>التحليلات المتقدمة</b>",
     "analytics_hint": "اختر التقرير الذي تريد عرضه:",
     "growth_30d_btn": "📈 نمو المستخدمين",
@@ -412,6 +415,7 @@
     "admin_panel": {
       "rows": [
         ["admin_analytics"],
+        ["admin_metrics_live"],
         ["admin_users", "admin_banned"],
         ["admin_unban_all"],
         ["admin_ban_user", "admin_unban_user"],
