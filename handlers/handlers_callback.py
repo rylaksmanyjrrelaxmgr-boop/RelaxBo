@@ -2,48 +2,35 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.6.0-stable)
+handlers_callback.py - معالج الأزرار (v9.6.0-final)
 =====================================================================
+🆕 v9.6.0-final — الإصدار المستقر النهائي:
+    ✅ Patch-1: سقف backoff يصل إلى _SEC_AUTH_NEG_MAX (60s)
+       min(fails+1, 6) بدل 5 → 6 مستويات
+    ✅ Patch-2: prune الأقفال في _show_main_menu_inline
+       → تنظيف فعّال حتى للحمل المنخفض (<500 callback)
+    ✅ Patch-3: حذف 'delete_penalty_dur' من _back_map
+       (لا مسار يصل إليه — كود نظيف)
+    ✅ Patch-4: تنظيف إضافي في _show_groups_list
+       → _prune_sec_auth_cache + _prune_kicked_notify_state
+
 🆕 v9.6.0-stable — الإصدار المستقر:
-    ✅ M2-10: استبدال WeakValueDictionary بـ Dict عادي + prune ذكي
-       → إزالة السباق النظري على الأقفال بشكل نهائي
-    ✅ M3-10: exponential backoff للكاش السلبي (3s → 48s)
-       → تجربة مستخدم أفضل + حماية DoS أقوى
+    ✅ M2-10: استبدال WeakValueDictionary بـ Dict + prune ذكي
+    ✅ M3-10: exponential backoff للكاش السلبي (3s → 60s)
     ✅ N3-10: _cleanup_user_data في _show_main_menu_inline
-       → تنظيف فعّال لمفاتيح last_cb_* و ars_*
-    ✅ M4-10: logger.info → logger.debug في _publish_all عند الإلغاء
-       → log أنظف عند shutdown
+    ✅ M4-10: logger.debug بدل logger.info في _publish_all
     ✅ M1-10: _prune_kicked_notify_state عند كل قائمة رئيسية
-       → تنظيف منتظم بلا JobQueue
     ✅ N5-10: translate بدل re.sub في _show_post_list
-       → أسرع 5-10× لمعاينة المنشورات
     ✅ N7-10: فحص نوع bot_data في _prune_kicked_notify_state
     ✅ N8-10: delete_penalty في _back_map احتياطاً
     ✅ N9-10: تعليق وقائي sec_penalty_durations
 
 🆕 v9.5.10 — إصلاحات المراجعة النهائية:
-    ✅ M4-9: _SEC_AUTH_NEG_TTL 5.0 → 30.0 (تم استبداله بـ backoff)
-    ✅ N6-9: setdefault للأقفال (تم استبداله بـ Dict + prune)
-    ✅ NEW-1-9: logger.info → logger.debug في unhandled param
-    ✅ M3-9: تصحيح تعليق _invalidate_sec_auth_cache
-
+    ✅ M4-9, N6-9, NEW-1-9, M3-9
 🆕 v9.5.9 — إصلاحات المراجعة النقدية:
-    ✅ C-NEW-2: كاش سلبي قصير في _check_sec_auth
-    ✅ C-NEW-3: إلغاء نظيف للمهام في _publish_all
-    ✅ M-NEW-2/3: _match_cb() helper
-    ✅ M-NEW-4/5: _BACK_MAP في _show_penalty_*
-    ✅ N-NEW-1: تنظيف دوري لـ _kicked_notify_*
-    ✅ N-NEW-3: تعقيم \x00-\x1f في معاينة المنشور
-    ✅ N-NEW-6: حذف الكود الميت
-    ✅ N-NEW-7: logging عند تصفير _cb_user_counter
-    ✅ NEW-Z: message_id check في _render_security_two_phase
-
-🆕 v9.5.8-final — تصحيح بعد مراجعة JSON:
-    ✅ FIX-4: _handle_admin يقبل النص الحرفي + ثابت CB معاً
-    ❌ إلغاء FIX-1/2/3 — الأزرار موجودة أصلاً في admin_panel
-
-🆕 v9.5.7 — إصلاحات مراجعة v9.5.6:
-    ✅ C1-EXT, WEAK-LOCKS, DEBOUNCE-FIX, COUNTER-CLEANUP
+    ✅ C-NEW-2, C-NEW-3, M-NEW-2/3/4/5, N-NEW-1/3/6/7, NEW-Z
+🆕 v9.5.8-final — FIX-4
+🆕 v9.5.7 — C1-EXT, WEAK-LOCKS, DEBOUNCE-FIX, COUNTER-CLEANUP
 🆕 v9.5.6 — إصلاحات تدقيق المراجعة الشاملة
 🆕 v9.5.5 — إشعار المالك عند طرد البوت
 🆕 v9.5.4 — إصلاح Regression + تحسينات
@@ -858,7 +845,8 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
     ✅ v9.5.6 (NEW-2): لا يُخزّن False عند فشل الشبكة.
     ✅ v9.5.9 (C-NEW-2): كاش سلبي قصير عند فشل API.
     ✅ v9.5.10 (M4-9): TTL الكاش السلبي.
-    ✅ v9.6.0 (M3-10): exponential backoff (3s → 48s).
+    ✅ v9.6.0 (M3-10): exponential backoff (3s → 60s).
+    ✅ v9.6.0-final (Patch-1): 6 مستويات للوصول للسقف.
     ✅ v9.6.0 (M2-10): Dict عادي + setdefault آمن.
     """
     if chat_id is None:
@@ -918,7 +906,9 @@ async def _check_sec_auth(context, user_id: int, chat_id: int) -> bool:
                     fails = int(prev[1])
                 except Exception:
                     fails = 0
-            new_fails = min(fails + 1, 5)
+            # ✅ v9.6.0-final (Patch-1): 6 بدل 5 للوصول إلى السقف (60s)
+            # fails=6 → 3×2⁵=96s مقيداً بـ _SEC_AUTH_NEG_MAX=60
+            new_fails = min(fails + 1, 6)
             ttl = min(
                 _SEC_AUTH_NEG_BASE * (2 ** (new_fails - 1)),
                 _SEC_AUTH_NEG_MAX,
@@ -2229,6 +2219,7 @@ class CallbackHandlers:
     # ═════════════════════════════════════════════════════════════
     # القائمة الرئيسية
     # ✅ v9.6.0 (N3-10): _cleanup_user_data + _prune_kicked_notify_state
+    # ✅ v9.6.0-final (Patch-2): + _prune_sec_auth_cache
     # ═════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2242,6 +2233,12 @@ class CallbackHandlers:
             # ✅ v9.6.0 (M1-10): نظّف kicked_notify عند العودة للقائمة
             try:
                 _prune_kicked_notify_state(context, time.monotonic())
+            except Exception:
+                pass
+            # ✅ v9.6.0-final (Patch-2): نظّف كاشات المصادقة أيضاً
+            # (للحمل المنخفض حيث لا يصل العدّاد لـ 500)
+            try:
+                _prune_sec_auth_cache(time.monotonic())
             except Exception:
                 pass
 
@@ -3837,6 +3834,15 @@ class CallbackHandlers:
 
     @staticmethod
     async def _show_groups_list(update, context, query, user_id, lang):
+        # ✅ v9.6.0-final (Patch-4): تنظيف دوري إضافي عند عرض قائمة المجموعات
+        # (يضمن التنظيف حتى لو لم يعد المستخدم للقائمة الرئيسية)
+        try:
+            now_t = time.monotonic()
+            _prune_sec_auth_cache(now_t)
+            _prune_kicked_notify_state(context, now_t)
+        except Exception:
+            pass
+
         groups = await DB.get_user_groups(user_id)
         if not groups:
             back = KeyboardFactory.get_text("back", lang)
@@ -5266,6 +5272,7 @@ class CallbackHandlers:
         """
         ✅ v9.5.9 (M-NEW-5): زر رجوع ديناميكي حسب setting_key.
         ✅ v9.6.0 (N8-10): delete_penalty في الخريطة احتياطاً.
+        ✅ v9.6.0-final (Patch-3): حُذف 'delete_penalty_dur' (زائد).
         """
         penalty_types = [
             (await _trans('mute_btn', lang, "🔇"), "mute"),
@@ -5279,13 +5286,12 @@ class CallbackHandlers:
             callback = f"sec_set_{setting_key}:{chat_id}:{ptype}"
             kb.append([InlineKeyboardButton(
                 label, callback_data=callback)])
-        # ✅ v9.6.0 (N8-10): delete_penalty احتياطاً
+        # ✅ v9.6.0-final (Patch-3): delete_penalty فقط (حُذف delete_penalty_dur)
         _back_map = {
             'antiflood_penalty':  f"sec_antiflood_settings:{chat_id}",
             'night_action':       f"sec_night_settings:{chat_id}",
             'violation_penalty':  f"sec_violation_settings:{chat_id}",
             'delete_penalty':     f"sec_del_pen:{chat_id}",
-            'delete_penalty_dur': f"sec_del_pen:{chat_id}",
         }
         back_cb = _back_map.get(
             setting_key, f"{CB.GRP_SET}:{chat_id}")
