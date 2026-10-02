@@ -2,9 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.5.4)
+handlers_callback.py - معالج الأزرار (v9.5.5)
 =====================================================================
-🆕 v9.5.4 — إصلاح Regression + تحسينات:
+🆕 v9.5.5 — إشعار المالك عند طرد البوت:
+    ✅ NEW: _notify_channel_owner_kicked()
+       → يُرسل رسالة لمالك القناة عند طرد البوت منها
+       → يُستدعى من _publish_single عند Forbidden
+       → يعرض اسم القناة + خطوات إعادة التفعيل
     ✅ BUG-1: إزالة _html.escape من _show_post_list (النص plain
        بدون parse_mode='HTML' كان يعرض &lt; &gt; حرفياً)
     ✅ OBS-1: settings.setdefault('_ts', ...) في _handle_auto_reply
@@ -413,6 +417,62 @@ async def _render_auto_reply_menu(
                 bot=context.bot)
         except Exception:
             pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v9.5.5 (NEW): إشعار مالك القناة عند طرد البوت
+# ═════════════════════════════════════════════════════════════════════
+
+async def _notify_channel_owner_kicked(bot, ch_db_id: int) -> None:
+    """
+    ✅ v9.5.5: يُرسل رسالة لمالك القناة عند طرد البوت منها.
+
+    يُستدعى من `_publish_single` داخل معالج `Forbidden`.
+
+    الخطوات:
+        1) جلب user_id و channel_name من user_channels
+        2) إرسال رسالة عربية واضحة بخطوات إعادة التفعيل
+        3) تسجيل النجاح/الفشل بدون كسر سلسلة النشر
+    """
+    try:
+        row = await DB.fetchone(
+            "SELECT user_id, channel_name FROM user_channels WHERE id=?",
+            (ch_db_id,)
+        )
+        if not row:
+            return
+        rd = _row_to_dict(row) or {}
+        owner_id = rd.get('user_id')
+        ch_name = rd.get('channel_name') or '?'
+
+        if not owner_id:
+            return
+
+        safe_name = _html.escape(str(ch_name))
+        text = (
+            "⚠️ <b>تنبيه مهم</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"تم إخراج البوت من قناتك:\n"
+            f"📡 <b>{safe_name}</b>\n\n"
+            "🔄 <b>لإعادة التفعيل:</b>\n"
+            "1️⃣ أضف البوت للقناة مجدداً\n"
+            "2️⃣ امنحه صلاحية النشر\n"
+            "3️⃣ اضغط على زر إعادة التفعيل في البوت\n\n"
+            "ℹ️ لن يحاول البوت النشر في هذه القناة حتى تُعيد تفعيلها."
+        )
+
+        try:
+            await safe_send(
+                bot, owner_id, text, parse_mode='HTML')
+            logger.info(
+                f"📬 تم إشعار المالك {owner_id} بطرد البوت "
+                f"من القناة {ch_db_id}")
+        except Exception as e:
+            logger.debug(
+                f"_notify_channel_owner_kicked send({owner_id}): {e}")
+    except Exception as e:
+        logger.debug(
+            f"_notify_channel_owner_kicked({ch_db_id}): {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -3595,6 +3655,14 @@ class CallbackHandlers:
                     await DB.increment_post_fail(post_id)
                 except Exception:
                     pass
+            # ✅ v9.5.5: إشعار مالك القناة بالطرد
+            try:
+                _task = asyncio.create_task(
+                    _notify_channel_owner_kicked(bot, ch_db_id))
+                ACTIVE_TASKS.add(_task)
+                _task.add_done_callback(ACTIVE_TASKS.discard)
+            except Exception:
+                pass
             return False
         except Exception as e:
             logger.error(f"❌ publish: {e}", exc_info=True)
@@ -7832,6 +7900,8 @@ __all__ = [
     "_invalidate_post_count_cache",
     # ✅ v9.5.3 (C1): الدالة الموحّدة الجديدة
     "_render_auto_reply_menu",
+    # ✅ v9.5.5 (NEW): إشعار مالك القناة بالطرد
+    "_notify_channel_owner_kicked",
 
     # ثوابت
     "_ANALYTICS_ALIASES",
