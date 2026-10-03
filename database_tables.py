@@ -13,6 +13,12 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
        - الإصلاح: الجدول الآن يُنشأ من هذا الملف بأسلوب موحّد
          عبر SQLite/PostgreSQL/MySQL
   ✅ EXPECTED_INDEX_COUNT: 72 → 73 (فهرس bot_addition_log)
+  ✅ دوال التنظيف الدوري (تُستدعى من main.py v5.5.21):
+       - _cleanup_old_admin_logs_postgres
+       - _cleanup_old_admin_logs_sqlite
+       - _cleanup_old_admin_logs_mysql
+       - ADMIN_LOGS_RETENTION_DAYS = 30
+       - ADMIN_LOGS_MAX_ROWS = 5000
 
 🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS):
   ✅ CURRENT_SCHEMA_VERSION: 20 → 21
@@ -20,8 +26,6 @@ database_tables.py — إنشاء الجداول والفهارس لكل قوا�
             • contest_type   (كان موجوداً، نُبقيه للتوافق)
             • question       (جديد — لمسابقات quiz)
             • correct_answer (جديد — لمسابقات quiz)
-       - الإصلاح: migration تلقائي يُضيف الأعمدة للقواعد القديمة
-       - المتوقع: مسابقات quiz تعمل بعد إعادة التشغيل
 
 🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN — إصلاح جذري)
 🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
@@ -539,6 +543,7 @@ def _is_advanced_index(cols: str) -> bool:
 
 # =====================================================================
 # ✅ v7.6.18/v7.6.20: تنظيف admin_logs القديمة + حد أقصى للصفوف
+# (يُستدعى أيضاً من main.py v5.5.21 دورياً)
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
@@ -2590,7 +2595,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.23: bot_addition_log — سجل إضافة البوت للمجموعات
+    # ✅ v7.6.23: bot_addition_log — سجل إضافة البوت (SQLite)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_addition_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2665,7 +2670,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
+    # ✅ v7.6.22: contests — مع question/correct_answer
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3316,7 +3321,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
+    # ✅ v7.6.22: contests — مع question/correct_answer
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id SERIAL PRIMARY KEY,
@@ -3981,7 +3986,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.22: contests — مع question/correct_answer (للتركيبات الجديدة)
+        # ✅ v7.6.22: contests — مع question/correct_answer
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -4280,4 +4285,8 @@ __all__ = [
     "ADMIN_LOGS_MAX_ROWS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
     "_adapt_cols_for_db",
+    # ✅ v7.6.23: دوال التنظيف (تُستدعى من main.py v5.5.21)
+    "_cleanup_old_admin_logs_postgres",
+    "_cleanup_old_admin_logs_sqlite",
+    "_cleanup_old_admin_logs_mysql",
 ]
