@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.0.0)
+database_refactor_mixin.py - استخراج الدوال الكبيرة من database.py (v1.1.0)
 ================================================================================
 🎯 الهدف:
     تقليل حجم database.py عبر نقل الدوال الضخمة إلى ملف منفصل، مع
     الحفاظ على نفس السلوك 100% عبر نمط Mixin.
+
+🆕 v1.1.0 (PG-NO-MV-FALLBACK):
+  ✅ ADD-1: CHANNELS_TO_PUBLISH_SQL_PG_NO_MV — استعلام PG حقيقي بدون MV
+           (يُستخدم قبل bootstrap أو عند فشل/تعطيل mv_active_user_limits).
+  ✅ ADD-2: تصدير الثابت في __all__.
+
+🆕 v1.0.0:
+  ✅ استخراج Pool Factories + Expire Penalties + Bigint conversion
+  ✅ 3 استعلامات get_channels_to_publish (PG / MySQL / SQLite)
 
 📦 المحتوى:
     ═══ ثوابت Module-level ═══
@@ -15,7 +24,8 @@ database_refactor_mixin.py - استخراج الدوال الكبيرة من dat
       - DEFAULT_PUBLISH_INTERVAL_MINUTES
 
     ═══ ثوابت SQL (get_channels_to_publish) ═══
-      - CHANNELS_TO_PUBLISH_SQL_PG
+      - CHANNELS_TO_PUBLISH_SQL_PG          (يستخدم MV)
+      - CHANNELS_TO_PUBLISH_SQL_PG_NO_MV    ← 🆕 v1.1.0
       - CHANNELS_TO_PUBLISH_SQL_MYSQL
       - CHANNELS_TO_PUBLISH_SQL_SQLITE
 
@@ -174,36 +184,52 @@ database_refactor_mixin.py - استخراج الدوال الكبيرة من dat
                 logger.info(f"✅ تحويل {converted} عمود إلى BIGINT")
             return converted
 
-    6) استبدل جسم get_channels_to_publish بالاستعلامات الثابتة:
+    6) استبدل جسم get_channels_to_publish بالاستعلامات الثابتة
+       (انظر 🆕 v1.1.0 لمعالجة race condition الصحيح):
+
         async def get_channels_to_publish(self, limit: int = 20) -> List[Dict]:
             from database_refactor_mixin import (
                 CHANNELS_TO_PUBLISH_SQL_PG,
+                CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,   # ← 🆕
                 CHANNELS_TO_PUBLISH_SQL_MYSQL,
                 CHANNELS_TO_PUBLISH_SQL_SQLITE,
             )
             now = TimeUtils.utc_now()
             owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
-            if USE_POSTGRES and self._mv_available:
-                now_mono = time.monotonic()
-                if (now_mono - self._mv_last_refresh_mono
-                        >= self._mv_refresh_cooldown):
-                    try:
-                        self._spawn_bg_task(self._maybe_refresh_mv())
-                    except Exception as e:
-                        logger.debug(f"MV refresh spawn: {e}")
+            # ═══ PostgreSQL ═══
+            if USE_POSTGRES:
+                if self._mv_available:
+                    now_mono = time.monotonic()
+                    if (now_mono - self._mv_last_refresh_mono
+                            >= self._mv_refresh_cooldown):
+                        try:
+                            self._spawn_bg_task(self._maybe_refresh_mv())
+                        except Exception as e:
+                            logger.debug(f"MV refresh spawn: {e}")
 
-            if USE_POSTGRES and self._mv_available:
+                    # Fast path: MV جاهز
+                    return await self.fetchall(
+                        CHANNELS_TO_PUBLISH_SQL_PG,
+                        (owner_id, now, limit),
+                    )
+
+                # Fallback: MV غير جاهز بعد (bootstrap) — لا نسقط
+                # أبداً إلى SQLite query على PostgreSQL
                 return await self.fetchall(
-                    CHANNELS_TO_PUBLISH_SQL_PG,
-                    (owner_id, now, limit),
+                    CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
+                    (now, owner_id, now, limit),
                 )
+
+            # ═══ MySQL ═══
             elif USE_MYSQL:
                 now_str = now.strftime("%Y-%m-%d %H:%M:%S")
                 return await self.fetchall(
                     CHANNELS_TO_PUBLISH_SQL_MYSQL,
                     (now_str, owner_id, now_str, limit),
                 )
+
+            # ═══ SQLite ═══
             else:
                 return await self.fetchall(
                     CHANNELS_TO_PUBLISH_SQL_SQLITE,
@@ -288,7 +314,7 @@ _DT_EXPRESSION_DEFAULTS = frozenset({
 
 
 # =====================================================================
-# 3) SQL Queries — get_channels_to_publish (3 استعلامات ثابتة)
+# 3) SQL Queries — get_channels_to_publish (4 استعلامات ثابتة)
 # =====================================================================
 #
 # ملاحظة: {MAX_POST_FAIL_COUNT} يُستبدل عند تحميل الملف.
@@ -297,7 +323,7 @@ _DT_EXPRESSION_DEFAULTS = frozenset({
 # =====================================================================
 
 # ═══════════════════════════════════════════════════════════════════
-# PostgreSQL — يستخدم MV (mv_active_user_limits) + LATERAL
+# PostgreSQL — Fast path: يستخدم MV (mv_active_user_limits) + LATERAL
 # ═══════════════════════════════════════════════════════════════════
 CHANNELS_TO_PUBLISH_SQL_PG = f"""
     SELECT uc.id, uc.channel_id, uc.user_id,
@@ -353,6 +379,83 @@ CHANNELS_TO_PUBLISH_SQL_PG = f"""
         sch.next_publish_date, uc.created_at
     ) ASC
     LIMIT $3
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v1.1.0: PostgreSQL — Fallback بدون MV (يُستخدم قبل bootstrap
+#            أو عند فشل/تعطيل mv_active_user_limits)
+#
+#            الهدف: منع السقوط إلى CHANNELS_TO_PUBLISH_SQL_SQLITE
+#            عند USE_POSTGRES=True و _mv_available=False، مما كان
+#            يسبب بطئاً (~4.5s) بسبب مسح CTE لجدول subscriptions.
+#
+# ⚠️ ترتيب البارامترات مختلف عن _SQL_PG:
+#     _SQL_PG      → ($1=owner_id, $2=now, $3=limit)
+#     _SQL_PG_NO_MV → ($1=now, $2=owner_id, $3=now, $4=limit)
+# ═══════════════════════════════════════════════════════════════════
+CHANNELS_TO_PUBLISH_SQL_PG_NO_MV = f"""
+    SELECT uc.id, uc.channel_id, uc.user_id,
+           u.auto_publish, u.auto_recycle,
+           COALESCE(pc.published_count, 0)
+               AS published_count
+    FROM user_channels uc
+    JOIN users u ON uc.user_id = u.user_id
+    LEFT JOIN schedule sch
+        ON uc.id = sch.channel_db_id
+    LEFT JOIN (
+        SELECT s.user_id,
+               MAX(p.max_channels) AS max_channels,
+               MAX(p.max_posts) AS max_posts
+        FROM subscriptions s
+        JOIN plans p ON s.plan_id = p.id
+        WHERE s.status = 'active' AND s.end_date > $1
+          AND p.is_active = 1
+        GROUP BY s.user_id
+    ) a ON uc.user_id = a.user_id
+    LEFT JOIN (
+        SELECT user_id, COUNT(*) AS channel_count
+        FROM user_channels
+        WHERE banned = 0
+        GROUP BY user_id
+    ) cc ON uc.user_id = cc.user_id
+    LEFT JOIN (
+        SELECT channel_db_id,
+               COUNT(*) FILTER (
+                   WHERE published = 0
+                     AND (fail_count IS NULL
+                          OR fail_count < {MAX_POST_FAIL_COUNT})
+               ) AS publishable_unpublished_count,
+               COUNT(*) FILTER (
+                   WHERE published = 1
+               ) AS published_count
+        FROM posts
+        GROUP BY channel_db_id
+    ) pc ON uc.id = pc.channel_db_id
+    WHERE uc.banned = 0 AND u.banned = 0
+      AND u.auto_publish = 1
+      AND (a.user_id IS NOT NULL OR uc.user_id = $2)
+      AND (sch.next_publish_date IS NULL
+           OR sch.next_publish_date <= $3)
+      AND (COALESCE(
+               pc.publishable_unpublished_count, 0
+           ) > 0
+           OR (u.auto_recycle = 1
+               AND COALESCE(
+                   pc.published_count, 0
+               ) > 0))
+      AND (a.user_id IS NULL
+           OR COALESCE(
+               cc.channel_count, 0
+           ) <= a.max_channels)
+      AND (a.user_id IS NULL
+           OR COALESCE(
+               pc.publishable_unpublished_count, 0
+           ) <= a.max_posts)
+    ORDER BY COALESCE(
+        sch.next_publish_date, uc.created_at
+    ) ASC
+    LIMIT $4
 """
 
 
@@ -1108,6 +1211,7 @@ __all__ = [
     "PENALTY_ARCHIVE_RETENTION_DAYS",
     # SQL queries
     "CHANNELS_TO_PUBLISH_SQL_PG",
+    "CHANNELS_TO_PUBLISH_SQL_PG_NO_MV",   # 🆕 v1.1.0
     "CHANNELS_TO_PUBLISH_SQL_MYSQL",
     "CHANNELS_TO_PUBLISH_SQL_SQLITE",
     # Mixin
