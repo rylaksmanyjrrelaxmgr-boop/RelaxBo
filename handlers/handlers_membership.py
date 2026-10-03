@@ -2,56 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.1-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.2-final)
 =====================================================================
-🆕 v1.2.1-final — إصلاح نوع added_at:
-    ✅ FIX-8: استخدام TimeUtils.utc_now() بدلاً من sql_iso()
-              لحل خطأ asyncpg:
+🆕 v1.2.2-final — إصلاح نهائي وحاسم لـ added_at:
+    ✅ FIX-9: تحويل صريح للتاريخ إلى datetime قبل الإرسال
+              (بأي حال، حتى لو أعاد TimeUtils قيمة غير متوقعة)
+    ✅ FIX-10: استيراد datetime صراحة في أعلى الملف
+    ✅ يحل نهائياً خطأ asyncpg:
               "expected datetime.date or datetime.datetime
                instance, got 'str'"
-              (database.py::_adapt_params يحوّل datetime تلقائياً
-               حسب نوع القاعدة)
+
+🆕 v1.2.1-final — إصلاح نوع added_at:
+    ✅ FIX-8: استخدام TimeUtils.utc_now() بدلاً من sql_iso()
 
 🆕 v1.2.0-final — إصلاح PostgreSQL (AUTOINCREMENT → SERIAL):
-    ✅ FIX-4: استخدام SQL صحيح لكل قاعدة بيانات
-              (SQLite: AUTOINCREMENT, PG: BIGSERIAL, MySQL: AUTO_INCREMENT)
+    ✅ FIX-4: SQL صحيح لكل قاعدة بيانات
     ✅ FIX-5: الاعتماد على database_tables.py لإنشاء الجدول
-              (إنشاء الجدول من database_tables.py أصبح المسار الأساسي)
     ✅ FIX-6: _ensure_table_exists أصبحت no-op لـ PostgreSQL/MySQL
-              (لأن database_tables.py تولّى المسؤولية)
-    ✅ FIX-7: الإبقاء على الإنشاء لـ SQLite فقط (للتوافق)
+    ✅ FIX-7: الإبقاء على الإنشاء لـ SQLite فقط
 
 🆕 v1.1.0-final — إصلاح قناة السجل:
     ✅ FIX-1: استخدام قناة السجل الخاصة بالمجموعة أولاً
-              (fallback للقناة العامة) — يتوافق مع سلوك
-              handlers_callback._handle_log_channel
     ✅ FIX-2: دالة جديدة _get_effective_log_channel(chat_id)
-              4 طرق fallback بالترتيب الصحيح
-    ✅ FIX-3: عرض "النطاق" في التقرير (خاصة/عامة)
+    ✅ FIX-3: عرض "النطاق" في التقرير
 
-🆕 v1.0.1-final — إصلاحات بعد المراجعة:
-    ✅ حذف استيراد CONFIG غير المستخدم
-    ✅ حذف _build_chat_link (dead code)
-    ✅ إنشاء جدول bot_addition_log مرة واحدة فقط
-    ✅ تحسين _get_log_channel (retry أقل)
-    ✅ تحسين _try_get_chat_photo (skip للقنوات بدون صورة)
+🆕 v1.0.1-final — إصلاحات بعد المراجعة
 
-🆕 v1.0.0-final — الإصدار الأول:
-    ✅ إرسال تقرير لقناة السجل عند إضافة البوت لمجموعة/قناة
-    ✅ يحتوي على: من أضاف، معلومات الدردشة، الوقت
-    ✅ Debounce لمنع التكرار (30 ثانية)
-    ✅ دعم المجموعات والقنوات (supergroups, channels, groups)
-    ✅ حفظ في قاعدة البيانات (جدول bot_addition_log)
-    ✅ إرفاق صورة الدردشة إن وُجدت
-    ✅ أزرار تفاعلية (فتح المحادثة + معلومات المضيف)
-    ✅ معالجة الأخطاء بشكل شامل
-    ✅ تنظيف دوري للـ debounce cache
+🆕 v1.0.0-final — الإصدار الأول
 =====================================================================
 """
 
 import html
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 
 from telegram import (
@@ -90,14 +74,11 @@ _table_created: bool = False
 
 async def _ensure_table_exists() -> None:
     """
-    ✅ v1.2.0 (FIX-4 + FIX-5 + FIX-6 + FIX-7): إنشاء جدول bot_addition_log.
+    ✅ v1.2.0 (FIX-4..7): إنشاء جدول bot_addition_log.
 
-    ملاحظة مهمة:
-      - PostgreSQL/MySQL: الجدول يُنشأ تلقائياً من database_tables.py
-        → نتحقق فقط من وجوده (بدون إنشاء) — no-op تقريباً
-      - SQLite: نُبقيه كـ fallback (للتوافق مع البيئات القديمة)
-
-    هذا يمنع خطأ AUTOINCREMENT على PostgreSQL نهائياً.
+    - PostgreSQL/MySQL: الجدول يُنشأ تلقائياً من database_tables.py
+      → نتحقق فقط من وجوده (بدون إنشاء) — no-op تقريباً
+    - SQLite: نُبقيه كـ fallback (للتوافق)
     """
     global _table_created
     if _table_created:
@@ -105,11 +86,10 @@ async def _ensure_table_exists() -> None:
 
     try:
         # ═══════════════════════════════════════════════════════════
-        # ✅ FIX-6: PostgreSQL/MySQL — الاعتماد على database_tables.py
+        # PostgreSQL/MySQL — الاعتماد على database_tables.py
         # ═══════════════════════════════════════════════════════════
         if getattr(DB, 'USE_POSTGRES', False) or \
            getattr(DB, 'USE_MYSQL', False):
-            # التحقق فقط من وجود الجدول
             try:
                 if getattr(DB, 'USE_POSTGRES', False):
                     exists = await DB.fetchval(
@@ -135,8 +115,6 @@ async def _ensure_table_exists() -> None:
                         "⚠️ bot_addition_log غير موجود على "
                         f"{'PostgreSQL' if getattr(DB, 'USE_POSTGRES', False) else 'MySQL'} "
                         "— تأكد من رفع database_tables.py المُصحَّح")
-                    # لا نُنشئ هنا — نتركها لـ database_tables.py
-                    # نُعلّم كـ "فشل مؤقت" حتى نحاول مرة أخرى
                     return
             except Exception as e:
                 logger.debug(
@@ -144,7 +122,7 @@ async def _ensure_table_exists() -> None:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # ✅ FIX-7: SQLite — الإنشاء المحلي (للتوافق)
+        # SQLite — الإنشاء المحلي (للتوافق)
         # ═══════════════════════════════════════════════════════════
         await DB.execute(
             "CREATE TABLE IF NOT EXISTS bot_addition_log ("
@@ -166,25 +144,17 @@ async def _ensure_table_exists() -> None:
     except Exception as e:
         logger.debug(
             f"_ensure_table_exists: {type(e).__name__}: {e}")
-        # لا نُعلّم كمنشأ حتى نجرب مجدداً في المرة التالية
 
 
 # ═════════════════════════════════════════════════════════════════════
 # Debounce — لمنع إرسال تقريرين لنفس الحدث
 # ═════════════════════════════════════════════════════════════════════
 
-# مفتاح: chat_id → آخر وقت إرسال (time.monotonic)
 _recent_reports: Dict[int, float] = {}
 
 
 def _should_send(chat_id: int) -> bool:
-    """
-    يمنع إرسال تقرير مكرر لنفس الدردشة خلال 30 ثانية.
-
-    Returns:
-        True إذا يجب الإرسال (وتُحدَّث العلامة الزمنية)
-        False إذا كان الحدث حديثاً (debounced)
-    """
+    """يمنع إرسال تقرير مكرر لنفس الدردشة خلال 30 ثانية."""
     if chat_id is None:
         return False
     now = time.monotonic()
@@ -199,12 +169,7 @@ def _should_send(chat_id: int) -> bool:
 
 
 def _prune_recent_reports() -> int:
-    """
-    تنظيف الإدخالات القديمة من cache.
-
-    Returns:
-        عدد الإدخالات المحذوفة
-    """
+    """تنظيف الإدخالات القديمة من cache."""
     removed = 0
     try:
         now = time.monotonic()
@@ -249,6 +214,89 @@ def _build_user_link(
         return f"tg://user?id={user_id}"
 
 
+# ═════════════════════════════════════════════════════════════════════
+# ✅ FIX-9: تحويل صريح للتاريخ إلى datetime
+# ═════════════════════════════════════════════════════════════════════
+
+def _normalize_datetime(value: Any) -> datetime:
+    """
+    ✅ v1.2.2 (FIX-9): تحويل صريح لأي قيمة زمنية إلى datetime.
+
+    الغرض: ضمان أن `added_at` دائماً datetime، مهما كان نوع المدخل:
+      - datetime              → يُعاد كما هو (بعد إزالة tzinfo)
+      - str (ISO / SQL)       → يُحلَّل إلى datetime
+      - None / قيمة غريبة     → يُرجع datetime.utcnow()
+
+    هذا يمنع خطأ asyncpg:
+      "expected datetime.date or datetime.datetime instance, got 'str'"
+    """
+    try:
+        # ── الحالة 1: datetime صريح ──
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                try:
+                    value = value.astimezone(timezone.utc).replace(
+                        tzinfo=None)
+                except Exception:
+                    value = value.replace(tzinfo=None)
+            return value
+
+        # ── الحالة 2: string (ISO / SQL) ──
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return datetime.now(timezone.utc).replace(tzinfo=None)
+
+            # محاولة استخدام TimeUtils.safe_parse_iso
+            try:
+                if hasattr(TimeUtils, 'safe_parse_iso'):
+                    parsed = TimeUtils.safe_parse_iso(s)
+                    if isinstance(parsed, datetime):
+                        return parsed
+            except Exception:
+                pass
+
+            # محاولات يدوية
+            for fmt in (
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d",
+            ):
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+
+            # محاولة fromisoformat
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except (ValueError, TypeError):
+                pass
+
+            # fallback: now
+            return datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # ── الحالة 3: قيمة غير متوقعة ──
+        # محاولة استخدام TimeUtils.utc_now أولاً
+        try:
+            if hasattr(TimeUtils, 'utc_now'):
+                dt = TimeUtils.utc_now()
+                if isinstance(dt, datetime):
+                    return dt
+        except Exception:
+            pass
+
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    except Exception as e:
+        logger.debug(f"_normalize_datetime failed: {e}")
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 # ✅ FIX-2: دالة جديدة — قناة السجل الفعّالة (خاصة → عامة)
 async def _get_effective_log_channel(
     chat_id: int
@@ -261,9 +309,6 @@ async def _get_effective_log_channel(
         2. قناة السجل العامة عبر DB.get_log_channel()
         3. قناة السجل العامة عبر DB.get_setting()
         4. استعلام مباشر من settings table
-
-    Args:
-        chat_id: معرّف الدردشة (المجموعة/القناة)
 
     Returns:
         tuple (channel_or_None, scope)
@@ -350,17 +395,20 @@ async def _save_addition_to_db(
     حفظ حدث الإضافة في قاعدة البيانات.
 
     ✅ v1.2.0: يعتمد على database_tables.py لإنشاء الجدول.
-    ✅ v1.2.1 (FIX-8): يُرسل كائن datetime (لا string) لـ added_at.
-
-    السبب: database.py::_adapt_params يحوّل datetime تلقائياً:
-      - PostgreSQL → TIMESTAMP
-      - MySQL      → "YYYY-MM-DD HH:MM:SS"
-      - SQLite     → "YYYY-MM-DD HH:MM:SS"
-    أما إذا أرسلنا string جاهزاً، فإن asyncpg يرفضه على PostgreSQL.
+    ✅ v1.2.2 (FIX-9): يمرر datetime دائماً لـ added_at
+                       (بعد التحويل الصريح).
     """
     try:
         # ✅ v1.0.1: إنشاء الجدول مرة واحدة (no-op لـ PG/MySQL)
         await _ensure_table_exists()
+
+        # ✅ v1.2.2 (FIX-9): تحويل صريح للتاريخ
+        #    أي قيمة → datetime مضمونة
+        try:
+            now_raw = TimeUtils.utc_now()
+        except Exception:
+            now_raw = None
+        added_at_value = _normalize_datetime(now_raw)
 
         await DB.execute(
             "INSERT INTO bot_addition_log "
@@ -377,9 +425,7 @@ async def _save_addition_to_db(
                 added_by_name or '',
                 added_by_username or '',
                 bot_status or '',
-                # ✅ v1.2.1 (FIX-8): كائن datetime بدلاً من string
-                # database.py::_adapt_params سيتعامل معه تلقائياً
-                TimeUtils.utc_now(),
+                added_at_value,  # ✅ datetime مضمون
             )
         )
         return True
@@ -400,22 +446,16 @@ def _build_report_text(
     new_status: str,
     log_scope: str = 'global',
 ) -> str:
-    """
-    بناء نص التقرير الكامل.
-
-    ✅ v1.1.0: يضيف سطر "نطاق القناة" (خاصة/عامة).
-    """
+    """بناء نص التقرير الكامل."""
     is_channel = (chat.type == "channel")
     chat_type_emoji = "📡" if is_channel else "👥"
     chat_type_name = "قناة" if is_channel else "مجموعة"
 
-    # اسم الدردشة
     chat_title = _safe_html(chat.title, "بدون اسم")
     chat_id = chat.id
     chat_type = chat.type or 'unknown'
     chat_username = getattr(chat, 'username', None)
 
-    # معلومات المُضيف
     adder_id = user.id
     adder_name = _safe_html(
         getattr(user, 'full_name', None)
@@ -428,14 +468,12 @@ def _build_report_text(
     )
     adder_link = _build_user_link(adder_id, adder_username)
 
-    # حالة البوت
     new_status_label = (
         "مشرف ✅"
         if new_status == "administrator"
         else "عضو ✅"
     )
 
-    # ✅ v1.1.0: نطاق قناة السجل
     scope_label = {
         'group': "🔒 خاصة بالمجموعة",
         'global': "🌐 عامة",
@@ -443,8 +481,13 @@ def _build_report_text(
     }.get(log_scope, "🌐 عامة")
 
     # ═══════════════════════════════════════════════════════════
-    # بناء النص
+    # الوقت الحالي (Mecca) — للعرض فقط
     # ═══════════════════════════════════════════════════════════
+    try:
+        mecca_time_str = TimeUtils.mecca_iso()
+    except Exception:
+        mecca_time_str = str(datetime.now(timezone.utc))
+
     text = (
         f"🆕 <b>تمت إضافة البوت إلى {chat_type_name} جديدة!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -457,7 +500,6 @@ def _build_report_text(
         f"   • نطاق السجل: {scope_label}\n"
     )
 
-    # رابط الدردشة (إن وُجد username)
     if chat_username:
         clean_chat_username = str(chat_username).lstrip('@')
         text += (
@@ -474,7 +516,7 @@ def _build_report_text(
         f"   • رابط: {_safe_html(adder_link)}\n"
         "\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 <b>الوقت:</b> {_safe_html(TimeUtils.mecca_iso())}"
+        f"🕐 <b>الوقت:</b> {_safe_html(mecca_time_str)}"
     )
 
     return text
@@ -486,7 +528,6 @@ def _build_report_keyboard(
     """بناء الأزرار التفاعلية للتقرير."""
     rows = []
 
-    # زر فتح المحادثة (إن وُجد username)
     chat_username = getattr(chat, 'username', None)
     if chat_username:
         try:
@@ -499,7 +540,6 @@ def _build_report_keyboard(
         except Exception:
             pass
 
-    # زر معلومات المُضيف
     try:
         user_username = getattr(user, 'username', None)
         user_link = _build_user_link(user.id, user_username)
@@ -522,21 +562,14 @@ def _build_report_keyboard(
 async def _try_get_chat_photo(
     bot, chat, chat_type: str
 ) -> Optional[str]:
-    """
-    ✅ v1.0.1: محاولة جلب صورة الدردشة (اختياري).
-
-    - للقنوات: photo موجود في كائن chat مباشرة
-    - للمجموعات: نحتاج get_chat لجلبه
-    """
+    """محاولة جلب صورة الدردشة (اختياري)."""
     try:
-        # ✅ للقنوات: chat.photo متوفر عادة
         photo = getattr(chat, 'photo', None)
         if photo is not None:
             file_id = getattr(photo, 'big_file_id', None)
             if file_id:
                 return file_id
 
-        # للمجموعات: جلب من API (يُكلف طلب واحد)
         if chat_type in ('group', 'supergroup'):
             try:
                 full_chat = await bot.get_chat(chat.id)
@@ -565,14 +598,6 @@ async def handle_my_chat_member(
 
     يُرسل تقريراً لقناة السجل عند:
       - إضافة البوت (left/kicked → member/administrator)
-
-    ✅ v1.1.0: يستخدم قناة السجل الخاصة بالمجموعة أولاً،
-    ثم العامة كـ fallback.
-
-    ⚠️ لا يُرسل تقريراً عند:
-      - الطرد (member → left) — معالَج في _notify_channel_owner_kicked
-      - ترقية/تنزيل المشرف (administrator ↔ member)
-      - أي تغيير آخر
     """
     result = update.my_chat_member
     if result is None:
@@ -607,7 +632,6 @@ async def handle_my_chat_member(
         logger.debug("my_chat_member: no chat or user")
         return
 
-    # تجاهل المحادثات الخاصة
     if chat.type == "private":
         logger.debug("my_chat_member: private chat ignored")
         return
@@ -618,7 +642,6 @@ async def handle_my_chat_member(
     if not _should_send(chat.id):
         return
 
-    # تنظيف دوري
     _prune_recent_reports()
 
     # ═══════════════════════════════════════════════════════════
@@ -641,7 +664,7 @@ async def handle_my_chat_member(
         logger.debug(f"save_addition_to_db outer: {e}")
 
     # ═══════════════════════════════════════════════════════════
-    # ✅ v1.1.0 (FIX-1): جلب قناة السجل الفعّالة
+    # جلب قناة السجل الفعّالة
     # ═══════════════════════════════════════════════════════════
     log_channel, log_scope = await _get_effective_log_channel(chat.id)
     if not log_channel:
@@ -728,7 +751,7 @@ async def handle_my_chat_member(
                 f"{type(e).__name__}: {e}")
             sent = False
 
-    # محاولة 3: بدون أزرار (احتياطي أخير)
+    # محاولة 3: بدون أزرار
     if not sent:
         try:
             await context.bot.send_message(
@@ -751,13 +774,7 @@ async def handle_my_chat_member(
 # ═════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> None:
-    """
-    تسجيل الـ handler في Application.
-
-    استخدمها في main.py:
-        from handlers_membership import register_handlers
-        register_handlers(application)
-    """
+    """تسجيل الـ handler في Application."""
     try:
         handler = ChatMemberHandler(
             handle_my_chat_member,
@@ -775,7 +792,7 @@ def register_handlers(application) -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# __all__ — التصدير الصريح
+# __all__
 # ═════════════════════════════════════════════════════════════════════
 
 __all__ = [
@@ -786,6 +803,7 @@ __all__ = [
     "_get_effective_log_channel",
     "_save_addition_to_db",
     "_ensure_table_exists",
+    "_normalize_datetime",
     "_build_report_text",
     "_build_report_keyboard",
     "_try_get_chat_photo",
