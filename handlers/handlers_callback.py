@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v4)
+handlers_callback.py - معالج الأزرار (v9.7.1-final)
 =====================================================================
+🆕 v9.7.1-final — إصلاحات أمان وتوحيد:
+    ✅ FIX-1: _membership_ensure_table — SQL متوافق مع SQLite/PG/MySQL
+              (كان يستخدم AUTOINCREMENT في كل الحالات).
+    ✅ FIX-2: _handle_post_publish — توحيد PUBLISH_RATE_LIMITER
+              مع النشر الجماعي (كان بلا rate limit في single publish).
+    ✅ FIX-3: _handle_buy_subscription — البحث عبر duration_days
+              أولاً بدل أسماء عربية ثابتة (توافق أوسع مع DB).
+
 🆕 v9.7.0-final-fixed-v4 — إصلاحات أمان نهائية:
     ✅ FIX-A: admin_restore_file — حماية من استعادة SQLite
               على Postgres/MySQL (كان يمكن أن يُفسد القاعدة).
@@ -281,27 +289,68 @@ _membership_table_created: bool = False
 
 
 async def _membership_ensure_table() -> None:
-    """إنشاء جدول bot_addition_log مرة واحدة فقط."""
+    """
+    إنشاء جدول bot_addition_log مرة واحدة فقط.
+
+    ✅ v9.7.1 (FIX-1): متوافق مع SQLite/PostgreSQL/MySQL.
+    - SQLite: INTEGER PRIMARY KEY AUTOINCREMENT + TEXT
+    - PostgreSQL: BIGSERIAL PRIMARY KEY + TIMESTAMP
+    - MySQL: BIGINT AUTO_INCREMENT + DATETIME
+    """
     global _membership_table_created
     if _membership_table_created:
         return
     try:
-        await DB.execute(
-            "CREATE TABLE IF NOT EXISTS bot_addition_log ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "chat_id INTEGER NOT NULL, "
-            "chat_title TEXT, "
-            "chat_type TEXT, "
-            "chat_username TEXT, "
-            "added_by_id INTEGER NOT NULL, "
-            "added_by_name TEXT, "
-            "added_by_username TEXT, "
-            "bot_status TEXT, "
-            "added_at TEXT NOT NULL"
-            ")"
-        )
+        db_type = getattr(DB, "DB_TYPE", "sqlite")
+        if db_type == "postgres":
+            sql = (
+                "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "chat_id BIGINT NOT NULL, "
+                "chat_title TEXT, "
+                "chat_type TEXT, "
+                "chat_username TEXT, "
+                "added_by_id BIGINT NOT NULL, "
+                "added_by_name TEXT, "
+                "added_by_username TEXT, "
+                "bot_status TEXT, "
+                "added_at TIMESTAMP NOT NULL"
+                ")"
+            )
+        elif db_type == "mysql":
+            sql = (
+                "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+                "id BIGINT PRIMARY KEY AUTO_INCREMENT, "
+                "chat_id BIGINT NOT NULL, "
+                "chat_title VARCHAR(255), "
+                "chat_type VARCHAR(50), "
+                "chat_username VARCHAR(255), "
+                "added_by_id BIGINT NOT NULL, "
+                "added_by_name VARCHAR(255), "
+                "added_by_username VARCHAR(255), "
+                "bot_status VARCHAR(50), "
+                "added_at DATETIME NOT NULL"
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            )
+        else:
+            sql = (
+                "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "chat_id INTEGER NOT NULL, "
+                "chat_title TEXT, "
+                "chat_type TEXT, "
+                "chat_username TEXT, "
+                "added_by_id INTEGER NOT NULL, "
+                "added_by_name TEXT, "
+                "added_by_username TEXT, "
+                "bot_status TEXT, "
+                "added_at TEXT NOT NULL"
+                ")"
+            )
+        await DB.execute(sql)
         _membership_table_created = True
-        logger.debug("✅ جدول bot_addition_log جاهز")
+        logger.debug(
+            f"✅ جدول bot_addition_log جاهز ({db_type})")
     except Exception as e:
         logger.debug(
             f"_membership_ensure_table: {type(e).__name__}: {e}")
@@ -4312,6 +4361,13 @@ class CallbackHandlers:
     async def _handle_buy_subscription(
         update, context, query, user_id, data, lang
     ):
+        """
+        ✅ v9.7.1 (FIX-3): البحث عبر duration_days مباشرة.
+
+        الأولوية:
+          1. بحث بـ duration_days (موصى به — مستقل عن اللغة/الاسم)
+          2. fallback: الأسماء العربية الثابتة (توافق خلفي)
+        """
         try:
             days = int(data.split("_")[-1])
         except (ValueError, IndexError):
@@ -4320,34 +4376,46 @@ class CallbackHandlers:
                 await _trans('invalid_data', lang, "❌"),
                 bot=context.bot)
             return
-        plan_names = {1: "يوم", 7: "أسبوع", 30: "شهر",
-                      90: "3 أشهر", 365: "سنة"}
-        plan_name = plan_names.get(days)
-        if not plan_name:
+
+        # ✅ FIX-3: البحث الأساسي بـ duration_days
+        plan_d: Optional[Dict[str, Any]] = None
+        try:
+            plan = await DB.fetchone(
+                "SELECT * FROM plans WHERE duration_days = ? "
+                "AND is_active = 1 AND is_gift = 0 "
+                "ORDER BY id ASC LIMIT 1",
+                (days,))
+            plan_d = _row_to_dict(plan)
+        except Exception as e:
+            logger.debug(
+                f"_handle_buy_subscription duration_days({days}): {e}")
+            plan_d = None
+
+        # fallback: البحث بالاسم العربي (توافق خلفي)
+        if not plan_d:
+            plan_names = {1: "يوم", 7: "أسبوع", 30: "شهر",
+                          90: "3 أشهر", 365: "سنة"}
+            plan_name = plan_names.get(days)
+            if plan_name:
+                try:
+                    plan = await DB.get_plan_by_name(plan_name)
+                    plan_d = _row_to_dict(plan)
+                except Exception as e:
+                    logger.debug(
+                        f"_handle_buy_subscription by_name"
+                        f"({plan_name}): {e}")
+                    plan_d = None
+
+        if not plan_d:
             await safe_edit(
                 query,
                 await _trans('plan_not_found', lang, "❌"),
                 bot=context.bot)
             return
-        plan = await DB.get_plan_by_name(plan_name)
-        plan_d = _row_to_dict(plan)
-        if not plan_d:
-            try:
-                fallback = await DB.fetchone(
-                    "SELECT * FROM plans WHERE duration_days = ? "
-                    "AND is_active = 1 AND is_gift = 0 LIMIT 1", (days,))
-                plan_d = _row_to_dict(fallback)
-            except Exception:
-                pass
-        if not plan_d:
-            await safe_edit(
-                query,
-                await _trans('plan_not_found', lang, "❌"),
-                bot=context.bot)
-            return
+
         plan_id = plan_d.get('id', 0)
         price = _coerce_int(plan_d.get('price'), 0)
-        name = plan_d.get('name') or plan_name
+        name = plan_d.get('name') or f"{days} days"
         description = plan_d.get('description') or name
         invoice_number = await DB.create_invoice(user_id, plan_id, price)
         if not invoice_number:
@@ -4618,6 +4686,9 @@ class CallbackHandlers:
 
     @staticmethod
     async def _handle_post_publish(update, context, query, user_id):
+        """
+        ✅ v9.7.1 (FIX-2): توحيد PUBLISH_RATE_LIMITER مع النشر الجماعي.
+        """
         lang = 'ar'
         try:
             lang = await DB.get_user_language(user_id) or 'ar'
@@ -4661,6 +4732,28 @@ class CallbackHandlers:
         async def _publish_task():
             try:
                 async with _publish_semaphore:
+                    # ✅ FIX-2: حماية RATE_LIMITER موحّدة مع bulk
+                    rate_ok = True
+                    try:
+                        await asyncio.wait_for(
+                            PUBLISH_RATE_LIMITER.acquire(),
+                            timeout=PUBLISH_ACQUIRE_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        rate_ok = False
+                        logger.warning(
+                            f"⏱️ RATE_LIMITER timeout "
+                            f"(single publish ch={active})")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.debug(f"RATE_LIMITER: {e}")
+
+                    if not rate_ok:
+                        await safe_send(
+                            bot, user_id,
+                            await _trans('publish_failed', lang, "❌"))
+                        return
+
                     result = await CallbackHandlers._publish_single(
                         context, bot, active, ch_id, post)
                 if result:
