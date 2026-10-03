@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.22)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.23)
 ================================================================================
+🚀 v7.6.23 (BOT-ADDITION-LOG-FIX):
+  ✅ CURRENT_SCHEMA_VERSION: 21 → 22
+       - السبب: إضافة جدول bot_addition_log (كان مفقوداً تماماً)
+       - الأعراض المُصلَحة:
+            • syntax error at or near "AUTOINCREMENT"  (PostgreSQL)
+            • relation "bot_addition_log" does not exist
+       - الإصلاح: الجدول الآن يُنشأ من هذا الملف بأسلوب موحّد
+         عبر SQLite/PostgreSQL/MySQL
+  ✅ EXPECTED_INDEX_COUNT: 72 → 73 (فهرس bot_addition_log)
+
 🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS):
   ✅ CURRENT_SCHEMA_VERSION: 20 → 21
        - السبب: إضافة أعمدة لجدول contests لمسابقات quiz:
@@ -40,9 +50,9 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.22: 20 → 21 (إجبار database.py على إعادة create_tables)
-# السبب: إضافة أعمدة لجدول contests لمسابقات quiz
-CURRENT_SCHEMA_VERSION = 21
+# ✅ v7.6.23: 21 → 22 (إجبار database.py على إعادة create_tables)
+# السبب: إضافة جدول bot_addition_log المفقود
+CURRENT_SCHEMA_VERSION = 22
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -103,8 +113,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.16: 72 (حُذف 3 فهارس زائدة من posts)
-EXPECTED_INDEX_COUNT = 72
+# ✅ v7.6.23: 72 → 73 (فهرس bot_addition_log)
+EXPECTED_INDEX_COUNT = 73
 
 # ✅ v7.6.14: فهارس تُتخطى على MySQL
 MYSQL_SKIP_INDEXES = frozenset({
@@ -298,6 +308,10 @@ COMMON_INDEXES = [
     # ═══ USER_WARNINGS (1) ═══
     ("user_warnings", "idx_user_warnings_chat",
      "user_warnings(chat_id)"),
+
+    # ═══ BOT_ADDITION_LOG (1) — ✅ v7.6.23 ═══
+    ("bot_addition_log", "idx_bot_addition_log_chat",
+     "bot_addition_log(chat_id, added_at DESC)"),
 ]
 
 DEPRECATED_INDEXES = [
@@ -410,6 +424,8 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_violations_chat",
     "idx_user_warnings_chat",
     "idx_bot_groups_banned_cover",
+    # ✅ v7.6.23
+    "idx_bot_addition_log_chat",
 })
 
 if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
@@ -2574,6 +2590,22 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.23: bot_addition_log — سجل إضافة البوت للمجموعات
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_addition_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT,
+            chat_username TEXT,
+            added_by_id INTEGER NOT NULL,
+            added_by_name TEXT,
+            added_by_username TEXT,
+            bot_status TEXT,
+            added_at TEXT NOT NULL
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -2888,7 +2920,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.6.22-contest-quiz-columns"),
+             "v7.6.23-bot-addition-log"),
         )
         await conn.commit()
     except Exception as e:
@@ -3206,6 +3238,22 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             user_id BIGINT PRIMARY KEY,
             added_by BIGINT,
             added_at TIMESTAMP
+        )
+    """)
+
+    # ✅ v7.6.23: bot_addition_log — PostgreSQL (BIGSERIAL + BIGINT)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_addition_log (
+            id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT,
+            chat_username TEXT,
+            added_by_id BIGINT NOT NULL,
+            added_by_name TEXT,
+            added_by_username TEXT,
+            bot_status TEXT,
+            added_at TIMESTAMP NOT NULL
         )
     """)
 
@@ -3530,7 +3578,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.22-contest-quiz-columns",
+            "v7.6.23-bot-addition-log",
         )
     except Exception as e:
         if logger:
@@ -3858,6 +3906,22 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.23: bot_addition_log — MySQL (AUTO_INCREMENT)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_addition_log (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT NOT NULL,
+                chat_title VARCHAR(255),
+                chat_type VARCHAR(50),
+                chat_username VARCHAR(255),
+                added_by_id BIGINT NOT NULL,
+                added_by_name VARCHAR(255),
+                added_by_username VARCHAR(255),
+                bot_status VARCHAR(50),
+                added_at DATETIME NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 `key` VARCHAR(255) PRIMARY KEY,
@@ -4175,7 +4239,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.22-contest-quiz-columns",
+                    "v7.6.23-bot-addition-log",
                 ),
             )
         except Exception as e:
