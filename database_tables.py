@@ -2,30 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.26)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.27)
 ================================================================================
+🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX) — إصلاح حرج:
+  ✅ FIX-CRITICAL: إزالة _run_maintenance_postgres من fast-path
+       - المشكلة: VACUUM (ANALYZE, SKIP_LOCKED) كان يُستدعى من داخل
+                  bootstrap transaction block
+       - الأعراض: PostgreSQL يُلغِي الـ transaction كاملاً بـ
+                  "VACUUM cannot run inside a transaction block"
+                  → كل الاستعلامات التالية تفشل بـ:
+                  "current transaction is aborted, commands ignored
+                  until end of transaction block"
+       - التأثير: فشل UNIQUE settings.key، _upsert_setting(tables_hash)،
+                  قراءة bootstrap_hash، وبالتالي فشل التهيئة كاملاً
+       - الإصلاح: VACUUM يجب أن يعمل خارج transaction
+       - الاستدعاء الآن من database.py::_bootstrap بعد commit
+         (استخدام self.connection() — autocommit mode)
+
 🆕 v7.6.26 (AUTOVACUUM-DEDUP + CTE-INDEX):
   ✅ FIX-1: إزالة الاستدعاء المكرر لـ _tune_autovacuum_postgres
-             - المشكلة: database.py::_tune_heavy_tables_autovacuum يعمل بعدنا
-                        بإعدادات أقوى (scale_factor=0.0 vs 0.05)
-             - الأعراض: رسالتان "ضُبط autovacuum" في السجل خلال 4 ثوان
-             - الأثر: توفير ~1.8s في كل إقلاع
-             - الحل: database.py هو المسؤول الوحيد عن autovacuum
-
   ✅ FIX-2: إضافة idx_subs_status_end_active
-             - المشكلة: CTE active_subs (في SQLite query و PG_NO_MV)
-                        يمسح subscriptions(status, end_date)
-             - الأعراض: استعلام 4.5s على PostgreSQL
-             - الحل: فهرس مركّب (status, end_date) لتسريع الـ CTE
 
 🚀 v7.6.25 (MIGRATION-ORDER-FIX):
   ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
-       - المشكلة: _create_indexes_* كان يُشغَّل قبل _migrate_missing_columns_*
-       - الأعراض: asyncpg.exceptions.InFailedSQLTransactionError
-                  current transaction is aborted
-       - السبب: CREATE INDEX على removed_at (غير موجود بعد) → transaction aborted
-       - الإصلاح: تشغيل _migrate_missing_columns_* أولاً
-       - السيناريو: عند ترقية v22 → v23 على قاعدة موجودة
 
 🚀 v7.6.24 (SOFT-DELETE-COLUMNS)
 🚀 v7.6.23 (BOT-ADDITION-LOG-FIX)
@@ -980,6 +979,26 @@ async def _quick_analyze_mysql(conn, logger):
 
 # =====================================================================
 # VACUUM ANALYZE الدوري
+# =====================================================================
+# ⚠️ v7.6.27 — تحذير حرج:
+# =====================================================================
+#   VACUUM في PostgreSQL **لا يعمل داخل transaction block**.
+#   استدعاء هذه الدالة من داخل `async with self.transaction()`
+#   (كما كان في fast-path قبل v7.6.27) يُلغِي الـ transaction
+#   كاملاً ويُسبِّب:
+#     asyncpg.exceptions.InFailedSQLTransactionError:
+#     current transaction is aborted, commands ignored until end of
+#     transaction block
+#
+#   عندها **كل** استعلام لاحق في نفس الـ transaction يفشل، بما في ذلك:
+#     - UNIQUE settings.key
+#     - _upsert_setting(tables_hash)
+#     - SELECT value FROM settings WHERE key='bootstrap_hash'
+#
+#   ✅ الحل الصحيح: استدعاؤها من database.py::_bootstrap **بعد** commit
+#      عبر `self.connection()` (autocommit mode — بلا tx.start()).
+#
+#   ⚠️ لا تستدعها أبداً من داخل `async with self.transaction()`.
 # =====================================================================
 
 async def _run_maintenance_postgres(conn, logger):
@@ -3010,7 +3029,16 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
         # await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
-        await _run_maintenance_postgres(conn, logger)
+        # ✅ v7.6.27 CRITICAL FIX: VACUUM لا يعمل داخل transaction!
+        #
+        # كان: await _run_maintenance_postgres(conn, logger)
+        #       ↑ يُشغّل VACUUM → PG يُلغِي الـ tx → كل الاستعلامات التالية تفشل
+        #
+        # الآن: VACUUM يُشغَّل من database.py::_bootstrap بعد commit
+        #        عبر self.connection() (autocommit mode).
+        #
+        # ⚠️ لا تُعِد الاستدعاء هنا أبداً — سيُسبِّب فشل التهيئة كاملاً.
+        # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
         if logger:
             logger.info(
                 f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
@@ -3631,6 +3659,9 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
     # await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
+    # ✅ v7.6.27 CRITICAL FIX: لا VACUUM داخل transaction!
+    #    (نفس السبب المُوضَّح في fast-path أعلاه)
+    # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
 
     try:
         await conn.execute(
@@ -3639,7 +3670,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.26-autovacuum-dedup",
+            "v7.6.27-vacuum-outside-tx-fix",
         )
     except Exception as e:
         if logger:
@@ -3665,6 +3696,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
+        # ✅ MySQL: OPTIMIZE/ANALYZE يعملان داخل transaction — لا مشكلة
         await _run_maintenance_mysql(conn, logger)
         if logger:
             logger.info(
@@ -4302,7 +4334,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.26-autovacuum-dedup",
+                    "v7.6.27-vacuum-outside-tx-fix",
                 ),
             )
         except Exception as e:
@@ -4348,4 +4380,7 @@ __all__ = [
     "_cleanup_old_admin_logs_sqlite",
     "_cleanup_old_admin_logs_mysql",
     "_tune_autovacuum_postgres",
+    "_run_maintenance_postgres",
+    "_run_maintenance_sqlite",
+    "_run_maintenance_mysql",
 ]
