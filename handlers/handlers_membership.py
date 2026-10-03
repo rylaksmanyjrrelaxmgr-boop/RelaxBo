@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.0-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.1-final)
 =====================================================================
+🆕 v1.2.1-final — إصلاح نوع added_at:
+    ✅ FIX-8: استخدام TimeUtils.utc_now() بدلاً من sql_iso()
+              لحل خطأ asyncpg:
+              "expected datetime.date or datetime.datetime
+               instance, got 'str'"
+              (database.py::_adapt_params يحوّل datetime تلقائياً
+               حسب نوع القاعدة)
+
 🆕 v1.2.0-final — إصلاح PostgreSQL (AUTOINCREMENT → SERIAL):
     ✅ FIX-4: استخدام SQL صحيح لكل قاعدة بيانات
               (SQLite: AUTOINCREMENT, PG: BIGSERIAL, MySQL: AUTO_INCREMENT)
@@ -20,7 +28,6 @@ handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.0-f
     ✅ FIX-2: دالة جديدة _get_effective_log_channel(chat_id)
               4 طرق fallback بالترتيب الصحيح
     ✅ FIX-3: عرض "النطاق" في التقرير (خاصة/عامة)
-    ✅ لا حذف، لا اختصار — نفس بنية v1.0.1
 
 🆕 v1.0.1-final — إصلاحات بعد المراجعة:
     ✅ حذف استيراد CONFIG غير المستخدم
@@ -343,6 +350,13 @@ async def _save_addition_to_db(
     حفظ حدث الإضافة في قاعدة البيانات.
 
     ✅ v1.2.0: يعتمد على database_tables.py لإنشاء الجدول.
+    ✅ v1.2.1 (FIX-8): يُرسل كائن datetime (لا string) لـ added_at.
+
+    السبب: database.py::_adapt_params يحوّل datetime تلقائياً:
+      - PostgreSQL → TIMESTAMP
+      - MySQL      → "YYYY-MM-DD HH:MM:SS"
+      - SQLite     → "YYYY-MM-DD HH:MM:SS"
+    أما إذا أرسلنا string جاهزاً، فإن asyncpg يرفضه على PostgreSQL.
     """
     try:
         # ✅ v1.0.1: إنشاء الجدول مرة واحدة (no-op لـ PG/MySQL)
@@ -363,7 +377,9 @@ async def _save_addition_to_db(
                 added_by_name or '',
                 added_by_username or '',
                 bot_status or '',
-                TimeUtils.sql_iso(),
+                # ✅ v1.2.1 (FIX-8): كائن datetime بدلاً من string
+                # database.py::_adapt_params سيتعامل معه تلقائياً
+                TimeUtils.utc_now(),
             )
         )
         return True
