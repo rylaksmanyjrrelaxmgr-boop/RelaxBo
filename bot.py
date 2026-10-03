@@ -2,33 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.22)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.23)
 ================================================================================
+🆕 v5.5.23 (POOL-MONITOR-V2):
+    ✅ PM-1: pool_health_monitor v2 — إصلاح WARNING كاذب على idle_tx
+              - idle_tx يحتاج 2 دورات متتالية قبل التحذير
+              - util<80% لا يسبب WARNING أبداً
+              - grace period 90s بعد بدء التطبيق
+              - استعلام تفصيلي عند idle_tx>=3 مع cooldown 10 دقائق
+              - streak ظاهر في الرسالة لتشخيص أفضل
+    ✅ PM-2: إضافة helper _dump_idle_tx_details
+
 🆕 v5.5.22 (SOFT-DELETE-INTEGRATION):
-    ✅ SD-1: استيراد handlers_channels_delete (تأكيد حذف القنوات)
-              مع fallback ذكي
-    ✅ SD-2: مهمة جديدة cleanup_removed_channels_periodically
-              - تعمل كل 24 ساعة
-              - تحذف القنوات المُزالة (Soft Delete) بعد 30 يوماً
-              - تستخدم DB.hard_delete_removed_channels_before
-    ✅ SD-3: تسجيل معالج تأكيد حذف القناة في التطبيق
-    ✅ SD-4: إضافة المهمة إلى قائمة المهام الخلفية (19 مهمة الآن)
-    ✅ SD-5: رسائل تشخيصية واضحة
+    ✅ SD-1: handlers_channels_delete (تأكيد حذف القنوات)
+    ✅ SD-2: cleanup_removed_channels_periodically (كل 24 ساعة)
+    ✅ SD-3: تسجيل معالج تأكيد حذف القناة
+    ✅ SD-4: 19 مهمة خلفية
+    ✅ SD-5: رسائل تشخيصية
 
-🆕 v5.5.21 (ADMIN_LOGS-AUTO-CLEANUP):
-    ✅ CLEANUP-1: مهمة cleanup_admin_logs_periodically
-                  - كل 24 ساعة
-                  - حذف سجلات > 30 يوماً
-                  - حد أقصى 5000 صف
-    ✅ CLEANUP-2: 18 مهمة خلفية
-    ✅ CLEANUP-3: أول تشغيل بعد ساعة
-
-🆕 v5.5.20 (MEMBERSHIP UPGRADE):
-    ✅ MEM-1: handlers_membership المستقل أولاً
-    ✅ MEM-2: fallback إلى handlers_callback المدموج
-    ✅ MEM-3: تسجيل MembershipHandler بعد chat_member
-    ✅ MEM-4: logging تشخيصي
-
+🆕 v5.5.21 (ADMIN_LOGS-AUTO-CLEANUP)
+🆕 v5.5.20 (MEMBERSHIP UPGRADE)
 🆕 v5.5.19 (MEMBERSHIP INTEGRATION)
 🆕 v5.5.18 (CRITICAL FIXES)
 🆕 v5.5.17 (REVIEW FIXES)
@@ -168,7 +161,7 @@ except ImportError as _e:
     _ADMIN_LOGS_CLEANUP_IMPORT_ERROR = str(_e)
 
 # ═════════════════════════════════════════════════════════════════════
-# ✅ v5.5.22 (SD-1): handlers_channels_delete (تأكيد حذف القنوات)
+# ✅ v5.5.22 (SD-1): handlers_channels_delete
 # ═════════════════════════════════════════════════════════════════════
 register_delete_confirmation = None
 _CH_DELETE_AVAILABLE = False
@@ -279,6 +272,18 @@ _WATCHER_MAX_PROBE_FAILURES = 3
 
 # ✅ v5.5.22 (SD-2): إعدادات Soft Delete cleanup
 _REMOVED_CHANNELS_GRACE_DAYS = 30
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v5.5.23 (PM-1): إعدادات pool_health_monitor v2
+# ═══════════════════════════════════════════════════════════════════
+_PM_STARTUP_GRACE_SEC = 90.0          # تجاهل idle_tx خلال هذه الفترة
+_PM_IDLE_TX_WARN_STREAK = 2           # دورات متتالية قبل WARNING
+_PM_IDLE_TX_ERROR_THRESHOLD = 3       # idle_tx>=هذا → ERROR مباشرة
+_PM_UTIL_WARN_PCT = 80.0              # util>=هذا → WARNING
+_PM_UTIL_CRITICAL_PCT = 95.0          # util>=هذا → ERROR
+_PM_LOCK_WAIT_WARN = 1                # lock_waits>=هذا → WARNING
+_PM_WAITING_WARN = 3                  # waiting>=هذا → WARNING
+_PM_ALERT_COOLDOWN_SEC = 600.0        # cooldown بين تفاصيل ERROR
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔍 v5.4.1: فحص AnalyticsMixin
@@ -949,10 +954,6 @@ async def cleanup_removed_channels_periodically() -> None:
         * removed_at IS NOT NULL
         * removed_at < NOW() - GRACE_DAYS
     - الحذف نهائي (CASCADE يحذف المنشورات)
-
-    الفائدة:
-        - نظام Soft Delete يُبقي البيانات فترة سماح (30 يوماً)
-        - بعدها تُحذف تلقائياً لتحرير المساحة
     """
     GRACE_DAYS = _REMOVED_CHANNELS_GRACE_DAYS
 
@@ -971,12 +972,9 @@ async def cleanup_removed_channels_periodically() -> None:
 
     while True:
         try:
-            # ✅ استخدام دالة DB.hard_delete_removed_channels_before
-            # إذا كانت متوفرة
             deleted = 0
 
             if hasattr(DB, 'hard_delete_removed_channels_before'):
-                # حساب التاريخ الفاصل
                 cutoff_dt = (
                     datetime.utcnow()
                     - timedelta(days=GRACE_DAYS)
@@ -987,7 +985,6 @@ async def cleanup_removed_channels_periodically() -> None:
                     )
                 )
             else:
-                # fallback: استعلام مباشر
                 db_type = getattr(DB, "DB_TYPE", "sqlite")
 
                 if db_type == "postgres":
@@ -1004,7 +1001,7 @@ async def cleanup_removed_channels_periodically() -> None:
                         f"AND removed_at < UTC_TIMESTAMP() - "
                         f"INTERVAL {GRACE_DAYS} DAY"
                     )
-                else:  # sqlite
+                else:
                     sql = (
                         "DELETE FROM user_channels "
                         "WHERE removed_at IS NOT NULL "
@@ -1318,11 +1315,81 @@ async def keep_alive():
 
 
 # =====================================================================
-# ✅ v5.5.9-14: pool_health_monitor
+# ✅ v5.5.23 (PM-2): تفاصيل idle-in-transaction
+# =====================================================================
+
+async def _dump_idle_tx_details() -> None:
+    """
+    ✅ v5.5.23: يسجّل تفاصيل الاتصالات العالقة في idle-in-transaction.
+
+    يُستدعى فقط عند ERROR مع cooldown، لتفادي إغراق السجل.
+    """
+    try:
+        rows = await DB.fetchall(
+            """
+            SELECT pid,
+                   usename,
+                   application_name,
+                   state,
+                   EXTRACT(EPOCH FROM (now() - state_change))::int
+                       AS seconds_in_state,
+                   LEFT(query, 200) AS query_snippet
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND state = 'idle in transaction'
+            ORDER BY state_change ASC
+            LIMIT 5
+            """
+        )
+        if not rows:
+            logger.error("   (لا توجد اتصالات idle_tx عند الاستعلام)")
+            return
+
+        logger.error(
+            f"🔍 idle-in-transaction details "
+            f"({len(rows)} اتصال عالق):"
+        )
+        for r in rows:
+            pid = r.get("pid")
+            user = r.get("usename")
+            app = r.get("application_name")
+            age = r.get("seconds_in_state")
+            snippet = r.get("query_snippet") or ""
+            snippet = snippet.replace("\n", " ")[:120]
+            logger.error(
+                f"   • pid={pid} user={user} app={app!r} "
+                f"age={age}s q={snippet!r}"
+            )
+    except Exception as qe:
+        logger.debug(f"_dump_idle_tx_details: {qe}")
+
+
+# =====================================================================
+# ✅ v5.5.23 (PM-1): pool_health_monitor v2
 # =====================================================================
 
 async def pool_health_monitor() -> None:
-    """يراقب حالة Pool + الاتصالات كل 5 دقائق."""
+    """
+    ✅ v5.5.23 (POOL-MONITOR-V2):
+    يراقب حالة Pool + الاتصالات كل 5 دقائق.
+
+    قواعد التصنيف الجديدة:
+      • idle_tx == 1 في دورة واحدة   → INFO (transient، طبيعي خلال backup)
+      • idle_tx >= 1 لدورتين متتاليتين → WARNING (مع streak ظاهر)
+      • idle_tx >= 3 في أي دورة       → ERROR + تفاصيل
+      • util < 80%                    → INFO (حتى لو idle_tx=1)
+      • util >= 80%                   → WARNING
+      • util >= 95%                   → ERROR
+      • lock_waits >= 1               → WARNING
+      • waiting >= 3                  → WARNING
+
+    Grace period: 90 ثانية بعد بدء المهمة → لا تحذيرات idle_tx
+                  (يمنع إزعاج bootstrap/backup)
+    """
+    _task_start_mono = time.monotonic()
+    _idle_tx_streak = 0
+    _last_details_dump_mono = 0.0
+
     try:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
@@ -1430,22 +1497,62 @@ async def pool_health_monitor() -> None:
                 (pool_current / pool_max * 100) if pool_max else 0
             )
 
-            is_stressed = (
-                lock_waits > 0
-                or idle_in_tx >= 1
-                or util_pct >= 80
-            )
+            # ✅ v5.5.23: تتبع streak
+            if idle_in_tx > 0:
+                _idle_tx_streak += 1
+            else:
+                _idle_tx_streak = 0
+
+            # grace period بعد بدء المهمة
+            in_grace = (
+                time.monotonic() - _task_start_mono
+            ) < _PM_STARTUP_GRACE_SEC
+
+            # ✅ v5.5.23: تحديد المستوى بشكل ذكي
+            level = "INFO"
+            if idle_in_tx >= _PM_IDLE_TX_ERROR_THRESHOLD:
+                level = "ERROR"
+            elif util_pct >= _PM_UTIL_CRITICAL_PCT:
+                level = "ERROR"
+            elif lock_waits >= _PM_LOCK_WAIT_WARN:
+                level = "WARNING"
+            elif waiting >= _PM_WAITING_WARN:
+                level = "WARNING"
+            elif util_pct >= _PM_UTIL_WARN_PCT:
+                level = "WARNING"
+            elif (
+                idle_in_tx >= 1
+                and _idle_tx_streak >= _PM_IDLE_TX_WARN_STREAK
+                and not in_grace
+            ):
+                level = "WARNING"
 
             msg = (
                 f"total={total}/{pool_max} active={active} idle={idle} "
-                f"idle_tx={idle_in_tx} lock_waits={lock_waits} "
-                f"waiting={waiting} util={util_pct:.0f}%"
+                f"idle_tx={idle_in_tx} streak={_idle_tx_streak} "
+                f"lock_waits={lock_waits} waiting={waiting} "
+                f"util={util_pct:.0f}%"
             )
 
-            if is_stressed:
+            if level == "ERROR":
+                logger.error(f"🔴 pool CRITICAL: {msg}")
+
+                # ✅ v5.5.23: تفاصيل idle_tx مع cooldown
+                if idle_in_tx >= 1:
+                    now_mono = time.monotonic()
+                    if (now_mono - _last_details_dump_mono
+                            >= _PM_ALERT_COOLDOWN_SEC):
+                        _last_details_dump_mono = now_mono
+                        await _dump_idle_tx_details()
+
+            elif level == "WARNING":
                 logger.warning(f"⚠️ pool DIAG  : {msg}")
             else:
-                logger.info(f"🟢 pool HEALTH: {msg}")
+                # ✅ v5.5.23: اختلاف بين "healthy" و "recovered"
+                if _idle_tx_streak == 0:
+                    logger.info(f"🟢 pool HEALTH: {msg}")
+                else:
+                    logger.info(f"🟢 pool OK    : {msg}")
 
         except asyncio.CancelledError:
             logger.info("🛑 pool_health_monitor أُلغيت")
