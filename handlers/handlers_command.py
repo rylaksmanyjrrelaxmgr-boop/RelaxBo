@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.1
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.2
 ===================================================================================
+🆕 v7.6.2 (CONTEST BUTTON TEXT FIX):
+    ✅ FIX-A: contests() — فصل نص الزر (خام) عن نص الرسالة (مُهرَّب)
+              السبب: InlineKeyboardButton.text هو نص عادي (plain text)
+                     وليس HTML. كان escape() يُظهر "&amp;" حرفياً في الأزرار.
+              النتيجة: الأزرار تعرض "✍️ المشاركة Foo & Bar" بدل
+                       "✍️ المشاركة Foo &amp; Bar"
+
 🆕 v7.6.1 (SAFE EDIT + ALL EXPORTS):
     ✅ FIX-1: _safe_edit_or_send — حماية من effective_user=None
               (رسائل القنوات / anonymous admin)
@@ -1031,11 +1038,17 @@ class CommandHandlers:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # contests
+    # contests — ✅ v7.6.2: FIX-A — فصل نص الزر عن نص الرسالة
     # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def contests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.6.2: نص الزر خام (plain text)، نص الرسالة مُهرَّب.
+
+        السبب: InlineKeyboardButton.text لا يُفسَّر كـ HTML — فتمرير
+        نص مُهرَّب (مثل "Foo &amp; Bar") يعرض "&amp;" حرفياً في الزر.
+        """
         user_id = update.effective_user.id
         lang = await _get_lang(user_id)
         contests = await DB.get_active_contests(10)
@@ -1069,7 +1082,11 @@ class CommandHandlers:
             if c_id is None:
                 continue
 
-            title = escape(str(c_d.get('title') or '—'))
+            # ✅ FIX-A: عنوان خام للأزرار، مُهرَّب للرسالة
+            raw_title = str(c_d.get('title') or '—')
+            title_display = escape(raw_title)
+            title_btn = raw_title[:20]  # نص خام — لا escape
+
             prize = escape(str(c_d.get('prize') or '—'))
             description = str(c_d.get('description') or '').strip()
             question = str(c_d.get('question') or '').strip()
@@ -1084,7 +1101,7 @@ class CommandHandlers:
                 type_icon = "🎲"
                 type_label = type_name_raffle
 
-            text += f"• <b>{title}</b>\n"
+            text += f"• <b>{title_display}</b>\n"
 
             if description:
                 if len(description) > CONTEST_DESC_DISPLAY_MAX:
@@ -1105,7 +1122,8 @@ class CommandHandlers:
 
             text += f"  👥 {participants_label}: {participants}\n\n"
 
-            button_label = f"{join_text} {title[:20]}"
+            # ✅ FIX-A: نص الزر خام (بدون escape)
+            button_label = f"{join_text} {title_btn}"
             kb.append([InlineKeyboardButton(
                 button_label,
                 callback_data=f"{CB.CONTEST_JOIN}:{c_id}"
