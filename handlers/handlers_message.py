@@ -2,19 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.19 - Dev Log Diagnostic)
+handlers_message.py - معالجات الرسائل (v7.9.20 - Forwarded Delete Fix)
 =====================================================================
-🆕 v7.9.19 (DEV LOG DIAGNOSTIC):
-    ✅ logging تشخيصي في _handle_global_ban_input عند فشل الإضافة
-    ✅ logging تشخيصي في _handle_group_ban_input عند فشل الإضافة
-    ✅ يسجّل: word + chat_id + user_id (لتسهيل التشخيص)
-    ✅ لا تغيير في السلوك أو التوقيعات (backward-compatible)
+🆕 v7.9.20 (FORWARDED-DELETE-FIX):
+    ✅ إصلاح: حذف الرسائل المُعاد توجيهها يعمل الآن في كل الحالات
+    ✅ فحص شامل: forward_origin + forward_date + forward_from
+                   + forward_from_chat + forward_sender_name
+    ✅ logging تشخيصي 🎯 عند كل حذف لمتابعة السلوك
 
-🆕 v7.9.18 (DEV LOG DIAGNOSTIC):
-    ✅ إضافة تتبّع تشخيصي كامل في _notify_dev_log (علامة 🔔)
-    ✅ warning بدل debug عند فشل الإرسال (ليظهر في اللوغ)
-    ✅ كل السطور التشخيصية عليها علامة 🔔 (لحذفها لاحقاً)
-
+🆕 v7.9.19 (DEV LOG DIAGNOSTIC)
+🆕 v7.9.18 (DEV LOG DIAGNOSTIC)
 🆕 v7.9.17 (إشعار قناة سجل المطور)
 🆕 v7.9.16 (دعم الترجمة لنصوص المسابقات)
 🆕 v7.9.15 (إصلاح عرض عنوان المسابقة)
@@ -146,7 +143,6 @@ _MEDIA_REPLY_TYPES = frozenset({
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
 
-# ✅ v7.9.11: مدة بقاء رسالة العقوبة قبل الحذف
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
@@ -161,13 +157,11 @@ async def _notify_dev_log(context, text: str) -> None:
 
     ✅ v7.9.18: أُضيف تتبّع تشخيصي كامل (علامة 🔔).
     """
-    # 🔔 تتبّع: بداية الاستدعاء
     logger.info("🔔 _notify_dev_log CALLED (from message handler)")
 
     try:
         log_ch = await DB.get_log_channel()
 
-        # 🔔 تتبّع: قيمة قناة السجل
         logger.info(f"🔔 log_ch from DB = {log_ch!r}")
 
         if not log_ch:
@@ -179,7 +173,6 @@ async def _notify_dev_log(context, text: str) -> None:
             logger.warning("🔔 log_ch is whitespace → abort")
             return
 
-        # تحديد الهدف: رقمي أو @username
         if ch_str.lstrip('-').isdigit():
             target = int(ch_str)
         elif ch_str.startswith('@'):
@@ -192,7 +185,6 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
-        # 🔔 تتبّع: الهدف المُحدَّد
         logger.info(f"🔔 target = {target!r} → sending...")
 
         await context.bot.send_message(
@@ -202,11 +194,9 @@ async def _notify_dev_log(context, text: str) -> None:
             disable_web_page_preview=True,
         )
 
-        # 🔔 تتبّع: نجاح
         logger.info(f"🔔 _notify_dev_log SUCCESS → {target}")
 
     except Exception as e:
-        # 🔔 v7.9.18: warning بدل debug — ليظهر في اللوغ
         logger.warning(
             f"🔔 _notify_dev_log FAILED: {e}",
             exc_info=True,
@@ -755,9 +745,6 @@ class MessageHandlers:
         UserState.WAIT_GROUP_BAN: "_handle_group_ban_input",
         UserState.WAIT_REM_GROUP_BAN: "_handle_rem_group_ban_input",
 
-        # ══════════════════════════════════════════════════════════════
-        # ✅ v7.9.14: مسابقات — تسلسل جديد مع quiz
-        # ══════════════════════════════════════════════════════════════
         UserState.WAIT_CONTEST_TITLE: "_handle_contest_title",
         UserState.WAIT_CONTEST_DESC: "_handle_contest_desc",
         UserState.WAIT_CONTEST_PRIZE: "_handle_contest_prize",
@@ -765,7 +752,6 @@ class MessageHandlers:
         UserState.WAIT_CONTEST_CORRECT_ANSWER: "_handle_contest_correct_answer",
         UserState.WAIT_CONTEST_DATE: "_handle_contest_date",
         UserState.WAIT_CONTEST_ANSWER: "_handle_contest_answer",
-        # ══════════════════════════════════════════════════════════════
 
         UserState.WAIT_AUTO_KEY: "_handle_auto_key",
         UserState.WAIT_AUTO_REPLY: "_handle_auto_reply_input",
@@ -1251,7 +1237,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # رسائل المجموعات
+    # رسائل المجموعات — ✅ v7.9.20: الإصلاح الجديد
     # =================================================================
 
     @staticmethod
@@ -1309,10 +1295,35 @@ class MessageHandlers:
                 update, context, chat_id, user_id, "max_len", settings)
             return
 
-        if getattr(message, 'forward_origin', None) and settings.get('delete_forwarded'):
-            await MessageHandlers._delete_and_warn(
-                update, context, chat_id, user_id, "forwarded", settings)
-            return
+        # ═══════════════════════════════════════════════════════════════
+        # ✅ v7.9.20 (FIX): فحص شامل للرسائل المُعاد توجيهها
+        # ═══════════════════════════════════════════════════════════════
+        if settings.get('delete_forwarded'):
+            _is_fwd = (
+                getattr(message, 'forward_origin', None) is not None
+                or getattr(message, 'forward_date', None) is not None
+                or getattr(message, 'forward_from', None) is not None
+                or getattr(message, 'forward_from_chat', None) is not None
+                or getattr(message, 'forward_sender_name', None) is not None
+            )
+            if _is_fwd:
+                try:
+                    fwd_from = (
+                        getattr(message, 'forward_from_chat', None)
+                        or getattr(message, 'forward_from', None)
+                    )
+                    fwd_id = getattr(fwd_from, 'id', None) if fwd_from else None
+                    logger.info(
+                        f"🎯 v7.9.20: حذف رسالة معاد توجيهها | "
+                        f"chat={chat_id} user={user_id} "
+                        f"fwd_from={fwd_id}"
+                    )
+                except Exception:
+                    pass
+                await MessageHandlers._delete_and_warn(
+                    update, context, chat_id, user_id, "forwarded", settings)
+                return
+        # ═══════════════════════════════════════════════════════════════
 
         media_checks = [
             (message.video, 'delete_videos', 'video'),
@@ -2190,7 +2201,6 @@ class MessageHandlers:
             msg = await _trans('word_exists', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         else:
-            # ✅ v7.9.19: logging تشخيصي
             logger.warning(
                 f"⚠️ add_banned_word فشل (global): "
                 f"word={word!r}, user={user_id} — "
@@ -2235,7 +2245,6 @@ class MessageHandlers:
             msg = await _trans('word_exists', lang, "❌")
             await safe_send(context.bot, user_id, msg)
         else:
-            # ✅ v7.9.19: logging تشخيصي
             logger.warning(
                 f"⚠️ add_banned_word فشل (group): "
                 f"word={word!r}, chat_id={chat_id}, user={user_id} — "
@@ -2286,17 +2295,12 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_prize(update, context):
-        """
-        ✅ v7.9.16: بعد استقبال الجائزة → يعرض أزرار المدة.
-        🌐 الأزرار + النص مترجَمون.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         context.user_data['contest_prize'] = update.effective_message.text or ""
 
         StateManager.set(user_id, UserState.WAIT_CONTEST_DURATION)
 
-        # 🌐 مفاتيح المدد + fallback عربي
         duration_keys = [
             ("1h",  "contest_duration_1h",  "⏰ ساعة"),
             ("6h",  "contest_duration_6h",  "🕐 6 ساعات"),
@@ -2338,10 +2342,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_question(update, context):
-        """
-        ✅ v7.9.16: يستقبل السؤال، ثم يطلب الإجابة الصحيحة.
-        🌐 النصوص مترجَمة.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
 
@@ -2363,9 +2363,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_correct_answer(update, context):
-        """
-        ✅ v7.9.16: quiz. النصوص مترجَمة.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
 
@@ -2431,10 +2428,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_date(update, context):
-        """
-        ⚠️ قديم — للتوافق الخلفي.
-        ✅ v7.9.16: النصوص مترجَمة.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
 
@@ -2500,7 +2493,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_answer(update, context):
-        """✅ حالة المشارك العادي — تبقى كما هي."""
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         contest_id = context.user_data.get('contest_join')
@@ -3133,10 +3125,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.9.17/18: redemption + إشعار قناة سجل المطور (تشخيص 🔔)
-    # ═════════════════════════════════════════════════════════════════
-
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
@@ -3155,7 +3143,6 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
 
-        # 🔔 تتبّع: نتيجة redeem_gift_code
         logger.info(f"🔔 redeem_gift_code (msg) result={result!r} user={user_id}")
 
         if isinstance(result, tuple):
@@ -3170,7 +3157,6 @@ class MessageHandlers:
                        days=days)
             await safe_send(context.bot, user_id, msg)
 
-            # ✅ v7.9.17/18: إشعار قناة سجل المطور
             try:
                 uname = update.effective_user.username or ""
                 fname = update.effective_user.first_name or ""
