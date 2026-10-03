@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.49 — VACUUM-OUTSIDE-TX-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.50 — PARAM-NORMALIZATION)
 ================================================================================
+🆕 v7.7.50 (PARAM-NORMALIZATION — DEFENSE IN DEPTH):
+  ✅ FIX-CRITICAL: تطبيع المعاملات في الدوال العامة
+       - المشكلة: تمرير scalar (مثل int) إلى fetchall/fetchone/fetchval/
+                  execute يُسبِّب TypeError قبل أي شيء:
+                  "argument after * must be an iterable"
+       - الأثر: db_diagnostics v6.3.0 كان يُمرِّر LONG_TX_WARN_SECONDS
+                كـ int → long_tx/idle_tx لم تُرصد أبداً (الاستثناء يُبتلع
+                في except Exception → logger.debug)
+       - الإصلاح: دالة _normalize_params() تُطبَّق في أول سطر من
+                  execute/fetchone/fetchall/fetchval
+       - الأثر: أي نمط استدعاء يعمل: scalar / list / set / tuple / None
+       - ملاحظة: db_diagnostics v6.4.x يُطبِّع من جانبه أيضاً (_safe_params)
+                 — الحماية من الطرفين (defense in depth)
+
 🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL):
   ✅ FIX-CRITICAL: نقل VACUUM (maintenance_postgres) خارج bootstrap tx
        - المشكلة: create_tables_postgres (fast-path) كان ينفذ
                   _run_maintenance_postgres داخل transaction الـ bootstrap
        - الأعراض: "current transaction is aborted" في كل استعلام لاحق
-                  (UNIQUE settings، حفظ tables_hash، حفظ bootstrap_hash،
-                   SELECT value FROM settings، إلخ)
-       - السجل: database_tables.py::_run_maintenance_postgres كان يُستدعى
-                من داخل database.py::transaction() → PostgreSQL يُلغِي
-                الـ tx بالكامل بسبب VACUUM inside transaction
        - الإصلاح:
            1) database_tables.py v7.6.27: حذف _run_maintenance_postgres
               من fast-path (تم في ملف منفصل)
            2) database.py v7.7.49: إضافة استدعاء _run_maintenance_postgres
               في _bootstrap بعد commit، باستخدام self.connection()
               (autocommit mode — لا tx) → VACUUM يعمل بنجاح
-       - الأثر المتوقع: اختفاء كل الأخطاء "current transaction is aborted"
 
 🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX)
 🆕 v7.7.47 (DEV-LOG-CHANNEL)
@@ -664,6 +672,42 @@ def _sql_get_setting_value() -> str:
     if USE_MYSQL:
         return "SELECT `value` FROM settings WHERE `key` = ?"
     return "SELECT value FROM settings WHERE key = ?"
+
+# =====================================================================
+# 🆕 v7.7.50: PARAMETER NORMALIZATION
+# =====================================================================
+
+def _normalize_params(params: Any) -> tuple:
+    """
+    🆕 v7.7.50: يُطبِّع المعاملات إلى tuple دائماً.
+
+    يقبل:
+        None              → ()
+        ()                → ()
+        scalar (int/str)  → (scalar,)
+        list              → tuple(items)
+        set / frozenset   → tuple(items)
+        tuple             → كما هو
+
+    السبب: جميع دوال execute/fetchone/fetchall/fetchval تستخدم
+    *p داخلياً. تمرير scalar مباشرة يُسبِّب:
+        TypeError: argument after * must be an iterable
+
+    الأثر العملي سابقاً: db_diagnostics v6.3.0 كان يُمرِّر
+    LONG_TX_WARN_SECONDS (int) → الاستثناء يُبتلع في except
+    → long_tx/idle_tx لم تُرصد أبداً.
+
+    ملاحظة: db_diagnostics v6.4.x يُطبِّع من جانبه أيضاً
+    عبر _safe_params — هذه الطبقة الثانية للدفاع.
+    """
+    if params is None:
+        return ()
+    if isinstance(params, tuple):
+        return params
+    if isinstance(params, (list, set, frozenset)):
+        return tuple(params)
+    # scalar (int / str / float / bool / datetime / bytes / ...)
+    return (params,)
 
 # =====================================================================
 # Parser للأقواس
@@ -3556,6 +3600,9 @@ class Database(
                     pass
 
     async def execute(self, query: str, params: tuple = ()) -> int:
+        # ✅ v7.7.50: تطبيع المعاملات
+        params = _normalize_params(params)
+
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._execute_with_conn(conn, q, *p)
@@ -3569,6 +3616,9 @@ class Database(
             raise
 
     async def fetchone(self, query: str, params: tuple = ()):
+        # ✅ v7.7.50: تطبيع المعاملات
+        params = _normalize_params(params)
+
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchone_with_conn(conn, q, *p)
@@ -3582,6 +3632,9 @@ class Database(
             raise
 
     async def fetchall(self, query: str, params: tuple = ()):
+        # ✅ v7.7.50: تطبيع المعاملات
+        params = _normalize_params(params)
+
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchall_with_conn(conn, q, *p)
@@ -3597,6 +3650,9 @@ class Database(
     async def fetchval(
         self, query: str, params: tuple = (), default=None
     ):
+        # ✅ v7.7.50: تطبيع المعاملات
+        params = _normalize_params(params)
+
         async def _exec(q, p):
             async with self.connection() as conn:
                 return await self._fetchval_with_conn(
@@ -6933,6 +6989,7 @@ __all__ = [
     "_clone_start_data", "_create_pool_with_retry",
     "_FactoryFailed",
     "_sql_get_setting_value",
+    "_normalize_params",   # ✅ v7.7.50
     "_find_values_end", "_insert_before_returning",
     "_replace_excluded_with_values",
     "_get_unique_columns", "_find_best_conflict_target",
