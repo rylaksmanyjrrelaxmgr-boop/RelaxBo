@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.5.34
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.0
 ===================================================================================
+🆕 v7.6.0 (DEV LOG — SEPARATE CHANNEL):
+    ✅ _notify_dev_log: قناة سجل المطور المنفصلة (dev_log_channel)
+    ✅ fallback تلقائي لقناة السجل العامة (log_channel)
+    ✅ توافق 100% — لو لم تُعيَّن قناة مطور، يعمل كما قبل
+    ✅ كل الإشعارات (grant/trial/redeem_gift/start-ref) تذهب
+       للقناة المنفصلة أولاً
+
 🆕 v7.5.34 (DEV LOG — GRANT + TRIAL):
     ✅ grant(): إشعار قناة سجل المطور عند منح اشتراك يدوي
     ✅ trial(): إشعار قناة سجل المطور عند تفعيل تجربة مجانية
@@ -219,16 +226,35 @@ async def _safe_send_message(bot, chat_id, text, **extra):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ إشعار قناة سجل المطور
+# ✅ v7.6.0: إشعار قناة سجل المطور (منفصلة)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _notify_dev_log(context, text: str) -> None:
     """
-    ✅ يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
+    ✅ v7.6.0: يرسل إشعاراً إلى قناة سجل المطور.
+
+    الأولوية:
+        1. قناة سجل المطور المنفصلة (dev_log_channel) — إن وُجدت
+        2. قناة السجل العامة (log_channel) — fallback للتوافق
+
     لا يفشل أبداً — يتجاهل الأخطاء بصمت.
     """
     try:
-        log_ch = await DB.get_log_channel()
+        # ✅ v7.6.0: قناة المطور أولاً
+        log_ch = ''
+        try:
+            if hasattr(DB, 'get_dev_log_channel'):
+                log_ch = await DB.get_dev_log_channel()
+        except Exception as e:
+            logger.debug(f"get_dev_log_channel failed: {e}")
+
+        # ✅ Fallback للقناة العامة
+        if not log_ch:
+            try:
+                log_ch = await DB.get_log_channel()
+            except Exception as e:
+                logger.debug(f"get_log_channel failed: {e}")
+
         if not log_ch:
             return
 
