@@ -4,36 +4,28 @@
 """
 database_channels_posts.py - دوال القنوات والمنشورات (Mixin)
 ================================================================================
-يُستخدم مع Database عبر الوراثة المتعددة (Mixin).
+🆕 v7.5.23 (SOFT-DELETE-INTEGRATION):
+    ✅ SOFT-1: دالة جديدة _has_removed_at_column() — فحص cached لوجود العمود
+    ✅ SOFT-2: add_channel — يمسح removed_at عند إعادة استخدام قناة سابقة
+              (استرجاع تلقائي عند إعادة الإضافة)
+    ✅ SOFT-3: get_user_channels — يُخفي القنوات المُزالة (removed_at IS NULL)
+    ✅ SOFT-4: get_active_channel — يتجاهل القنوات المُزالة
+    ✅ SOFT-5: get_channel_info — يُخفي المعلومات إن كانت القناة مُزالة
+    ✅ SOFT-6: دالة جديدة soft_delete_channel(channel_db_id, reason)
+    ✅ SOFT-7: دالة جديدة restore_channel(channel_db_id)
+    ✅ SOFT-8: دالة جديدة get_removed_channels(user_id) — للإدارة
+    ✅ SOFT-9: دالة جديدة hard_delete_removed_channels_before(cutoff)
+              للتنظيف الدوري بعد فترة السماح
+    ✅ SOFT-10: is_channel_owner — يتحقق أن القناة غير مُزالة
 
-🆕 v7.5.22 (PERFORMANCE-FIX — get_next_post من 1.91s → <30ms):
-    ✅ get_next_post: استعلامان مُعاد كتابتهما
-       - إزالة JOIN user_channels uc (زائد — get_channels_to_publish يفلتر banned مسبقاً)
-       - ORDER BY p.id ASC بدل ORDER BY p.fail_count ASC, p.created_at ASC
-         (يطابق idx_posts_channel_unpub_fresh_created)
-       - النتيجة: من Seq Scan + Sort على 464 صف → Index Scan مباشر
-       - المتوقع: 1.91s → <30ms (تحسّن ~60x)
+📌 v7.5.22 (PERFORMANCE-FIX — get_next_post):
+    ✅ get_next_post: استعلامان محسّنان (<30ms بدل 1.91s)
 
-🆕 v7.5.21 (تحديد القناة التالية تلقائياً عند حذف النشطة):
-    ✅ delete_channel: عند حذف القناة النشطة:
-       - يبحث عن أحدث قناة غير محظورة
-       - يحفظها كـ active_channel في DB (بدل NULL)
-       - يُبطل start_data_{user_id} أيضاً
-    ✅ النتيجة: القناة الثانية تصبح نشطة تلقائياً وتُحفظ دائماً
-
-📌 v7.5.20 (نفس السلوك الأصلي + إصلاحات آمنة):
-    ✅ get_channel_by_id: نفس السلوك (channel_id فقط) — بلا تغيير
-    ✅ invalidate: positional دائماً (user_id) — كما الأصلي
-    ✅ إضافات آمنة فقط (لا تكسر أي استدعاء):
-       - channels_cache.invalidate(user_id) في add_posts/delete_post/reset_posts
-       - internal_cache.invalidate(start_data_{user_id}) — للاتساق
-    ✅ حماية أفضل من None/Exceptions (بدون تغيير المنطق)
-
-🆕 v7.5.18 (إصلاح PostgreSQL):
-    ✅ reset_posts: استخدام _fetchval_with_conn بدل conn.execute
-
+📌 v7.5.21 (تحديد القناة التالية تلقائياً عند حذف النشطة)
+📌 v7.5.20 (نفس السلوك + إصلاحات آمنة)
+🆕 v7.5.18 (إصلاح PostgreSQL: reset_posts)
 📌 v7.2: استخراج من database.py
-📌 نفس واجهة API الأصلية — لا تغيير في الأسماء أو السلوك.
+📌 نفس واجهة API الأصلية — لا تغيير في الأسماء أو السلوك (باستثناء Soft Delete).
 ================================================================================
 """
 
@@ -43,6 +35,13 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v7.5.23: Cache لوجود عمود removed_at
+# ═════════════════════════════════════════════════════════════════════
+
+_removed_col_cache: Optional[bool] = None
 
 
 class ChannelsPostsMixin:
@@ -60,6 +59,76 @@ class ChannelsPostsMixin:
     """
 
     # ═════════════════════════════════════════════════════════════════
+    #          ✅ v7.5.23: فحص وجود عمود removed_at (cached)
+    # ═════════════════════════════════════════════════════════════════
+
+    async def _has_removed_at_column(self) -> bool:
+        """
+        فحص cached لوجود عمود removed_at في جدول user_channels.
+
+        النتيجة تُحفظ في متغير عام لتجنب الفحص المتكرر.
+
+        Returns:
+            True إذا كان العمود موجوداً (Soft Delete مُفعَّل)
+            False إذا لم يكن (الترقية لم تكتمل بعد)
+        """
+        global _removed_col_cache
+        if _removed_col_cache is not None:
+            return _removed_col_cache
+
+        try:
+            from database import USE_POSTGRES, USE_MYSQL
+
+            if USE_POSTGRES:
+                exists = await self.fetchval(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'user_channels' "
+                    "AND column_name = 'removed_at' "
+                    "AND table_schema = current_schema()"
+                )
+            elif USE_MYSQL:
+                exists = await self.fetchval(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'user_channels' "
+                    "AND COLUMN_NAME = 'removed_at'"
+                )
+            else:
+                cursor = await self.execute(
+                    "PRAGMA table_info(user_channels)"
+                )
+                try:
+                    rows = await cursor.fetchall()
+                    exists = any(
+                        (r[1] if isinstance(r, tuple) else r.get('name'))
+                        == 'removed_at'
+                        for r in rows
+                    )
+                finally:
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
+
+            _removed_col_cache = bool(exists)
+            if _removed_col_cache:
+                logger.info(
+                    "✅ user_channels.removed_at موجود — "
+                    "Soft Delete مُفعَّل"
+                )
+            else:
+                logger.info(
+                    "ℹ️ user_channels.removed_at غير موجود — "
+                    "ترقية database_tables.py مطلوبة لتفعيل Soft Delete"
+                )
+            return _removed_col_cache
+
+        except Exception as e:
+            logger.debug(f"_has_removed_at_column: {e}")
+            _removed_col_cache = False
+            return False
+
+    # ═════════════════════════════════════════════════════════════════
     #                    🎬 دوال القنوات (12 دالة)
     # ═════════════════════════════════════════════════════════════════
 
@@ -69,11 +138,8 @@ class ChannelsPostsMixin:
         """
         إضافة قناة جديدة للمستخدم.
 
-        يتحقق من:
-        - حدود الباقة (max_channels)
-        - عدم وجود القناة مسبقاً
-        - إعداد الجدولة تلقائياً (12 دقيقة)
-        - منح 10 نقاط للقناة الجديدة
+        ✅ v7.5.23 (SOFT-2): إذا كانت القناة مُزالة سابقاً (Soft Delete)،
+                            يُلغى removed_at تلقائياً (استرجاع).
 
         Returns:
             dict: {id, channel_id, channel_name, posts_count}
@@ -134,11 +200,30 @@ class ChannelsPostsMixin:
                     )
                     if existing:
                         ch_db_id = existing["id"]
-                        await self._execute_with_conn(
-                            conn,
-                            "UPDATE user_channels SET channel_name = ?, banned = 0 WHERE id = ?",
-                            channel_name, ch_db_id,
-                        )
+
+                        # ✅ v7.5.23 (SOFT-2): استرجاع إن كانت مُزالة
+                        if await self._has_removed_at_column():
+                            await self._execute_with_conn(
+                                conn,
+                                "UPDATE user_channels "
+                                "SET channel_name = ?, banned = 0, "
+                                "    removed_at = NULL, removal_reason = NULL "
+                                "WHERE id = ?",
+                                channel_name, ch_db_id,
+                            )
+                            logger.info(
+                                f"♻️ استرجاع القناة {ch_db_id} "
+                                f"(user={user_id}, ch_id={channel_id}) "
+                                f"— أُلغيت علامة الإزالة"
+                            )
+                        else:
+                            await self._execute_with_conn(
+                                conn,
+                                "UPDATE user_channels "
+                                "SET channel_name = ?, banned = 0 "
+                                "WHERE id = ?",
+                                channel_name, ch_db_id,
+                            )
                         is_new = False
                     else:
                         if USE_POSTGRES:
@@ -290,31 +375,67 @@ class ChannelsPostsMixin:
             return None
 
     async def get_active_channel(self, user_id: int) -> Optional[int]:
-        """جلب القناة النشطة (مع التحقق من عدم الحظر)"""
+        """
+        جلب القناة النشطة (مع التحقق من عدم الحظر).
+
+        ✅ v7.5.23 (SOFT-4): يتجاهل القنوات المُزالة أيضاً.
+        """
+        has_removed = await self._has_removed_at_column()
+
         result = await self.fetchval(
             "SELECT active_channel FROM users WHERE user_id = ?", (user_id,)
         )
         if result:
-            banned = await self.fetchval(
-                "SELECT banned FROM user_channels WHERE id = ? AND user_id = ?",
-                (result, user_id), default=1,
-            )
+            if has_removed:
+                banned = await self.fetchval(
+                    "SELECT banned FROM user_channels "
+                    "WHERE id = ? AND user_id = ? AND removed_at IS NULL",
+                    (result, user_id), default=1,
+                )
+            else:
+                banned = await self.fetchval(
+                    "SELECT banned FROM user_channels WHERE id = ? AND user_id = ?",
+                    (result, user_id), default=1,
+                )
             if banned == 0:
                 return result
+
+        # fallback: أول قناة غير محظورة
+        if has_removed:
+            return await self.fetchval(
+                "SELECT id FROM user_channels "
+                "WHERE user_id = ? AND banned = 0 AND removed_at IS NULL "
+                "ORDER BY id LIMIT 1",
+                (user_id,),
+            )
         return await self.fetchval(
-            "SELECT id FROM user_channels WHERE user_id = ? AND banned = 0 ORDER BY id LIMIT 1",
+            "SELECT id FROM user_channels "
+            "WHERE user_id = ? AND banned = 0 ORDER BY id LIMIT 1",
             (user_id,),
         )
 
     async def set_active_channel(self, user_id: int, channel_db_id: int) -> bool:
-        """تعيين القناة النشطة"""
+        """
+        تعيين القناة النشطة.
+
+        ✅ v7.5.23 (SOFT-4): يمنع تعيين قناة مُزالة كـ active.
+        """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, channels_cache
 
-        exists = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ? AND banned = 0",
-            (channel_db_id, user_id),
-        )
+        if await self._has_removed_at_column():
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND banned = 0 "
+                "AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            exists = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND banned = 0",
+                (channel_db_id, user_id),
+            )
         if not exists:
             return False
 
@@ -333,7 +454,11 @@ class ChannelsPostsMixin:
         return result
 
     async def get_user_channels(self, user_id: int) -> List[Dict]:
-        """جلب كل قنوات المستخدم (مع كاش)"""
+        """
+        جلب كل قنوات المستخدم (مع كاش).
+
+        ✅ v7.5.23 (SOFT-3): يُخفي القنوات المُزالة (Soft Delete).
+        """
         from database import internal_cache, CACHE_AVAILABLE, channels_cache
 
         if CACHE_AVAILABLE:
@@ -344,19 +469,34 @@ class ChannelsPostsMixin:
         if cached is not None:
             return cached
 
-        channels = await self.fetchall(
-            "SELECT id, channel_id, channel_name, banned, created_at "
-            "FROM user_channels WHERE user_id = ? "
-            "ORDER BY created_at DESC",
-            (user_id,),
-        )
+        # ✅ v7.5.23: فلترة القنوات المُزالة
+        if await self._has_removed_at_column():
+            channels = await self.fetchall(
+                "SELECT id, channel_id, channel_name, banned, created_at "
+                "FROM user_channels WHERE user_id = ? "
+                "AND removed_at IS NULL "
+                "ORDER BY created_at DESC",
+                (user_id,),
+            )
+        else:
+            channels = await self.fetchall(
+                "SELECT id, channel_id, channel_name, banned, created_at "
+                "FROM user_channels WHERE user_id = ? "
+                "ORDER BY created_at DESC",
+                (user_id,),
+            )
+
         await internal_cache.set(f"channels_{user_id}", channels)
         if CACHE_AVAILABLE:
             await channels_cache.set(user_id, channels)
         return channels
 
     async def get_channel_info(self, user_id: int, channel_db_id: int) -> Optional[Dict]:
-        """جلب معلومات قناة (مع التحقق من الملكية + كاش)"""
+        """
+        جلب معلومات قناة (مع التحقق من الملكية + كاش).
+
+        ✅ v7.5.23 (SOFT-5): يعيد None إن كانت القناة مُزالة.
+        """
         from database import internal_cache, CACHE_AVAILABLE, channels_cache
 
         if CACHE_AVAILABLE:
@@ -367,10 +507,19 @@ class ChannelsPostsMixin:
         if cached is not None:
             return cached
 
-        result = await self.fetchone(
-            "SELECT * FROM user_channels WHERE id = ? AND user_id = ?",
-            (channel_db_id, user_id),
-        )
+        # ✅ v7.5.23: فلترة المُزالة
+        if await self._has_removed_at_column():
+            result = await self.fetchone(
+                "SELECT * FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            result = await self.fetchone(
+                "SELECT * FROM user_channels WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id),
+            )
+
         if result:
             await internal_cache.set(f"channel_info_{channel_db_id}", result)
             if CACHE_AVAILABLE:
@@ -419,9 +568,6 @@ class ChannelsPostsMixin:
     async def get_channel_by_id(self, user_id: int, channel_id: int) -> Optional[Dict]:
         """
         ✅ v7.5.20: نفس السلوك الأصلي تماماً (channel_id فقط).
-
-        يبحث في `channel_id` (Telegram ID) — كما في الكود الأصلي.
-        لا تغيير في المنطق.
         """
         return await self.fetchone(
             "SELECT * FROM user_channels WHERE user_id = ? AND channel_id = ?",
@@ -430,19 +576,16 @@ class ChannelsPostsMixin:
 
     async def delete_channel(self, user_id: int, channel_db_id: int) -> bool:
         """
-        حذف قناة + تحديد القناة التالية تلقائياً إن كانت النشطة.
+        حذف قناة نهائياً + تحديد القناة التالية تلقائياً إن كانت النشطة.
 
-        🆕 v7.5.21:
-        - إذا كانت القناة المحذوفة هي النشطة:
-          1) ابحث عن أحدث قناة غير محظورة
-          2) احفظها كـ active_channel في DB (بدل NULL)
-          3) أبلغ بالمستخدم (log)
-        - إذا لم تكن النشطة: لا تغيير في active_channel
+        🆕 v7.5.23: هذا **حذف نهائي** (Hard Delete).
+                    للـ Soft Delete استخدم soft_delete_channel().
 
-        المزايا مقارنة بـ v7.5.20:
-        - لا fallback متكرر في get_active_channel (أداء أفضل)
-        - users.active_channel محفوظ دائماً (اتساق DB)
-        - المستخدم يرى القناة التالية نشطة فوراً
+        ⚠️ ملاحظة: PostgreSQL's ON DELETE CASCADE يحذف تلقائياً
+                    المنشورات + schedule + last_publish المرتبطة.
+
+        📌 يُستدعى من:
+        - handlers_channels_delete.py::_execute_delete (بعد تأكيد المستخدم)
         """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, channels_cache, posts_cache
@@ -462,7 +605,7 @@ class ChannelsPostsMixin:
                     except (TypeError, ValueError):
                         was_active = False
 
-                # ─── 2) احذف القناة ───
+                # ─── 2) احذف القناة (CASCADE يحذف المنشورات) ───
                 deleted = await self._execute_with_conn(
                     conn,
                     "DELETE FROM user_channels WHERE id = ? AND user_id = ?",
@@ -473,14 +616,24 @@ class ChannelsPostsMixin:
 
                 # ─── 3) حدّث active_channel ───
                 if was_active:
-                    # 🆕 v7.5.21: ابحث عن أحدث قناة غير محظورة
-                    next_row = await self._fetchone_with_conn(
-                        conn,
-                        "SELECT id, channel_name FROM user_channels "
-                        "WHERE user_id = ? AND banned = 0 "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        user_id,
-                    )
+                    # ✅ v7.5.23: ابحث عن أحدث قناة غير محظورة وغير مُزالة
+                    if await self._has_removed_at_column():
+                        next_row = await self._fetchone_with_conn(
+                            conn,
+                            "SELECT id, channel_name FROM user_channels "
+                            "WHERE user_id = ? AND banned = 0 "
+                            "AND removed_at IS NULL "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            user_id,
+                        )
+                    else:
+                        next_row = await self._fetchone_with_conn(
+                            conn,
+                            "SELECT id, channel_name FROM user_channels "
+                            "WHERE user_id = ? AND banned = 0 "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            user_id,
+                        )
                     new_active_id = next_row["id"] if next_row else None
 
                     await self._execute_with_conn(
@@ -535,12 +688,200 @@ class ChannelsPostsMixin:
             logger.error(f"❌ Error in delete_channel: {e}", exc_info=True)
             return False
 
+    # ═════════════════════════════════════════════════════════════════
+    #          ✅ v7.5.23: دوال Soft Delete الجديدة
+    # ═════════════════════════════════════════════════════════════════
+
+    async def soft_delete_channel(
+        self,
+        channel_db_id: int,
+        reason: str = "unknown",
+    ) -> bool:
+        """
+        ✅ v7.5.23 (SOFT-6): وسم قناة كمُزالة (Soft Delete).
+
+        لا تحذف البيانات — فقط تضع علامة زمنية.
+        يمكن الاسترجاع لاحقاً عبر restore_channel() أو add_channel().
+
+        Args:
+            channel_db_id: معرّف القناة في قاعدة البيانات
+            reason: سبب الإزالة ('bot_kicked', 'user_deleted', ...)
+
+        Returns:
+            True إذا نجح، False إذا فشل أو العمود غير موجود
+        """
+        if not await self._has_removed_at_column():
+            logger.warning(
+                "⚠️ soft_delete_channel: العمود removed_at غير موجود "
+                "— تخطي (لن يتم وسم القناة)"
+            )
+            return False
+
+        if not channel_db_id:
+            return False
+
+        try:
+            from database import TimeUtils
+
+            result = await self.execute(
+                "UPDATE user_channels "
+                "SET removed_at = ?, removal_reason = ? "
+                "WHERE id = ? AND removed_at IS NULL",
+                (TimeUtils.utc_now(), reason, channel_db_id),
+            )
+
+            if isinstance(result, int) and result > 0:
+                logger.info(
+                    f"📌 Soft delete: القناة {channel_db_id} "
+                    f"(reason={reason}) — ستُحذف بعد فترة السماح"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(
+                f"❌ soft_delete_channel({channel_db_id}): "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
+
+    async def restore_channel(self, channel_db_id: int) -> bool:
+        """
+        ✅ v7.5.23 (SOFT-7): استرجاع قناة مُزالة (إلغاء Soft Delete).
+
+        Args:
+            channel_db_id: معرّف القناة في قاعدة البيانات
+
+        Returns:
+            True إذا نجح، False إذا فشل أو لم تكن مُزالة
+        """
+        if not await self._has_removed_at_column():
+            return False
+
+        if not channel_db_id:
+            return False
+
+        try:
+            result = await self.execute(
+                "UPDATE user_channels "
+                "SET removed_at = NULL, removal_reason = NULL "
+                "WHERE id = ? AND removed_at IS NOT NULL",
+                (channel_db_id,),
+            )
+
+            if isinstance(result, int) and result > 0:
+                logger.info(
+                    f"♻️ استُرجعت القناة {channel_db_id} — "
+                    f"أُلغيت علامة الإزالة"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(
+                f"❌ restore_channel({channel_db_id}): "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
+
+    async def get_removed_channels(
+        self, user_id: int, limit: int = 50
+    ) -> List[Dict]:
+        """
+        ✅ v7.5.23 (SOFT-8): جلب القنوات المُزالة للمستخدم.
+
+        مفيدة للإدارة أو عرض "قنوات محذوفة مؤقتاً".
+
+        Returns:
+            قائمة القنوات المُزالة (مرتبة بالأحدث)
+        """
+        if not await self._has_removed_at_column():
+            return []
+
+        try:
+            return await self.fetchall(
+                "SELECT id, channel_id, channel_name, "
+                "       removed_at, removal_reason "
+                "FROM user_channels "
+                "WHERE user_id = ? AND removed_at IS NOT NULL "
+                "ORDER BY removed_at DESC LIMIT ?",
+                (user_id, limit),
+            )
+        except Exception as e:
+            logger.error(f"❌ get_removed_channels: {e}")
+            return []
+
+    async def hard_delete_removed_channels_before(
+        self, cutoff_dt
+    ) -> int:
+        """
+        ✅ v7.5.23 (SOFT-9): حذف نهائي للقنوات المُزالة قبل تاريخ معين.
+
+        يُستخدم من مهمة التنظيف الدوري في main.py.
+
+        Args:
+            cutoff_dt: كائن datetime — احذف ما مضى عليه cutoff_dt
+
+        Returns:
+            عدد القنوات المحذوفة
+        """
+        if not await self._has_removed_at_column():
+            return 0
+
+        try:
+            from database import USE_POSTGRES, USE_MYSQL
+
+            if USE_POSTGRES:
+                # PostgreSQL يدعم INTERVAL مباشرة
+                result = await self.execute(
+                    "DELETE FROM user_channels "
+                    "WHERE removed_at IS NOT NULL "
+                    "AND removed_at < ?",
+                    (cutoff_dt,),
+                )
+            else:
+                # SQLite/MySQL — استخدم ? للمقارنة
+                result = await self.execute(
+                    "DELETE FROM user_channels "
+                    "WHERE removed_at IS NOT NULL "
+                    "AND removed_at < ?",
+                    (cutoff_dt,),
+                )
+
+            if isinstance(result, int) and result > 0:
+                logger.info(
+                    f"🧹 حذف نهائي: {result} قناة مهجورة "
+                    f"(مُزالة قبل {cutoff_dt})"
+                )
+                return result
+            return 0
+
+        except Exception as e:
+            logger.error(
+                f"❌ hard_delete_removed_channels_before: {e}",
+                exc_info=True,
+            )
+            return 0
+
     async def is_channel_owner(self, user_id: int, channel_db_id: int) -> bool:
-        """هل المستخدم مالك القناة؟"""
-        result = await self.fetchval(
-            "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?",
-            (channel_db_id, user_id),
-        )
+        """
+        هل المستخدم مالك القناة؟
+
+        ✅ v7.5.23 (SOFT-10): يتجاهل القنوات المُزالة.
+        """
+        if await self._has_removed_at_column():
+            result = await self.fetchval(
+                "SELECT 1 FROM user_channels "
+                "WHERE id = ? AND user_id = ? AND removed_at IS NULL",
+                (channel_db_id, user_id),
+            )
+        else:
+            result = await self.fetchval(
+                "SELECT 1 FROM user_channels WHERE id = ? AND user_id = ?",
+                (channel_db_id, user_id),
+            )
         return result is not None
 
     async def count_user_posts(self, user_id: int, channel_db_id: int) -> int:
@@ -728,24 +1069,10 @@ class ChannelsPostsMixin:
         """
         جلب المنشور التالي للنشر.
 
-        🆕 v7.5.22: PERFORMANCE-FIX — استعلامان مُعاد كتابتهما
-
-        المشكلة السابقة (1.91s):
-          • JOIN user_channels uc زائد — get_channels_to_publish يفلتر
-            banned مسبقاً
-          • ORDER BY p.fail_count ASC, p.created_at ASC لا يطابق
-            idx_posts_channel_unpub_fresh_created
-          • PostgreSQL يضطر لـ Seq Scan + Sort على 464 صف
-
-        الحل الجديد (<30ms):
-          • إزالة JOIN user_channels تماماً
-          • ORDER BY p.id ASC يطابق الفهرس مباشرة
-          • Index Scan مباشر بدون Sort
+        🆕 v7.5.22: PERFORMANCE-FIX — <30ms بدل 1.91s
 
         Returns:
-            (post_dict, was_recycled):
-            - post_dict: بيانات المنشور أو None
-            - was_recycled: True إذا تم إعادة تدوير المنشورات
+            (post_dict, was_recycled)
         """
         from database import CACHE_AVAILABLE, posts_cache
 
@@ -757,7 +1084,6 @@ class ChannelsPostsMixin:
                     return cached, False
 
             # ─── 2) من DB ───
-            # ✅ v7.5.22: استعلام محسّن — يستخدم الفهرس مباشرة
             post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
@@ -788,7 +1114,6 @@ class ChannelsPostsMixin:
                 (channel_db_id,),
             )
 
-            # ✅ v7.5.22: نفس النمط المحسّن بعد إعادة التدوير
             post_row = await self.fetchone(
                 """SELECT p.id, p.text, p.media_type, p.media_file_id, p.fail_count
                    FROM posts p
@@ -856,14 +1181,13 @@ class ChannelsPostsMixin:
         إعادة تعيين كل المنشورات (published=0, fail_count=0).
 
         ✅ v7.5.18: استخدام _fetchval_with_conn بدل conn.execute
-        ✅ v7.5.20: إضافة channels_cache.invalidate(user_id) — آمن
+        ✅ v7.5.20: إضافة channels_cache.invalidate(user_id)
         """
         from database import internal_cache, CACHE_AVAILABLE
         from database import invalidate_user_cache, posts_cache, channels_cache
 
         try:
             async with self.transaction() as conn:
-                # ✅ استخدام الدالة المساعدة (تعمل مع كل قواعد البيانات)
                 owns = await self._fetchval_with_conn(
                     conn,
                     "SELECT 1 FROM user_channels "
@@ -877,7 +1201,6 @@ class ChannelsPostsMixin:
                     )
                     return 0
 
-                # إعادة تعيين الكل
                 await self._execute_with_conn(
                     conn,
                     "UPDATE posts SET published = 0, fail_count = 0 "
@@ -885,7 +1208,6 @@ class ChannelsPostsMixin:
                     channel_db_id,
                 )
 
-                # عد المنشورات
                 count = await self._fetchval_with_conn(
                     conn,
                     "SELECT COUNT(*) FROM posts "
@@ -894,7 +1216,6 @@ class ChannelsPostsMixin:
                     default=0,
                 )
 
-                # إبطال الكاش
                 await internal_cache.invalidate(f"user_{user_id}")
                 await internal_cache.invalidate(f"channel_info_{channel_db_id}")
                 await internal_cache.invalidate(f"start_data_{user_id}")
