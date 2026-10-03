@@ -2,2673 +2,4398 @@
 # -*- coding: utf-8 -*-
 
 """
-db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.28)
 ================================================================================
-v6.4.0 — PARAMETER-BINDING HOTFIX + HTML-SAFE SPLIT + INDEX FALLBACK
+🆕 v7.6.28 (MAINTENANCE-USERS-FIX):
+  ✅ FIX-HIGH: إضافة "users" إلى MAINTENANCE_TABLES
+       - المشكلة: users كان مفقوداً من MAINTENANCE_TABLES
+       - الأثر: VACUUM (ANALYZE, SKIP_LOCKED) الدوري لم يكن يشمل users
+                (autovacuum وحده يعمل — غير كافٍ لجداول كبيرة)
+       - الاكتشاف: db_diagnostics v6.4.0 (_check_maintenance_consistency)
+       - الإصلاح: إضافة "users" في مقدمة القائمة (بعد posts)
 
-التحسينات على v6.3.0:
-    🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً
-       - المشكلة: DB.fetchall("...> $1...", LONG_TX_WARN_SECONDS)
-                  كان يُمرِّر int (وليس tuple) → TypeError
-                  عند *p في Database._fetchall_with_conn
-       - الأثر: long transactions و idle-in-transaction لم تُرصد أبداً
-       - الحل: (_safe_params(LONG_TX_WARN_SECONDS))
-       - إضافة helper _safe_params في هذا الملف أيضاً (defense in depth)
+🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX) — إصلاح حرج:
+  ✅ FIX-CRITICAL: إزالة _run_maintenance_postgres من fast-path
+       - المشكلة: VACUUM (ANALYZE, SKIP_LOCKED) كان يُستدعى من داخل
+                  bootstrap transaction block
+       - الأعراض: PostgreSQL يُلغِي الـ transaction كاملاً بـ
+                  "VACUUM cannot run inside a transaction block"
+                  → كل الاستعلامات التالية تفشل بـ:
+                  "current transaction is aborted, commands ignored
+                  until end of transaction block"
+       - التأثير: فشل UNIQUE settings.key، _upsert_setting(tables_hash)،
+                  قراءة bootstrap_hash، وبالتالي فشل التهيئة كاملاً
+       - الإصلاح: VACUUM يجب أن يعمل خارج transaction
+       - الاستدعاء الآن من database.py::_bootstrap بعد commit
+         (استخدام self.connection() — autocommit mode)
 
-    🆕 fallback ثانٍ حقيقي لـ _get_indexes:
-       - المسار الأول: pg_indexes (المُفضَّل)
-       - المسار الثاني: pg_class + pg_index (fallback فعلي)
-       - السبب: بعض إعدادات Aiven تتقيّد على pg_indexes تحت RLS محددة
+🆕 v7.6.26 (AUTOVACUUM-DEDUP + CTE-INDEX):
+  ✅ FIX-1: إزالة الاستدعاء المكرر لـ _tune_autovacuum_postgres
+  ✅ FIX-2: إضافة idx_subs_status_end_active
 
-    🆕 _get_per_table_autovacuum: سبب واضح بدلاً من "غير مرئي"
-       - reason: not_found | not_in_schema | query_failed | ok
-       - التقرير يعرض سبباً دقيقاً بدلاً من تخمين مضلل
+🚀 v7.6.25 (MIGRATION-ORDER-FIX):
+  ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
 
-    🆕 _split_for_telegram آمن لـ HTML:
-       - تتبع الوسوم المفتوحة عبر _get_open_html_tags
-       - إغلاقها في نهاية كل جزء وإعادة فتحها في بداية الجزء التالي
-       - يمنع BadRequest: can't parse entities
-
-    🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح في التقرير
-       - لا نُظهر جدول MySQL كـ "✅ صحّي" بسبب dead_tup=0 غير حقيقي
-
-    🆕 فحص تناسق MAINTENANCE_TABLES vs HEAVY_TABLES_FOR_AUTOVACUUM
-       - إذا users مفقود من MAINTENANCE_TABLES → تحذير
-         (VACUUM في database_tables لن يشمل users)
-
-المبادئ (محفوظة من v6.0.0):
-    ✅ لا نخلط بين "الدليل" و"الاحتمال".
-    ✅ backend_xmin وحده لا يُعتبر إثباتاً للحجب.
-    ✅ لا نفترض أن VACUUM سيعيد المساحة لنظام الملفات.
-    ✅ لا ننفذ pg_terminate_backend() تلقائياً.
-    ✅ SQL identifiers تُقتبس بأمان.
-    ✅ PostgreSQL / MySQL / SQLite لها تحليلات مختلفة.
-    ✅ جميع عمليات التشخيص read-only.
-
-الاستخدام:
-    from db_diagnostics import diagnose_db, diagnose_db_split, vacuum_analyze_tables
+🚀 v7.6.24 (SOFT-DELETE-COLUMNS)
+🚀 v7.6.23 (BOT-ADDITION-LOG-FIX)
+🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS)
+🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN)
+🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
+🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX)
+🚀 v7.6.18 (DIAGNOSIS-FIXES)
+🚀 v7.6.17 (SCHEMA-AWARE-INDEX-CHECK + MIGRATION-FIX)
+🚀 v7.6.16 (REMOVE-REDUNDANT-POSTS-INDEXES)
+🚀 v7.6.15 (SLOW-QUERY-FIX)
+🚀 v7.6.14 (ADVANCED-INDEXES-PER-DB)
+🚀 v7.6.13 (FASTPATH-INDEX-RECOVERY + QUICK-ANALYZE)
+🚀 v7.6.12 (VACUUM + SLOW-QUERY-FIX)
+🚀 v7.6.11 (MISSING-TABLES-MIGRATION)
+🚀 v7.6.10 (AUTO-CLEANUP-STALE-LINKS)
+🚀 v7.6.9  (SLOW-QUERY-INDEX-FIX)
+🚀 v7.6.8  (CURSOR-CLEANUP)
+🚀 v7.6.7  (BANNED-WORDS-INDEX-FIX)
 ================================================================================
 """
 
-from __future__ import annotations
-
+import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
 
+# =====================================================================
+# 0. ثوابت
+# =====================================================================
 
-logger = logging.getLogger(__name__)
+# ✅ v7.6.24: 22 → 23
+CURRENT_SCHEMA_VERSION = 23
 
+CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
-# =============================================================================
-# VERSION
-# =============================================================================
+MAINTENANCE_INTERVAL_SECONDS = 86400
 
-VERSION = "6.4.0"
+VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 
+ADMIN_LOGS_RETENTION_DAYS = 30
 
-# =============================================================================
-# THRESHOLDS
-# =============================================================================
+ADMIN_LOGS_MAX_ROWS = 5000
 
-DEAD_TUPLE_WARN_PCT = 10.0
-DEAD_TUPLE_CRIT_PCT = 20.0
+REMOVED_CHANNELS_GRACE_DAYS = 30
 
-DEAD_TUPLE_WARN_ABS = 1_000
-DEAD_TUPLE_CRIT_ABS = 10_000
-
-MIN_TABLE_SIZE_FOR_ALERT = 200
-
-SMALL_TABLE_THRESHOLD = 500
-SMALL_TABLE_MIN_DEAD_CRIT = 100
-SMALL_TABLE_MIN_DEAD_WARN = 50
-
-ADMIN_LOGS_WARN_ROWS = 10_000
-ADMIN_LOGS_CRIT_ROWS = 50_000
-
-LONG_TX_WARN_SECONDS = 300
-VERY_LONG_TX_SECONDS = 1800
-
-IDLE_TX_WARN_SECONDS = 120
-IDLE_TX_CRIT_SECONDS = 1800
-
-AV_NOT_RUNNING_HOURS = 24
-NAPTIME_WARN_SECONDS = 300
-
-ANALYZE_MOD_WARN_PCT = 10.0
-ANALYZE_MOD_CRIT_PCT = 20.0
-
-EXPECTED_VACUUM_SCALE_FACTOR = "0.05"
-EXPECTED_ANALYZE_SCALE_FACTOR = "0.02"
-
-DEFAULT_VACUUM_THRESHOLD = 50
-DEFAULT_ANALYZE_THRESHOLD = 50
-
-AVG_ROW_BYTES_ESTIMATE = 200
-
-REPORT_MAX_CHARS = 3800
-TELEGRAM_MESSAGE_LIMIT = 4096
-
-REQUIRED_HEAVY_TABLE_USERS = "users"
-
-
-# =============================================================================
-# CRITICAL INDEXES
-# =============================================================================
-
-_CRITICAL_INDEXES: Dict[str, List[str]] = {
-    "posts": [
-        "posts_pkey",
-        "idx_posts_unique",
-        "idx_posts_text_hash",
-        "idx_posts_channel_pub_at",
-        "idx_posts_channel_pub_fail_created",
-        "idx_posts_channel_unpub_fresh_created",
-    ],
-    "banned_words": [
-        "banned_words_pkey",
-        "banned_words_word_chat_id_key",
-        "idx_banned_words_chat",
-        "idx_banned_words_chat_word",
-    ],
-    "bot_groups": [
-        "bot_groups_pkey",
-        "idx_bot_groups_added_by",
-        "idx_bot_groups_banned_cover",
-        "idx_bot_groups_log_channel",
-        "idx_groups_banned",
-    ],
-    "users": [
-        "users_pkey",
-    ],
-    "user_channels": [
-        "user_channels_pkey",
-    ],
-    "subscriptions": [
-        "subscriptions_pkey",
-    ],
-}
-
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
-@dataclass
-class CauseItem:
-    text: str
-    confidence: str = "medium"
-    evidence: List[str] = field(default_factory=list)
-
-
-@dataclass
-class RootCause:
-    table: str
-    causes: List[CauseItem] = field(default_factory=list)
-    severity: str = "🟢"
-    solutions: List[Tuple[int, str, str]] = field(default_factory=list)
-    expected: List[str] = field(default_factory=list)
-
-
-# =============================================================================
-# GENERIC HELPERS
-# =============================================================================
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None:
-            return default
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _escape_html(value: Any) -> str:
-    if value is None:
-        return ""
-    return (
-        str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def _fmt_size_kb(kb: Any) -> str:
-    try:
-        value = float(kb)
-    except (TypeError, ValueError, OverflowError):
-        return "?"
-    if value < 0:
-        return "?"
-    if value >= 1024 * 1024:
-        return f"{value / (1024 * 1024):.2f} GB"
-    if value >= 1024:
-        return f"{value / 1024:.2f} MB"
-    return f"{value:.1f} KB"
-
-
-def _fmt_size_bytes(value: Any) -> str:
-    try:
-        return _fmt_size_kb(float(value) / 1024.0)
-    except (TypeError, ValueError, OverflowError):
-        return "?"
-
-
-def _fmt_duration_seconds(value: Any) -> str:
-    seconds = _safe_int(value, -1)
-    if seconds < 0:
-        return "?"
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        minutes = seconds // 60
-        remaining = seconds % 60
-        if remaining:
-            return f"{minutes}m{remaining}s"
-        return f"{minutes}m"
-    if seconds < 86400:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        if minutes:
-            return f"{hours}h{minutes}m"
-        return f"{hours}h"
-    days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    if hours:
-        return f"{days}d{hours}h"
-    return f"{days}d"
-
-
-def _fmt_dt(value: Any) -> str:
-    if value is None:
-        return "—"
-    try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        text = str(value)
-        return text[:19] if len(text) > 19 else text
-    except Exception:
-        return "?"
-
-
-def _dead_pct(dead: int, live: int) -> float:
-    dead = max(dead, 0)
-    live = max(live, 0)
-    total = dead + live
-    if total <= 0:
-        return 0.0
-    return (dead / total) * 100.0
-
-
-def _is_significant_table(dead: int, live: int) -> bool:
-    total = max(dead, 0) + max(live, 0)
-    return total >= MIN_TABLE_SIZE_FOR_ALERT
-
-
-def _dead_severity(dead: int, live: int) -> str:
-    total = max(dead, 0) + max(live, 0)
-    if total < MIN_TABLE_SIZE_FOR_ALERT:
-        return "ok"
-
-    pct = _dead_pct(dead, live)
-
-    if total < SMALL_TABLE_THRESHOLD:
-        if dead >= DEAD_TUPLE_CRIT_ABS:
-            return "critical"
-        if dead >= SMALL_TABLE_MIN_DEAD_CRIT and pct >= DEAD_TUPLE_CRIT_PCT:
-            return "critical"
-        if dead >= SMALL_TABLE_MIN_DEAD_WARN and pct >= DEAD_TUPLE_WARN_PCT:
-            return "warning"
-        return "ok"
-
-    if dead >= DEAD_TUPLE_CRIT_ABS or pct >= DEAD_TUPLE_CRIT_PCT:
-        return "critical"
-    if dead >= DEAD_TUPLE_WARN_ABS or pct >= DEAD_TUPLE_WARN_PCT:
-        return "warning"
-    return "ok"
-
-
-def _dead_emoji(dead: int, live: int) -> str:
-    severity = _dead_severity(dead, live)
-    if severity == "critical":
-        return "🔴"
-    if severity == "warning":
-        return "🟡"
-    return "✅"
-
-
-def _parse_interval_seconds(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    text = str(value).strip().lower()
-    if not text:
-        return None
-    if ":" in text:
-        try:
-            parts = text.split(":")
-            if len(parts) == 3:
-                return int(
-                    float(parts[0]) * 3600
-                    + float(parts[1]) * 60
-                    + float(parts[2])
-                )
-        except Exception:
-            pass
-    match = re.fullmatch(
-        r"\s*([0-9]+(?:\.[0-9]+)?)\s*"
-        r"(ms|s|sec|secs|second|seconds|"
-        r"min|mins|minute|minutes|"
-        r"h|hr|hrs|hour|hours|"
-        r"d|day|days)?\s*",
-        text,
-    )
-    if not match:
-        return None
-    number = float(match.group(1))
-    unit = match.group(2) or "s"
-    multipliers = {
-        "ms": 0.001,
-        "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-        "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-        "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-        "d": 86400, "day": 86400, "days": 86400,
-    }
-    return int(number * multipliers.get(unit, 1))
-
-
-# =============================================================================
-# 🆕 v6.4.0: PARAMETER SAFETY
-# =============================================================================
-
-def _safe_params(*args: Any) -> tuple:
-    """
-    🆕 v6.4.0: يضمن أن المعاملات دائماً tuple.
-
-    السبب: Database.fetchall/fetchone/fetchval يستخدمون *p
-    داخلياً. تمرير scalar (مثل int) يُسبِّب:
-        TypeError: argument after * must be an iterable
-
-    أنماط الاستخدام:
-        _safe_params()               → ()
-        _safe_params(300)            → (300,)
-        _safe_params((a, b))         → (a, b)
-        _safe_params([a, b])         → (a, b)
-        _safe_params(a, b)           → (a, b)
-    """
-    if not args:
-        return ()
-    if len(args) == 1:
-        single = args[0]
-        if single is None:
-            return ()
-        if isinstance(single, tuple):
-            return single
-        if isinstance(single, (list, set, frozenset)):
-            return tuple(single)
-        return (single,)
-    return tuple(args)
-
-
-def _build_pg_in_clause(
-    items: List[str], start_index: int = 1
-) -> Tuple[str, List[str]]:
-    """يبني IN ($1, $2, ...) مع placeholders صريحة."""
-    if not items:
-        return ("NULL", [])
-    placeholders = []
-    for i, _ in enumerate(items):
-        placeholders.append(f"${start_index + i}")
-    return (", ".join(placeholders), list(items))
-
-
-# =============================================================================
-# SQL SAFETY
-# =============================================================================
-
-def _quote_pg_identifier(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
-
-
-def _quote_pg_literal(value: Any) -> str:
-    text = "" if value is None else str(value)
-    return "'" + text.replace("'", "''") + "'"
-
-
-def _safe_sqlite_identifier(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
-
-
-# =============================================================================
-# DATABASE TYPE
-# =============================================================================
-
-def _is_postgres() -> bool:
-    try:
-        from database import USE_POSTGRES
-        return bool(USE_POSTGRES)
-    except Exception:
-        return False
-
-
-def _is_mysql() -> bool:
-    try:
-        from database import USE_MYSQL
-        return bool(USE_MYSQL)
-    except Exception:
-        return False
-
-
-def _db_type() -> str:
-    if _is_postgres():
-        return "PostgreSQL"
-    if _is_mysql():
-        return "MySQL"
-    return "SQLite"
-
-
-# =============================================================================
-# TIME HELPERS
-# =============================================================================
-
-def _hours_since(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        from database import TimeUtils
-        now = TimeUtils.utc_now()
-        dt = value
-        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return (now - dt).total_seconds() / 3600.0
-    except Exception as exc:
-        logger.debug("_hours_since: %s", exc)
-        return None
-
-
-# =============================================================================
-# RELOPTIONS
-# =============================================================================
-
-def _parse_reloptions(value: Any) -> Dict[str, str]:
-    result: Dict[str, str] = {}
-    if value is None:
-        return result
-    try:
-        if isinstance(value, (list, tuple)):
-            items = value
-        else:
-            text = str(value).strip()
-            if text.startswith("{") and text.endswith("}"):
-                text = text[1:-1]
-            if not text:
-                return result
-            items = text.split(",")
-        for item in items:
-            item = str(item).strip()
-            if "=" not in item:
-                continue
-            key, val = item.split("=", 1)
-            result[key.strip()] = val.strip()
-    except Exception as exc:
-        logger.debug("_parse_reloptions: %s", exc)
-    return result
-
-
-def _normalize_factor(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    try:
-        number = float(str(value).strip())
-        return f"{number:.6f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(value).strip()
-
-
-# =============================================================================
-# 1. DEAD TUPLES
-# =============================================================================
-
-async def _get_dead_tuples_postgres() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT relname AS table_name,
-                   n_live_tup AS live_tup,
-                   n_dead_tup AS dead_tup,
-                   n_tup_ins AS inserts,
-                   n_tup_upd AS updates,
-                   n_tup_del AS deletes,
-                   n_mod_since_analyze AS mod_since_analyze,
-                   last_vacuum,
-                   last_autovacuum,
-                   last_analyze,
-                   last_autoanalyze,
-                   vacuum_count,
-                   autovacuum_count,
-                   analyze_count,
-                   autoanalyze_count
-            FROM pg_stat_user_tables
-            WHERE n_live_tup > 0 OR n_dead_tup > 0
-            ORDER BY n_dead_tup DESC, n_live_tup DESC
-            LIMIT 50
-        """)
-        return rows or []
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_postgres: %s", exc)
-        return []
-
-
-async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT TABLE_NAME AS table_name,
-                   TABLE_ROWS AS live_tup,
-                   DATA_FREE AS data_free_bytes,
-                   DATA_LENGTH AS data_bytes,
-                   INDEX_LENGTH AS index_bytes
-            FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
-            ORDER BY DATA_FREE DESC, TABLE_ROWS DESC
-            LIMIT 50
-        """)
-        result = []
-        for row in rows or []:
-            result.append({
-                "table_name": row.get("table_name"),
-                "live_tup": _safe_int(row.get("live_tup")),
-                "dead_tup": 0,
-                # 🆕 v6.4.0: MySQL لا يدعم dead_tup بنفس نموذج PG
-                "dead_unsupported": True,
-                "data_free_bytes": _safe_int(row.get("data_free_bytes")),
-                "data_bytes": _safe_int(row.get("data_bytes")),
-                "index_bytes": _safe_int(row.get("index_bytes")),
-                "inserts": 0, "updates": 0, "deletes": 0,
-                "mod_since_analyze": 0,
-                "last_vacuum": None, "last_autovacuum": None,
-                "last_analyze": None, "last_autoanalyze": None,
-                "vacuum_count": 0, "autovacuum_count": 0,
-                "analyze_count": 0, "autoanalyze_count": 0,
-            })
-        return result
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_mysql: %s", exc)
-        return []
-
-
-async def _get_dead_tuples_sqlite() -> List[Dict[str, Any]]:
-    from database import DB
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS table_name
-            FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-        """)
-        result = []
-        for row in rows or []:
-            name = row.get("table_name")
-            if not name:
-                continue
-            safe_name = _safe_sqlite_identifier(name)
-            try:
-                count = _safe_int(
-                    await DB.fetchval(
-                        f"SELECT COUNT(*) FROM {safe_name}",
-                        default=0,
-                    )
-                )
-            except Exception:
-                count = 0
-            result.append({
-                "table_name": name,
-                "live_tup": count,
-                "dead_tup": 0,
-                "dead_unsupported": True,   # 🆕 v6.4.0
-                "inserts": 0, "updates": 0, "deletes": 0,
-                "mod_since_analyze": 0,
-                "last_vacuum": None, "last_autovacuum": None,
-                "last_analyze": None, "last_autoanalyze": None,
-                "vacuum_count": 0, "autovacuum_count": 0,
-                "analyze_count": 0, "autoanalyze_count": 0,
-            })
-        return result
-    except Exception as exc:
-        logger.warning("_get_dead_tuples_sqlite: %s", exc)
-        return []
-
-
-async def _get_dead_tuples() -> List[Dict[str, Any]]:
-    if _is_postgres():
-        return await _get_dead_tuples_postgres()
-    if _is_mysql():
-        return await _get_dead_tuples_mysql()
-    return await _get_dead_tuples_sqlite()
-
-
-# =============================================================================
-# 2. TABLE SIZES
-# =============================================================================
-
-async def _get_table_sizes() -> List[Dict[str, Any]]:
-    from database import DB
-
-    if _is_postgres():
-        try:
-            return await DB.fetchall("""
-                SELECT relname AS table_name,
-                       pg_total_relation_size(relid) AS total_bytes,
-                       pg_relation_size(relid) AS table_bytes,
-                       pg_indexes_size(relid) AS index_bytes
-                FROM pg_stat_user_tables
-                ORDER BY pg_total_relation_size(relid) DESC
-                LIMIT 20
-            """) or []
-        except Exception as exc:
-            logger.warning("_get_table_sizes postgres: %s", exc)
-            return []
-
-    if _is_mysql():
-        try:
-            return await DB.fetchall("""
-                SELECT TABLE_NAME AS table_name,
-                       COALESCE(DATA_LENGTH, 0)
-                       + COALESCE(INDEX_LENGTH, 0) AS total_bytes,
-                       COALESCE(DATA_LENGTH, 0) AS table_bytes,
-                       COALESCE(INDEX_LENGTH, 0) AS index_bytes
-                FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA = DATABASE()
-                ORDER BY (
-                    COALESCE(DATA_LENGTH, 0)
-                    + COALESCE(INDEX_LENGTH, 0)
-                ) DESC
-                LIMIT 20
-            """) or []
-        except Exception as exc:
-            logger.warning("_get_table_sizes mysql: %s", exc)
-            return []
-
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS table_name
-            FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-        """)
-        result = []
-        for row in rows or []:
-            name = row.get("table_name")
-            if not name:
-                continue
-            safe_name = _safe_sqlite_identifier(name)
-            try:
-                count = _safe_int(
-                    await DB.fetchval(
-                        f"SELECT COUNT(*) FROM {safe_name}",
-                        default=0,
-                    )
-                )
-            except Exception:
-                count = 0
-            approx = count * AVG_ROW_BYTES_ESTIMATE
-            result.append({
-                "table_name": name,
-                "total_bytes": approx,
-                "table_bytes": approx,
-                "index_bytes": 0,
-                "row_count": count,
-            })
-        result.sort(
-            key=lambda item: _safe_int(item.get("total_bytes")),
-            reverse=True,
-        )
-        return result[:20]
-    except Exception as exc:
-        logger.warning("_get_table_sizes sqlite: %s", exc)
-        return []
-
-
-# =============================================================================
-# SCHEMA INFO
-# =============================================================================
-
-async def _get_schema_info() -> Dict[str, Any]:
-    from database import DB, USE_POSTGRES
-
-    info = {
-        "current_schema": None,
-        "current_schemas": None,
-        "search_path": None,
-        "database": None,
-        "user": None,
-        "version": None,
-    }
-
-    if not USE_POSTGRES:
-        return info
-
-    try:
-        info["current_schema"] = await DB.fetchval(
-            "SELECT current_schema()"
-        )
-    except Exception:
-        pass
-
-    try:
-        schemas_str = await DB.fetchval(
-            "SELECT array_to_string(current_schemas(false), ',')"
-        )
-        if schemas_str:
-            info["current_schemas"] = [
-                s.strip() for s in str(schemas_str).split(",")
-                if s.strip()
-            ]
-    except Exception:
-        pass
-
-    try:
-        info["search_path"] = await DB.fetchval("SHOW search_path")
-    except Exception:
-        pass
-
-    try:
-        info["database"] = await DB.fetchval(
-            "SELECT current_database()"
-        )
-    except Exception:
-        pass
-
-    try:
-        info["user"] = await DB.fetchval("SELECT current_user")
-    except Exception:
-        pass
-
-    try:
-        info["version"] = await DB.fetchval("SHOW server_version")
-    except Exception:
-        pass
-
-    return info
-
-
-# =============================================================================
-# 🆕 v6.4.0: PER-TABLE AUTOVACUUM (مع reason)
-# =============================================================================
-
-async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
-    """
-    🆕 v6.4.0: يعرض سبب دقيق عند غياب الجدول:
-      - "ok"            : موجود ومُحمَّل
-      - "not_found"     : لم يُرجعه الاستعلام (غير موجود فعلاً؟)
-      - "not_in_schema" : موجود في pg_class لكن خارج current_schemas
-      - "query_failed"  : الاستعلامان فشلا
-    """
-    from database import DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM
-
-    result: Dict[str, Dict[str, Any]] = {}
-    heavy = list(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-    for table in heavy:
-        result[table] = {
-            "reloptions": {},
-            "is_tuned": False,
-            "exists": False,
-            "reason": "not_found",
-        }
-
-    if not USE_POSTGRES or not heavy:
-        return result
-
-    in_clause, params = _build_pg_in_clause(heavy, 1)
-
-    # ── المسار الأول: pg_class + current_schemas ──
-    query = f"""
-        SELECT c.relname AS table_name,
-               c.reloptions,
-               n.nspname AS schema_name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relname IN ({in_clause})
-          AND c.relkind IN ('r', 'p')
-          AND n.nspname = ANY(current_schemas(false))
-    """
-
-    rows: List[Dict[str, Any]] = []
-    primary_failed = False
-    try:
-        rows = await DB.fetchall(query, tuple(params)) or []
-    except Exception as exc:
-        primary_failed = True
-        logger.warning("_get_per_table_autovacuum primary: %s", exc)
-
-    # ── fallback: بدون فلترة schema ──
-    if not rows:
-        try:
-            fallback_query = f"""
-                SELECT c.relname AS table_name,
-                       c.reloptions,
-                       n.nspname AS schema_name
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname IN ({in_clause})
-                  AND c.relkind IN ('r', 'p')
-                  AND n.nspname NOT IN (
-                      'pg_catalog', 'information_schema'
-                  )
-            """
-            fallback_rows = await DB.fetchall(
-                fallback_query, tuple(params)
-            ) or []
-            if fallback_rows:
-                rows = fallback_rows
-        except Exception as exc2:
-            logger.warning(
-                "_get_per_table_autovacuum fallback: %s", exc2
-            )
-            if primary_failed:
-                # كلا المسارين فشل
-                for table in heavy:
-                    result[table]["reason"] = "query_failed"
-                return result
-
-    found_names = set()
-    for row in rows or []:
-        name = row.get("table_name")
-        if not name:
-            continue
-        found_names.add(name)
-        options = _parse_reloptions(row.get("reloptions"))
-        vacuum_factor = _normalize_factor(
-            options.get("autovacuum_vacuum_scale_factor")
-        )
-        analyze_factor = _normalize_factor(
-            options.get("autovacuum_analyze_scale_factor")
-        )
-        tuned = (
-            vacuum_factor == _normalize_factor(
-                EXPECTED_VACUUM_SCALE_FACTOR
-            )
-            and analyze_factor == _normalize_factor(
-                EXPECTED_ANALYZE_SCALE_FACTOR
-            )
-        )
-        result[name] = {
-            "reloptions": options,
-            "is_tuned": tuned,
-            "exists": True,
-            "reason": "ok",
-            "schema": row.get("schema_name"),
-        }
-
-    # ── تشخيص الغائبين ──
-    missing = [t for t in heavy if t not in found_names]
-    if missing:
-        # هل هم موجودون في pg_class لكن خارج schema؟
-        try:
-            miss_clause, miss_params = _build_pg_in_clause(
-                missing, 1
-            )
-            exist_rows = await DB.fetchall(
-                f"""
-                    SELECT c.relname, n.nspname
-                    FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE c.relname IN ({miss_clause})
-                      AND c.relkind IN ('r', 'p')
-                """,
-                tuple(miss_params),
-            ) or []
-            for r in exist_rows:
-                nm = r.get("relname")
-                if nm in result and not result[nm]["exists"]:
-                    result[nm]["reason"] = "not_in_schema"
-        except Exception as exc:
-            logger.debug("missing-tables probe: %s", exc)
-
-    return result
-
-
-# =============================================================================
-# 4. BLOCKERS (مع إصلاح v6.4.0)
-# =============================================================================
-
-async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
-    """
-    🔴 v6.4.0 FIX-CRITICAL:
-    كان DB.fetchall(q, LONG_TX_WARN_SECONDS) يُمرِّر int لا tuple
-    → TypeError يُبتلع في except → long_tx لا تُرصد أبداً.
-
-    الحل: _safe_params() لكل استدعاء.
-    """
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return []
-
-    blockers: List[Dict[str, Any]] = []
-
-    # ── long_transaction ──
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, state, usename, application_name,
-                   client_addr::text AS client_addr,
-                   EXTRACT(EPOCH FROM (now() - xact_start))::bigint
-                       AS tx_age_sec,
-                   EXTRACT(EPOCH FROM (now() - query_start))::bigint
-                       AS query_age_sec,
-                   backend_xmin::text AS backend_xmin,
-                   backend_xid::text AS backend_xid,
-                   substring(query, 1, 300) AS query
-            FROM pg_stat_activity
-            WHERE xact_start IS NOT NULL
-              AND state <> 'idle'
-              AND pid <> pg_backend_pid()
-              AND EXTRACT(EPOCH FROM (now() - xact_start)) > $1
-            ORDER BY tx_age_sec DESC
-            LIMIT 20
-        """, _safe_params(LONG_TX_WARN_SECONDS))
-        for row in rows or []:
-            blockers.append({
-                "type": "long_transaction",
-                "pid": row.get("pid"),
-                "state": row.get("state"),
-                "usename": row.get("usename"),
-                "app": row.get("application_name"),
-                "client": row.get("client_addr"),
-                "tx_age_sec": _safe_int(row.get("tx_age_sec")),
-                "query_age_sec": _safe_int(row.get("query_age_sec")),
-                "backend_xmin": row.get("backend_xmin"),
-                "backend_xid": row.get("backend_xid"),
-                "query": (row.get("query") or "")[:300],
-            })
-    except Exception as exc:
-        logger.warning("blockers(long transaction): %s", exc)
-
-    # ── idle_in_transaction ──
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, usename, application_name,
-                   client_addr::text AS client_addr,
-                   EXTRACT(EPOCH FROM (now() - state_change))::bigint
-                       AS idle_sec,
-                   backend_xmin::text AS backend_xmin,
-                   backend_xid::text AS backend_xid,
-                   substring(query, 1, 300) AS query
-            FROM pg_stat_activity
-            WHERE state = 'idle in transaction'
-              AND pid <> pg_backend_pid()
-              AND EXTRACT(EPOCH FROM (now() - state_change)) > $1
-            ORDER BY idle_sec DESC
-            LIMIT 20
-        """, _safe_params(IDLE_TX_WARN_SECONDS))
-        for row in rows or []:
-            blockers.append({
-                "type": "idle_in_transaction",
-                "pid": row.get("pid"),
-                "usename": row.get("usename"),
-                "app": row.get("application_name"),
-                "client": row.get("client_addr"),
-                "idle_sec": _safe_int(row.get("idle_sec")),
-                "backend_xmin": row.get("backend_xmin"),
-                "backend_xid": row.get("backend_xid"),
-                "query": (row.get("query") or "")[:300],
-            })
-    except Exception as exc:
-        logger.warning("blockers(idle transaction): %s", exc)
-
-    # ── running_vacuum ──
-    try:
-        rows = await DB.fetchall("""
-            SELECT pid, datname,
-                   relid::regclass::text AS table_name,
-                   phase,
-                   heap_blks_total,
-                   heap_blks_scanned,
-                   heap_blks_vacuumed,
-                   CASE
-                       WHEN heap_blks_total > 0
-                       THEN ROUND(
-                           heap_blks_vacuumed::numeric
-                           / heap_blks_total::numeric * 100, 1)
-                       ELSE 0
-                   END AS progress_pct
-            FROM pg_stat_progress_vacuum
-            LIMIT 20
-        """)
-        for row in rows or []:
-            total = _safe_int(row.get("heap_blks_total"))
-            scanned = _safe_int(row.get("heap_blks_scanned"))
-            vacuumed = _safe_int(row.get("heap_blks_vacuumed"))
-            pct = _safe_float(row.get("progress_pct"))
-            if total > 0:
-                progress = (
-                    f"scanned={scanned:,}; "
-                    f"vacuumed={vacuumed:,}/{total:,}; "
-                    f"{pct:.1f}%"
-                )
-            else:
-                progress = "?"
-            blockers.append({
-                "type": "running_vacuum",
-                "pid": row.get("pid"),
-                "datname": row.get("datname"),
-                "table": row.get("table_name"),
-                "phase": row.get("phase"),
-                "progress": progress,
-            })
-    except Exception as exc:
-        logger.debug("blockers(running vacuum): %s", exc)
-
-    return blockers
-
-
-# =============================================================================
-# XMIN
-# =============================================================================
-
-async def _get_current_xmin_horizon() -> Optional[int]:
-    from database import DB
-    try:
-        row = await DB.fetchone(
-            "SELECT pg_snapshot_xmin(pg_current_snapshot())::text "
-            "AS xmin"
-        )
-        if not row:
-            return None
-        xmin_str = row.get("xmin")
-        if not xmin_str:
-            return None
-        return int(xmin_str)
-    except Exception as exc:
-        logger.debug("_get_current_xmin_horizon: %s", exc)
-        return None
-
-
-def _parse_xmin(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        text = str(value).strip()
-        if not text:
-            return None
-        return int(text)
-    except (TypeError, ValueError):
-        return None
-
-
-def _detect_xmin_blockers(
-    blockers: List[Dict[str, Any]],
-    current_xmin: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-
-    for item in blockers:
-        if item.get("type") != "long_transaction":
-            continue
-
-        age = _safe_int(item.get("tx_age_sec"))
-        xmin_raw = item.get("backend_xmin")
-        xmin_int = _parse_xmin(xmin_raw)
-
-        if age < VERY_LONG_TX_SECONDS:
-            continue
-        if xmin_int is None:
-            continue
-
-        blocks_vacuum: Optional[bool] = None
-        if current_xmin is not None:
-            blocks_vacuum = xmin_int < current_xmin
-
-        if blocks_vacuum is True:
-            confidence = "high"
-            note = "يحجب VACUUM فعلاً (xmin < horizon)"
-        elif blocks_vacuum is False:
-            confidence = "medium"
-            note = "لا يحجب حالياً (xmin >= horizon)"
-        else:
-            confidence = "medium"
-            note = "غير مؤكد (لا يمكن قراءة horizon)"
-
-        candidates.append({
-            "pid": item.get("pid"),
-            "age": age,
-            "xmin": xmin_int,
-            "backend_xid": item.get("backend_xid"),
-            "state": item.get("state"),
-            "query": item.get("query") or "",
-            "blocks_vacuum": blocks_vacuum,
-            "confidence": confidence,
-            "note": note,
-        })
-
-    candidates.sort(
-        key=lambda c: (
-            c.get("blocks_vacuum") is not True,
-            -_safe_int(c.get("age")),
-        )
-    )
-
-    return candidates
-
-
-def _detect_xmin_blocker(
-    long_tx: List[Dict[str, Any]],
-    current_xmin: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    candidates = _detect_xmin_blockers(long_tx, current_xmin)
-    return candidates[0] if candidates else None
-
-
-# =============================================================================
-# 5. INDEXES — 🆕 v6.4.0 مع fallback حقيقي
-# =============================================================================
-
-async def _get_indexes(
-    tables: List[str],
-) -> Dict[str, List[str]]:
-    """
-    🆕 v6.4.0: fallback فعلي.
-
-    المسار الأول: pg_indexes (المُفضَّل — يحتوي تعريف الفهرس)
-    المسار الثاني: pg_class + pg_index (يعمل حتى لو pg_indexes
-                    مقيّد بـ RLS معينة على Aiven)
-    """
-    from database import DB
-
-    result: Dict[str, List[str]] = {table: [] for table in tables}
-    if not tables:
-        return result
-
-    if _is_postgres():
-        in_clause, params = _build_pg_in_clause(tables, 1)
-
-        # ── المحاولة الأولى: pg_indexes ──
-        try:
-            query = f"""
-                SELECT tablename AS table_name,
-                       indexname AS index_name
-                FROM pg_indexes
-                WHERE tablename IN ({in_clause})
-                  AND schemaname NOT IN (
-                      'pg_catalog', 'information_schema'
-                  )
-                ORDER BY tablename, indexname
-            """
-            rows = await DB.fetchall(query, tuple(params))
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-            if any(result.values()):
-                return result
-        except Exception as exc:
-            logger.warning("_get_indexes (pg_indexes): %s", exc)
-
-        # ── fallback: pg_class + pg_index ──
-        try:
-            query = f"""
-                SELECT c.relname AS table_name,
-                       ic.relname AS index_name
-                FROM pg_index i
-                JOIN pg_class c ON c.oid = i.indrelid
-                JOIN pg_class ic ON ic.oid = i.indexrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname IN ({in_clause})
-                  AND n.nspname = ANY(current_schemas(false))
-                ORDER BY c.relname, ic.relname
-            """
-            rows = await DB.fetchall(query, tuple(params))
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-            if any(result.values()):
-                logger.info(
-                    "ℹ️ _get_indexes: استُخدم fallback "
-                    "(pg_class + pg_index)"
-                )
-                return result
-        except Exception as exc:
-            logger.warning("_get_indexes (pg_class fallback): %s", exc)
-
-        return result
-
-    if _is_mysql():
-        try:
-            rows = await DB.fetchall("""
-                SELECT TABLE_NAME AS table_name,
-                       INDEX_NAME AS index_name
-                FROM information_schema.STATISTICS
-                WHERE TABLE_SCHEMA = DATABASE()
-                ORDER BY TABLE_NAME, INDEX_NAME
-            """)
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-        except Exception as exc:
-            logger.warning("_get_indexes mysql: %s", exc)
-        return result
-
-    # SQLite
-    try:
-        rows = await DB.fetchall("""
-            SELECT name AS index_name,
-                   tbl_name AS table_name
-            FROM sqlite_master
-            WHERE type = 'index'
-        """)
-        for row in rows or []:
-            table = row.get("table_name")
-            index = row.get("index_name")
-            if (table in result and index
-                    and index not in result[table]):
-                result[table].append(index)
-    except Exception as exc:
-        logger.warning("_get_indexes sqlite: %s", exc)
-
-    return result
-
-
-# =============================================================================
-# 6. POSTGRES SETTINGS
-# =============================================================================
-
-async def _get_pg_settings() -> Dict[str, Any]:
-    from database import DB, USE_POSTGRES
-
-    if not USE_POSTGRES:
-        return {}
-
-    keys = [
-        "autovacuum",
-        "autovacuum_naptime",
-        "autovacuum_vacuum_scale_factor",
-        "autovacuum_analyze_scale_factor",
-        "autovacuum_vacuum_threshold",
-        "autovacuum_analyze_threshold",
-        "autovacuum_max_workers",
-        "autovacuum_vacuum_cost_delay",
-        "autovacuum_vacuum_cost_limit",
-        "max_connections",
-        "shared_buffers",
-        "work_mem",
-        "effective_cache_size",
-        "synchronous_commit",
-        "server_version",
-    ]
-    settings: Dict[str, Any] = {}
-    for key in keys:
-        try:
-            settings[key] = await DB.fetchval(f"SHOW {key}")
-        except Exception as exc:
-            logger.debug("SHOW %s failed: %s", key, exc)
-            settings[key] = None
-    return settings
-
-
-def _autovacuum_enabled(settings: Dict[str, Any]) -> bool:
-    value = str(settings.get("autovacuum", "on")).strip().lower()
-    return value in {"on", "true", "1", "yes"}
-
-
-# =============================================================================
-# THRESHOLD CALCULATION
-# =============================================================================
-
-def _autovacuum_vacuum_trigger(
-    live_rows: int,
-    settings: Dict[str, Any],
-    table_options: Optional[Dict[str, str]] = None,
-) -> int:
-    options = table_options or {}
-    threshold_raw = options.get("autovacuum_vacuum_threshold")
-    scale_raw = options.get("autovacuum_vacuum_scale_factor")
-    if threshold_raw is None:
-        threshold_raw = settings.get("autovacuum_vacuum_threshold")
-    if scale_raw is None:
-        scale_raw = settings.get("autovacuum_vacuum_scale_factor")
-    threshold = _safe_int(threshold_raw, DEFAULT_VACUUM_THRESHOLD)
-    scale = _safe_float(scale_raw, 0.2)
-    trigger = threshold + int(max(live_rows, 0) * max(scale, 0.0))
-    return max(trigger, 0)
-
-
-def _autovacuum_analyze_trigger(
-    live_rows: int,
-    settings: Dict[str, Any],
-    table_options: Optional[Dict[str, str]] = None,
-) -> int:
-    options = table_options or {}
-    threshold_raw = options.get("autovacuum_analyze_threshold")
-    scale_raw = options.get("autovacuum_analyze_scale_factor")
-    if threshold_raw is None:
-        threshold_raw = settings.get("autovacuum_analyze_threshold")
-    if scale_raw is None:
-        scale_raw = settings.get("autovacuum_analyze_scale_factor")
-    threshold = _safe_int(threshold_raw, DEFAULT_ANALYZE_THRESHOLD)
-    scale = _safe_float(scale_raw, 0.1)
-    trigger = threshold + int(max(live_rows, 0) * max(scale, 0.0))
-    return max(trigger, 0)
-
-
-# =============================================================================
-# PROJECT CHECK
-# =============================================================================
-
-def _check_project_heavy_tables() -> Optional[str]:
-    try:
-        from database import HEAVY_TABLES_FOR_AUTOVACUUM
-    except Exception as exc:
-        logger.debug("_check_project_heavy_tables: %s", exc)
-        return None
-
-    heavy = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-
-    if REQUIRED_HEAVY_TABLE_USERS not in heavy:
-        return (
-            "🔴 <b>v7.7.37 لم يُطبَّق</b> — "
-            f'"{REQUIRED_HEAVY_TABLE_USERS}" مفقود من '
-            "HEAVY_TABLES_FOR_AUTOVACUUM. "
-            "أعد النشر + restart البوت."
-        )
-    return None
-
-
-# 🆕 v6.4.0: فحص تناسق MAINTENANCE_TABLES
-def _check_maintenance_consistency() -> Optional[str]:
-    """
-    🆕 v6.4.0: MAINTENANCE_TABLES في database_tables.py تُحدد
-    الجداول التي يستهدفها VACUUM (ANALYZE, SKIP_LOCKED) الدوري.
-    إذا كان جدول حرج (users مثلاً) مفقوداً منها → لن يُنظَّف دورياً.
-    """
-    try:
-        from database_tables import MAINTENANCE_TABLES
-        from database import HEAVY_TABLES_FOR_AUTOVACUUM
-    except Exception as exc:
-        logger.debug("_check_maintenance_consistency: %s", exc)
-        return None
-
-    maint = set(MAINTENANCE_TABLES or ())
-    heavy = set(HEAVY_TABLES_FOR_AUTOVACUUM or ())
-
-    missing = heavy - maint
-    if not missing:
-        return None
-
-    missing_str = ", ".join(sorted(missing))
-    return (
-        "🟡 <b>VACUUM الدوري لا يشمل جداول حرجة:</b> "
-        f"<code>{_escape_html(missing_str)}</code>\n"
-        "💡 <b>السبب:</b> مفقودة من "
-        "<code>MAINTENANCE_TABLES</code> في database_tables.py\n"
-        "💡 <b>الأثر:</b> VACUUM (ANALYZE, SKIP_LOCKED) الدوري "
-        "لن يعمل عليها — autovacuum وحده يعمل."
-    )
-
-
-async def _check_admin_logs_size() -> Optional[str]:
-    from database import DB
-
-    try:
-        row_count = _safe_int(
-            await DB.fetchval("SELECT COUNT(*) FROM admin_logs",
-                              default=0)
-        )
-    except Exception as exc:
-        logger.debug("_check_admin_logs_size: %s", exc)
-        return None
-
-    if row_count >= ADMIN_LOGS_CRIT_ROWS:
-        return (
-            f"🔴 <b>admin_logs كبير جداً:</b> "
-            f"{row_count:,} صف\n"
-            f"💡 نظّف القديم الآن: "
-            f"<code>DELETE FROM admin_logs "
-            f"WHERE created_at < NOW() - INTERVAL '30 days';</code>"
-        )
-
-    if row_count >= ADMIN_LOGS_WARN_ROWS:
-        return (
-            f"🟡 <b>admin_logs يحتاج تقليماً:</b> "
-            f"{row_count:,} صف\n"
-            f"💡 نظّف القديم: "
-            f"<code>DELETE FROM admin_logs "
-            f"WHERE created_at < NOW() - INTERVAL '60 days';</code>"
-        )
-
-    return None
-
-
-# =============================================================================
-# ANALYSIS ENGINE
-# =============================================================================
-
-async def _analyze_root_causes(
-    dead_rows: List[Dict[str, Any]],
-    per_table: Dict[str, Dict[str, Any]],
-    blockers: List[Dict[str, Any]],
-    pg_settings: Dict[str, Any],
-) -> Tuple[List[RootCause], List[str]]:
-    if not _is_postgres():
-        return [], []
-
-    from database import HEAVY_TABLES_FOR_AUTOVACUUM
-
-    causes_out: List[RootCause] = []
-    general_notes: List[str] = []
-
-    heavy_tables = set(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-
-    long_tx = [b for b in blockers
-               if b.get("type") == "long_transaction"]
-    idle_tx = [b for b in blockers
-               if b.get("type") == "idle_in_transaction"]
-    running_vacuum = [b for b in blockers
-                      if b.get("type") == "running_vacuum"]
-
-    av_enabled = _autovacuum_enabled(pg_settings)
-    naptime = _parse_interval_seconds(
-        pg_settings.get("autovacuum_naptime")
-    )
-
-    if not av_enabled:
-        general_notes.append(
-            "🔴 <b>autovacuum = OFF</b> — "
-            "التنظيف التلقائي معطّل عالمياً."
-        )
-    else:
-        general_notes.append("🟢 <b>autovacuum = ON</b>.")
-
-    sc = str(pg_settings.get("synchronous_commit", "")).strip().lower()
-    if sc == "off":
-        general_notes.append(
-            "ℹ️ <b>synchronous_commit=off</b> — "
-            "مقصود من v7.7.36 لتحسين الأداء. لا تعتبره خطأً."
-        )
-    elif sc == "on":
-        general_notes.append(
-            "⚠️ <b>synchronous_commit=on</b> — "
-            "v7.7.36 يضبطه على off تلقائياً عبر server_settings."
-        )
-
-    project_warning = _check_project_heavy_tables()
-    if project_warning:
-        general_notes.append(project_warning)
-
-    # 🆕 v6.4.0
-    maint_warning = _check_maintenance_consistency()
-    if maint_warning:
-        general_notes.append(maint_warning)
-
-    admin_logs_warning = await _check_admin_logs_size()
-    if admin_logs_warning:
-        general_notes.append(admin_logs_warning)
-
-    if naptime is not None and naptime > NAPTIME_WARN_SECONDS:
-        general_notes.append(
-            "🟡 <b>autovacuum_naptime</b> = "
-            f"<code>{_escape_html(pg_settings.get('autovacuum_naptime'))}</code> "
-            "وهو أعلى من 5 دقائق."
-        )
-
-    if running_vacuum:
-        for item in running_vacuum:
-            general_notes.append(
-                "🟢 VACUUM يعمل الآن على "
-                f"<code>{_escape_html(item.get('table'))}</code> "
-                f"— {_escape_html(item.get('phase'))} "
-                f"({_escape_html(item.get('progress'))})"
-            )
-
-    current_xmin = await _get_current_xmin_horizon()
-    xmin_candidates = _detect_xmin_blockers(long_tx, current_xmin)
-
-    if xmin_candidates:
-        real_blockers = [
-            c for c in xmin_candidates
-            if c.get("blocks_vacuum") is True
-        ]
-        if real_blockers:
-            candidate = real_blockers[0]
-            general_notes.append(
-                "🔴 <b>معاملة تحجب VACUUM فعلاً:</b> "
-                f"pid=<code>{candidate.get('pid')}</code> "
-                f"العمر={_fmt_duration_seconds(candidate.get('age'))} "
-                f"xmin=<code>{candidate.get('xmin')}</code> "
-                f"< horizon=<code>{current_xmin}</code>"
-            )
-        else:
-            candidate = xmin_candidates[0]
-            general_notes.append(
-                "🟡 <b>مرشح للتحقيق (غير مؤكد):</b> "
-                f"pid=<code>{candidate.get('pid')}</code> "
-                f"العمر={_fmt_duration_seconds(candidate.get('age'))} "
-                f"xmin=<code>{candidate.get('xmin')}</code>"
-            )
-    elif long_tx:
-        general_notes.append(
-            f"🟡 توجد <b>{len(long_tx)}</b> معاملة طويلة؛ "
-            "لم يظهر دليل كافٍ لإثبات أنها تحجز VACUUM."
-        )
-
-    if idle_tx:
-        severe_idle = [
-            item for item in idle_tx
-            if _safe_int(item.get("idle_sec")) >= IDLE_TX_CRIT_SECONDS
-        ]
-        if severe_idle:
-            general_notes.append(
-                "🔴 توجد معاملات <b>idle in transaction</b> "
-                f"لفترة طويلة ({len(severe_idle)})."
-            )
-        else:
-            general_notes.append(
-                f"🟠 توجد <b>{len(idle_tx)}</b> "
-                "idle-in-transaction؛ قد تحتفظ بـ snapshot."
-            )
-
-    for row in dead_rows:
-        table = row.get("table_name")
-        if not table:
-            continue
-
-        live = _safe_int(row.get("live_tup"))
-        dead = _safe_int(row.get("dead_tup"))
-
-        if not _is_significant_table(dead, live):
-            continue
-
-        severity = _dead_severity(dead, live)
-        if severity == "ok":
-            continue
-
-        pct = _dead_pct(dead, live)
-        info = per_table.get(table, {})
-        reloptions = info.get("reloptions") or {}
-        is_heavy = table in heavy_tables
-        is_tuned = bool(info.get("is_tuned"))
-
-        last_av = row.get("last_autovacuum")
-        av_hours = _hours_since(last_av)
-        analyze_mod = _safe_int(row.get("mod_since_analyze"))
-        analyze_mod_pct = (
-            analyze_mod / live * 100.0 if live > 0 else 0.0
-        )
-
-        vacuum_trigger = _autovacuum_vacuum_trigger(
-            live, pg_settings, reloptions
-        )
-        analyze_trigger = _autovacuum_analyze_trigger(
-            live, pg_settings, reloptions
-        )
-
-        active_vacuum = any(
-            item.get("type") == "running_vacuum"
-            and item.get("table") == table
-            for item in blockers
-        )
-
-        causes_list: List[CauseItem] = []
-
-        if active_vacuum:
-            causes_list.append(CauseItem(
-                text=(
-                    "VACUUM يعمل حالياً على الجدول؛ "
-                    "قد تكون الإحصاءات الحالية مؤقتة."
-                ),
-                confidence="high",
-                evidence=["pg_stat_progress_vacuum"],
-            ))
-
-        if not av_enabled:
-            causes_list.append(CauseItem(
-                text=(
-                    "autovacuum معطّل عالمياً؛ "
-                    "لن يحدث تنظيف تلقائي."
-                ),
-                confidence="high",
-                evidence=["autovacuum=off"],
-            ))
-
-        if dead >= vacuum_trigger:
-            causes_list.append(CauseItem(
-                text=(
-                    "عدد dead tuples تجاوز threshold "
-                    "المحسوب تقريبياً لـ autovacuum."
-                ),
-                confidence="high",
-                evidence=[
-                    f"dead={dead:,}",
-                    f"trigger≈{vacuum_trigger:,}",
-                ],
-            ))
-
-        if is_heavy and not is_tuned:
-            causes_list.append(CauseItem(
-                text=(
-                    "<b>إعدادات الجدول الخاصة بـ autovacuum "
-                    "ليست على القيم المستهدفة.</b>"
-                ),
-                confidence="high",
-                evidence=[
-                    "reloptions="
-                    + (
-                        ", ".join(
-                            f"{k}={v}"
-                            for k, v in list(reloptions.items())[:5]
-                        )
-                        if reloptions
-                        else "default"
-                    )
-                ],
-            ))
-
-        if xmin_candidates:
-            candidate = next(
-                (c for c in xmin_candidates
-                 if c.get("blocks_vacuum") is True),
-                xmin_candidates[0],
-            )
-            is_real_blocker = candidate.get("blocks_vacuum") is True
-            causes_list.append(CauseItem(
-                text=(
-                    "معاملة طويلة تحجز snapshot قديم "
-                    + ("(مثبت)." if is_real_blocker
-                       else "(مرشح، غير مثبت).")
-                ),
-                confidence=(
-                    "high" if is_real_blocker else "medium"
-                ),
-                evidence=[
-                    f"pid={candidate.get('pid')}",
-                    "age=" + _fmt_duration_seconds(
-                        candidate.get("age")
-                    ),
-                    f"backend_xmin={candidate.get('xmin')}",
-                    f"note={candidate.get('note', '')}",
-                ],
-            ))
-        elif long_tx:
-            causes_list.append(CauseItem(
-                text=(
-                    f"توجد {len(long_tx)} معاملة طويلة، "
-                    "لكن الحجب غير مثبت."
-                ),
-                confidence="low",
-                evidence=[
-                    (
-                        f"pid={item.get('pid')} "
-                        f"age={_fmt_duration_seconds(item.get('tx_age_sec'))}"
-                    )
-                    for item in long_tx[:3]
-                ],
-            ))
-
-        if idle_tx:
-            causes_list.append(CauseItem(
-                text=(
-                    f"توجد {len(idle_tx)} "
-                    "idle-in-transaction؛ قد تحتفظ "
-                    "بـ snapshot مفتوح."
-                ),
-                confidence="medium",
-                evidence=[
-                    (
-                        f"pid={item.get('pid')} "
-                        f"idle={_fmt_duration_seconds(item.get('idle_sec'))}"
-                    )
-                    for item in idle_tx[:3]
-                ],
-            ))
-
-        if av_hours is not None and av_hours > AV_NOT_RUNNING_HOURS:
-            causes_list.append(CauseItem(
-                text="آخر autovacuum أقدم من 24 ساعة.",
-                confidence="medium",
-                evidence=[f"last_autovacuum={_fmt_dt(last_av)}"],
-            ))
-
-        if av_hours is None and dead > DEAD_TUPLE_WARN_ABS:
-            causes_list.append(CauseItem(
-                text=(
-                    "لا توجد قيمة last_autovacuum؛ "
-                    "قد يعني ذلك أن autovacuum لم يُسجّل "
-                    "على هذا الجدول بعد."
-                ),
-                confidence="medium",
-                evidence=["last_autovacuum=NULL"],
-            ))
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            causes_list.append(CauseItem(
-                text=(
-                    "إحصاءات الجدول قديمة بسبب عدد كبير "
-                    "من التعديلات منذ آخر ANALYZE."
-                ),
-                confidence=(
-                    "high"
-                    if analyze_mod_pct >= ANALYZE_MOD_CRIT_PCT
-                    else "medium"
-                ),
-                evidence=[
-                    f"mod_since_analyze={analyze_mod:,}",
-                    f"ratio={analyze_mod_pct:.1f}%",
-                    f"trigger≈{analyze_trigger:,}",
-                ],
-            ))
-
-        if not causes_list:
-            causes_list.append(CauseItem(
-                text="لم يظهر سبب جذري واضح من البيانات الحالية.",
-                confidence="low",
-                evidence=[f"dead/live={pct:.1f}%"],
-            ))
-
-        solutions: List[Tuple[int, str, str]] = []
-        priority = 1
-        safe_table = _quote_pg_identifier(table)
-        safe_table_html = _escape_html(safe_table)
-
-        if active_vacuum:
-            solutions.append((
-                priority,
-                "⏳ انتظر VACUUM الجاري ثم أعد التشخيص.",
-                (
-                    "SELECT relname, n_live_tup, n_dead_tup "
-                    "FROM pg_stat_user_tables "
-                    f"WHERE relname = {_quote_pg_literal(table)};"
-                ),
-            ))
-        else:
-            solutions.append((
-                priority,
-                (
-                    "🧹 <b>تنظيف فوري:</b> "
-                    f"<code>VACUUM (ANALYZE) "
-                    f"{safe_table_html};</code>"
-                ),
-                f"VACUUM (ANALYZE) {safe_table};",
-            ))
-        priority += 1
-
-        if is_heavy and not is_tuned:
-            solutions.append((
-                priority,
-                "⚙️ اضبط autovacuum للجدول على القيم المستهدفة:",
-                (
-                    f"ALTER TABLE {safe_table} SET ("
-                    "autovacuum_vacuum_scale_factor = "
-                    f"{EXPECTED_VACUUM_SCALE_FACTOR}, "
-                    "autovacuum_analyze_scale_factor = "
-                    f"{EXPECTED_ANALYZE_SCALE_FACTOR}"
-                    ");"
-                ),
-            ))
-            priority += 1
-
-        if not av_enabled:
-            solutions.append((
-                priority,
-                "🔴 فعّل autovacuum عالمياً.",
-                (
-                    "ALTER SYSTEM SET autovacuum = on; "
-                    "SELECT pg_reload_conf();"
-                ),
-            ))
-            priority += 1
-
-        if xmin_candidates:
-            candidate = next(
-                (c for c in xmin_candidates
-                 if c.get("blocks_vacuum") is True),
-                xmin_candidates[0],
-            )
-            pid = _safe_int(candidate.get("pid"))
-            solutions.append((
-                priority,
-                (
-                    "🔎 افحص المعاملة المرشحة "
-                    f"(pid={pid}) قبل أي إجراء."
-                ),
-                (
-                    "SELECT pid, usename, application_name, "
-                    "state, xact_start, backend_xmin, "
-                    "backend_xid, query "
-                    "FROM pg_stat_activity "
-                    f"WHERE pid = {pid};"
-                ),
-            ))
-            priority += 1
-
-            solutions.append((
-                priority,
-                (
-                    "⚠️ لا تنهِ المعاملة إلا بعد "
-                    "التأكد من أنها عالقة وآمنة للإلغاء."
-                ),
-                "",
-            ))
-            priority += 1
-
-        if idle_tx:
-            solutions.append((
-                priority,
-                "🟠 افحص idle-in-transaction:",
-                (
-                    "SELECT pid, usename, application_name, "
-                    "state, state_change, backend_xmin, query "
-                    "FROM pg_stat_activity "
-                    "WHERE state = 'idle in transaction' "
-                    "ORDER BY state_change;"
-                ),
-            ))
-            priority += 1
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            solutions.append((
-                priority,
-                (
-                    "📊 حدّث إحصاءات الجدول: "
-                    f"<code>ANALYZE {safe_table_html};</code>"
-                ),
-                f"ANALYZE {safe_table};",
-            ))
-            priority += 1
-
-        if naptime is not None and naptime > NAPTIME_WARN_SECONDS:
-            solutions.append((
-                priority,
-                (
-                    "⚙️ يمكن تقليل autovacuum_naptime إذا كان "
-                    "تأخر بدء autovacuum مشكلة فعلية."
-                ),
-                (
-                    "ALTER SYSTEM SET "
-                    "autovacuum_naptime = '60s'; "
-                    "SELECT pg_reload_conf();"
-                ),
-            ))
-            priority += 1
-
-        solutions.append((
-            priority,
-            "📈 أعد القياس بعد انتهاء العملية.",
-            (
-                "SELECT relname, n_live_tup, n_dead_tup, "
-                "last_autovacuum, last_autoanalyze "
-                "FROM pg_stat_user_tables "
-                f"WHERE relname = {_quote_pg_literal(table)};"
-            ),
-        ))
-
-        expected: List[str] = []
-
-        if active_vacuum:
-            expected.append(
-                "⏳ لا نحكم على النتيجة قبل انتهاء VACUUM الجاري."
-            )
-        else:
-            expected.append(
-                "🧹 المتوقع: انخفاض dead tuples القابلة للتنظيف "
-                "بعد VACUUM."
-            )
-            expected.append(
-                "ℹ️ n_dead_tup قد لا يصبح صفراً فوراً؛ "
-                "الإحصاءات والعمليات المتزامنة قد تؤثر على الرقم."
-            )
-            expected.append(
-                "💾 VACUUM العادي لا يعني بالضرورة عودة المساحة "
-                "لنظام الملفات؛ المساحة قد تصبح متاحة لإعادة "
-                "الاستخدام داخل الجدول."
-            )
-
-        if is_heavy and not is_tuned:
-            expected.append(
-                "⚙️ بعد ضبط reloptions: سيبدأ autovacuum عند "
-                "threshold أقل من الإعداد الافتراضي."
-            )
-
-        if analyze_mod_pct >= ANALYZE_MOD_WARN_PCT:
-            expected.append(
-                "📊 ANALYZE سيحدّث إحصاءات المخطط ويحسن "
-                "قرارات الـ planner عند الحاجة."
-            )
-
-        severity_emoji = (
-            "🔴" if severity == "critical" else "🟡"
-        )
-
-        causes_out.append(RootCause(
-            table=table,
-            causes=causes_list,
-            severity=severity_emoji,
-            solutions=solutions,
-            expected=expected,
-        ))
-
-    causes_out.sort(
-        key=lambda item: (
-            item.severity != "🔴",
-            item.severity != "🟡",
-            item.table,
-        )
-    )
-
-    return causes_out, general_notes
-
-
-# =============================================================================
-# HEALTH SCORE
-# =============================================================================
-
-def _calculate_pg_health(
-    dead_rows: List[Dict[str, Any]],
-    blockers: List[Dict[str, Any]],
-    pg_settings: Dict[str, Any],
-) -> Dict[str, Any]:
-    critical = 0
-    warning = 0
-    total_dead = 0
-    significant_tables = 0
-
-    for row in dead_rows:
-        dead = _safe_int(row.get("dead_tup"))
-        live = _safe_int(row.get("live_tup"))
-
-        total_dead += dead
-
-        if not _is_significant_table(dead, live):
-            continue
-
-        significant_tables += 1
-
-        severity = _dead_severity(dead, live)
-        if severity == "critical":
-            critical += 1
-        elif severity == "warning":
-            warning += 1
-
-    long_tx_count = sum(
-        1 for item in blockers
-        if item.get("type") == "long_transaction"
-    )
-    idle_count = sum(
-        1 for item in blockers
-        if item.get("type") == "idle_in_transaction"
-    )
-
-    score = 100
-
-    if total_dead >= 50_000:
-        score -= 40
-    elif total_dead >= 10_000:
-        score -= 25
-    elif total_dead >= 5_000:
-        score -= 15
-    elif total_dead >= 1_000:
-        score -= 8
-    elif total_dead >= 500:
-        score -= 3
-
-    score -= critical * 8
-    score -= warning * 3
-
-    score -= long_tx_count * 4
-    score -= idle_count * 3
-
-    if not _autovacuum_enabled(pg_settings):
-        score -= 30
-
-    score = max(0, min(100, score))
-
-    return {
-        "score": score,
-        "critical": critical,
-        "warning": warning,
-        "long_tx": long_tx_count,
-        "idle_tx": idle_count,
-        "total_dead": total_dead,
-        "significant_tables": significant_tables,
-    }
-
-
-# =============================================================================
-# REPORT BUILDER
-# =============================================================================
-
-class _ReportBuilder:
-    def __init__(self, max_chars: int = REPORT_MAX_CHARS):
-        self._lines: List[str] = []
-        self._total_chars = 0
-        self._max_chars = max(1, int(max_chars))
-
-    def add(self, value: str) -> bool:
-        if value is None:
-            return False
-        text = str(value)
-        extra = len(text) + (1 if self._lines else 0)
-        if self._total_chars + extra > self._max_chars:
-            return False
-        self._lines.append(text)
-        self._total_chars += extra
-        return True
-
-    def build(self) -> str:
-        return "\n".join(self._lines)
-
-    @property
-    def char_count(self) -> int:
-        return self._total_chars
-
-    @property
-    def line_count(self) -> int:
-        return len(self._lines)
-
-
-# =============================================================================
-# 🆕 v6.4.0: HTML-SAFE SPLIT
-# =============================================================================
-
-_HTML_TAG_RE = re.compile(
-    r'<(/?)(\w+)((?:\s+[^>]*?)?)(/?)>',
-    re.DOTALL,
+# ✅ v7.6.28 FIX-HIGH: إضافة "users" (كان مفقوداً)
+#    users جدول كبير في المشروع (يستقبل تحديثات متكررة:
+#    auto_publish, auto_recycle, active_channel, language, ...)
+#    بدون VACUUM دوري، dead tuples قد تتراكم حتى autovacuum وحده.
+MAINTENANCE_TABLES = (
+    "posts",
+    "users",            # ✅ v7.6.28
+    "auto_replies",
+    "subscriptions",
+    "user_channels",
+    "user_penalties",
+    "banned_words",
+    "schedule",
+    "admin_logs",
 )
 
-_VOID_HTML_TAGS = frozenset({
-    "br", "hr", "img", "input", "meta", "link", "area",
-    "base", "col", "embed", "source", "track", "wbr",
+SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
+    "auto_replies",
+    "auto_reply_settings",
+    "anonymous_admins",
+    "last_publish",
+    "user_groups_link",
+    "user_points",
+    "settings",
+    "group_admins",
+    "group_security",
+    "hidden_owner_groups",
+    "hidden_admins",
+    "plans",
+    "user_warnings",
+    "user_violations",
+    "referral_rewards",
+    "bot_admins",
+    "chat_locks",
+    "group_rules",
+    "schedule",
+    "user_reminder_settings",
+    "support_tickets",
+    "bot_addition_log",
+)
+
+DEFAULT_SETTINGS = (
+    ("publish_interval", "12"),
+    ("auto_backup", "1"),
+    ("last_ticket_number", "0"),
+    ("last_backup", ""),
+)
+
+# ✅ v7.6.26: 74 → 75 (إضافة idx_subs_status_end_active)
+EXPECTED_INDEX_COUNT = 75
+
+MYSQL_SKIP_INDEXES = frozenset({
+    "idx_penalties_active_id",
 })
 
+COMMON_INDEXES = [
+    ("users", "idx_users_banned", "users(banned)"),
+    ("users", "idx_users_active_channel", "users(active_channel)"),
+    ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
+    ("users", "idx_users_language", "users(language)"),
+    ("users", "idx_users_subscription_end", "users(subscription_end)"),
+    ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
-def _html_tag_name(full_open_tag: str) -> str:
-    m = re.match(r'<(\w+)', full_open_tag)
-    return m.group(1) if m else ""
+    ("user_channels", "idx_uc_user", "user_channels(user_id)"),
+    ("user_channels", "idx_user_channels_user_created",
+     "user_channels(user_id, created_at DESC)"),
+    ("user_channels", "idx_user_channels_user_banned",
+     "user_channels(user_id, banned)"),
+    ("user_channels", "idx_user_channels_banned_user",
+     "user_channels(banned, user_id)"),
 
+    ("posts", "idx_posts_text_hash", "posts(text_hash)"),
+    ("posts", "idx_posts_channel_pub_fail_created",
+     "posts(channel_db_id, published, fail_count, created_at)"),
+    ("posts", "idx_posts_channel_pub_at",
+     "posts(channel_db_id, published, published_at)"),
+    ("posts", "idx_posts_channel_unpub_fresh_created",
+     "posts(channel_db_id, id) WHERE published = 0 "
+     "AND (fail_count IS NULL OR fail_count < 3)"),
 
-def _get_open_html_tags(text: str) -> List[str]:
-    """
-    🆕 v6.4.0: يُرجع قائمة الوسوم المفتوحة (كنص فتح كامل)
-    بالترتيب. تُستخدم لإغلاقها قبل القطع وإعادة فتحها بعده.
-    """
-    stack: List[str] = []
-    for m in _HTML_TAG_RE.finditer(text):
-        is_closing = bool(m.group(1))
-        tag_name_raw = m.group(2)
-        tag_name = tag_name_raw.lower()
-        attrs = m.group(3) or ""
-        self_closing = bool(m.group(4))
+    ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
+    ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
+    ("bot_groups", "idx_bot_groups_log_channel",
+     "bot_groups(log_channel_id)"),
+    ("bot_groups", "idx_bot_groups_banned_cover",
+     "bot_groups(banned) INCLUDE (chat_id, chat_name, username)"),
 
-        if tag_name in _VOID_HTML_TAGS:
-            continue
-        if self_closing:
-            continue
+    ("user_groups_link", "idx_user_groups_link_user_id",
+     "user_groups_link(user_id)"),
 
-        full_open = f"<{tag_name_raw}{attrs}>"
+    ("group_admins", "idx_group_admins_user_id",
+     "group_admins(user_id)"),
+    ("group_admins", "idx_group_admins_user_chat",
+     "group_admins(user_id, chat_id)"),
 
-        if is_closing:
-            for i in range(len(stack) - 1, -1, -1):
-                if _html_tag_name(stack[i]).lower() == tag_name:
-                    del stack[i:]
-                    break
-        else:
-            stack.append(full_open)
-    return stack
+    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id",
+     "hidden_owner_groups(owner_id)"),
+    ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat",
+     "hidden_owner_groups(owner_id, chat_id)"),
 
+    ("hidden_admins", "idx_hidden_admins_admin_id",
+     "hidden_admins(admin_id)"),
+    ("hidden_admins", "idx_hidden_admins_admin_chat",
+     "hidden_admins(admin_id, chat_id)"),
 
-def _split_for_telegram(
-    text: str,
-    limit: int = TELEGRAM_MESSAGE_LIMIT,
-) -> List[str]:
-    """
-    🆕 v6.4.0: قطع آمن لـ HTML.
+    ("anonymous_admins", "idx_anonymous_admins_user_id",
+     "anonymous_admins(user_id)"),
+    ("anonymous_admins", "idx_anonymous_admins_anonymous_id",
+     "anonymous_admins(anonymous_id)"),
+    ("anonymous_admins", "idx_anon_user_chat",
+     "anonymous_admins(user_id, chat_id)"),
+    ("anonymous_admins", "idx_anon_anon_chat",
+     "anonymous_admins(anonymous_id, chat_id)"),
 
-    - يتتبع الوسوم المفتوحة في كل جزء
-    - يُغلقها في نهاية الجزء
-    - يعيد فتحها في بداية الجزء التالي
-    → يمنع BadRequest: can't parse entities من تيليجرام
-    """
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
+    ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
+    ("banned_words", "idx_banned_words_chat_word",
+     "banned_words(chat_id, word)"),
 
-    parts: List[str] = []
-    remaining = text
-    # نترك هامشاً للوسوم المضافة
-    safe_limit = max(1, limit - 200)
+    ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
+    ("auto_replies", "idx_auto_replies_lookup",
+     "auto_replies(chat_id, keyword, is_active)"),
+    ("auto_replies", "idx_ar_chat_keyword",
+     "auto_replies(chat_id, keyword)"),
+    ("auto_replies", "idx_ar_usage",
+     "auto_replies(usage_count DESC)"),
+    ("auto_replies", "idx_auto_replies_keyword_active",
+     "auto_replies(keyword, is_active, chat_id)"),
+    ("auto_replies", "idx_auto_replies_active_keyword",
+     "auto_replies(is_active, keyword, chat_id)"),
 
-    while len(remaining) > limit:
-        cut = remaining.rfind("\n", 0, safe_limit)
-        if cut < safe_limit // 2:
-            cut = safe_limit
+    ("schedule", "idx_schedule_next_publish",
+     "schedule(next_publish_date)"),
+    ("schedule", "idx_schedule_channel_next",
+     "schedule(channel_db_id, next_publish_date)"),
 
-        chunk = remaining[:cut]
-        open_tags = _get_open_html_tags(chunk)
+    ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
+    ("subscriptions", "idx_sub_status", "subscriptions(status)"),
+    ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
+    # ✅ v7.6.26: فهرس لتسريع CTE active_subs (status + end_date)
+    ("subscriptions", "idx_subs_status_end_active",
+     "subscriptions(status, end_date)"),
+    ("subscriptions", "idx_subscriptions_user_status",
+     "subscriptions(user_id, status)"),
+    ("subscriptions", "idx_subscriptions_user_status_end",
+     "subscriptions(user_id, status, end_date)"),
 
-        closing = "".join(
-            f"</{_html_tag_name(t)}>"
-            for t in reversed(open_tags)
-        )
-        reopening = "".join(open_tags)
+    ("invoices", "idx_inv_user", "invoices(user_id)"),
 
-        parts.append(chunk.rstrip() + closing)
-        remaining = reopening + remaining[cut:].lstrip("\n")
+    ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
+    ("referrals", "idx_referrals_referrer_created",
+     "referrals(referrer_id, created_at DESC)"),
 
-    if remaining:
-        parts.append(remaining)
+    ("referral_rewards", "idx_referral_rewards_count",
+     "referral_rewards(referral_count)"),
 
-    return parts
+    ("contests", "idx_contests_status", "contests(status)"),
+    ("contests", "idx_contests_status_end",
+     "contests(status, end_date)"),
 
+    ("contest_participants", "idx_contest_participants_contest",
+     "contest_participants(contest_id)"),
 
-# =============================================================================
-# MAIN DIAGNOSTIC
-# =============================================================================
+    ("gift_codes", "idx_gift_codes_plan",
+     "gift_codes(plan_id)"),
 
-async def _build_diagnose_lines() -> List[str]:
-    from database import (
-        DB, USE_POSTGRES, USE_MYSQL,
-        HEAVY_TABLES_FOR_AUTOVACUUM,
+    ("user_penalties", "idx_penalties_user",
+     "user_penalties(user_id)"),
+    ("user_penalties", "idx_penalties_chat",
+     "user_penalties(chat_id)"),
+    ("user_penalties", "idx_penalties_status",
+     "user_penalties(status)"),
+    ("user_penalties", "idx_penalties_user_chat_status_end",
+     "user_penalties(user_id, chat_id, status, end_time)"),
+    ("user_penalties", "idx_penalties_status_end",
+     "user_penalties(status, end_time)"),
+    ("user_penalties", "idx_penalties_active_id",
+     "user_penalties(id) WHERE status = 'active' "
+     "AND end_time IS NOT NULL"),
+
+    ("user_points", "idx_points_user", "user_points(user_id)"),
+    ("user_points", "idx_user_points_value", "user_points(points DESC)"),
+
+    ("support_tickets", "idx_tickets_status",
+     "support_tickets(status)"),
+    ("support_tickets", "idx_tickets_status_created",
+     "support_tickets(status, created_at DESC)"),
+
+    ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
+
+    ("admin_logs", "idx_admin_logs_chat",
+     "admin_logs(chat_id, id DESC)"),
+
+    ("penalty_archive", "idx_penalty_archive_archived",
+     "penalty_archive(archived_at)"),
+
+    ("sentiment_history", "idx_sentiment_user_chat",
+     "sentiment_history(user_id, chat_id)"),
+    ("sentiment_history", "idx_sentiment_created",
+     "sentiment_history(created_at)"),
+
+    ("user_messages", "idx_user_messages_chat",
+     "user_messages(chat_id)"),
+
+    ("scheduled_posts", "idx_scheduled_posts_time",
+     "scheduled_posts(publish_time)"),
+
+    ("user_reminder_settings", "idx_reminder_subscription",
+     "user_reminder_settings(subscription_reminder)"),
+
+    ("user_violations", "idx_user_violations_chat",
+     "user_violations(chat_id)"),
+
+    ("user_warnings", "idx_user_warnings_chat",
+     "user_warnings(chat_id)"),
+
+    ("bot_addition_log", "idx_bot_addition_log_chat",
+     "bot_addition_log(chat_id, added_at DESC)"),
+
+    ("user_channels", "idx_user_channels_removed_at",
+     "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
+]
+
+DEPRECATED_INDEXES = [
+    "idx_posts_channel",
+    "idx_posts_published",
+    "idx_posts_channel_published",
+    "idx_posts_channel_pub_fail_created_optimized",
+    "idx_posts_next", "idx_posts_channel_unpub",
+    "idx_posts_channel_pub", "idx_posts_channel_pub_fail",
+    "idx_posts_channel_pub_fail_count",
+    "idx_posts_fail", "idx_posts_created_at",
+    "idx_posts_fail_count", "idx_posts_channel_created",
+    "idx_posts_channel_fail",
+
+    "idx_sub_user_status_end", "idx_subscriptions_active",
+    "idx_subscriptions_active_end",
+
+    "idx_user_channels_user_banned_only",
+    "idx_user_channels_user_banned_id",
+    "idx_user_channels_id_user", "idx_uc_user_banned",
+    "idx_uc_channel_id", "idx_uc_active",
+
+    "idx_penalties_user_chat_status", "idx_penalties_user_chat",
+    "idx_user_penalties_active_end", "idx_user_penalties_expiry",
+    "idx_user_penalties_cleanup", "idx_penalties_chat_status",
+    "idx_penalties_expiry",
+    "idx_penalties_cleanup",
+    "idx_penalties_end_time",
+    "idx_security_chat",
+    "idx_group_security_chat",
+
+    "idx_banned_words_word",
+
+    "idx_reminders_subscription", "idx_reminders_user",
+
+    "idx_admin_logs_created", "idx_admin_logs_admin",
+
+    "idx_anonymous_admins_chat", "idx_anonymous_admins_user",
+
+    "idx_hidden_admin_admin",
+
+    "idx_group_admins_user", "idx_group_admins_chat",
+
+    "idx_sched_next", "idx_schedule_next", "idx_schedule_next_channel",
+
+    "idx_contest_participants_user",
+
+    "idx_users_updated", "idx_users_trial_used",
+    "idx_users_subscription", "idx_users_referral",
+    "idx_users_banned_publish",
+
+    "idx_referrals_referred", "idx_referrals_created",
+
+    "idx_contests_end",
+
+    "idx_hidden_owner_owner",
+
+    "idx_tickets_user", "idx_tickets_number",
+
+    "idx_inv_status", "idx_inv_number",
+
+    "idx_auto_replies_keyword", "idx_ar_keyword",
+
+    "idx_settings_key",
+
+    "idx_user_violations_user",
+    "idx_violations_user_chat",
+    "idx_user_warnings_user",
+
+    "idx_ugl_user",
+]
+
+CRITICAL_INDEX_NAMES = frozenset({
+    "idx_bot_groups_log_channel",
+    "idx_posts_channel_pub_fail_created",
+    "idx_posts_channel_pub_at",
+    "idx_posts_channel_unpub_fresh_created",
+    "idx_penalties_user_chat_status_end",
+    "idx_penalties_status_end",
+    "idx_penalties_active_id",
+    "idx_user_channels_user_banned",
+    "idx_subscriptions_user_status_end",
+    "idx_schedule_channel_next",
+    "idx_banned_words_chat",
+    "idx_banned_words_chat_word",
+    "idx_auto_replies_keyword_active",
+    "idx_auto_replies_active_keyword",
+    "idx_user_violations_chat",
+    "idx_user_warnings_chat",
+    "idx_bot_groups_banned_cover",
+    "idx_bot_addition_log_chat",
+    "idx_user_channels_removed_at",
+})
+
+if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
+    raise RuntimeError(
+        f"❌ عدد الفهارس غير مطابق: "
+        f"متوقع {EXPECTED_INDEX_COUNT}، وُجد {len(COMMON_INDEXES)}."
     )
 
-    lines: List[str] = []
 
-    db_type = _db_type()
+# =====================================================================
+# دوال مساعدة
+# =====================================================================
 
-    lines.append(f"🔬 <b>تشخيص قاعدة البيانات v{VERSION}</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🗄️ <b>النوع:</b> <code>{_escape_html(db_type)}</code>")
+def _safe_now_iso(TimeUtils) -> str:
+    if TimeUtils:
+        try:
+            return TimeUtils.sql_iso()
+        except Exception as e:
+            logging.debug(f"_safe_now_iso fallback: {e}")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _safe_now_dt(TimeUtils):
+    if TimeUtils:
+        try:
+            return TimeUtils.utc_now()
+        except Exception as e:
+            logging.debug(f"_safe_now_dt fallback: {e}")
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_valid_index_name(name: str) -> bool:
+    if not name or not isinstance(name, str):
+        return False
+    return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
+
+
+def _normalize_columns(col_str: str) -> str:
+    if not col_str:
+        return ""
+    s = col_str.replace(" ", "").lower()
+    s = s.replace("public.", "")
+    return s
+
+
+def _normalize_columns_mysql(col_str: str) -> str:
+    if not col_str:
+        return ""
+    s = col_str.lower()
+    s = re.sub(r"\s+(asc|desc)\b", "", s)
+    s = s.replace(" ", "")
+    return s
+
+
+def _parse_expected_columns(cols: str) -> str:
+    if not cols:
+        return ""
+    m = re.match(r"^\w+\s*\((.+?)\)(?:\s|$)", cols.strip())
+    if not m:
+        return ""
+    return m.group(1)
+
+
+def _adapt_cols_for_db(cols: str, db_type: str) -> str:
+    if not cols:
+        return cols
+    if db_type == "postgres":
+        return cols
+
+    s = cols
+
+    include_match = re.search(
+        r"\s+INCLUDE\s*\(([^)]*)\)", s, re.IGNORECASE
+    )
+    if include_match:
+        included = include_match.group(1).strip()
+        s = s[:include_match.start()] + s[include_match.end():]
+        s = s.rstrip()
+        if s.endswith(")"):
+            s = s[:-1].rstrip()
+            if not s.endswith("("):
+                s += ", " + included + ")"
+            else:
+                s += included + ")"
+
+    if db_type == "mysql":
+        s = re.sub(
+            r"\s+WHERE\s+.*$", "", s,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        s = s.rstrip()
+
+    return s
+
+
+def _get_expected_cols_for_index(
+    idx_name: str, db_type: str = "postgres"
+) -> str:
+    for _table, name, cols in COMMON_INDEXES:
+        if name == idx_name:
+            return _adapt_cols_for_db(cols, db_type)
+    return ""
+
+
+def _is_advanced_index(cols: str) -> bool:
+    if not cols:
+        return False
+    s = cols.upper()
+    return " WHERE " in s or " INCLUDE " in s
+
+
+# =====================================================================
+# تنظيف admin_logs
+# =====================================================================
+
+async def _cleanup_old_admin_logs_postgres(conn, logger):
+    total_deleted = 0
 
     try:
-        size_kb = await DB.get_db_size_kb()
-        lines.append(f"💾 <b>الحجم:</b> {_fmt_size_kb(size_kb)}")
-    except Exception as exc:
-        logger.debug("get_db_size_kb failed: %s", exc)
-
-    if USE_POSTGRES:
-        schema_info = await _get_schema_info()
-        if schema_info.get("current_schema"):
-            lines.append(
-                f"📋 <b>Schema:</b> "
-                f"<code>{_escape_html(schema_info['current_schema'])}</code>"
-            )
-        if schema_info.get("current_schemas"):
-            schemas_list = ", ".join(
-                _escape_html(s) for s in schema_info["current_schemas"]
-            )
-            lines.append(
-                f"📋 <b>Schemas المتاحة:</b> "
-                f"<code>{schemas_list}</code>"
-            )
-        if schema_info.get("database"):
-            lines.append(
-                f"🗃️ <b>Database:</b> "
-                f"<code>{_escape_html(schema_info['database'])}</code>"
-            )
-
-    dead_rows = await _get_dead_tuples()
-    per_table = (
-        await _get_per_table_autovacuum() if USE_POSTGRES else {}
-    )
-    blockers = (
-        await _get_autovacuum_blockers() if USE_POSTGRES else []
-    )
-    pg_settings = (
-        await _get_pg_settings() if USE_POSTGRES else {}
-    )
-    sizes = await _get_table_sizes()
-    indexes = await _get_indexes(list(_CRITICAL_INDEXES.keys()))
-
-    if USE_POSTGRES:
-        health = _calculate_pg_health(dead_rows, blockers, pg_settings)
-        lines.append("")
-        lines.append("📌 <b>الخلاصة التقنية</b>")
-        lines.append(f"  🔴 جداول حرجة: <b>{health['critical']}</b>")
-        lines.append(
-            f"  🟡 جداول تحتاج انتباه: <b>{health['warning']}</b>"
+        result = await conn.execute(
+            "DELETE FROM admin_logs "
+            "WHERE created_at < NOW() - "
+            f"INTERVAL '{ADMIN_LOGS_RETENTION_DAYS} days'"
         )
-        lines.append(
-            f"  ⚠️ Long transactions: <b>{health['long_tx']}</b>"
-        )
-        lines.append(
-            f"  🟠 Idle transactions: <b>{health['idle_tx']}</b>"
-        )
-        lines.append(
-            f"  💀 إجمالي dead tuples: "
-            f"<b>{health['total_dead']:,}</b>"
-        )
-        lines.append(
-            f"  📊 جداول مهمة: "
-            f"<b>{health['significant_tables']}</b>"
-        )
-        av_state = (
-            "🟢 ON"
-            if _autovacuum_enabled(pg_settings)
-            else "🔴 OFF"
-        )
-        lines.append(f"  autovacuum: <b>{av_state}</b>")
-        lines.append(
-            f"  مؤشر الحالة التقني: "
-            f"<b>{health['score']}/100</b>"
-        )
-
-    causes: List[RootCause] = []
-    general_notes: List[str] = []
-
-    if USE_POSTGRES:
-        causes, general_notes = await _analyze_root_causes(
-            dead_rows, per_table, blockers, pg_settings
-        )
-
-    if causes or general_notes:
-        lines.append("")
-        lines.append("╔══════════════════════════════════╗")
-        lines.append("║  🎯 <b>التحليل المنطقي</b>          ║")
-        lines.append("╚══════════════════════════════════╝")
-        lines.append("")
-
-        for note in general_notes:
-            lines.append(note)
-            lines.append("")
-
-        confidence_label = {
-            "high": "🟢 ثقة عالية",
-            "medium": "🟡 ثقة متوسطة",
-            "low": "🟠 ثقة منخفضة",
-        }
-
-        for cause_group in causes:
-            lines.append(
-                f"{cause_group.severity} "
-                f"<b>جدول: "
-                f"<code>{_escape_html(cause_group.table)}</code>"
-                f"</b>"
-            )
-
-            if cause_group.causes:
-                sorted_causes = sorted(
-                    cause_group.causes,
-                    key=lambda item: (
-                        {"high": 0, "medium": 1, "low": 2}
-                        .get(item.confidence, 3)
-                    ),
-                )
-                lines.append(
-                    f"├─ <b>الأسباب المرشحة "
-                    f"({len(cause_group.causes)}):</b>"
-                )
-                for cause in sorted_causes:
-                    label = confidence_label.get(
-                        cause.confidence, "?"
+        if result and isinstance(result, str) and result.startswith("DELETE "):
+            try:
+                deleted = int(result.split()[1])
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 PG: حُذف {deleted} صف قديم من admin_logs "
+                        f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
                     )
-                    lines.append(f"│   {label} — {cause.text}")
-                    for evidence in cause.evidence[:3]:
-                        lines.append(
-                            f"│       • "
-                            f"<i>{_escape_html(evidence)}</i>"
+            except (IndexError, ValueError):
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup admin_logs (age): {e}")
+
+    try:
+        total = await conn.fetchval("SELECT COUNT(*) FROM admin_logs")
+        if total and total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            result = await conn.execute(
+                "DELETE FROM admin_logs "
+                "WHERE id IN ("
+                "  SELECT id FROM admin_logs "
+                "  ORDER BY id ASC "
+                f"  LIMIT {to_delete}"
+                ")"
+            )
+            if result and isinstance(result, str) and result.startswith("DELETE "):
+                try:
+                    deleted = int(result.split()[1])
+                    total_deleted += deleted
+                    if logger and deleted:
+                        logger.info(
+                            f"🧹 PG: حُذف {deleted} صف من admin_logs "
+                            f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
                         )
+                except (IndexError, ValueError):
+                    pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup admin_logs (max_rows): {e}")
 
-            if cause_group.solutions:
-                lines.append("├─ <b>الإجراءات:</b>")
-                for priority, title, _sql in cause_group.solutions:
-                    icon = (
-                        "🟥" if priority == 1
-                        else ("🟧" if priority == 2 else "🟨")
-                    )
-                    lines.append(f"│   {icon} {title}")
+    return total_deleted
 
-            if cause_group.expected:
-                lines.append("├─ <b>التوقع بعد الإصلاح:</b>")
-                for expected in cause_group.expected:
-                    lines.append(f"│   {expected}")
 
-            lines.append("")
+async def _cleanup_old_admin_logs_sqlite(conn, logger):
+    total_deleted = 0
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📊 <b>التفاصيل الكاملة</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-
-    if USE_POSTGRES:
-        lines.append("")
-        lines.append("<b>1. Dead Tuples + نشاط التنظيف</b>")
-        lines.append("")
-        shown = 0
-        for row in dead_rows:
-            name = row.get("table_name") or "?"
-            live = _safe_int(row.get("live_tup"))
-            dead = _safe_int(row.get("dead_tup"))
-            if live == 0 and dead == 0:
-                continue
-            pct = _dead_pct(dead, live)
-            emoji = _dead_emoji(dead, live)
-            last_av = _fmt_dt(row.get("last_autovacuum"))
-            last_an = _fmt_dt(row.get("last_autoanalyze"))
-            lines.append(
-                f"{emoji} <code>{_escape_html(name):<18}</code> "
-                f"live={live:>7,} dead={dead:>7,} ({pct:.1f}%)"
-            )
-            lines.append(
-                f"     🧹 AV: <code>{last_av}</code> | "
-                f"📊 AN: <code>{last_an}</code>"
-            )
-            shown += 1
-            if shown >= 12:
-                break
-        if shown == 0:
-            lines.append("✅ لا توجد بيانات.")
-
-    if USE_POSTGRES and per_table:
-        lines.append("")
-        lines.append("<b>2. Autovacuum لكل جدول حرج</b>")
-        lines.append("")
-        for table in HEAVY_TABLES_FOR_AUTOVACUUM:
-            info = per_table.get(table, {})
-            reason = info.get("reason", "not_found")
-            if not info.get("exists"):
-                if reason == "query_failed":
-                    lines.append(
-                        f"🔴 <code>{_escape_html(table)}</code> — "
-                        f"<b>فشل الاستعلام</b> (تحقق من الصلاحيات)"
-                    )
-                elif reason == "not_in_schema":
-                    lines.append(
-                        f"🟠 <code>{_escape_html(table)}</code> — "
-                        f"موجود لكن خارج <code>search_path</code>"
-                    )
-                else:
-                    lines.append(
-                        f"❓ <code>{_escape_html(table)}</code> — "
-                        f"غير موجود في pg_class"
-                    )
-                continue
-            if info.get("is_tuned"):
-                lines.append(
-                    f"✅ <code>{_escape_html(table)}</code> — مضبوط "
-                    f"({EXPECTED_VACUUM_SCALE_FACTOR}/"
-                    f"{EXPECTED_ANALYZE_SCALE_FACTOR})"
-                )
-            elif info.get("reloptions"):
-                summary = ", ".join(
-                    f"{key}={value}"
-                    for key, value in list(
-                        info["reloptions"].items()
-                    )[:4]
-                )
-                lines.append(
-                    f"🟡 <code>{_escape_html(table)}</code> — "
-                    f"{_escape_html(summary)}"
-                )
-            else:
-                lines.append(
-                    f"⚠️ <code>{_escape_html(table)}</code> — "
-                    f"القيم الافتراضية"
-                )
-
-    if USE_POSTGRES and blockers:
-        lines.append("")
-        lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
-        lines.append("")
-        for item in blockers:
-            kind = item.get("type")
-            if kind == "long_transaction":
-                xmin = item.get("backend_xmin") or "—"
-                lines.append(
-                    f"🟡 <b>Long tx</b> "
-                    f"pid=<code>{item.get('pid')}</code> "
-                    f"عمر={_fmt_duration_seconds(item.get('tx_age_sec'))} "
-                    f"xmin=<code>{_escape_html(xmin)}</code>"
-                )
-            elif kind == "idle_in_transaction":
-                lines.append(
-                    f"🟠 <b>Idle-in-tx</b> "
-                    f"pid=<code>{item.get('pid')}</code> "
-                    f"خامل={_fmt_duration_seconds(item.get('idle_sec'))}"
-                )
-            elif kind == "running_vacuum":
-                lines.append(
-                    f"🟢 <b>VACUUM</b> على "
-                    f"<code>{_escape_html(item.get('table'))}</code> — "
-                    f"{_escape_html(item.get('phase'))} "
-                    f"({_escape_html(item.get('progress'))})"
-                )
-    elif USE_POSTGRES:
-        lines.append("")
-        lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
-        lines.append("")
-        lines.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM جارٍ.")
-
-    if sizes:
-        lines.append("")
-        lines.append("<b>4. أحجام الجداول — Top 10</b>")
-        lines.append("")
-        for row in sizes[:10]:
-            name = row.get("table_name") or "?"
-            total = _safe_int(row.get("total_bytes"))
-            lines.append(
-                f"  <code>{_escape_html(name):<20}</code> "
-                f"{_fmt_size_bytes(total)}"
-            )
-
-    lines.append("")
-    lines.append("<b>5. الفهارس الحرجة</b>")
-    for table, expected_indexes in _CRITICAL_INDEXES.items():
-        actual = set(indexes.get(table, []))
-        missing = [
-            index for index in expected_indexes
-            if index not in actual
-        ]
-        if missing:
-            lines.append(
-                f"⚠️ <b>{_escape_html(table)}</b> "
-                f"({len(actual)}) — مفقود {len(missing)}"
-            )
-            for missing_index in missing:
-                lines.append(
-                    f"   ❌ <code>{_escape_html(missing_index)}</code>"
-                )
-        else:
-            lines.append(
-                f"✅ <b>{_escape_html(table)}</b> ({len(actual)})"
-            )
-
-    if USE_POSTGRES and pg_settings:
-        lines.append("")
-        lines.append("<b>6. إعدادات PostgreSQL</b>")
-        lines.append("")
-        keys = (
-            "autovacuum",
-            "autovacuum_naptime",
-            "autovacuum_vacuum_scale_factor",
-            "autovacuum_analyze_scale_factor",
-            "autovacuum_vacuum_threshold",
-            "autovacuum_analyze_threshold",
-            "autovacuum_max_workers",
-            "max_connections",
-            "shared_buffers",
-            "work_mem",
-            "synchronous_commit",
-            "server_version",
+    try:
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(days=ADMIN_LOGS_RETENTION_DAYS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor = await conn.execute(
+            "DELETE FROM admin_logs WHERE created_at < ?",
+            (cutoff,),
         )
-        for key in keys:
-            value = pg_settings.get(key)
-            if value is None:
-                continue
-            lines.append(
-                f"  <code>{_escape_html(key)} = "
-                f"{_escape_html(value)}</code>"
-            )
-
-    if USE_MYSQL:
-        lines.append("")
-        lines.append("<b>7. ملاحظة MySQL</b>")
-        lines.append(
-            "ℹ️ MySQL لا يستخدم dead tuples بنفس نموذج PostgreSQL؛ "
-            "يتم عرض DATA_FREE كإشارة تقريبية للمساحة الحرة/المجزأة."
-        )
-        lines.append(
-            "⚠️ <b>لا تعتمد على هذا التقرير للحكم على صحة MySQL</b> "
-            "— DATA_FREE يعني مساحة قابلة لإعادة الاستخدام، وليس "
-            "بالضرورة dead tuples."
-        )
-
-    if not USE_POSTGRES and not USE_MYSQL:
-        lines.append("")
-        lines.append("<b>7. ملاحظة SQLite</b>")
-        lines.append(
-            "ℹ️ SQLite لا يملك autovacuum بنفس نموذج PostgreSQL؛ "
-            "VACUUM يعيد بناء قاعدة البيانات."
-        )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("✅ <b>اكتمل التشخيص</b>")
-
-    return lines
-
-
-async def diagnose_db() -> str:
-    lines = await _build_diagnose_lines()
-
-    builder = _ReportBuilder(max_chars=REPORT_MAX_CHARS)
-    for line in lines:
-        if not builder.add(line):
-            builder.add("")
-            builder.add("… <i>(تم اقتصار التقرير للحدّ الأقصى)</i>")
-            builder.add(
-                "💡 استخدم /db_diag_split للتقرير الكامل."
-            )
-            break
-
-    return builder.build()
-
-
-async def diagnose_db_split(
-    max_chars_per_part: int = TELEGRAM_MESSAGE_LIMIT,
-) -> List[str]:
-    lines = await _build_diagnose_lines()
-    full_text = "\n".join(lines)
-    return _split_for_telegram(full_text, limit=max_chars_per_part)
-
-
-# =============================================================================
-# VACUUM / OPTIMIZE
-# =============================================================================
-
-async def vacuum_analyze_tables() -> str:
-    from database import (
-        DB, USE_POSTGRES, USE_MYSQL,
-        HEAVY_TABLES_FOR_AUTOVACUUM,
-    )
-
-    lines: List[str] = []
-    lines.append("🧹 <b>تنظيف قاعدة البيانات</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-
-    if USE_POSTGRES:
-        lines.append("🗄️ PostgreSQL — VACUUM")
-    elif USE_MYSQL:
-        lines.append("🗄️ MySQL — OPTIMIZE/maintenance")
-    else:
-        lines.append("🗄️ SQLite — VACUUM")
-    lines.append("")
-
-    if USE_POSTGRES:
         try:
-            blockers = await _get_autovacuum_blockers()
-            running = [
-                item for item in blockers
-                if item.get("type") == "running_vacuum"
-            ]
-        except Exception as exc:
-            logger.debug("vacuum running check failed: %s", exc)
-            running = []
-
-        if running:
-            lines.append("⚠️ <b>يوجد VACUUM جارٍ:</b>")
-            for item in running:
-                lines.append(
-                    f"  • <code>"
-                    f"{_escape_html(item.get('table'))}"
-                    f"</code> — "
-                    f"{_escape_html(item.get('phase'))} "
-                    f"({_escape_html(item.get('progress'))})"
+            deleted = cursor.rowcount or 0
+            total_deleted += deleted
+            if logger and deleted:
+                logger.info(
+                    f"🧹 SQLite: حُذف {deleted} صف قديم من admin_logs "
+                    f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
                 )
-            lines.append("")
-            lines.append("💡 لن نوقف العملية الجارية.")
-            lines.append("")
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        try:
+            await conn.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup admin_logs (age): {e}")
 
-    tables = list(HEAVY_TABLES_FOR_AUTOVACUUM or [])
-    if not tables:
-        lines.append(
-            "ℹ️ لا توجد جداول في HEAVY_TABLES_FOR_AUTOVACUUM."
-        )
-        return "\n".join(lines)
+    try:
+        cursor = await conn.execute("SELECT COUNT(*) FROM admin_logs")
+        try:
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
 
-    results: List[Tuple[str, bool, str]] = []
-    for table in tables:
-        if not table:
+        if total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            cursor = await conn.execute(
+                "DELETE FROM admin_logs "
+                "WHERE id IN ("
+                "  SELECT id FROM admin_logs "
+                "  ORDER BY id ASC "
+                "  LIMIT ?"
+                ")",
+                (to_delete,),
+            )
+            try:
+                deleted = cursor.rowcount or 0
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 SQLite: حُذف {deleted} صف من admin_logs "
+                        f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
+                    )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup admin_logs (max_rows): {e}")
+
+    return total_deleted
+
+
+async def _cleanup_old_admin_logs_mysql(conn, logger):
+    total_deleted = 0
+
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute(
+                "DELETE FROM admin_logs "
+                "WHERE created_at < NOW() - "
+                f"INTERVAL {ADMIN_LOGS_RETENTION_DAYS} DAY"
+            )
+            deleted = cursor.rowcount or 0
+            total_deleted += deleted
+            if logger and deleted:
+                logger.info(
+                    f"🧹 MySQL: حُذف {deleted} صف قديم من admin_logs "
+                    f"(> {ADMIN_LOGS_RETENTION_DAYS} يوم)"
+                )
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        try:
+            await conn.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup admin_logs (age): {e}")
+
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute("SELECT COUNT(*) FROM admin_logs")
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+
+        if total > ADMIN_LOGS_MAX_ROWS:
+            to_delete = total - ADMIN_LOGS_MAX_ROWS
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "DELETE FROM admin_logs "
+                    f"ORDER BY id ASC "
+                    f"LIMIT {to_delete}"
+                )
+                deleted = cursor.rowcount or 0
+                total_deleted += deleted
+                if logger and deleted:
+                    logger.info(
+                        f"🧹 MySQL: حُذف {deleted} صف من admin_logs "
+                        f"(تجاوز الحد {ADMIN_LOGS_MAX_ROWS})"
+                    )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup admin_logs (max_rows): {e}")
+
+    return total_deleted
+
+
+# =====================================================================
+# autovacuum
+# =====================================================================
+# ✅ v7.6.26: هذا الـ helper لم يعد يُستدعى تلقائياً من create_tables_postgres
+#            لأن database.py::_tune_heavy_tables_autovacuum يقوم بالمهمة
+#            بإعدادات أقوى (scale_factor=0.0) وبعد create_tables.
+#            أُبقي للاستخدام اليدوي/الاختباري فقط.
+# =====================================================================
+
+async def _tune_autovacuum_postgres(conn, logger):
+    tuned = 0
+    failed = 0
+    for tbl in SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM:
+        if not _is_valid_index_name(tbl):
+            failed += 1
             continue
         try:
-            await DB.vacuum(table)
-            results.append((table, True, ""))
-        except Exception as exc:
-            logger.exception("VACUUM failed for %s", table)
-            results.append((table, False, str(exc)[:300]))
-
-    success = 0
-    failed = 0
-    for table, ok, error in results:
-        if ok:
-            lines.append(f"✅ <code>{_escape_html(table)}</code>")
-            success += 1
-        else:
-            lines.append(
-                f"❌ <code>{_escape_html(table)}</code> — "
-                f"{_escape_html(error)}"
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = $1 "
+                "AND table_schema = current_schema()",
+                tbl,
             )
+            if not exists:
+                continue
+            await conn.execute(
+                f"ALTER TABLE {tbl} SET ("
+                f"autovacuum_vacuum_scale_factor = 0.05, "
+                f"autovacuum_vacuum_threshold = 10, "
+                f"autovacuum_analyze_scale_factor = 0.02, "
+                f"autovacuum_analyze_threshold = 10"
+                f")"
+            )
+            tuned += 1
+        except Exception as e:
             failed += 1
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"✅ نجح: <b>{success}</b> | ❌ فشل: <b>{failed}</b>")
-
-    if USE_POSTGRES and success:
-        lines.append("")
-        lines.append("💡 <b>التحقق:</b>")
-        lines.append(
-            "شغّل <code>/db_diag</code> بعد انتهاء VACUUM "
-            "ثم قارن:"
+            if logger:
+                logger.debug(f"⚠️ PG autovacuum tune {tbl}: {e}")
+    if logger and tuned:
+        logger.info(
+            f"⚙️ PG: ضُبط autovacuum على {tuned} جدول صغير "
+            f"({failed} فشل)"
         )
-        lines.append("• <code>n_dead_tup</code>")
-        lines.append("• <code>last_autovacuum</code>")
-        lines.append("• <code>last_autoanalyze</code>")
-        lines.append("• حجم الجدول")
-        lines.append("")
-        lines.append(
-            "ℹ️ لا تتوقع بالضرورة أن يصبح "
-            "<code>n_dead_tup</code> صفراً، "
-            "ولا تعتبر انخفاضه دليلاً على "
-            "انكماش حجم الملف على القرص."
+    return tuned
+
+
+# =====================================================================
+# فحص جماعي للفهارس
+# =====================================================================
+
+async def _ensure_all_indexes_exist_postgres(conn, logger):
+    try:
+        all_names = [n for _, n, _ in COMMON_INDEXES]
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            all_names,
+        )
+        existing = {r["indexname"] for r in rows}
+        missing = [n for n in all_names if n not in existing]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ PG: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            cols = _get_expected_cols_for_index(idx_name, "postgres")
+            if not cols:
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ PG fast-path فهرس {idx_name}: {e}"
+                    )
+        if logger and created:
+            logger.info(
+                f"✅ PG fast-path: أُعيد إنشاء {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_postgres: {e}")
+        return 0
+
+
+async def _ensure_all_indexes_exist_sqlite(conn, logger):
+    try:
+        all_names = [n for _, n, _ in COMMON_INDEXES]
+        placeholders = ",".join(["?"] * len(all_names))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(all_names),
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        existing = {r[0] for r in rows}
+        missing = [n for n in all_names if n not in existing]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ SQLite: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            cols = _get_expected_cols_for_index(idx_name, "sqlite")
+            if not cols:
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ SQLite fast-path فهرس {idx_name}: {e}"
+                    )
+        if created:
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        if logger and created:
+            logger.info(
+                f"✅ SQLite fast-path: أُعيد إنشاء {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_sqlite: {e}")
+        return 0
+
+
+async def _ensure_all_indexes_exist_mysql(conn, logger):
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        try:
+            existing_pairs = await _fetch_existing_indexes_mysql(
+                conn, list(tables)
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ MySQL fetch indexes: {e}")
+            return 0
+
+        existing = {(t, idx) for (t, idx) in existing_pairs}
+        missing = [
+            (t, n, c) for t, n, c in COMMON_INDEXES
+            if (t, n) not in existing and n not in MYSQL_SKIP_INDEXES
+        ]
+        if not missing:
+            return 0
+
+        if logger:
+            logger.warning(
+                f"⚠️ MySQL: {len(missing)} فهرس مفقود في fast-path "
+                f"— إعادة إنشاء"
+            )
+
+        created = 0
+        failed = 0
+        for _table, idx_name, cols in missing:
+            if not _is_valid_index_name(idx_name):
+                failed += 1
+                continue
+            adapted = _adapt_cols_for_db(cols, "mysql")
+            if not adapted:
+                failed += 1
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX {idx_name} ON {adapted}"
+                )
+                created += 1
+            except Exception as e:
+                err_msg = str(e).lower()
+                if (
+                    "duplicate" in err_msg
+                    or "already exists" in err_msg
+                    or "1061" in err_msg
+                ):
+                    continue
+                failed += 1
+                if logger:
+                    logger.warning(
+                        f"⚠️ MySQL fast-path فهرس {idx_name}: {e}"
+                    )
+        if logger and created:
+            logger.info(
+                f"✅ MySQL fast-path: أُنشئ {created} فهرس "
+                f"({failed} فشل)"
+            )
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_all_indexes_exist_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# ANALYZE سريع
+# =====================================================================
+
+async def _quick_analyze_postgres(conn, logger):
+    try:
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE {tbl}")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+        if logger and done:
+            logger.info(f"📊 PG: ANALYZE على {done} جدول")
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _quick_analyze_postgres: {e}")
+        return 0
+
+
+async def _quick_analyze_mysql(conn, logger):
+    try:
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE TABLE `{tbl}`")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+        if logger and done:
+            logger.info(f"📊 MySQL: ANALYZE على {done} جدول")
+        return done
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _quick_analyze_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# VACUUM ANALYZE الدوري
+# =====================================================================
+# ⚠️ v7.6.27 — تحذير حرج:
+# =====================================================================
+#   VACUUM في PostgreSQL **لا يعمل داخل transaction block**.
+#   استدعاء هذه الدالة من داخل `async with self.transaction()`
+#   (كما كان في fast-path قبل v7.6.27) يُلغِي الـ transaction
+#   كاملاً ويُسبِّب:
+#     asyncpg.exceptions.InFailedSQLTransactionError:
+#     current transaction is aborted, commands ignored until end of
+#     transaction block
+#
+#   عندها **كل** استعلام لاحق في نفس الـ transaction يفشل، بما في ذلك:
+#     - UNIQUE settings.key
+#     - _upsert_setting(tables_hash)
+#     - SELECT value FROM settings WHERE key='bootstrap_hash'
+#
+#   ✅ الحل الصحيح: استدعاؤها من database.py::_bootstrap **بعد** commit
+#      عبر `self.connection()` (autocommit mode — بلا tx.start()).
+#
+#   ⚠️ لا تستدعها أبداً من داخل `async with self.transaction()`.
+# =====================================================================
+
+async def _run_maintenance_postgres(conn, logger):
+    try:
+        try:
+            last_val = await conn.fetchval(
+                "SELECT value FROM settings WHERE key = 'last_maintenance_at'"
+            )
+        except Exception:
+            last_val = None
+
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    if logger:
+                        logger.debug(
+                            f"⏩ PG maintenance: تخطي (آخر صيانة منذ "
+                            f"{age / 3600:.1f}h)"
+                        )
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info(
+                "🧹 PG: بدء VACUUM (ANALYZE, SKIP_LOCKED) "
+                "على الجداول الحرجة..."
+            )
+
+        done = 0
+        failed = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(
+                    f"VACUUM (ANALYZE, SKIP_LOCKED) {tbl}"
+                )
+                done += 1
+            except Exception as e:
+                failed += 1
+                if logger:
+                    logger.debug(f"⚠️ VACUUM {tbl}: {e}")
+            try:
+                await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                "last_maintenance_at",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ record maintenance time: {e}")
+
+        if logger and done:
+            logger.info(
+                f"✅ PG: VACUUM (ANALYZE, SKIP_LOCKED) على {done} جدول "
+                f"({failed} فشل)"
+            )
+        return done
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_postgres: {e}")
+        return 0
+
+
+async def _run_maintenance_sqlite(conn, logger):
+    try:
+        try:
+            cursor = await conn.execute(
+                "SELECT value FROM settings WHERE key = 'last_maintenance_at'"
+            )
+            try:
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+        except Exception:
+            row = None
+
+        last_val = row[0] if row else None
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info("🧹 SQLite: بدء VACUUM + ANALYZE...")
+
+        try:
+            await conn.execute("VACUUM")
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ SQLite VACUUM: {e}")
+
+        try:
+            await conn.execute("ANALYZE")
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ SQLite ANALYZE: {e}")
+
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("last_maintenance_at", datetime.now(timezone.utc).isoformat()),
+            )
+            await conn.commit()
+        except Exception:
+            pass
+
+        if logger:
+            logger.info("✅ SQLite: VACUUM + ANALYZE مكتمل")
+        return 1
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_sqlite: {e}")
+        return 0
+
+
+async def _run_maintenance_mysql(conn, logger):
+    try:
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT `value` FROM settings "
+                    "WHERE `key` = 'last_maintenance_at'"
+                )
+                row = await cursor.fetchone()
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+        except Exception:
+            row = None
+
+        last_val = row[0] if row else None
+        if last_val:
+            try:
+                last_dt = datetime.fromisoformat(str(last_val))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < MAINTENANCE_INTERVAL_SECONDS:
+                    return 0
+            except (ValueError, TypeError):
+                pass
+
+        if logger:
+            logger.info("🧹 MySQL: بدء ANALYZE + OPTIMIZE...")
+
+        done = 0
+        for tbl in MAINTENANCE_TABLES:
+            try:
+                await conn.execute(f"ANALYZE TABLE `{tbl}`")
+                done += 1
+            except Exception as e:
+                if logger:
+                    logger.debug(f"⚠️ ANALYZE {tbl}: {e}")
+            try:
+                await asyncio.sleep(VACUUM_INTER_TABLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "INSERT INTO settings (`key`, `value`) VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                    ("last_maintenance_at",
+                     datetime.now(timezone.utc).isoformat()),
+                )
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+            await conn.commit()
+        except Exception:
+            pass
+
+        if logger and done:
+            logger.info(f"✅ MySQL: ANALYZE على {done} جدول")
+        return done
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _run_maintenance_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# Migrations — إضافة أعمدة مفقودة
+# =====================================================================
+
+_GROUP_SECURITY_NEW_COLUMNS = [
+    ("violation_penalty", "TEXT DEFAULT 'none'"),
+    ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
+]
+
+_CONTESTS_NEW_COLUMNS = [
+    ("contest_type", "TEXT DEFAULT 'raffle'"),
+    ("question", "TEXT DEFAULT ''"),
+    ("correct_answer", "TEXT DEFAULT ''"),
+]
+
+_USER_CHANNELS_NEW_COLUMNS = [
+    ("removed_at", "TEXT DEFAULT NULL"),
+    ("removal_reason", "TEXT DEFAULT NULL"),
+]
+
+
+async def _migrate_missing_columns_sqlite(conn, logger):
+    checked = 0
+    added = 0
+
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (group_security)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(f"⚠️ SQLite migration {col_name}: {e}")
+
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration contests.{col_name}: {e}"
+                )
+
+    for col_name, col_def in _USER_CHANNELS_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration user_channels.{col_name}: {e}"
+                )
+
+    if added:
+        await conn.commit()
+    return added
+
+
+async def _migrate_missing_columns_postgres(conn, logger):
+    checked = 0
+    added = 0
+    skipped = 0
+
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'group_security' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (group_security)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ PG migration {col_name}: {e}")
+
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'contests' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration contests.{col_name}: {e}"
+                )
+
+    _pg_user_channels_cols = [
+        ("removed_at", "TIMESTAMP DEFAULT NULL"),
+        ("removal_reason", "TEXT DEFAULT NULL"),
+    ]
+    for col_name, col_def in _pg_user_channels_cols:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'user_channels' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration user_channels.{col_name}: {e}"
+                )
+
+    if logger and checked:
+        logger.debug(
+            f"📊 PG migration: فُحص {checked}، "
+            f"أُضيف {added}، موجود مسبقاً {skipped}"
+        )
+    return added
+
+
+async def _migrate_missing_columns_mysql(conn, logger):
+    checked = 0
+    added = 0
+    skipped = 0
+
+    for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'group_security' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE group_security "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (group_security)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(f"⚠️ MySQL migration {col_name}: {e}")
+
+    for col_name, col_def in _CONTESTS_NEW_COLUMNS:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'contests' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE contests "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} (contests)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration contests.{col_name}: {e}"
+                )
+
+    _mysql_user_channels_cols = [
+        ("removed_at", "DATETIME DEFAULT NULL"),
+        ("removal_reason", "VARCHAR(50) DEFAULT NULL"),
+    ]
+    for col_name, col_def in _mysql_user_channels_cols:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'user_channels' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration user_channels.{col_name}: {e}"
+                )
+
+    if logger and checked:
+        logger.debug(
+            f"📊 MySQL migration: فُحص {checked}، "
+            f"أُضيف {added}، موجود مسبقاً {skipped}"
+        )
+    return added
+
+
+# =====================================================================
+# Fast-path: schema_version
+# =====================================================================
+
+async def _get_current_schema_version_postgres(conn):
+    try:
+        row = await conn.fetchrow(
+            "SELECT MAX(version) AS v FROM schema_version"
+        )
+        if row and row["v"] is not None:
+            return int(row["v"])
+    except Exception:
+        pass
+    return 0
+
+
+async def _get_current_schema_version_sqlite(conn):
+    try:
+        cursor = await conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        )
+        try:
+            row = await cursor.fetchone()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        if row and row[0] is not None:
+            return int(row[0])
+    except Exception:
+        pass
+    return 0
+
+
+async def _get_current_schema_version_mysql(conn):
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute("SELECT MAX(version) FROM schema_version")
+            row = await cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 0
+
+
+# =====================================================================
+# التنظيف التلقائي للبيانات القديمة
+# =====================================================================
+
+async def _cleanup_stale_links_sqlite(conn, logger):
+    cleaned_links = 0
+    cleaned_anon = 0
+    try:
+        cursor = await conn.execute(
+            "DELETE FROM user_groups_link WHERE user_id < 0"
+        )
+        try:
+            cleaned_links = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup user_groups_link: {e}")
+
+    try:
+        placeholders = ",".join(["?"] * len(CLEANUP_ANONYMOUS_BOT_IDS))
+        cursor = await conn.execute(
+            f"DELETE FROM anonymous_admins "
+            f"WHERE anonymous_id IN ({placeholders})",
+            CLEANUP_ANONYMOUS_BOT_IDS,
+        )
+        try:
+            cleaned_anon = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ SQLite cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 SQLite cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
+
+
+async def _cleanup_stale_links_postgres(conn, logger):
+    cleaned_links = 0
+    cleaned_anon = 0
+    try:
+        result = await conn.execute(
+            "DELETE FROM user_groups_link WHERE user_id < 0"
+        )
+        if result and isinstance(result, str) and result.startswith("DELETE "):
+            try:
+                cleaned_links = int(result.split()[1])
+            except (IndexError, ValueError):
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup user_groups_link: {e}")
+
+    try:
+        result = await conn.execute(
+            "DELETE FROM anonymous_admins "
+            "WHERE anonymous_id = ANY($1::bigint[])",
+            list(CLEANUP_ANONYMOUS_BOT_IDS),
+        )
+        if result and isinstance(result, str) and result.startswith("DELETE "):
+            try:
+                cleaned_anon = int(result.split()[1])
+            except (IndexError, ValueError):
+                pass
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ PG cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 PG cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
+
+
+async def _cleanup_stale_links_mysql(conn, logger):
+    cleaned_links = 0
+    cleaned_anon = 0
+    try:
+        cursor = await conn.cursor()
+        try:
+            await cursor.execute(
+                "DELETE FROM user_groups_link WHERE user_id < 0"
+            )
+            cleaned_links = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup user_groups_link: {e}")
+
+    try:
+        cursor = await conn.cursor()
+        try:
+            placeholders = ",".join(["%s"] * len(CLEANUP_ANONYMOUS_BOT_IDS))
+            await cursor.execute(
+                f"DELETE FROM anonymous_admins "
+                f"WHERE anonymous_id IN ({placeholders})",
+                CLEANUP_ANONYMOUS_BOT_IDS,
+            )
+            cleaned_anon = cursor.rowcount or 0
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.debug(f"⚠️ MySQL cleanup anonymous_admins: {e}")
+
+    if logger and (cleaned_links or cleaned_anon):
+        logger.info(
+            f"🧹 MySQL cleanup: {cleaned_links} صف سالب من user_groups_link، "
+            f"{cleaned_anon} صف بوت نظام من anonymous_admins"
+        )
+    return cleaned_links + cleaned_anon
+
+
+# =====================================================================
+# فحص الفهارس الحرجة
+# =====================================================================
+
+async def _verify_critical_indexes_postgres(conn, logger):
+    try:
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            list(CRITICAL_INDEX_NAMES),
+        )
+        existing = {r["indexname"] for r in rows}
+        missing = CRITICAL_INDEX_NAMES - existing
+        if not missing:
+            return 0
+        if logger:
+            logger.warning(
+                f"⚠️ PG: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name, "postgres")
+            if not cols:
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+                if logger:
+                    logger.info(f"✅ PG: أُنشئ {idx_name}")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ PG فشل إنشاء {idx_name}: {e}")
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_postgres: {e}")
+        return 0
+
+
+async def _verify_critical_indexes_sqlite(conn, logger):
+    try:
+        placeholders = ",".join(["?"] * len(CRITICAL_INDEX_NAMES))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(CRITICAL_INDEX_NAMES),
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        existing = {r[0] for r in rows}
+        missing = CRITICAL_INDEX_NAMES - existing
+        if not missing:
+            return 0
+        if logger:
+            logger.warning(
+                f"⚠️ SQLite: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name, "sqlite")
+            if not cols:
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+                )
+                created += 1
+                if logger:
+                    logger.info(f"✅ SQLite: أُنشئ {idx_name}")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ SQLite فشل {idx_name}: {e}")
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_sqlite: {e}")
+        return 0
+
+
+async def _verify_critical_indexes_mysql(conn, logger):
+    try:
+        tables = set()
+        for _t, idx_name, _c in COMMON_INDEXES:
+            if idx_name in CRITICAL_INDEX_NAMES:
+                tables.add(_t)
+        if not tables:
+            return 0
+        existing_pairs = await _fetch_existing_indexes_mysql(
+            conn, list(tables)
+        )
+        existing_names = {idx for _, idx in existing_pairs}
+        missing = CRITICAL_INDEX_NAMES - existing_names
+        missing = {n for n in missing if n not in MYSQL_SKIP_INDEXES}
+        if not missing:
+            return 0
+        if logger:
+            logger.warning(
+                f"⚠️ MySQL: {len(missing)} فهرس حرج مفقود — إعادة إنشاء"
+            )
+        created = 0
+        for idx_name in missing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            cols = _get_expected_cols_for_index(idx_name, "mysql")
+            if not cols:
+                continue
+            try:
+                await conn.execute(f"CREATE INDEX {idx_name} ON {cols}")
+                created += 1
+                if logger:
+                    logger.info(f"✅ MySQL: أُنشئ {idx_name}")
+            except Exception as e:
+                err_msg = str(e).lower()
+                if (
+                    "duplicate" in err_msg
+                    or "already exists" in err_msg
+                    or "1061" in err_msg
+                ):
+                    continue
+                if logger:
+                    logger.warning(f"⚠️ MySQL فشل {idx_name}: {e}")
+        return created
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _verify_critical_indexes_mysql: {e}")
+        return 0
+
+
+# =====================================================================
+# دوال فحص جماعية
+# =====================================================================
+
+async def _fetch_existing_indexes_postgres(conn, index_names):
+    if not index_names:
+        return set()
+    try:
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            list(index_names),
+        )
+        return {row["indexname"] for row in rows}
+    except Exception as e:
+        logging.debug(f"_fetch_existing_indexes_postgres: {e}")
+        return set()
+
+
+async def _fetch_existing_indexes_sqlite(conn):
+    try:
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name IS NOT NULL"
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        return {row[0] for row in rows}
+    except Exception as e:
+        logging.debug(f"_fetch_existing_indexes_sqlite: {e}")
+        return set()
+
+
+async def _fetch_existing_indexes_mysql(conn, tables):
+    if not tables:
+        return set()
+    try:
+        cursor = await conn.cursor()
+        placeholders = ",".join(["%s"] * len(tables))
+        await cursor.execute(
+            f"SELECT DISTINCT TABLE_NAME, INDEX_NAME "
+            f"FROM information_schema.statistics "
+            f"WHERE TABLE_SCHEMA = DATABASE() "
+            f"AND TABLE_NAME IN ({placeholders})",
+            tuple(tables),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {(r[0], r[1]) for r in rows}
+    except Exception as e:
+        logging.warning(
+            f"⚠️ information_schema فشل ({e}) — استخدام SHOW INDEX"
+        )
+        existing = set()
+        for table in tables:
+            try:
+                cursor = await conn.cursor()
+                try:
+                    await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                    rows = await cursor.fetchall()
+                    for r in rows:
+                        existing.add((table, r[2]))
+                finally:
+                    try:
+                        await cursor.close()
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        return existing
+
+
+# =====================================================================
+# فحص تعريفات الفهارس
+# =====================================================================
+
+async def _ensure_index_definitions_match_postgres(conn, logger):
+    checked = 0
+    dropped = 0
+    missing = 0
+    try:
+        rows = await conn.fetch(
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            [name for _, name, _ in COMMON_INDEXES],
+        )
+        existing = {row["indexname"]: row["indexdef"] for row in rows}
+        for _table, idx_name, cols in COMMON_INDEXES:
+            if not _is_valid_index_name(idx_name):
+                continue
+            if _is_advanced_index(cols):
+                checked += 1
+                continue
+            if idx_name not in existing:
+                missing += 1
+                continue
+            actual_def = existing[idx_name]
+            m = re.search(
+                r"USING\s+\w+\s+\(([^)]+)\)",
+                actual_def,
+                re.IGNORECASE,
+            )
+            if not m:
+                continue
+            actual_cols = _normalize_columns(m.group(1))
+            expected_cols = _normalize_columns(
+                _parse_expected_columns(cols)
+            )
+            if actual_cols != expected_cols:
+                logger.warning(
+                    f"⚠️ PG: {idx_name} تعريف مختلف "
+                    f"(فعلي={actual_cols[:60]}, متوقع={expected_cols[:60]}) — يُحذف"
+                )
+                try:
+                    await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                    dropped += 1
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+            checked += 1
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 PG: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_postgres: {e}")
+
+
+async def _ensure_index_definitions_match_sqlite(conn, logger):
+    checked = 0
+    dropped = 0
+    missing = 0
+    try:
+        names = [name for _, name, _ in COMMON_INDEXES]
+        if not names:
+            return
+        placeholders = ",".join(["?"] * len(names))
+        cursor = await conn.execute(
+            f"SELECT name, sql FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(names),
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        existing = {r[0]: (r[1] or "") for r in rows}
+        for _table, idx_name, cols in COMMON_INDEXES:
+            if not _is_valid_index_name(idx_name):
+                continue
+            if " INCLUDE " in cols.upper():
+                checked += 1
+                continue
+            if idx_name not in existing:
+                missing += 1
+                continue
+            sql_def = existing[idx_name]
+            m = re.search(
+                r"ON\s+\w+\s*\(([^)]+)\)",
+                sql_def,
+                re.IGNORECASE,
+            )
+            if not m:
+                continue
+            actual_cols = _normalize_columns(m.group(1))
+            expected_cols = _normalize_columns(
+                _parse_expected_columns(cols)
+            )
+            if actual_cols != expected_cols:
+                logger.warning(f"⚠️ SQLite: {idx_name} تعريف مختلف — يُحذف")
+                try:
+                    await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                    dropped += 1
+                except Exception as e:
+                    logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+            checked += 1
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 SQLite: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_sqlite: {e}")
+
+
+async def _ensure_index_definitions_match_mysql(conn, logger):
+    checked = 0
+    dropped = 0
+    missing = 0
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        for table in tables:
+            if not _is_valid_index_name(table):
+                continue
+            try:
+                cursor = await conn.cursor()
+                try:
+                    await cursor.execute(f"SHOW INDEX FROM `{table}`")
+                    rows = await cursor.fetchall()
+                finally:
+                    await cursor.close()
+            except Exception:
+                continue
+            by_key = {}
+            for r in rows:
+                key_name = r[2]
+                seq = r[3]
+                col_name = r[4]
+                by_key.setdefault(key_name, []).append((seq, col_name))
+            for _t, idx_name, cols in COMMON_INDEXES:
+                if _t != table:
+                    continue
+                if not _is_valid_index_name(idx_name):
+                    continue
+                if idx_name in MYSQL_SKIP_INDEXES:
+                    continue
+                if idx_name not in by_key:
+                    missing += 1
+                    continue
+                sorted_cols = sorted(by_key[idx_name], key=lambda x: x[0])
+                actual_cols = _normalize_columns_mysql(
+                    ",".join(c for _, c in sorted_cols)
+                )
+                adapted_cols = _adapt_cols_for_db(cols, "mysql")
+                expected_cols = _normalize_columns_mysql(
+                    _parse_expected_columns(adapted_cols)
+                )
+                if actual_cols != expected_cols:
+                    logger.warning(
+                        f"⚠️ MySQL: {table}.{idx_name} تعريف مختلف — يُحذف"
+                    )
+                    try:
+                        await conn.execute(
+                            f"DROP INDEX {idx_name} ON `{table}`"
+                        )
+                        dropped += 1
+                    except Exception as e:
+                        logger.warning(f"⚠️ فشل حذف {idx_name}: {e}")
+                checked += 1
+        if logger and dropped > 0:
+            logger.info(
+                f"🔧 MySQL: أُعيد بناء {dropped} فهرس — "
+                f"فُحص {checked}، مفقود {missing}"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ _ensure_index_definitions_match_mysql: {e}")
+
+
+# =====================================================================
+# حذف الفهارس القديمة
+# =====================================================================
+
+async def _drop_deprecated_indexes_postgres(conn, logger):
+    if not DEPRECATED_INDEXES:
+        return 0
+    dropped = 0
+    try:
+        rows = await conn.fetch(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = ANY($1::text[]) "
+            "  AND schemaname = ANY(current_schemas(false))",
+            DEPRECATED_INDEXES,
+        )
+        existing = {row["indexname"] for row in rows}
+        if not existing:
+            if logger:
+                logger.debug("🧹 PG: 0 فهرس قديم للحذف")
+            return 0
+        for idx_name in existing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            try:
+                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                dropped += 1
+                if logger:
+                    logger.info(f"🧹 PG: حُذف فهرس قديم {idx_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ فشل حذف فهرس {idx_name}: {e}")
+        if dropped > 0:
+            logger.info(f"🧹 PG: حُذف إجمالي {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_postgres: {e}")
+    return dropped
+
+
+async def _drop_deprecated_indexes_sqlite(conn, logger):
+    if not DEPRECATED_INDEXES:
+        return 0
+    dropped = 0
+    try:
+        placeholders = ",".join(["?"] * len(DEPRECATED_INDEXES))
+        cursor = await conn.execute(
+            f"SELECT name FROM sqlite_master "
+            f"WHERE type='index' AND name IN ({placeholders})",
+            tuple(DEPRECATED_INDEXES),
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+        existing = {row[0] for row in rows}
+        for idx_name in existing:
+            if not _is_valid_index_name(idx_name):
+                continue
+            try:
+                await conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                dropped += 1
+            except Exception as e:
+                logger.warning(f"⚠️ SQLite فشل حذف {idx_name}: {e}")
+        if dropped > 0:
+            logger.info(f"🧹 SQLite: حُذف {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_sqlite: {e}")
+    return dropped
+
+
+async def _drop_deprecated_indexes_mysql(conn, logger):
+    if not DEPRECATED_INDEXES:
+        return 0
+    dropped = 0
+    try:
+        tables = set(t for t, _, _ in COMMON_INDEXES)
+        existing = await _fetch_existing_indexes_mysql(conn, tables)
+        for table, idx_name in existing:
+            if idx_name in DEPRECATED_INDEXES:
+                if not _is_valid_index_name(idx_name):
+                    continue
+                if not _is_valid_index_name(table):
+                    continue
+                try:
+                    await conn.execute(
+                        f"DROP INDEX {idx_name} ON `{table}`"
+                    )
+                    dropped += 1
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "1091" not in err_msg and "doesn't exist" not in err_msg:
+                        logger.warning(
+                            f"⚠️ MySQL فشل حذف {idx_name}: {e}"
+                        )
+        if dropped > 0:
+            logger.info(f"🧹 MySQL: حُذف {dropped} فهرس قديم")
+    except Exception as e:
+        logger.warning(f"⚠️ _drop_deprecated_indexes_mysql: {e}")
+    return dropped
+
+
+# =====================================================================
+# إنشاء الفهارس
+# =====================================================================
+
+async def _create_indexes_generic(
+    conn, logger, db_name: str, fetch_existing_fn, db_type: str
+):
+    try:
+        existing = await fetch_existing_fn(conn)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ {db_name} فشل جلب الفهارس: {e}")
+        return
+
+    to_create = []
+    for t, n, c in COMMON_INDEXES:
+        if n in existing:
+            continue
+        adapted = _adapt_cols_for_db(c, db_type)
+        if not adapted:
+            continue
+        to_create.append((t, n, adapted))
+
+    if not to_create:
+        if logger:
+            logger.info(
+                f"✅ {db_name}: 0 فهرس جديد، "
+                f"{len(COMMON_INDEXES)} موجود، 0 فشل"
+            )
+        return
+
+    created = 0
+    failed = 0
+    for _table, idx_name, cols in to_create:
+        if not _is_valid_index_name(idx_name):
+            failed += 1
+            continue
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {cols}"
+            )
+            created += 1
+        except Exception as e:
+            failed += 1
+            if logger:
+                logger.warning(f"⚠️ {db_name} فهرس {idx_name}: {e}")
+
+    skipped = len(COMMON_INDEXES) - len(to_create)
+    if logger:
+        logger.info(
+            f"✅ {db_name}: {created} فهرس جديد، "
+            f"{skipped} موجود، {failed} فشل"
         )
 
-    return "\n".join(lines)
+
+async def _create_indexes_sqlite(conn, logger):
+    async def _fetch(c):
+        return await _fetch_existing_indexes_sqlite(c)
+    await _create_indexes_generic(
+        conn, logger, "SQLite", _fetch, "sqlite"
+    )
 
 
-# =============================================================================
-# PUBLIC API
-# =============================================================================
+async def _create_indexes_postgres(conn, logger):
+    index_names = [idx_name for _, idx_name, _ in COMMON_INDEXES]
+
+    async def _fetch(c):
+        return await _fetch_existing_indexes_postgres(c, index_names)
+
+    await _create_indexes_generic(
+        conn, logger, "PostgreSQL", _fetch, "postgres"
+    )
+
+
+async def _create_indexes_mysql(conn, logger):
+    tables = set(t for t, _, _ in COMMON_INDEXES)
+    try:
+        existing = await _fetch_existing_indexes_mysql(conn, tables)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ MySQL فشل جلب الفهارس: {e}")
+        return
+
+    created = 0
+    skipped = 0
+    failed = 0
+    for table, idx_name, cols in COMMON_INDEXES:
+        if idx_name in MYSQL_SKIP_INDEXES:
+            skipped += 1
+            continue
+        if (table, idx_name) in existing:
+            skipped += 1
+            continue
+        if not _is_valid_index_name(idx_name):
+            failed += 1
+            continue
+        adapted = _adapt_cols_for_db(cols, "mysql")
+        if not adapted:
+            failed += 1
+            continue
+        try:
+            await conn.execute(
+                f"CREATE INDEX {idx_name} ON {adapted}"
+            )
+            created += 1
+        except Exception as e:
+            err_msg = str(e).lower()
+            if (
+                "duplicate" in err_msg
+                or "already exists" in err_msg
+                or "1061" in err_msg
+            ):
+                skipped += 1
+            else:
+                failed += 1
+                if logger:
+                    logger.warning(f"⚠️ MySQL فهرس {idx_name}: {e}")
+
+    if logger:
+        logger.info(
+            f"✅ MySQL: {created} فهرس جديد، "
+            f"{skipped} موجود، {failed} فشل"
+        )
+
+
+# =====================================================================
+# 1. جداول SQLite
+# =====================================================================
+
+async def create_tables_sqlite(conn, logger, TimeUtils):
+    current = await _get_current_schema_version_sqlite(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.25 FIX: migrations أولاً
+        await _migrate_missing_columns_sqlite(conn, logger)
+        await _verify_critical_indexes_sqlite(conn, logger)
+        await _ensure_all_indexes_exist_sqlite(conn, logger)
+        await _drop_deprecated_indexes_sqlite(conn, logger)
+        await _cleanup_stale_links_sqlite(conn, logger)
+        await _cleanup_old_admin_logs_sqlite(conn, logger)
+        await _run_maintenance_sqlite(conn, logger)
+        if logger:
+            logger.info(
+                f"⏩ SQLite: schema v{current} محدّث — تخطي (fast-path)"
+            )
+        return
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            description TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            language TEXT DEFAULT 'ar',
+            auto_publish INTEGER DEFAULT 1,
+            auto_recycle INTEGER DEFAULT 1,
+            banned INTEGER DEFAULT 0,
+            trial_used INTEGER DEFAULT 0,
+            subscription_end TEXT,
+            referral_code TEXT UNIQUE,
+            created_at TEXT,
+            updated_at TEXT,
+            active_channel INTEGER
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            channel_id INTEGER,
+            channel_name TEXT,
+            banned INTEGER DEFAULT 0,
+            created_at TEXT,
+            removed_at TEXT DEFAULT NULL,
+            removal_reason TEXT DEFAULT NULL,
+            UNIQUE(user_id, channel_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_db_id INTEGER,
+            text TEXT,
+            text_hash TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
+            published INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            created_at TEXT,
+            published_at TEXT,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+    try:
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
+            ON posts(
+                channel_db_id,
+                text_hash,
+                COALESCE(media_type, ''),
+                COALESCE(media_file_id, '')
+            )
+        """)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ SQLite idx_posts_unique: {e}")
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schedule (
+            channel_db_id INTEGER PRIMARY KEY,
+            schedule_type TEXT DEFAULT 'interval_minutes',
+            interval_minutes INTEGER DEFAULT 12,
+            interval_hours INTEGER DEFAULT 0,
+            interval_days INTEGER DEFAULT 0,
+            days_of_week TEXT DEFAULT '[]',
+            specific_dates TEXT DEFAULT '[]',
+            publish_time TEXT DEFAULT '00:00',
+            cron_expression TEXT,
+            next_publish_date TEXT,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS last_publish (
+            channel_db_id INTEGER PRIMARY KEY,
+            last_publish_time TEXT,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_groups (
+            chat_id INTEGER PRIMARY KEY,
+            chat_name TEXT,
+            username TEXT,
+            added_by INTEGER,
+            added_at TEXT,
+            updated_at TEXT,
+            banned INTEGER DEFAULT 0,
+            log_channel_id INTEGER DEFAULT NULL
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_locks (
+            chat_id INTEGER PRIMARY KEY,
+            locked INTEGER DEFAULT 0,
+            locked_at TEXT,
+            locked_by INTEGER
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_groups_link (
+            user_id INTEGER,
+            chat_id INTEGER,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_admins (
+            chat_id INTEGER,
+            user_id INTEGER,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+            chat_id INTEGER,
+            owner_id INTEGER,
+            is_hidden INTEGER DEFAULT 1,
+            PRIMARY KEY (chat_id, owner_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hidden_admins (
+            chat_id INTEGER,
+            admin_id INTEGER,
+            added_by INTEGER,
+            added_at TEXT,
+            PRIMARY KEY (chat_id, admin_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS anonymous_admins (
+            chat_id INTEGER NOT NULL,
+            anonymous_id INTEGER NOT NULL,
+            added_by INTEGER,
+            user_id INTEGER,
+            added_at TEXT,
+            PRIMARY KEY (chat_id, anonymous_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_security (
+            chat_id INTEGER PRIMARY KEY,
+            delete_links INTEGER DEFAULT 0,
+            mentions INTEGER DEFAULT 0,
+            slow_mode INTEGER DEFAULT 0,
+            slow_mode_seconds INTEGER DEFAULT 5,
+            welcome_enabled INTEGER DEFAULT 0,
+            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+            goodbye_enabled INTEGER DEFAULT 0,
+            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+            delete_banned_words INTEGER DEFAULT 0,
+            auto_penalty TEXT DEFAULT 'none',
+            auto_mute_duration INTEGER DEFAULT 3600,
+            delete_videos INTEGER DEFAULT 0,
+            delete_audio INTEGER DEFAULT 0,
+            delete_animation INTEGER DEFAULT 0,
+            delete_service INTEGER DEFAULT 0,
+            delete_documents INTEGER DEFAULT 0,
+            delete_stickers INTEGER DEFAULT 0,
+            delete_forwarded INTEGER DEFAULT 0,
+            delete_polls INTEGER DEFAULT 0,
+            delete_games INTEGER DEFAULT 0,
+            delete_voice INTEGER DEFAULT 0,
+            delete_video_note INTEGER DEFAULT 0,
+            delete_photos INTEGER DEFAULT 0,
+            delete_penalty TEXT DEFAULT 'none',
+            delete_penalty_duration INTEGER DEFAULT 0,
+            delete_penalty_messages INTEGER DEFAULT 0,
+            antiflood_enabled INTEGER DEFAULT 0,
+            antiflood_messages INTEGER DEFAULT 5,
+            antiflood_seconds INTEGER DEFAULT 10,
+            antiflood_penalty TEXT DEFAULT 'mute',
+            antiflood_penalty_duration INTEGER DEFAULT 3600,
+            max_warnings INTEGER DEFAULT 3,
+            warn_penalty TEXT DEFAULT 'ban',
+            warn_penalty_duration INTEGER DEFAULT 3600,
+            warn_enabled INTEGER DEFAULT 0,
+            max_message_length INTEGER DEFAULT 0,
+            night_mode_enabled INTEGER DEFAULT 0,
+            night_mode_start TEXT DEFAULT '23:00',
+            night_mode_end TEXT DEFAULT '06:00',
+            night_mode_action TEXT DEFAULT 'mute',
+            night_mode_action_duration INTEGER DEFAULT 3600,
+            nsfw_enabled INTEGER DEFAULT 0,
+            nsfw_threshold REAL DEFAULT 0.7,
+            nsfw_filter INTEGER DEFAULT 0,
+            auto_approve_join INTEGER DEFAULT 0,
+            auto_reject_join INTEGER DEFAULT 0,
+            mute_default_duration INTEGER DEFAULT 3600,
+            ban_default_duration INTEGER DEFAULT 0,
+            warn_default_duration INTEGER DEFAULT 0,
+            restrict_default_duration INTEGER DEFAULT 1800,
+            enable_timed_penalties INTEGER DEFAULT 1,
+            auto_remove_penalties INTEGER DEFAULT 1,
+            violation_strikes INTEGER DEFAULT 3,
+            violation_duration INTEGER DEFAULT 60,
+            violation_penalty TEXT DEFAULT 'none',
+            violation_penalty_duration INTEGER DEFAULT 3600
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS banned_words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word TEXT,
+            chat_id INTEGER,
+            added_by INTEGER,
+            added_at TEXT,
+            UNIQUE(word, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_replies (
+            chat_id INTEGER,
+            keyword TEXT,
+            reply TEXT,
+            reply_type TEXT DEFAULT 'text',
+            reply_media_id TEXT,
+            reply_buttons TEXT,
+            created_at TEXT,
+            is_active INTEGER DEFAULT 1,
+            usage_count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, keyword)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_reply_settings (
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            only_admins INTEGER DEFAULT 0,
+            ignore_bots INTEGER DEFAULT 1,
+            updated_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            message TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
+            ticket_number INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT,
+            replied INTEGER DEFAULT 0
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_admins (
+            user_id INTEGER PRIMARY KEY,
+            added_by INTEGER,
+            added_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_addition_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT,
+            chat_username TEXT,
+            added_by_id INTEGER NOT NULL,
+            added_by_name TEXT,
+            added_by_username TEXT,
+            bot_status TEXT,
+            added_at TEXT NOT NULL
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    for key, value in DEFAULT_SETTINGS:
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO NOTHING",
+                (key, value),
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ SQLite settings '{key}': {e}")
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER,
+            created_at TEXT,
+            UNIQUE(referrer_id, referred_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS referral_rewards (
+            user_id INTEGER PRIMARY KEY,
+            referral_count INTEGER DEFAULT 0,
+            total_reward_days INTEGER DEFAULT 0,
+            claimed_reward_days INTEGER DEFAULT 0,
+            last_referral_date TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_reminder_settings (
+            user_id INTEGER PRIMARY KEY,
+            subscription_reminder INTEGER DEFAULT 1,
+            daily_stats_reminder INTEGER DEFAULT 0,
+            weekly_report INTEGER DEFAULT 1,
+            reminder_days_before INTEGER DEFAULT 3,
+            last_daily_sent TEXT,
+            last_weekly_sent TEXT,
+            last_subscription_sent TEXT,
+            last_reminder_sent TEXT,
+            notification_lang TEXT DEFAULT 'ar'
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_translation (
+            user_id INTEGER PRIMARY KEY,
+            lang TEXT DEFAULT 'off'
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            creator_id INTEGER,
+            title TEXT,
+            description TEXT,
+            prize TEXT,
+            end_date TEXT,
+            status TEXT DEFAULT 'active',
+            winner_id INTEGER,
+            created_at TEXT,
+            contest_type TEXT DEFAULT 'raffle',
+            question TEXT DEFAULT '',
+            correct_answer TEXT DEFAULT ''
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contest_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            contest_id INTEGER,
+            answer TEXT,
+            joined_at TEXT,
+            UNIQUE(user_id, contest_id)
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contest_winners (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contest_id INTEGER,
+            winner_id INTEGER,
+            announced_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            admin_id INTEGER,
+            action TEXT,
+            target_id INTEGER,
+            reason TEXT,
+            created_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_warnings (
+            user_id INTEGER,
+            chat_id INTEGER,
+            warnings INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_violations (
+            user_id INTEGER,
+            chat_id INTEGER,
+            violation_count INTEGER DEFAULT 0,
+            last_violation_time TEXT,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_rules (
+            chat_id INTEGER PRIMARY KEY,
+            rules_text TEXT,
+            updated_by INTEGER,
+            updated_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_messages (
+            user_id INTEGER,
+            chat_id INTEGER,
+            message_time TEXT,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            text TEXT,
+            publish_time TEXT,
+            fail_count INTEGER DEFAULT 0
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS sentiment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            chat_id INTEGER,
+            text_encrypted BLOB,
+            sentiment TEXT,
+            score REAL,
+            created_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            description TEXT,
+            price INTEGER,
+            currency TEXT DEFAULT 'XTR',
+            duration_days INTEGER,
+            max_channels INTEGER,
+            max_posts INTEGER,
+            features TEXT CHECK(features IS NULL OR json_valid(features)),
+            is_active INTEGER DEFAULT 1,
+            is_gift INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            plan_id INTEGER,
+            status TEXT DEFAULT 'active',
+            start_date TEXT,
+            end_date TEXT,
+            auto_renew INTEGER DEFAULT 0,
+            provider TEXT DEFAULT 'xtr',
+            provider_subscription_id TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT UNIQUE,
+            user_id INTEGER,
+            plan_id INTEGER,
+            amount INTEGER,
+            currency TEXT DEFAULT 'XTR',
+            status TEXT DEFAULT 'pending',
+            provider TEXT DEFAULT 'xtr',
+            provider_payment_id TEXT,
+            paid_at TEXT,
+            created_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS payment_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            provider TEXT DEFAULT 'xtr',
+            event_type TEXT,
+            data TEXT,
+            created_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_penalties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            chat_id INTEGER,
+            penalty_type TEXT,
+            duration INTEGER,
+            start_time TEXT,
+            end_time TEXT,
+            reason TEXT,
+            issued_by INTEGER,
+            status TEXT DEFAULT 'active',
+            created_at TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS violation_penalties (
+            chat_id INTEGER NOT NULL,
+            violation_type TEXT NOT NULL,
+            penalty_type TEXT NOT NULL DEFAULT 'mute',
+            duration_seconds INTEGER DEFAULT 3600,
+            PRIMARY KEY (chat_id, violation_type)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS gift_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            plan_id INTEGER,
+            creator_id INTEGER,
+            used_by INTEGER,
+            used_at TEXT,
+            created_at TEXT,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_points (
+            user_id INTEGER PRIMARY KEY,
+            points INTEGER DEFAULT 0,
+            last_updated TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS penalty_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            chat_id INTEGER,
+            penalty_type TEXT,
+            duration INTEGER,
+            start_time TEXT,
+            end_time TEXT,
+            reason TEXT,
+            issued_by INTEGER,
+            status TEXT,
+            created_at TEXT,
+            archived_at TEXT
+        )
+    """)
+
+    # ✅ v7.6.25 FIX: migrations أولاً (يضيف removed_at قبل الفهرس)
+    await _migrate_missing_columns_sqlite(conn, logger)
+    await _drop_deprecated_indexes_sqlite(conn, logger)
+    await _ensure_index_definitions_match_sqlite(conn, logger)
+    await _create_indexes_sqlite(conn, logger)
+    await _cleanup_stale_links_sqlite(conn, logger)
+    await _cleanup_old_admin_logs_sqlite(conn, logger)
+
+    try:
+        await conn.execute(
+            "INSERT INTO schema_version "
+            "(version, applied_at, description) "
+            "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
+            (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
+             "v7.6.28-maintenance-users-fix"),
+        )
+        await conn.commit()
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ schema_version SQLite: {e}")
+
+    if logger:
+        logger.info("✅ تم إنشاء جميع جداول SQLite مع الفهارس المحسنة")
+
+
+# =====================================================================
+# 2. جداول PostgreSQL
+# =====================================================================
+
+async def create_tables_postgres(conn, logger, TimeUtils):
+    current = await _get_current_schema_version_postgres(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        if logger:
+            logger.info(
+                f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
+            )
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_postgres(conn, logger)
+        await _verify_critical_indexes_postgres(conn, logger)
+        await _ensure_all_indexes_exist_postgres(conn, logger)
+        await _ensure_index_definitions_match_postgres(conn, logger)
+        await _drop_deprecated_indexes_postgres(conn, logger)
+        await _cleanup_stale_links_postgres(conn, logger)
+        await _cleanup_old_admin_logs_postgres(conn, logger)
+        # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
+        # await _tune_autovacuum_postgres(conn, logger)
+        await _quick_analyze_postgres(conn, logger)
+        # ✅ v7.6.27 CRITICAL FIX: VACUUM لا يعمل داخل transaction!
+        #
+        # كان: await _run_maintenance_postgres(conn, logger)
+        #       ↑ يُشغّل VACUUM → PG يُلغِي الـ tx → كل الاستعلامات التالية تفشل
+        #
+        # الآن: VACUUM يُشغَّل من database.py::_bootstrap بعد commit
+        #        عبر self.connection() (autocommit mode).
+        #
+        # ⚠️ لا تُعِد الاستدعاء هنا أبداً — سيُسبِّب فشل التهيئة كاملاً.
+        # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
+        if logger:
+            logger.info(
+                f"⏩ PG: schema v{current} محدّث — تخطي (fast-path)"
+            )
+        return
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL,
+            description TEXT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            language TEXT DEFAULT 'ar',
+            auto_publish INTEGER DEFAULT 1,
+            auto_recycle INTEGER DEFAULT 1,
+            banned INTEGER DEFAULT 0,
+            trial_used INTEGER DEFAULT 0,
+            subscription_end TIMESTAMP,
+            referral_code TEXT UNIQUE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            active_channel INTEGER
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_channels (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            channel_id BIGINT,
+            channel_name TEXT,
+            banned INTEGER DEFAULT 0,
+            created_at TIMESTAMP,
+            removed_at TIMESTAMP DEFAULT NULL,
+            removal_reason TEXT DEFAULT NULL,
+            UNIQUE(user_id, channel_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id SERIAL PRIMARY KEY,
+            channel_db_id INTEGER,
+            text TEXT,
+            text_hash TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
+            published INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP,
+            published_at TIMESTAMP,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+    try:
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique
+            ON posts(
+                channel_db_id,
+                text_hash,
+                COALESCE(media_type, ''),
+                COALESCE(media_file_id, '')
+            )
+        """)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ PG idx_posts_unique: {e}")
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schedule (
+            channel_db_id INTEGER PRIMARY KEY,
+            schedule_type TEXT DEFAULT 'interval_minutes',
+            interval_minutes INTEGER DEFAULT 12,
+            interval_hours INTEGER DEFAULT 0,
+            interval_days INTEGER DEFAULT 0,
+            days_of_week TEXT DEFAULT '[]',
+            specific_dates TEXT DEFAULT '[]',
+            publish_time TEXT DEFAULT '00:00',
+            cron_expression TEXT,
+            next_publish_date TIMESTAMP,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS last_publish (
+            channel_db_id INTEGER PRIMARY KEY,
+            last_publish_time TIMESTAMP,
+            FOREIGN KEY (channel_db_id) REFERENCES user_channels(id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_groups (
+            chat_id BIGINT PRIMARY KEY,
+            chat_name TEXT,
+            username TEXT,
+            added_by BIGINT,
+            added_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            banned INTEGER DEFAULT 0,
+            log_channel_id BIGINT DEFAULT NULL
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_locks (
+            chat_id BIGINT PRIMARY KEY,
+            locked INTEGER DEFAULT 0,
+            locked_at TIMESTAMP,
+            locked_by BIGINT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_groups_link (
+            user_id BIGINT,
+            chat_id BIGINT,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_admins (
+            chat_id BIGINT,
+            user_id BIGINT,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+            chat_id BIGINT,
+            owner_id BIGINT,
+            is_hidden INTEGER DEFAULT 1,
+            PRIMARY KEY (chat_id, owner_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hidden_admins (
+            chat_id BIGINT,
+            admin_id BIGINT,
+            added_by BIGINT,
+            added_at TIMESTAMP,
+            PRIMARY KEY (chat_id, admin_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS anonymous_admins (
+            chat_id BIGINT NOT NULL,
+            anonymous_id BIGINT NOT NULL,
+            added_by BIGINT,
+            user_id BIGINT,
+            added_at TIMESTAMP,
+            PRIMARY KEY (chat_id, anonymous_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_security (
+            chat_id BIGINT PRIMARY KEY,
+            delete_links INTEGER DEFAULT 0,
+            mentions INTEGER DEFAULT 0,
+            slow_mode INTEGER DEFAULT 0,
+            slow_mode_seconds INTEGER DEFAULT 5,
+            welcome_enabled INTEGER DEFAULT 0,
+            welcome_text TEXT DEFAULT 'مرحباً {user} في {chat} 🤍',
+            goodbye_enabled INTEGER DEFAULT 0,
+            goodbye_text TEXT DEFAULT 'وداعاً {user} 👋',
+            delete_banned_words INTEGER DEFAULT 0,
+            auto_penalty TEXT DEFAULT 'none',
+            auto_mute_duration INTEGER DEFAULT 3600,
+            delete_videos INTEGER DEFAULT 0,
+            delete_audio INTEGER DEFAULT 0,
+            delete_animation INTEGER DEFAULT 0,
+            delete_service INTEGER DEFAULT 0,
+            delete_documents INTEGER DEFAULT 0,
+            delete_stickers INTEGER DEFAULT 0,
+            delete_forwarded INTEGER DEFAULT 0,
+            delete_polls INTEGER DEFAULT 0,
+            delete_games INTEGER DEFAULT 0,
+            delete_voice INTEGER DEFAULT 0,
+            delete_video_note INTEGER DEFAULT 0,
+            delete_photos INTEGER DEFAULT 0,
+            delete_penalty TEXT DEFAULT 'none',
+            delete_penalty_duration INTEGER DEFAULT 0,
+            delete_penalty_messages INTEGER DEFAULT 0,
+            antiflood_enabled INTEGER DEFAULT 0,
+            antiflood_messages INTEGER DEFAULT 5,
+            antiflood_seconds INTEGER DEFAULT 10,
+            antiflood_penalty TEXT DEFAULT 'mute',
+            antiflood_penalty_duration INTEGER DEFAULT 3600,
+            max_warnings INTEGER DEFAULT 3,
+            warn_penalty TEXT DEFAULT 'ban',
+            warn_penalty_duration INTEGER DEFAULT 3600,
+            warn_enabled INTEGER DEFAULT 0,
+            max_message_length INTEGER DEFAULT 0,
+            night_mode_enabled INTEGER DEFAULT 0,
+            night_mode_start TEXT DEFAULT '23:00',
+            night_mode_end TEXT DEFAULT '06:00',
+            night_mode_action TEXT DEFAULT 'mute',
+            night_mode_action_duration INTEGER DEFAULT 3600,
+            nsfw_enabled INTEGER DEFAULT 0,
+            nsfw_threshold REAL DEFAULT 0.7,
+            nsfw_filter INTEGER DEFAULT 0,
+            auto_approve_join INTEGER DEFAULT 0,
+            auto_reject_join INTEGER DEFAULT 0,
+            mute_default_duration INTEGER DEFAULT 3600,
+            ban_default_duration INTEGER DEFAULT 0,
+            warn_default_duration INTEGER DEFAULT 0,
+            restrict_default_duration INTEGER DEFAULT 1800,
+            enable_timed_penalties INTEGER DEFAULT 1,
+            auto_remove_penalties INTEGER DEFAULT 1,
+            violation_strikes INTEGER DEFAULT 3,
+            violation_duration INTEGER DEFAULT 60,
+            violation_penalty TEXT DEFAULT 'none',
+            violation_penalty_duration INTEGER DEFAULT 3600
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS banned_words (
+            id SERIAL PRIMARY KEY,
+            word TEXT,
+            chat_id BIGINT,
+            added_by BIGINT,
+            added_at TIMESTAMP,
+            UNIQUE(word, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_replies (
+            chat_id BIGINT,
+            keyword TEXT,
+            reply TEXT,
+            reply_type TEXT DEFAULT 'text',
+            reply_media_id TEXT,
+            reply_buttons TEXT,
+            created_at TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            usage_count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, keyword)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auto_reply_settings (
+            chat_id BIGINT PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            only_admins INTEGER DEFAULT 0,
+            ignore_bots INTEGER DEFAULT 1,
+            updated_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            username TEXT,
+            message TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
+            ticket_number INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP,
+            replied INTEGER DEFAULT 0
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_admins (
+            user_id BIGINT PRIMARY KEY,
+            added_by BIGINT,
+            added_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_addition_log (
+            id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT,
+            chat_username TEXT,
+            added_by_id BIGINT NOT NULL,
+            added_by_name TEXT,
+            added_by_username TEXT,
+            bot_status TEXT,
+            added_at TIMESTAMP NOT NULL
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    for key, value in DEFAULT_SETTINGS:
+        try:
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO NOTHING",
+                key, value,
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ PG settings '{key}': {e}")
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id SERIAL PRIMARY KEY,
+            referrer_id BIGINT,
+            referred_id BIGINT,
+            created_at TIMESTAMP,
+            UNIQUE(referrer_id, referred_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS referral_rewards (
+            user_id BIGINT PRIMARY KEY,
+            referral_count INTEGER DEFAULT 0,
+            total_reward_days INTEGER DEFAULT 0,
+            claimed_reward_days INTEGER DEFAULT 0,
+            last_referral_date TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_reminder_settings (
+            user_id BIGINT PRIMARY KEY,
+            subscription_reminder INTEGER DEFAULT 1,
+            daily_stats_reminder INTEGER DEFAULT 0,
+            weekly_report INTEGER DEFAULT 1,
+            reminder_days_before INTEGER DEFAULT 3,
+            last_daily_sent TIMESTAMP,
+            last_weekly_sent TIMESTAMP,
+            last_subscription_sent TIMESTAMP,
+            last_reminder_sent TIMESTAMP,
+            notification_lang TEXT DEFAULT 'ar'
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_translation (
+            user_id BIGINT PRIMARY KEY,
+            lang TEXT DEFAULT 'off'
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contests (
+            id SERIAL PRIMARY KEY,
+            creator_id BIGINT,
+            title TEXT,
+            description TEXT,
+            prize TEXT,
+            end_date TIMESTAMP,
+            status TEXT DEFAULT 'active',
+            winner_id BIGINT,
+            created_at TIMESTAMP,
+            contest_type TEXT DEFAULT 'raffle',
+            question TEXT DEFAULT '',
+            correct_answer TEXT DEFAULT ''
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contest_participants (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            contest_id INTEGER,
+            answer TEXT,
+            joined_at TIMESTAMP,
+            UNIQUE(user_id, contest_id)
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS contest_winners (
+            id SERIAL PRIMARY KEY,
+            contest_id INTEGER,
+            winner_id BIGINT,
+            announced_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT,
+            admin_id BIGINT,
+            action TEXT,
+            target_id BIGINT,
+            reason TEXT,
+            created_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_warnings (
+            user_id BIGINT,
+            chat_id BIGINT,
+            warnings INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_violations (
+            user_id BIGINT,
+            chat_id BIGINT,
+            violation_count INTEGER DEFAULT 0,
+            last_violation_time TIMESTAMP,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_rules (
+            chat_id BIGINT PRIMARY KEY,
+            rules_text TEXT,
+            updated_by BIGINT,
+            updated_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_messages (
+            user_id BIGINT,
+            chat_id BIGINT,
+            message_time TIMESTAMP,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_posts (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT,
+            text TEXT,
+            publish_time TIMESTAMP,
+            fail_count INTEGER DEFAULT 0
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS sentiment_history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            chat_id BIGINT,
+            text_encrypted BYTEA,
+            sentiment TEXT,
+            score REAL,
+            created_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE,
+            description TEXT,
+            price INTEGER,
+            currency TEXT DEFAULT 'XTR',
+            duration_days INTEGER,
+            max_channels INTEGER,
+            max_posts INTEGER,
+            features TEXT CHECK (
+                features IS NULL
+                OR features = ''
+                OR features ~ '^\\s*[\\{\\[]'
+            ),
+            is_active INTEGER DEFAULT 1,
+            is_gift INTEGER DEFAULT 0,
+            created_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            plan_id INTEGER,
+            status TEXT DEFAULT 'active',
+            start_date TIMESTAMP,
+            end_date TIMESTAMP,
+            auto_renew INTEGER DEFAULT 0,
+            provider TEXT DEFAULT 'xtr',
+            provider_subscription_id TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoices (
+            id SERIAL PRIMARY KEY,
+            number TEXT UNIQUE,
+            user_id BIGINT,
+            plan_id INTEGER,
+            amount INTEGER,
+            currency TEXT DEFAULT 'XTR',
+            status TEXT DEFAULT 'pending',
+            provider TEXT DEFAULT 'xtr',
+            provider_payment_id TEXT,
+            paid_at TIMESTAMP,
+            created_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS payment_logs (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            provider TEXT DEFAULT 'xtr',
+            event_type TEXT,
+            data TEXT,
+            created_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_penalties (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            chat_id BIGINT,
+            penalty_type TEXT,
+            duration INTEGER,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            reason TEXT,
+            issued_by BIGINT,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS violation_penalties (
+            chat_id BIGINT NOT NULL,
+            violation_type TEXT NOT NULL,
+            penalty_type TEXT NOT NULL DEFAULT 'mute',
+            duration_seconds INTEGER DEFAULT 3600,
+            PRIMARY KEY (chat_id, violation_type)
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS gift_codes (
+            id SERIAL PRIMARY KEY,
+            code TEXT UNIQUE,
+            plan_id INTEGER,
+            creator_id BIGINT,
+            used_by BIGINT,
+            used_at TIMESTAMP,
+            created_at TIMESTAMP,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_points (
+            user_id BIGINT PRIMARY KEY,
+            points INTEGER DEFAULT 0,
+            last_updated TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS penalty_archive (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            chat_id BIGINT,
+            penalty_type TEXT,
+            duration INTEGER,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            reason TEXT,
+            issued_by BIGINT,
+            status TEXT,
+            created_at TIMESTAMP,
+            archived_at TIMESTAMP
+        )
+    """)
+
+    # ✅ v7.6.25 FIX: migrations FIRST (قبل الفهارس)
+    await _migrate_missing_columns_postgres(conn, logger)
+    await _drop_deprecated_indexes_postgres(conn, logger)
+    await _ensure_index_definitions_match_postgres(conn, logger)
+    await _create_indexes_postgres(conn, logger)
+    await _cleanup_stale_links_postgres(conn, logger)
+    await _cleanup_old_admin_logs_postgres(conn, logger)
+    # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
+    # await _tune_autovacuum_postgres(conn, logger)
+    await _quick_analyze_postgres(conn, logger)
+    # ✅ v7.6.27 CRITICAL FIX: لا VACUUM داخل transaction!
+    #    (نفس السبب المُوضَّح في fast-path أعلاه)
+    # await _run_maintenance_postgres(conn, logger)  # ❌ MOVED TO database.py
+
+    try:
+        await conn.execute(
+            "INSERT INTO schema_version "
+            "(version, applied_at, description) "
+            "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+            CURRENT_SCHEMA_VERSION,
+            _safe_now_dt(TimeUtils),
+            "v7.6.28-maintenance-users-fix",
+        )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ schema_version PG: {e}")
+
+    if logger:
+        logger.info("✅ تم إنشاء جميع جداول PostgreSQL مع الفهارس المحسنة")
+
+
+# =====================================================================
+# 3. جداول MySQL
+# =====================================================================
+
+async def create_tables_mysql(conn, logger, TimeUtils):
+    current = await _get_current_schema_version_mysql(conn)
+    if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_mysql(conn, logger)
+        await _verify_critical_indexes_mysql(conn, logger)
+        await _ensure_all_indexes_exist_mysql(conn, logger)
+        await _ensure_index_definitions_match_mysql(conn, logger)
+        await _drop_deprecated_indexes_mysql(conn, logger)
+        await _cleanup_stale_links_mysql(conn, logger)
+        await _cleanup_old_admin_logs_mysql(conn, logger)
+        await _quick_analyze_mysql(conn, logger)
+        # ✅ MySQL: OPTIMIZE/ANALYZE يعملان داخل transaction — لا مشكلة
+        await _run_maintenance_mysql(conn, logger)
+        if logger:
+            logger.info(
+                f"⏩ MySQL: schema v{current} محدّث — تخطي (fast-path)"
+            )
+        return
+
+    await conn.execute("SET FOREIGN_KEY_CHECKS=0")
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INT PRIMARY KEY,
+                applied_at DATETIME NOT NULL,
+                description TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                language VARCHAR(10) DEFAULT 'ar',
+                auto_publish TINYINT(1) DEFAULT 1,
+                auto_recycle TINYINT(1) DEFAULT 1,
+                banned TINYINT(1) DEFAULT 0,
+                trial_used TINYINT(1) DEFAULT 0,
+                subscription_end DATETIME,
+                referral_code VARCHAR(255) UNIQUE,
+                created_at DATETIME,
+                updated_at DATETIME,
+                active_channel INT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                channel_id BIGINT,
+                channel_name VARCHAR(255),
+                banned TINYINT(1) DEFAULT 0,
+                created_at DATETIME,
+                removed_at DATETIME DEFAULT NULL,
+                removal_reason VARCHAR(50) DEFAULT NULL,
+                UNIQUE KEY (user_id, channel_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                channel_db_id INT,
+                text TEXT NOT NULL,
+                text_hash CHAR(64) DEFAULT '',
+                media_type VARCHAR(50),
+                media_file_id VARCHAR(255),
+                published TINYINT(1) DEFAULT 0,
+                fail_count INT DEFAULT 0,
+                created_at DATETIME,
+                published_at DATETIME,
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        try:
+            await conn.execute("""
+                CREATE UNIQUE INDEX idx_posts_unique
+                ON posts(
+                    channel_db_id,
+                    text_hash,
+                    (COALESCE(media_type, '')),
+                    (COALESCE(media_file_id, ''))
+                )
+            """)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if (
+                "duplicate" not in err_msg
+                and "1061" not in err_msg
+                and "already exists" not in err_msg
+            ):
+                if logger:
+                    logger.warning(f"⚠️ MySQL idx_posts_unique: {e}")
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                channel_db_id INT PRIMARY KEY,
+                schedule_type VARCHAR(50) DEFAULT 'interval_minutes',
+                interval_minutes INT DEFAULT 12,
+                interval_hours INT DEFAULT 0,
+                interval_days INT DEFAULT 0,
+                days_of_week TEXT,
+                specific_dates TEXT,
+                publish_time VARCHAR(10) DEFAULT '00:00',
+                cron_expression TEXT,
+                next_publish_date DATETIME,
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS last_publish (
+                channel_db_id INT PRIMARY KEY,
+                last_publish_time DATETIME,
+                FOREIGN KEY (channel_db_id)
+                    REFERENCES user_channels(id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_groups (
+                chat_id BIGINT PRIMARY KEY,
+                chat_name VARCHAR(255),
+                username VARCHAR(255),
+                added_by BIGINT,
+                added_at DATETIME,
+                updated_at DATETIME,
+                banned TINYINT(1) DEFAULT 0,
+                log_channel_id BIGINT DEFAULT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_locks (
+                chat_id BIGINT PRIMARY KEY,
+                locked TINYINT(1) DEFAULT 0,
+                locked_at DATETIME,
+                locked_by BIGINT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups_link (
+                user_id BIGINT,
+                chat_id BIGINT,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id BIGINT,
+                user_id BIGINT,
+                PRIMARY KEY (chat_id, user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_owner_groups (
+                chat_id BIGINT,
+                owner_id BIGINT,
+                is_hidden TINYINT(1) DEFAULT 1,
+                PRIMARY KEY (chat_id, owner_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_admins (
+                chat_id BIGINT,
+                admin_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, admin_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS anonymous_admins (
+                chat_id BIGINT NOT NULL,
+                anonymous_id BIGINT NOT NULL,
+                added_by BIGINT,
+                user_id BIGINT,
+                added_at DATETIME,
+                PRIMARY KEY (chat_id, anonymous_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_security (
+                chat_id BIGINT PRIMARY KEY,
+                delete_links TINYINT(1) DEFAULT 0,
+                mentions TINYINT(1) DEFAULT 0,
+                slow_mode TINYINT(1) DEFAULT 0,
+                slow_mode_seconds INT DEFAULT 5,
+                welcome_enabled TINYINT(1) DEFAULT 0,
+                welcome_text VARCHAR(2000)
+                    DEFAULT 'مرحباً {user} في {chat} 🤍',
+                goodbye_enabled TINYINT(1) DEFAULT 0,
+                goodbye_text VARCHAR(2000)
+                    DEFAULT 'وداعاً {user} 👋',
+                delete_banned_words TINYINT(1) DEFAULT 0,
+                auto_penalty VARCHAR(50) DEFAULT 'none',
+                auto_mute_duration INT DEFAULT 3600,
+                delete_videos TINYINT(1) DEFAULT 0,
+                delete_audio TINYINT(1) DEFAULT 0,
+                delete_animation TINYINT(1) DEFAULT 0,
+                delete_service TINYINT(1) DEFAULT 0,
+                delete_documents TINYINT(1) DEFAULT 0,
+                delete_stickers TINYINT(1) DEFAULT 0,
+                delete_forwarded TINYINT(1) DEFAULT 0,
+                delete_polls TINYINT(1) DEFAULT 0,
+                delete_games TINYINT(1) DEFAULT 0,
+                delete_voice TINYINT(1) DEFAULT 0,
+                delete_video_note TINYINT(1) DEFAULT 0,
+                delete_photos TINYINT(1) DEFAULT 0,
+                delete_penalty VARCHAR(50) DEFAULT 'none',
+                delete_penalty_duration INT DEFAULT 0,
+                delete_penalty_messages INT DEFAULT 0,
+                antiflood_enabled TINYINT(1) DEFAULT 0,
+                antiflood_messages INT DEFAULT 5,
+                antiflood_seconds INT DEFAULT 10,
+                antiflood_penalty VARCHAR(50) DEFAULT 'mute',
+                antiflood_penalty_duration INT DEFAULT 3600,
+                max_warnings INT DEFAULT 3,
+                warn_penalty VARCHAR(50) DEFAULT 'ban',
+                warn_penalty_duration INT DEFAULT 3600,
+                warn_enabled TINYINT(1) DEFAULT 0,
+                max_message_length INT DEFAULT 0,
+                night_mode_enabled TINYINT(1) DEFAULT 0,
+                night_mode_start VARCHAR(10) DEFAULT '23:00',
+                night_mode_end VARCHAR(10) DEFAULT '06:00',
+                night_mode_action VARCHAR(50) DEFAULT 'mute',
+                night_mode_action_duration INT DEFAULT 3600,
+                nsfw_enabled TINYINT(1) DEFAULT 0,
+                nsfw_threshold FLOAT DEFAULT 0.7,
+                nsfw_filter TINYINT(1) DEFAULT 0,
+                auto_approve_join TINYINT(1) DEFAULT 0,
+                auto_reject_join TINYINT(1) DEFAULT 0,
+                mute_default_duration INT DEFAULT 3600,
+                ban_default_duration INT DEFAULT 0,
+                warn_default_duration INT DEFAULT 0,
+                restrict_default_duration INT DEFAULT 1800,
+                enable_timed_penalties TINYINT(1) DEFAULT 1,
+                auto_remove_penalties TINYINT(1) DEFAULT 1,
+                violation_strikes INT DEFAULT 3,
+                violation_duration INT DEFAULT 60,
+                violation_penalty VARCHAR(50) DEFAULT 'none',
+                violation_penalty_duration INT DEFAULT 3600
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_words (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                word VARCHAR(255),
+                chat_id BIGINT,
+                added_by BIGINT,
+                added_at DATETIME,
+                UNIQUE KEY (word, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                chat_id BIGINT,
+                keyword VARCHAR(255),
+                reply TEXT,
+                reply_type VARCHAR(50) DEFAULT 'text',
+                reply_media_id TEXT,
+                reply_buttons TEXT,
+                created_at DATETIME,
+                is_active TINYINT(1) DEFAULT 1,
+                usage_count INT DEFAULT 0,
+                PRIMARY KEY (chat_id, keyword)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_reply_settings (
+                chat_id BIGINT PRIMARY KEY,
+                enabled TINYINT(1) DEFAULT 0,
+                only_admins TINYINT(1) DEFAULT 0,
+                ignore_bots TINYINT(1) DEFAULT 1,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                username VARCHAR(255),
+                message TEXT,
+                media_type VARCHAR(50),
+                media_file_id TEXT,
+                ticket_number INT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at DATETIME,
+                replied TINYINT(1) DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                added_by BIGINT,
+                added_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_addition_log (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT NOT NULL,
+                chat_title VARCHAR(255),
+                chat_type VARCHAR(50),
+                chat_username VARCHAR(255),
+                added_by_id BIGINT NOT NULL,
+                added_by_name VARCHAR(255),
+                added_by_username VARCHAR(255),
+                bot_status VARCHAR(50),
+                added_at DATETIME NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                `key` VARCHAR(255) PRIMARY KEY,
+                `value` TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        for key, value in DEFAULT_SETTINGS:
+            try:
+                await conn.execute(
+                    "INSERT IGNORE INTO settings (`key`, `value`) "
+                    "VALUES (%s, %s)",
+                    (key, value),
+                )
+            except Exception as e:
+                if logger:
+                    logger.warning(f"⚠️ MySQL settings '{key}': {e}")
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                referrer_id BIGINT,
+                referred_id BIGINT,
+                created_at DATETIME,
+                UNIQUE KEY (referrer_id, referred_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                user_id BIGINT PRIMARY KEY,
+                referral_count INT DEFAULT 0,
+                total_reward_days INT DEFAULT 0,
+                claimed_reward_days INT DEFAULT 0,
+                last_referral_date DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reminder_settings (
+                user_id BIGINT PRIMARY KEY,
+                subscription_reminder TINYINT(1) DEFAULT 1,
+                daily_stats_reminder TINYINT(1) DEFAULT 0,
+                weekly_report TINYINT(1) DEFAULT 1,
+                reminder_days_before INT DEFAULT 3,
+                last_daily_sent DATETIME,
+                last_weekly_sent DATETIME,
+                last_subscription_sent DATETIME,
+                last_reminder_sent DATETIME,
+                notification_lang VARCHAR(10) DEFAULT 'ar'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_translation (
+                user_id BIGINT PRIMARY KEY,
+                lang VARCHAR(10) DEFAULT 'off'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contests (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                creator_id BIGINT,
+                title VARCHAR(255),
+                description TEXT,
+                prize VARCHAR(255),
+                end_date DATETIME,
+                status VARCHAR(50) DEFAULT 'active',
+                winner_id BIGINT,
+                created_at DATETIME,
+                contest_type VARCHAR(50) DEFAULT 'raffle',
+                question TEXT,
+                correct_answer TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_participants (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                contest_id INT,
+                answer TEXT,
+                joined_at DATETIME,
+                UNIQUE KEY (user_id, contest_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS contest_winners (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                contest_id INT,
+                winner_id BIGINT,
+                announced_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                admin_id BIGINT,
+                action VARCHAR(255),
+                target_id BIGINT,
+                reason TEXT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                user_id BIGINT,
+                chat_id BIGINT,
+                warnings INT DEFAULT 0,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_violations (
+                user_id BIGINT,
+                chat_id BIGINT,
+                violation_count INT DEFAULT 0,
+                last_violation_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_rules (
+                chat_id BIGINT PRIMARY KEY,
+                rules_text TEXT,
+                updated_by BIGINT,
+                updated_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_messages (
+                user_id BIGINT,
+                chat_id BIGINT,
+                message_time DATETIME,
+                PRIMARY KEY (user_id, chat_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                chat_id BIGINT,
+                text TEXT,
+                publish_time DATETIME,
+                fail_count INT DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentiment_history (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                text_encrypted BLOB,
+                sentiment VARCHAR(50),
+                score FLOAT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                name VARCHAR(100) UNIQUE,
+                description TEXT,
+                price INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                duration_days INT,
+                max_channels INT,
+                max_posts INT,
+                features TEXT,
+                is_active TINYINT(1) DEFAULT 1,
+                is_gift TINYINT(1) DEFAULT 0,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                plan_id INT,
+                status VARCHAR(50) DEFAULT 'active',
+                start_date DATETIME,
+                end_date DATETIME,
+                auto_renew TINYINT(1) DEFAULT 0,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_subscription_id VARCHAR(255),
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                number VARCHAR(50) UNIQUE,
+                user_id BIGINT,
+                plan_id INT,
+                amount INT,
+                currency VARCHAR(10) DEFAULT 'XTR',
+                status VARCHAR(50) DEFAULT 'pending',
+                provider VARCHAR(50) DEFAULT 'xtr',
+                provider_payment_id VARCHAR(255),
+                paid_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                provider VARCHAR(50) DEFAULT 'xtr',
+                event_type VARCHAR(100),
+                data TEXT,
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_penalties (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type VARCHAR(50),
+                duration INT,
+                start_time DATETIME,
+                end_time DATETIME,
+                reason TEXT,
+                issued_by BIGINT,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS violation_penalties (
+                chat_id BIGINT NOT NULL,
+                violation_type VARCHAR(50) NOT NULL,
+                penalty_type VARCHAR(50) NOT NULL DEFAULT 'mute',
+                duration_seconds INT DEFAULT 3600,
+                PRIMARY KEY (chat_id, violation_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                code VARCHAR(50) UNIQUE,
+                plan_id INT,
+                creator_id BIGINT,
+                used_by BIGINT,
+                used_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY (plan_id) REFERENCES plans(id)
+                    ON DELETE RESTRICT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_points (
+                user_id BIGINT PRIMARY KEY,
+                points INT DEFAULT 0,
+                last_updated DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS penalty_archive (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                user_id BIGINT,
+                chat_id BIGINT,
+                penalty_type VARCHAR(50),
+                duration INT,
+                start_time DATETIME,
+                end_time DATETIME,
+                reason TEXT,
+                issued_by BIGINT,
+                status VARCHAR(50),
+                created_at DATETIME,
+                archived_at DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_mysql(conn, logger)
+        await _drop_deprecated_indexes_mysql(conn, logger)
+        await _ensure_index_definitions_match_mysql(conn, logger)
+        await _create_indexes_mysql(conn, logger)
+        await _cleanup_stale_links_mysql(conn, logger)
+        await _cleanup_old_admin_logs_mysql(conn, logger)
+        await _quick_analyze_mysql(conn, logger)
+
+        try:
+            await conn.execute(
+                "INSERT IGNORE INTO schema_version "
+                "(version, applied_at, description) "
+                "VALUES (%s, %s, %s)",
+                (
+                    CURRENT_SCHEMA_VERSION,
+                    _safe_now_iso(TimeUtils),
+                    "v7.6.28-maintenance-users-fix",
+                ),
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ schema_version MySQL: {e}")
+
+        if logger:
+            logger.info("✅ تم إنشاء جميع جداول MySQL مع الفهارس المحسنة")
+
+    finally:
+        try:
+            await conn.execute("SET FOREIGN_KEY_CHECKS=1")
+        except Exception as e:
+            if logger:
+                logger.error(f"❌ فشل إعادة FOREIGN_KEY_CHECKS: {e}")
+
+
+# =====================================================================
+# تصدير
+# =====================================================================
 
 __all__ = [
-    "VERSION",
-    "diagnose_db",
-    "diagnose_db_split",
-    "vacuum_analyze_tables",
-    "RootCause",
-    "CauseItem",
-    "_analyze_root_causes",
-    "_detect_xmin_blocker",
-    "_detect_xmin_blockers",
-    "_get_current_xmin_horizon",
-    "_get_per_table_autovacuum",
-    "_get_autovacuum_blockers",
-    "_get_dead_tuples",
-    "_get_table_sizes",
-    "_get_indexes",
-    "_autovacuum_vacuum_trigger",
-    "_autovacuum_analyze_trigger",
-    "_check_project_heavy_tables",
-    "_check_maintenance_consistency",
-    "_check_admin_logs_size",
-    "_get_schema_info",
-    "_split_for_telegram",
-    "_get_open_html_tags",
-    "_safe_params",
-    "_ReportBuilder",
-    "_is_significant_table",
-    "_build_pg_in_clause",
-    "REPORT_MAX_CHARS",
-    "TELEGRAM_MESSAGE_LIMIT",
-    "MIN_TABLE_SIZE_FOR_ALERT",
-    "SMALL_TABLE_THRESHOLD",
-    "SMALL_TABLE_MIN_DEAD_CRIT",
-    "SMALL_TABLE_MIN_DEAD_WARN",
-    "ADMIN_LOGS_WARN_ROWS",
-    "ADMIN_LOGS_CRIT_ROWS",
+    "create_tables_sqlite",
+    "create_tables_postgres",
+    "create_tables_mysql",
+    "CURRENT_SCHEMA_VERSION",
+    "CLEANUP_ANONYMOUS_BOT_IDS",
+    "COMMON_INDEXES",
+    "EXPECTED_INDEX_COUNT",
+    "CRITICAL_INDEX_NAMES",
+    "DEPRECATED_INDEXES",
+    "DEFAULT_SETTINGS",
+    "MAINTENANCE_INTERVAL_SECONDS",
+    "MAINTENANCE_TABLES",
+    "VACUUM_INTER_TABLE_DELAY_SECONDS",
+    "MYSQL_SKIP_INDEXES",
+    "ADMIN_LOGS_RETENTION_DAYS",
+    "ADMIN_LOGS_MAX_ROWS",
+    "REMOVED_CHANNELS_GRACE_DAYS",
+    "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
+    "_adapt_cols_for_db",
+    "_cleanup_old_admin_logs_postgres",
+    "_cleanup_old_admin_logs_sqlite",
+    "_cleanup_old_admin_logs_mysql",
+    "_tune_autovacuum_postgres",
+    "_run_maintenance_postgres",
+    "_run_maintenance_sqlite",
+    "_run_maintenance_mysql",
 ]
