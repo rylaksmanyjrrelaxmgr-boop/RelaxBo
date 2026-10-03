@@ -2,27 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.20)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.21)
 ================================================================================
+🆕 v5.5.21 (ADMIN_LOGS-AUTO-CLEANUP):
+    ✅ CLEANUP-1: مهمة جديدة cleanup_admin_logs_periodically
+                  - تعمل كل 24 ساعة تلقائياً
+                  - تستخدم دوال _cleanup_old_admin_logs_* من database_tables.py
+                  - تحذف سجلات > 30 يوماً
+                  - تحذف الزائد عن 5000 صف
+                  - تدعم PostgreSQL/MySQL/SQLite
+    ✅ CLEANUP-2: إضافة المهمة إلى قائمة المهام الخلفية (18 مهمة الآن)
+    ✅ CLEANUP-3: أول تشغيل بعد ساعة من الإقلاع (تجنب الحمل)
+
 🆕 v5.5.20 (MEMBERSHIP UPGRADE):
     ✅ MEM-1: استخدام handlers_membership.py المستقل أولاً
-              (FIX-1: قناة سجل خاصة بالمجموعة + FIX-3: عرض النطاق)
     ✅ MEM-2: fallback ذكي إلى handlers_callback المدموج
-              في حال عدم توفر handlers_membership
     ✅ MEM-3: تسجيل MembershipHandler بعد chat_member.register()
     ✅ MEM-4: logging تشخيصي واضح عند الفشل
 
 🆕 v5.5.19 (MEMBERSHIP INTEGRATION)
-🆕 v5.5.18 (CRITICAL FIXES — based on v5.5.17 review):
-    ✅ #1 حرجة: `runner.cleanup()` في مسار Webhook — كان مفقوداً!
-    ✅ #2: `watcher_task` داخل `try/finally` — لا تسريب عند الإلغاء
-    ✅ #3: `_watch_runner` — كشف TCPSite مباشر + تحذير واضح عند الفشل
-    ✅ #4: `_collect_admin_ids` — warning فقط عند فشل **كل** الطرق
-    ✅ #5: رسالة الإغلاق النهائية "👋 انتهت دورة حياة البوت"
-    ✅ #6: معالجة `CancelledError` بشكل نمطي (Python 3.8+)
-    ✅ #7: SIGTERM handler مُسجَّل فقط في وضع Webhook
-    ✅ #8: `_watch_runner` — health probe داخلي (يكتشف التعليق أيضاً)
-
+🆕 v5.5.18 (CRITICAL FIXES — based on v5.5.17 review)
 🆕 v5.5.17 (REVIEW FIXES)
 🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY)
 🆕 v5.5.15 (BUG FIXES — aiohttp leak + HTML escape)
@@ -143,6 +142,25 @@ except ImportError as _e1:
                 _MEMBERSHIP_IMPORT_ERROR = (
                     f"standalone: {_e2} | embedded: {_e4}"
                 )
+
+# ✅ v5.5.21 (CLEANUP-1): استيراد دوال تنظيف admin_logs
+try:
+    from database_tables import (
+        _cleanup_old_admin_logs_postgres as _cleanup_admin_logs_pg,
+        _cleanup_old_admin_logs_sqlite as _cleanup_admin_logs_sqlite,
+        _cleanup_old_admin_logs_mysql as _cleanup_admin_logs_mysql,
+        ADMIN_LOGS_RETENTION_DAYS,
+        ADMIN_LOGS_MAX_ROWS,
+    )
+    _ADMIN_LOGS_CLEANUP_AVAILABLE = True
+except ImportError as _e:
+    _cleanup_admin_logs_pg = None
+    _cleanup_admin_logs_sqlite = None
+    _cleanup_admin_logs_mysql = None
+    ADMIN_LOGS_RETENTION_DAYS = 30
+    ADMIN_LOGS_MAX_ROWS = 5000
+    _ADMIN_LOGS_CLEANUP_AVAILABLE = False
+    _ADMIN_LOGS_CLEANUP_IMPORT_ERROR = str(_e)
 
 # ✅ v4: قائمة القنوات
 from handlers.handlers_channels_list import register_channels_list_handlers
@@ -341,6 +359,22 @@ else:
     logger.warning(
         f"⚠️ register_membership_handlers غير متاح: "
         f"{_MEMBERSHIP_IMPORT_ERROR}"
+    )
+
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v5.5.21 (CLEANUP-1): فحص توفر دوال تنظيف admin_logs
+# ═══════════════════════════════════════════════════════════════════
+if _ADMIN_LOGS_CLEANUP_AVAILABLE:
+    logger.info(
+        f"✅ admin_logs cleanup متاح — "
+        f"احتفاظ={ADMIN_LOGS_RETENTION_DAYS}d, "
+        f"حد أقصى={ADMIN_LOGS_MAX_ROWS} صف"
+    )
+else:
+    logger.warning(
+        f"⚠️ دوال تنظيف admin_logs غير متاحة: "
+        f"{globals().get('_ADMIN_LOGS_CLEANUP_IMPORT_ERROR', 'unknown')} "
+        f"— المهمة الدورية معطّلة"
     )
 
 ALLOWED_UPDATES = [
@@ -798,6 +832,101 @@ async def _shutdown_group_log() -> None:
         logger.warning(f"⚠️ GroupLog shutdown: {e}")
     finally:
         _GROUP_LOG_INSTANCE = None
+
+
+# =====================================================================
+# ✅ v5.5.21 (CLEANUP-1): مهمة تنظيف admin_logs دورياً
+# =====================================================================
+
+async def cleanup_admin_logs_periodically() -> None:
+    """
+    ✅ v5.5.21 (CLEANUP-1): ينظّف جدول admin_logs كل 24 ساعة.
+
+    ما يفعله:
+        1. حذف السجلات الأقدم من ADMIN_LOGS_RETENTION_DAYS (30 يوماً)
+        2. حذف الزائد عن ADMIN_LOGS_MAX_ROWS (5000 صف)
+
+    التوقيت:
+        - أول تشغيل: بعد ساعة من الإقلاع (تجنب الحمل)
+        - التشغيلات التالية: كل 24 ساعة
+
+    الفائدة:
+        - يمنع نمو admin_logs بشكل غير محدود
+        - يحرر مساحة القرص
+        - يحافظ على أداء الاستعلامات
+
+    ملاحظة:
+        نفس المنطق موجود في database_tables.py لكنه يُنفَّذ فقط
+        عند create_tables (أي عند إعادة التشغيل).
+        هذه المهمة تضمن التنظيف الدوري **بدون** إعادة تشغيل.
+    """
+    if not _ADMIN_LOGS_CLEANUP_AVAILABLE:
+        logger.info(
+            "⏭️ cleanup_admin_logs_periodically: "
+            "دوال التنظيف غير متاحة — تخطي"
+        )
+        return
+
+    # انتظار ساعة قبل أول تشغيل (تجنب الحمل عند الإقلاع)
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info("🛑 cleanup_admin_logs: initial sleep أُلغي")
+        raise
+
+    logger.info(
+        "🧹 cleanup_admin_logs_periodically: بدء الحلقة "
+        "(كل 24 ساعة)"
+    )
+
+    while True:
+        try:
+            db_type = getattr(DB, "DB_TYPE", "sqlite")
+            deleted = 0
+
+            async with DB.connection() as conn:
+                if db_type == "postgres":
+                    if _cleanup_admin_logs_pg is not None:
+                        deleted = await _cleanup_admin_logs_pg(
+                            conn, logger
+                        )
+                elif db_type == "mysql":
+                    if _cleanup_admin_logs_mysql is not None:
+                        deleted = await _cleanup_admin_logs_mysql(
+                            conn, logger
+                        )
+                else:  # sqlite
+                    if _cleanup_admin_logs_sqlite is not None:
+                        deleted = await _cleanup_admin_logs_sqlite(
+                            conn, logger
+                        )
+
+            if deleted:
+                logger.info(
+                    f"✅ admin_logs cleanup: حُذف {deleted} صف "
+                    f"(احتفاظ={ADMIN_LOGS_RETENTION_DAYS}d, "
+                    f"حد أقصى={ADMIN_LOGS_MAX_ROWS})"
+                )
+            else:
+                logger.debug(
+                    "ℹ️ admin_logs cleanup: لا شيء للحذف"
+                )
+
+        except asyncio.CancelledError:
+            logger.info("🛑 cleanup_admin_logs أُلغيت")
+            raise
+        except Exception as e:
+            logger.error(
+                f"❌ cleanup_admin_logs (سيُعاد بعد 24h): {e}",
+                exc_info=True,
+            )
+
+        # انتظار 24 ساعة
+        try:
+            await asyncio.sleep(86400)
+        except asyncio.CancelledError:
+            logger.info("🛑 cleanup_admin_logs أُلغيت")
+            raise
 
 
 # =====================================================================
@@ -1851,6 +1980,8 @@ async def main():
         ),
         asyncio.create_task(contest_cleanup()),
         asyncio.create_task(pool_health_monitor()),
+        # ✅ v5.5.21 (CLEANUP-2): مهمة تنظيف admin_logs دورياً
+        asyncio.create_task(cleanup_admin_logs_periodically()),
     ]
 
     if _MAINTENANCE_AVAILABLE and callable(_maintenance_loop):
@@ -1881,7 +2012,14 @@ async def main():
             f"{globals().get('_MAINTENANCE_IMPORT_ERROR', 'module missing')}"
         )
 
+    # ✅ v5.5.21 (CLEANUP-3): رسالة تعريفية بالمهام الكلية
     logger.info(f"✅ تم تشغيل {len(tasks)} مهمة خلفية")
+    if _ADMIN_LOGS_CLEANUP_AVAILABLE:
+        logger.info(
+            f"🧹 admin_logs cleanup مُفعّل — كل 24 ساعة "
+            f"(احتفاظ={ADMIN_LOGS_RETENTION_DAYS}d, "
+            f"حد أقصى={ADMIN_LOGS_MAX_ROWS} صف)"
+        )
 
     # ═════════════════════════════════════════════════════════════
     # ✅ v5.5.18 (#7): SIGTERM handler — Webhook فقط
