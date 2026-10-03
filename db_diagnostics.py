@@ -4,9 +4,18 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.4.0 — PARAMETER-BINDING HOTFIX + HTML-SAFE SPLIT + INDEX FALLBACK
+v6.4.1 — FLEXIBLE-AUTOVACUUM-TUNING + PARAMETER-BINDING HOTFIX
 
-التحسينات على v6.3.0:
+التحسينات على v6.4.0:
+    ✅ EXPECTED_*_SCALE_FACTOR أصبحت قوائم مقبولة (flexible)
+       - السبب: database.py يضبط 0.02/0.01 بينما الإعداد الافتراضي
+                في بعض الإصدارات 0.05/0.02 — كلاهما "مضبوط"
+       - النتيجة: لم تعد الجداول الثقيلة تُعرض 🟡 بسبب اختلاف القيم
+       - القيم المقبولة:
+            autovacuum_vacuum_scale_factor ∈ {0.02, 0.05}
+            autovacuum_analyze_scale_factor ∈ {0.01, 0.02}
+
+التحسينات الموروثة من v6.4.0:
     🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً
        - المشكلة: DB.fetchall("...> $1...", LONG_TX_WARN_SECONDS)
                   كان يُمرِّر int (وليس tuple) → TypeError
@@ -18,23 +27,17 @@ v6.4.0 — PARAMETER-BINDING HOTFIX + HTML-SAFE SPLIT + INDEX FALLBACK
     🆕 fallback ثانٍ حقيقي لـ _get_indexes:
        - المسار الأول: pg_indexes (المُفضَّل)
        - المسار الثاني: pg_class + pg_index (fallback فعلي)
-       - السبب: بعض إعدادات Aiven تتقيّد على pg_indexes تحت RLS محددة
 
     🆕 _get_per_table_autovacuum: سبب واضح بدلاً من "غير مرئي"
        - reason: not_found | not_in_schema | query_failed | ok
-       - التقرير يعرض سبباً دقيقاً بدلاً من تخمين مضلل
 
     🆕 _split_for_telegram آمن لـ HTML:
-       - تتبع الوسوم المفتوحة عبر _get_open_html_tags
-       - إغلاقها في نهاية كل جزء وإعادة فتحها في بداية الجزء التالي
+       - تتبع الوسوم المفتوحة وإغلاقها/إعادة فتحها عند القطع
        - يمنع BadRequest: can't parse entities
 
     🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح في التقرير
-       - لا نُظهر جدول MySQL كـ "✅ صحّي" بسبب dead_tup=0 غير حقيقي
 
     🆕 فحص تناسق MAINTENANCE_TABLES vs HEAVY_TABLES_FOR_AUTOVACUUM
-       - إذا users مفقود من MAINTENANCE_TABLES → تحذير
-         (VACUUM في database_tables لن يشمل users)
 
 المبادئ (محفوظة من v6.0.0):
     ✅ لا نخلط بين "الدليل" و"الاحتمال".
@@ -55,7 +58,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -65,7 +68,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.4.0"
+VERSION = "6.4.1"
 
 
 # =============================================================================
@@ -99,8 +102,39 @@ NAPTIME_WARN_SECONDS = 300
 ANALYZE_MOD_WARN_PCT = 10.0
 ANALYZE_MOD_CRIT_PCT = 20.0
 
-EXPECTED_VACUUM_SCALE_FACTOR = "0.05"
-EXPECTED_ANALYZE_SCALE_FACTOR = "0.02"
+# ═════════════════════════════════════════════════════════════════════
+# 🆕 v6.4.1: قيم autovacuum المقبولة (flexible)
+# ═════════════════════════════════════════════════════════════════════
+# أي مجموعة من (vacuum_factor, analyze_factor) ضمن الشروط التالية
+# تُعتبر "مضبوطة":
+#   vacuum_factor ∈ ACCEPTED_VACUUM_FACTORS
+#   analyze_factor ∈ ACCEPTED_ANALYZE_FACTORS
+#
+# القيم المرجعية:
+#   - database.py::_tune_heavy_tables_autovacuum → 0.02 / 0.01
+#   - database_tables.py::_tune_autovacuum_postgres (يدوي) → 0.05 / 0.02
+#   - PostgreSQL defaults → 0.20 / 0.10 (غير مقبول)
+# ═════════════════════════════════════════════════════════════════════
+
+ACCEPTED_VACUUM_SCALE_FACTORS: Set[str] = {
+    "0.02",   # database.py (v7.7.x — heavy tables)
+    "0.05",   # database_tables.py (manual helper)
+    "0",      # aggressive (scale=0 مع threshold صغير)
+}
+
+ACCEPTED_ANALYZE_SCALE_FACTORS: Set[str] = {
+    "0.01",   # database.py (v7.7.x — heavy tables)
+    "0.02",   # database_tables.py (manual helper)
+    "0",      # aggressive (scale=0)
+}
+
+# للعرض فقط
+EXPECTED_VACUUM_SCALE_FACTOR = "0.02"
+EXPECTED_ANALYZE_SCALE_FACTOR = "0.01"
+
+# للتوافق الخلفي مع أي كود خارجي يستورد الأسماء القديمة
+EXPECTED_VACUUM_SCALE_FACTORS = ACCEPTED_VACUUM_SCALE_FACTORS
+EXPECTED_ANALYZE_SCALE_FACTORS = ACCEPTED_ANALYZE_SCALE_FACTORS
 
 DEFAULT_VACUUM_THRESHOLD = 50
 DEFAULT_ANALYZE_THRESHOLD = 50
@@ -349,23 +383,16 @@ def _parse_interval_seconds(value: Any) -> Optional[int]:
 
 
 # =============================================================================
-# 🆕 v6.4.0: PARAMETER SAFETY
+# PARAMETER SAFETY (v6.4.0)
 # =============================================================================
 
 def _safe_params(*args: Any) -> tuple:
     """
-    🆕 v6.4.0: يضمن أن المعاملات دائماً tuple.
+    يضمن أن المعاملات دائماً tuple.
 
     السبب: Database.fetchall/fetchone/fetchval يستخدمون *p
     داخلياً. تمرير scalar (مثل int) يُسبِّب:
         TypeError: argument after * must be an iterable
-
-    أنماط الاستخدام:
-        _safe_params()               → ()
-        _safe_params(300)            → (300,)
-        _safe_params((a, b))         → (a, b)
-        _safe_params([a, b])         → (a, b)
-        _safe_params(a, b)           → (a, b)
     """
     if not args:
         return ()
@@ -487,10 +514,14 @@ def _parse_reloptions(value: Any) -> Dict[str, str]:
 
 
 def _normalize_factor(value: Any) -> Optional[str]:
+    """يُوحِّد القيم الرقمية: '0.020' → '0.02'، '0' → '0'."""
     if value is None:
         return None
     try:
         number = float(str(value).strip())
+        # صفر صريح
+        if number == 0:
+            return "0"
         return f"{number:.6f}".rstrip("0").rstrip(".")
     except Exception:
         return str(value).strip()
@@ -550,7 +581,6 @@ async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
                 "table_name": row.get("table_name"),
                 "live_tup": _safe_int(row.get("live_tup")),
                 "dead_tup": 0,
-                # 🆕 v6.4.0: MySQL لا يدعم dead_tup بنفس نموذج PG
                 "dead_unsupported": True,
                 "data_free_bytes": _safe_int(row.get("data_free_bytes")),
                 "data_bytes": _safe_int(row.get("data_bytes")),
@@ -596,7 +626,7 @@ async def _get_dead_tuples_sqlite() -> List[Dict[str, Any]]:
                 "table_name": name,
                 "live_tup": count,
                 "dead_tup": 0,
-                "dead_unsupported": True,   # 🆕 v6.4.0
+                "dead_unsupported": True,
                 "inserts": 0, "updates": 0, "deletes": 0,
                 "mod_since_analyze": 0,
                 "last_vacuum": None, "last_autovacuum": None,
@@ -763,12 +793,37 @@ async def _get_schema_info() -> Dict[str, Any]:
 
 
 # =============================================================================
-# 🆕 v6.4.0: PER-TABLE AUTOVACUUM (مع reason)
+# 🆕 v6.4.1: PER-TABLE AUTOVACUUM مع flexible tuning
 # =============================================================================
+
+def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
+    """
+    🆕 v6.4.1: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
+    ضمن المجموعة المقبولة (وليس مطابقة لقيمة واحدة فقط).
+    """
+    vacuum_raw = reloptions.get("autovacuum_vacuum_scale_factor")
+    analyze_raw = reloptions.get("autovacuum_analyze_scale_factor")
+
+    if vacuum_raw is None or analyze_raw is None:
+        return False
+
+    vacuum_norm = _normalize_factor(vacuum_raw)
+    analyze_norm = _normalize_factor(analyze_raw)
+
+    if vacuum_norm is None or analyze_norm is None:
+        return False
+
+    return (
+        vacuum_norm in ACCEPTED_VACUUM_SCALE_FACTORS
+        and analyze_norm in ACCEPTED_ANALYZE_SCALE_FACTORS
+    )
+
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     """
-    🆕 v6.4.0: يعرض سبب دقيق عند غياب الجدول:
+    🆕 v6.4.1: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
+
+    reason:
       - "ok"            : موجود ومُحمَّل
       - "not_found"     : لم يُرجعه الاستعلام (غير موجود فعلاً؟)
       - "not_in_schema" : موجود في pg_class لكن خارج current_schemas
@@ -836,7 +891,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
                 "_get_per_table_autovacuum fallback: %s", exc2
             )
             if primary_failed:
-                # كلا المسارين فشل
                 for table in heavy:
                     result[table]["reason"] = "query_failed"
                 return result
@@ -848,20 +902,7 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             continue
         found_names.add(name)
         options = _parse_reloptions(row.get("reloptions"))
-        vacuum_factor = _normalize_factor(
-            options.get("autovacuum_vacuum_scale_factor")
-        )
-        analyze_factor = _normalize_factor(
-            options.get("autovacuum_analyze_scale_factor")
-        )
-        tuned = (
-            vacuum_factor == _normalize_factor(
-                EXPECTED_VACUUM_SCALE_FACTOR
-            )
-            and analyze_factor == _normalize_factor(
-                EXPECTED_ANALYZE_SCALE_FACTOR
-            )
-        )
+        tuned = _is_tuned_reloptions(options)
         result[name] = {
             "reloptions": options,
             "is_tuned": tuned,
@@ -873,7 +914,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     # ── تشخيص الغائبين ──
     missing = [t for t in heavy if t not in found_names]
     if missing:
-        # هل هم موجودون في pg_class لكن خارج schema؟
         try:
             miss_clause, miss_params = _build_pg_in_clause(
                 missing, 1
@@ -899,7 +939,7 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 
 
 # =============================================================================
-# 4. BLOCKERS (مع إصلاح v6.4.0)
+# 4. BLOCKERS
 # =============================================================================
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
@@ -1130,18 +1170,15 @@ def _detect_xmin_blocker(
 
 
 # =============================================================================
-# 5. INDEXES — 🆕 v6.4.0 مع fallback حقيقي
+# 5. INDEXES (مع fallback)
 # =============================================================================
 
 async def _get_indexes(
     tables: List[str],
 ) -> Dict[str, List[str]]:
     """
-    🆕 v6.4.0: fallback فعلي.
-
     المسار الأول: pg_indexes (المُفضَّل — يحتوي تعريف الفهرس)
-    المسار الثاني: pg_class + pg_index (يعمل حتى لو pg_indexes
-                    مقيّد بـ RLS معينة على Aiven)
+    المسار الثاني: pg_class + pg_index (fallback فعلي)
     """
     from database import DB
 
@@ -1351,7 +1388,6 @@ def _check_project_heavy_tables() -> Optional[str]:
     return None
 
 
-# 🆕 v6.4.0: فحص تناسق MAINTENANCE_TABLES
 def _check_maintenance_consistency() -> Optional[str]:
     """
     🆕 v6.4.0: MAINTENANCE_TABLES في database_tables.py تُحدد
@@ -1472,7 +1508,6 @@ async def _analyze_root_causes(
     if project_warning:
         general_notes.append(project_warning)
 
-    # 🆕 v6.4.0
     maint_warning = _check_maintenance_consistency()
     if maint_warning:
         general_notes.append(maint_warning)
@@ -2043,7 +2078,7 @@ class _ReportBuilder:
 
 
 # =============================================================================
-# 🆕 v6.4.0: HTML-SAFE SPLIT
+# HTML-SAFE SPLIT
 # =============================================================================
 
 _HTML_TAG_RE = re.compile(
@@ -2064,7 +2099,7 @@ def _html_tag_name(full_open_tag: str) -> str:
 
 def _get_open_html_tags(text: str) -> List[str]:
     """
-    🆕 v6.4.0: يُرجع قائمة الوسوم المفتوحة (كنص فتح كامل)
+    يُرجع قائمة الوسوم المفتوحة (كنص فتح كامل)
     بالترتيب. تُستخدم لإغلاقها قبل القطع وإعادة فتحها بعده.
     """
     stack: List[str] = []
@@ -2097,7 +2132,7 @@ def _split_for_telegram(
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
     """
-    🆕 v6.4.0: قطع آمن لـ HTML.
+    قطع آمن لـ HTML.
 
     - يتتبع الوسوم المفتوحة في كل جزء
     - يُغلقها في نهاية الجزء
@@ -2660,6 +2695,7 @@ __all__ = [
     "_split_for_telegram",
     "_get_open_html_tags",
     "_safe_params",
+    "_is_tuned_reloptions",
     "_ReportBuilder",
     "_is_significant_table",
     "_build_pg_in_clause",
@@ -2671,4 +2707,10 @@ __all__ = [
     "SMALL_TABLE_MIN_DEAD_WARN",
     "ADMIN_LOGS_WARN_ROWS",
     "ADMIN_LOGS_CRIT_ROWS",
+    "ACCEPTED_VACUUM_SCALE_FACTORS",
+    "ACCEPTED_ANALYZE_SCALE_FACTORS",
+    "EXPECTED_VACUUM_SCALE_FACTOR",
+    "EXPECTED_ANALYZE_SCALE_FACTOR",
+    "EXPECTED_VACUUM_SCALE_FACTORS",
+    "EXPECTED_ANALYZE_SCALE_FACTORS",
 ]
