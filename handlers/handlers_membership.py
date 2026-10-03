@@ -2,8 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.0.0-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.1.0-final)
 =====================================================================
+🆕 v1.1.0-final — إصلاح قناة السجل:
+    ✅ FIX-1: استخدام قناة السجل الخاصة بالمجموعة أولاً
+              (fallback للقناة العامة) — يتوافق مع سلوك
+              handlers_callback._handle_log_channel
+    ✅ FIX-2: دالة جديدة _get_effective_log_channel(chat_id)
+              4 طرق fallback بالترتيب الصحيح
+    ✅ FIX-3: عرض "النطاق" في التقرير (خاصة/عامة)
+    ✅ لا حذف، لا اختصار — نفس بنية v1.0.1
+
+🆕 v1.0.1-final — إصلاحات بعد المراجعة:
+    ✅ حذف استيراد CONFIG غير المستخدم
+    ✅ حذف _build_chat_link (dead code)
+    ✅ إنشاء جدول bot_addition_log مرة واحدة فقط
+    ✅ تحسين _get_log_channel (retry أقل)
+    ✅ تحسين _try_get_chat_photo (skip للقنوات بدون صورة)
+
 🆕 v1.0.0-final — الإصدار الأول:
     ✅ إرسال تقرير لقناة السجل عند إضافة البوت لمجموعة/قناة
     ✅ يحتوي على: من أضاف، معلومات الدردشة، الوقت
@@ -20,14 +36,13 @@ handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.0.0-f
 import html
 import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
 )
 from telegram.ext import ContextTypes, ChatMemberHandler
 
-from config import CONFIG
 from database import DB, TimeUtils
 
 logger = logging.getLogger(__name__)
@@ -48,6 +63,43 @@ _OUT_STATUSES = frozenset(('left', 'kicked'))
 
 # حالة البوت بعد الإضافة (يعني "أصبح موجوداً")
 _IN_STATUSES = frozenset(('member', 'administrator'))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# حالة الجدول (لإنشائه مرة واحدة فقط)
+# ═════════════════════════════════════════════════════════════════════
+
+_table_created: bool = False
+
+
+async def _ensure_table_exists() -> None:
+    """
+    ✅ v1.0.1: إنشاء جدول bot_addition_log مرة واحدة فقط.
+    """
+    global _table_created
+    if _table_created:
+        return
+    try:
+        await DB.execute(
+            "CREATE TABLE IF NOT EXISTS bot_addition_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "chat_id INTEGER NOT NULL, "
+            "chat_title TEXT, "
+            "chat_type TEXT, "
+            "chat_username TEXT, "
+            "added_by_id INTEGER NOT NULL, "
+            "added_by_name TEXT, "
+            "added_by_username TEXT, "
+            "bot_status TEXT, "
+            "added_at TEXT NOT NULL"
+            ")"
+        )
+        _table_created = True
+        logger.debug("✅ جدول bot_addition_log جاهز")
+    except Exception as e:
+        logger.debug(
+            f"_ensure_table_exists: {type(e).__name__}: {e}")
+        # لا نُعلّم كمنشأ حتى نجرب مجدداً في المرة التالية
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -122,50 +174,74 @@ def _build_user_link(
     """بناء رابط للمستخدم (username أو tg://)."""
     try:
         if username:
-            return f"https://t.me/{username}"
+            clean = str(username).lstrip('@')
+            if clean:
+                return f"https://t.me/{clean}"
         return f"tg://user?id={user_id}"
     except Exception:
         return f"tg://user?id={user_id}"
 
 
-def _build_chat_link(
-    chat_id: int, username: Optional[str] = None
-) -> Optional[str]:
-    """بناء رابط للدردشة إن أمكن."""
-    try:
-        if username:
-            return f"https://t.me/{username}"
-        return None
-    except Exception:
-        return None
-
-
-async def _get_log_channel() -> Optional[str]:
+# ✅ FIX-2: دالة جديدة — قناة السجل الفعّالة (خاصة → عامة)
+async def _get_effective_log_channel(
+    chat_id: int
+) -> Tuple[Optional[str], str]:
     """
-    جلب معرّف قناة السجل العامة.
+    ✅ v1.1.0 (FIX-1 + FIX-2): جلب قناة السجل الفعّالة.
 
-    يجرّب عدة طرق بحسب ما هو متوفر في DB.
+    الأولوية:
+        1. قناة السجل الخاصة بالمجموعة (get_group_log_channel)
+        2. قناة السجل العامة عبر DB.get_log_channel()
+        3. قناة السجل العامة عبر DB.get_setting()
+        4. استعلام مباشر من settings table
+
+    Args:
+        chat_id: معرّف الدردشة (المجموعة/القناة)
+
+    Returns:
+        tuple (channel_or_None, scope)
+        scope في: ('group', 'global', 'none')
     """
-    # الطريقة 1: DB.get_log_channel()
+    # ═══ الطريقة 1: قناة المجموعة الخاصة ═══
+    if chat_id is not None:
+        try:
+            if hasattr(DB, 'get_group_log_channel'):
+                value = await DB.get_group_log_channel(chat_id)
+                if value:
+                    logger.debug(
+                        f"✅ _get_effective_log_channel: "
+                        f"قناة مجموعة {chat_id} = {value}")
+                    return str(value).strip(), 'group'
+        except Exception as e:
+            logger.debug(
+                f"DB.get_group_log_channel({chat_id}) failed: {e}")
+
+    # ═══ الطريقة 2: القناة العامة عبر get_log_channel ═══
     try:
         if hasattr(DB, 'get_log_channel'):
             value = await DB.get_log_channel()
             if value:
-                return str(value).strip()
+                logger.debug(
+                    f"✅ _get_effective_log_channel: "
+                    f"قناة عامة = {value}")
+                return str(value).strip(), 'global'
     except Exception as e:
         logger.debug(f"DB.get_log_channel() failed: {e}")
 
-    # الطريقة 2: DB.get_setting()
+    # ═══ الطريقة 3: القناة العامة عبر get_setting ═══
     try:
         if hasattr(DB, 'get_setting'):
             value = await DB.get_setting(
                 'log_channel', default='')
             if value:
-                return str(value).strip()
+                logger.debug(
+                    f"✅ _get_effective_log_channel: "
+                    f"setting عام = {value}")
+                return str(value).strip(), 'global'
     except Exception as e:
         logger.debug(f"DB.get_setting failed: {e}")
 
-    # الطريقة 3: استعلام مباشر
+    # ═══ الطريقة 4: استعلام مباشر ═══
     try:
         row = await DB.fetchone(
             "SELECT value FROM settings "
@@ -179,12 +255,19 @@ async def _get_log_channel() -> Optional[str]:
             else:
                 value = None
             if value:
-                return str(value).strip()
+                logger.debug(
+                    f"✅ _get_effective_log_channel: "
+                    f"query عام = {value}")
+                return str(value).strip(), 'global'
     except Exception as e:
         logger.debug(f"direct query failed: {e}")
 
-    return None
+    return None, 'none'
 
+
+# ═════════════════════════════════════════════════════════════════════
+# دوال قاعدة البيانات
+# ═════════════════════════════════════════════════════════════════════
 
 async def _save_addition_to_db(
     chat_id: int,
@@ -198,30 +281,11 @@ async def _save_addition_to_db(
 ) -> bool:
     """
     حفظ حدث الإضافة في قاعدة البيانات.
-
-    يُنشئ الجدول إن لم يكن موجوداً.
     """
     try:
-        # إنشاء الجدول إذا لم يكن موجوداً
-        try:
-            await DB.execute(
-                "CREATE TABLE IF NOT EXISTS bot_addition_log ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "chat_id INTEGER NOT NULL, "
-                "chat_title TEXT, "
-                "chat_type TEXT, "
-                "chat_username TEXT, "
-                "added_by_id INTEGER NOT NULL, "
-                "added_by_name TEXT, "
-                "added_by_username TEXT, "
-                "bot_status TEXT, "
-                "added_at TEXT NOT NULL"
-                ")"
-            )
-        except Exception as e:
-            logger.debug(f"CREATE TABLE bot_addition_log: {e}")
+        # ✅ v1.0.1: إنشاء الجدول مرة واحدة
+        await _ensure_table_exists()
 
-        # الإدخال
         await DB.execute(
             "INSERT INTO bot_addition_log "
             "(chat_id, chat_title, chat_type, chat_username, "
@@ -248,12 +312,21 @@ async def _save_addition_to_db(
         return False
 
 
+# ═════════════════════════════════════════════════════════════════════
+# بناء التقرير
+# ═════════════════════════════════════════════════════════════════════
+
 def _build_report_text(
     chat,
     user,
     new_status: str,
+    log_scope: str = 'global',
 ) -> str:
-    """بناء نص التقرير الكامل."""
+    """
+    بناء نص التقرير الكامل.
+
+    ✅ v1.1.0: يضيف سطر "نطاق القناة" (خاصة/عامة).
+    """
     is_channel = (chat.type == "channel")
     chat_type_emoji = "📡" if is_channel else "👥"
     chat_type_name = "قناة" if is_channel else "مجموعة"
@@ -284,6 +357,13 @@ def _build_report_text(
         else "عضو ✅"
     )
 
+    # ✅ v1.1.0: نطاق قناة السجل
+    scope_label = {
+        'group': "🔒 خاصة بالمجموعة",
+        'global': "🌐 عامة",
+        'none': "❓",
+    }.get(log_scope, "🌐 عامة")
+
     # ═══════════════════════════════════════════════════════════
     # بناء النص
     # ═══════════════════════════════════════════════════════════
@@ -296,13 +376,15 @@ def _build_report_text(
         f"   • المعرف: <code>{chat_id}</code>\n"
         f"   • النوع: <code>{_safe_html(chat_type)}</code>\n"
         f"   • صلاحية البوت: {new_status_label}\n"
+        f"   • نطاق السجل: {scope_label}\n"
     )
 
     # رابط الدردشة (إن وُجد username)
     if chat_username:
+        clean_chat_username = str(chat_username).lstrip('@')
         text += (
             f"   • الرابط: "
-            f"https://t.me/{_safe_html(chat_username)}\n"
+            f"https://t.me/{clean_chat_username}\n"
         )
 
     text += (
@@ -330,10 +412,12 @@ def _build_report_keyboard(
     chat_username = getattr(chat, 'username', None)
     if chat_username:
         try:
-            rows.append([InlineKeyboardButton(
-                "🔗 فتح المحادثة",
-                url=f"https://t.me/{chat_username}",
-            )])
+            clean = str(chat_username).lstrip('@')
+            if clean:
+                rows.append([InlineKeyboardButton(
+                    "🔗 فتح المحادثة",
+                    url=f"https://t.me/{clean}",
+                )])
         except Exception:
             pass
 
@@ -358,16 +442,35 @@ def _build_report_keyboard(
 
 
 async def _try_get_chat_photo(
-    bot, chat_id: int
+    bot, chat, chat_type: str
 ) -> Optional[str]:
-    """محاولة جلب صورة الدردشة (اختياري)."""
+    """
+    ✅ v1.0.1: محاولة جلب صورة الدردشة (اختياري).
+
+    - للقنوات: photo موجود في كائن chat مباشرة
+    - للمجموعات: نحتاج get_chat لجلبه
+    """
     try:
-        chat = await bot.get_chat(chat_id)
+        # ✅ للقنوات: chat.photo متوفر عادة
         photo = getattr(chat, 'photo', None)
         if photo is not None:
-            return getattr(photo, 'big_file_id', None)
+            file_id = getattr(photo, 'big_file_id', None)
+            if file_id:
+                return file_id
+
+        # للمجموعات: جلب من API (يُكلف طلب واحد)
+        if chat_type in ('group', 'supergroup'):
+            try:
+                full_chat = await bot.get_chat(chat.id)
+                photo = getattr(full_chat, 'photo', None)
+                if photo is not None:
+                    return getattr(photo, 'big_file_id', None)
+            except Exception as e:
+                logger.debug(
+                    f"_try_get_chat_photo get_chat "
+                    f"({chat.id}): {e}")
     except Exception as e:
-        logger.debug(f"_try_get_chat_photo({chat_id}): {e}")
+        logger.debug(f"_try_get_chat_photo: {e}")
     return None
 
 
@@ -384,6 +487,9 @@ async def handle_my_chat_member(
 
     يُرسل تقريراً لقناة السجل عند:
       - إضافة البوت (left/kicked → member/administrator)
+
+    ✅ v1.1.0: يستخدم قناة السجل الخاصة بالمجموعة أولاً،
+    ثم العامة كـ fallback.
 
     ⚠️ لا يُرسل تقريراً عند:
       - الطرد (member → left) — معالَج في _notify_channel_owner_kicked
@@ -408,7 +514,6 @@ async def handle_my_chat_member(
     is_in = new_status in _IN_STATUSES
 
     if not (was_out and is_in):
-        # ليس حدث إضافة حقيقي — تجاهل
         logger.debug(
             f"⏭️ my_chat_member ignored "
             f"(old={old_status}, new={new_status})")
@@ -424,7 +529,7 @@ async def handle_my_chat_member(
         logger.debug("my_chat_member: no chat or user")
         return
 
-    # تجاهل المحادثات الخاصة (لا معنى لها هنا)
+    # تجاهل المحادثات الخاصة
     if chat.type == "private":
         logger.debug("my_chat_member: private chat ignored")
         return
@@ -439,32 +544,7 @@ async def handle_my_chat_member(
     _prune_recent_reports()
 
     # ═══════════════════════════════════════════════════════════
-    # جلب قناة السجل
-    # ═══════════════════════════════════════════════════════════
-    log_channel = await _get_log_channel()
-    if not log_channel:
-        logger.debug(
-            "No log channel configured; skipping bot-addition report")
-        # نحفظ في DB حتى لو لم تكن هناك قناة سجل
-        try:
-            await _save_addition_to_db(
-                chat_id=chat.id,
-                chat_title=chat.title or '',
-                chat_type=chat.type or '',
-                chat_username=getattr(chat, 'username', None),
-                added_by_id=user.id,
-                added_by_name=(
-                    getattr(user, 'full_name', None) or ''
-                ),
-                added_by_username=getattr(user, 'username', None),
-                bot_status=new_status,
-            )
-        except Exception:
-            pass
-        return
-
-    # ═══════════════════════════════════════════════════════════
-    # الحفظ في قاعدة البيانات (لا يحجب الإرسال لو فشل)
+    # الحفظ في قاعدة البيانات
     # ═══════════════════════════════════════════════════════════
     try:
         await _save_addition_to_db(
@@ -483,10 +563,24 @@ async def handle_my_chat_member(
         logger.debug(f"save_addition_to_db outer: {e}")
 
     # ═══════════════════════════════════════════════════════════
+    # ✅ v1.1.0 (FIX-1): جلب قناة السجل الفعّالة
+    # ═══════════════════════════════════════════════════════════
+    log_channel, log_scope = await _get_effective_log_channel(chat.id)
+    if not log_channel:
+        logger.debug(
+            "No log channel configured; skipping bot-addition report")
+        return
+
+    logger.info(
+        f"📤 تقرير الإضافة: قناة السجل={log_channel} "
+        f"(نطاق={log_scope}) chat={chat.id}")
+
+    # ═══════════════════════════════════════════════════════════
     # بناء التقرير
     # ═══════════════════════════════════════════════════════════
     try:
-        text = _build_report_text(chat, user, new_status)
+        text = _build_report_text(
+            chat, user, new_status, log_scope=log_scope)
     except Exception as e:
         logger.error(
             f"_build_report_text failed: "
@@ -505,16 +599,17 @@ async def handle_my_chat_member(
     # ═══════════════════════════════════════════════════════════
     photo_id = None
     try:
-        photo_id = await _try_get_chat_photo(context.bot, chat.id)
+        photo_id = await _try_get_chat_photo(
+            context.bot, chat, chat.type or '')
     except Exception:
         photo_id = None
 
     # ═══════════════════════════════════════════════════════════
-    # الإرسال
+    # الإرسال (سلسلة fallback)
     # ═══════════════════════════════════════════════════════════
     sent = False
 
-    # محاولة الإرسال مع الصورة أولاً
+    # محاولة 1: مع الصورة
     if photo_id:
         try:
             await context.bot.send_photo(
@@ -527,13 +622,14 @@ async def handle_my_chat_member(
             sent = True
             logger.info(
                 f"📬 تقرير إضافة البوت أُرسل مع صورة "
-                f"(chat={chat.id}, adder={user.id})")
+                f"(chat={chat.id}, adder={user.id}, "
+                f"scope={log_scope})")
         except Exception as e:
             logger.debug(
-                f"send_photo failed, falling back to text: {e}")
+                f"send_photo failed, fallback to text: {e}")
             sent = False
 
-    # إرسال نصي (احتياطي أو أساسي)
+    # محاولة 2: رسالة نصية مع أزرار
     if not sent:
         try:
             await context.bot.send_message(
@@ -546,14 +642,15 @@ async def handle_my_chat_member(
             sent = True
             logger.info(
                 f"📬 تقرير إضافة البوت أُرسل "
-                f"(chat={chat.id}, adder={user.id})")
+                f"(chat={chat.id}, adder={user.id}, "
+                f"scope={log_scope})")
         except Exception as e:
             logger.error(
                 f"❌ فشل إرسال تقرير قناة السجل: "
                 f"{type(e).__name__}: {e}")
             sent = False
 
-    # إعادة المحاولة بدون keyboard إن فشل الإرسال
+    # محاولة 3: بدون أزرار (احتياطي أخير)
     if not sent:
         try:
             await context.bot.send_message(
@@ -564,7 +661,7 @@ async def handle_my_chat_member(
             )
             logger.info(
                 f"📬 تقرير أُرسل (بدون أزرار) "
-                f"(chat={chat.id})")
+                f"(chat={chat.id}, scope={log_scope})")
         except Exception as e:
             logger.error(
                 f"❌ فشل إرسال تقرير حتى بدون أزرار: "
@@ -572,7 +669,7 @@ async def handle_my_chat_member(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# تسجيل الـ handler (دالة مساعدة)
+# تسجيل الـ handler
 # ═════════════════════════════════════════════════════════════════════
 
 def register_handlers(application) -> None:
@@ -608,12 +705,14 @@ __all__ = [
     "register_handlers",
     "_should_send",
     "_prune_recent_reports",
-    "_get_log_channel",
+    "_get_effective_log_channel",   # ✅ v1.1.0: دالة جديدة
     "_save_addition_to_db",
+    "_ensure_table_exists",
     "_build_report_text",
     "_build_report_keyboard",
     "_try_get_chat_photo",
     "_recent_reports",
+    "_table_created",
     "_DEBOUNCE_SECONDS",
     "_DEBOUNCE_STALE_AGE",
     "_OUT_STATUSES",
