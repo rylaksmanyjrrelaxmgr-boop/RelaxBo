@@ -134,9 +134,6 @@ EXPECTED_INDEX_COUNT = 74
 # ✅ v7.6.14: فهارس تُتخطى على MySQL
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
-    # ✅ v7.6.24: MySQL لا يدعم partial indexes
-    # لكن الفهرس العادي على removed_at مقبول
-    # (سنستخدم فهرس عادي بدلاً من partial)
 })
 
 COMMON_INDEXES = [
@@ -563,7 +560,8 @@ def _is_advanced_index(cols: str) -> bool:
 
 
 # =====================================================================
-# ✅ v7.6.18/v7.6.20: تنظيف admin_logs
+# ✅ v7.6.18/v7.6.20: تنظيف admin_logs القديمة + حد أقصى للصفوف
+# (يُستدعى أيضاً من main.py v5.5.21 دورياً)
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
@@ -775,7 +773,7 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.6.18: autovacuum للجداول الصغيرة
+# ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
@@ -1280,7 +1278,7 @@ _CONTESTS_NEW_COLUMNS = [
     ("correct_answer", "TEXT DEFAULT ''"),
 ]
 
-# ✅ v7.6.24: user_channels — Soft Delete columns
+# ✅ v7.6.24: user_channels — Soft Delete columns (SQLite)
 _USER_CHANNELS_NEW_COLUMNS = [
     ("removed_at", "TEXT DEFAULT NULL"),
     ("removal_reason", "TEXT DEFAULT NULL"),
@@ -2469,7 +2467,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.24: user_channels + Soft Delete columns
+    # ✅ v7.6.24: user_channels + Soft Delete
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3122,7 +3120,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.24: user_channels + Soft Delete columns
+    # ✅ v7.6.24: user_channels + Soft Delete
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id SERIAL PRIMARY KEY,
@@ -3778,7 +3776,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.24: user_channels + Soft Delete columns
+        # ✅ v7.6.24: user_channels + Soft Delete
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_channels (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -4420,11 +4418,9 @@ __all__ = [
     "MYSQL_SKIP_INDEXES",
     "ADMIN_LOGS_RETENTION_DAYS",
     "ADMIN_LOGS_MAX_ROWS",
-    # ✅ v7.6.24
     "REMOVED_CHANNELS_GRACE_DAYS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
     "_adapt_cols_for_db",
-    # ✅ v7.6.23: دوال التنظيف
     "_cleanup_old_admin_logs_postgres",
     "_cleanup_old_admin_logs_sqlite",
     "_cleanup_old_admin_logs_mysql",
