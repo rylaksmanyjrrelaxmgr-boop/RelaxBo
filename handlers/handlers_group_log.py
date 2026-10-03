@@ -1,10 +1,19 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.1)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.2)
 =====================================================================
+🆕 v1.6.2 (TRUTHFUL DOCSTRING + ACTIVE USE):
+    ✅ استخدام _is_valid_channel_ref فعلاً (كان مُستورَداً غير مُستخدم)
+       - طبقة تحقق أولى قبل _normalize_channel_input
+       - عند فشل الأداة → نستمر (لا نحجب بسبب خطأ داخلي)
+    ✅ استخدام _is_forwarded فعلاً (كان كوداً ميتاً)
+       - فحص موحّد قبل استخراج معلومات الإعادة
+       - logging واضح للنوع
+    ✅ إضافة logging تشخيصي مفيد لمسارات التحقق
+
 🆕 v1.6.1 (CONSISTENCY + ROBUSTNESS):
     ✅ استخدام _is_valid_channel_ref كطبقة تحقق أولى (عند توفرها)
-    ✅ إضافة _is_forwarded_via_origin للكشف الموحّد عن الرسائل المُعاد توجيهها
+    ✅ إضافة _is_forwarded للكشف الموحّد عن الرسائل المُعاد توجيهها
     ✅ تحسين رسائل الخطأ لتشمل حالة PTB v13.x و v20+
     ✅ إضافة retry خفيف عند فشل bot.get_chat (انتظار 0.5s)
     ✅ معالجة صريحة لحالة "المجموعة نفسها" مع رسالة أوضح
@@ -207,6 +216,9 @@ def _is_forwarded(msg) -> bool:
     """
     ✅ v1.6.1: كشف شامل لرسالة معاد توجيهها.
     يتوافق مع PTB v20+ و v13.x.
+
+    🆕 v1.6.2: مُستخدمة فعلاً في receive_log_channel() قبل
+    استخراج معلومات الإعادة.
     """
     if msg is None:
         return False
@@ -226,7 +238,7 @@ def _is_forwarded(msg) -> bool:
 
 
 # =====================================================================
-# ✅ v1.5.0: إبطال كاش قائمة قناة السجل (متوافق مع handlers_callback.py v9.4.0)
+# ✅ v1.5.0: إبطال كاش قائمة قناة السجل
 # =====================================================================
 
 async def _invalidate_log_channel_menu_cache(chat_id: int) -> None:
@@ -333,6 +345,30 @@ async def _resolve_username_with_retry(
 
 
 # =====================================================================
+# ✅ v1.6.2: طبقة تحقق أولى عبر _is_valid_channel_ref
+# =====================================================================
+
+def _passes_initial_validation(text: str) -> bool:
+    """
+    ✅ v1.6.2: طبقة تحقق أولى (fail-open).
+
+    تستخدم _is_valid_channel_ref إن توفرت. إن لم تتوفر أو رمت خطأ
+    → تُعيد True (لا نحجب المستخدم بسبب أداة تحقق خارجية).
+
+    Returns:
+        True  → النص مقبول مبدئياً (أو لا يمكن التحقق)
+        False → النص مرفوض صراحةً
+    """
+    if _is_valid_channel_ref is None:
+        return True
+    try:
+        return bool(_is_valid_channel_ref(text))
+    except Exception as e:
+        logger.debug(f"_passes_initial_validation exception: {e}")
+        return True
+
+
+# =====================================================================
 # استقبال معرّف قناة السجل
 # =====================================================================
 
@@ -343,6 +379,7 @@ async def receive_log_channel(
     يستقبل معرّف القناة أو رسالة موجّهة، ويحفظها كقناة سجل.
 
     ✅ v1.6.1: مُحسَّن مع retry + كشف موحّد + رسائل خطأ أوضح.
+    ✅ v1.6.2: يستخدم _is_valid_channel_ref و _is_forwarded فعلاً.
     """
     user = update.effective_user
     if not user:
@@ -406,21 +443,54 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── ✅ v1.6.1: استخراج/حلّ chat_id ───
+    # ─── ✅ v1.6.2: استخراج/حلّ chat_id ───
     chat_id: Optional[int] = None
     title: str = ""
 
     # 1) من رسالة معاد توجيهها (الأولوية القصوى)
-    forwarded_id, forwarded_title = _extract_forward_channel(msg)
-    if forwarded_id is not None:
-        chat_id = forwarded_id
-        title = forwarded_title
-        logger.debug(
-            f"📍 chat_id من forwarded: {chat_id} ({title})"
-        )
+    # ✅ v1.6.2: نستخدم _is_forwarded ككشف موحّد أولاً
+    is_fwd = _is_forwarded(msg)
+    if is_fwd:
+        forwarded_id, forwarded_title = _extract_forward_channel(msg)
+        if forwarded_id is not None:
+            chat_id = forwarded_id
+            title = forwarded_title
+            logger.info(
+                f"✅ v1.6.2: chat_id من forwarded: "
+                f"{chat_id} ({title!r})"
+            )
+        else:
+            # كان معاد توجيهها لكن ليس من قناة
+            logger.debug(
+                "📭 الرسالة معاد توجيهها لكن ليست من قناة — "
+                "نستمر للنص"
+            )
 
     # 2) من النص (رقم / @username / username / t.me link)
     if chat_id is None and text:
+        # ✅ v1.6.2: طبقة تحقق أولى (إن توفرت)
+        if not _passes_initial_validation(text):
+            logger.info(
+                f"⛔ v1.6.2: رفض النص عبر _is_valid_channel_ref: "
+                f"{text[:50]!r}"
+            )
+            try:
+                await msg.reply_text(
+                    "❌ <b>قيمة غير صالحة</b>\n\n"
+                    "أرسل أحد التالي:\n"
+                    "• معرّف رقمي: <code>-1001234567890</code>\n"
+                    "• <code>@username</code>\n"
+                    "• <code>username</code>\n"
+                    "• رابط: <code>https://t.me/username</code>\n"
+                    "• أو <b>أعد توجيه رسالة</b> من القناة\n\n"
+                    "⚠️ روابط الدعوة (<code>t.me/+abc</code>) غير مدعومة.\n"
+                    "للإلغاء: أرسل <b>إلغاء</b>.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            return
+
         parsed_id, parsed_username = _normalize_channel_input(text)
 
         if parsed_id is not None:
@@ -722,7 +792,7 @@ __all__ = [
     "receive_log_channel",
     "cancel_log_channel_wait",
     "register_group_log_handlers",
-    # ✅ v1.6.1: دوال مساعدة مُصدَّرة للاختبار
+    # ✅ v1.6.2: دوال مساعدة مُصدَّرة للاختبار
     "_normalize_channel_input",
     "_extract_forward_channel",
     "_is_forwarded",
@@ -730,4 +800,5 @@ __all__ = [
     "_get_group_log",
     "_invalidate_log_channel_menu_cache",
     "_safe_html",
+    "_passes_initial_validation",   # 🆕 v1.6.2
 ]
