@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.2)
+handlers/chat_member.py - معالج تحديثات المشرفين من Telegram (v1.3)
 ================================================================================
 يحل مشكلة تأخر /start عبر:
 
@@ -11,9 +11,18 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
 3. ✅ تحديث الكاش في utils.py لمنع استدعاءات getChatAdministrators
 4. ✅ التعامل مع جميع أنواع التغييرات
 
+🆕 v1.3 (DIRECTION LABEL FIX):
+    ✅ FIX-1: تمييز صحيح لـ creator↔administrator
+              (creator → admin = تخفيض، admin → creator = ترقية)
+    ✅ FIX-2: استخدام أكواد action إنجليزية
+              (admin_upgrade, admin_downgrade, admin_upgrade_to_creator,
+               admin_downgrade_from_creator)
+    ✅ FIX-3: دالة helper _get_direction_info() لتبسيط المنطق
+    ✅ FIX-4: توثيق أفضل لسلوك الحالات الحدّية
+
 🆕 v1.2 (CRITICAL FIX — منع تسجيل القنوات كمجموعات):
     ✅ on_my_chat_member_update: فحص chat.type قبل register_group
-    ✅ القنوات (channel/supergroup من نوع channel) تُتجاهل تماماً
+    ✅ القنوات (channel) تُتجاهل تماماً
     ✅ القنوات تُدار عبر _handle_channel_input في handlers_message.py
     ✅ يمنع ظهور القنوات في "مجموعاتي"
 
@@ -35,6 +44,7 @@ handlers/chat_member.py - معالج تحديثات المشرفين من Telegr
    - تقليل الحمل على Telegram API بنسبة 95%
    - تسريع /start من 5 ثوان إلى < 300ms
    - القنوات لا تدخل قائمة المجموعات ✅ v1.2
+   - تسميات صحيحة لكل الحالات ✅ v1.3
 
 📌 التسجيل في bot.py:
    from handlers import chat_member
@@ -46,7 +56,7 @@ import logging
 import re
 import time
 from html import escape
-from typing import Optional, Set, Dict, Any
+from typing import Optional, Set, Dict, Any, Tuple
 
 from telegram import Update, Chat, ChatMember, ChatMemberUpdated, User
 from telegram.ext import ContextTypes, ChatMemberHandler
@@ -105,9 +115,10 @@ def _is_group_chat(chat: Optional[Chat]) -> bool:
 def _is_transition_admin(old_status: str, new_status: str) -> bool:
     """
     ✅ v1.1: هل تغيّر وضع الإشراف؟
+
     - يفحص الترقية (عضو → مشرف)
     - يفحص التخفيض (مشرف → عضو)
-    - يفحص creator → administrator (تخفيض داخلي بين المشرفين)
+    - يفحص creator ↔ administrator (تغيير داخلي بين المشرفين)
     """
     old_is_admin = _is_admin_status(old_status)
     new_is_admin = _is_admin_status(new_status)
@@ -122,6 +133,50 @@ def _is_transition_admin(old_status: str, new_status: str) -> bool:
         return True
 
     return False
+
+
+def _get_direction_info(
+    old_status: str, new_status: str
+) -> Tuple[bool, str, str]:
+    """
+    ✅ v1.3 (FIX-1 + FIX-2 + FIX-3): تحديد الاتجاه بشكل صحيح.
+
+    Returns:
+        (is_now_admin, direction_label, action_code)
+
+        is_now_admin: هل المستخدم مشرف بعد التغيير؟
+        direction_label: نص عربي للعرض
+        action_code: كود إنجليزي للتسجيل في admin_logs
+    """
+    old_is_admin = _is_admin_status(old_status)
+    new_is_admin = _is_admin_status(new_status)
+
+    # creator → administrator (تخفيض داخلي — لا يزال مشرف)
+    if old_status == "creator" and new_status == "administrator":
+        return (
+            True,
+            "تخفيض مالك → مشرف",
+            "admin_downgrade_from_creator",
+        )
+
+    # administrator → creator (ترقية للمالك)
+    if old_status == "administrator" and new_status == "creator":
+        return (
+            True,
+            "ترقية مشرف → مالك",
+            "admin_upgrade_to_creator",
+        )
+
+    # عضو → مشرف
+    if new_is_admin and not old_is_admin:
+        return (True, "ترقية", "admin_upgrade")
+
+    # مشرف → عضو
+    if not new_is_admin and old_is_admin:
+        return (False, "تخفيض", "admin_downgrade")
+
+    # حالة غير متوقعة (safety)
+    return (new_is_admin, "تغيير", "admin_adjust")
 
 
 def _extract_user(chat_member: ChatMember) -> Optional[User]:
@@ -468,6 +523,7 @@ async def on_chat_member_update(
     معالج تحديثات أعضاء المجموعة.
 
     ✅ v1.1: يستخدم التحديث الفردي (بدون API call) للمسار الساخن.
+    ✅ v1.3: تسميات صحيحة لكل حالات المشرفين.
     """
     # ═══════════════════════════════════════════════════════════════
     # 1. التحقق من البيانات
@@ -501,12 +557,15 @@ async def on_chat_member_update(
         # 2. تغيير في وضع الإشراف
         # ═══════════════════════════════════════════════════════════════
         if _is_transition_admin(old_status, new_status):
-            is_now_admin = _is_admin_status(new_status)
-            direction = "ترقية" if is_now_admin else "تخفيض"
+            # ✅ v1.3 (FIX-1 + FIX-2 + FIX-3): تحديد الاتجاه بدقة
+            is_now_admin, direction_label, action_code = _get_direction_info(
+                old_status, new_status
+            )
 
             logger.info(
                 f"👑 تغيير مشرف في {chat.id}: المستخدم {user_id} "
-                f"(@{username}) — {old_status} → {new_status} ({direction})"
+                f"(@{username}) — {old_status} → {new_status} "
+                f"({direction_label})"
             )
 
             # ✅ v1.1: تحديث فردي (بدون API call)
@@ -525,12 +584,12 @@ async def on_chat_member_update(
                 )
                 await _sync_admins_to_db_full(context.bot, chat.id)
 
-            # ✅ v1.1: تسجيل في admin_logs
+            # ✅ v1.1 + FIX-2: تسجيل في admin_logs بكود إنجليزي
             if actor_id:
                 await _log_admin_change(
                     chat_id=chat.id,
                     admin_id=actor_id,
-                    action=f"admin_{direction}",
+                    action=action_code,
                     target_id=user_id or 0,
                     reason=f"{old_status} → {new_status}",
                 )
@@ -818,5 +877,5 @@ def register(app) -> None:
     )
 
     logger.info(
-        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.2"
+        "✅ تم تسجيل ChatMemberHandler (معالج المشرفين والأعضاء) — v1.3"
     )
