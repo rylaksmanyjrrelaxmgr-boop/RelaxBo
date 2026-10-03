@@ -2,22 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.19)
+🌿 Relax Manager – البوت الرئيسي (النسخة النهائية المُحسَّنة v5.5.20)
 ================================================================================
-🆕 v5.5.19 (MEMBERSHIP INTEGRATION):
-    ✅ MEM-1: استيراد register_membership_handlers مع fallback
-    ✅ MEM-2: _verify_membership_handler() للفحص المبكر
+🆕 v5.5.20 (MEMBERSHIP UPGRADE):
+    ✅ MEM-1: استخدام handlers_membership.py المستقل أولاً
+              (FIX-1: قناة سجل خاصة بالمجموعة + FIX-3: عرض النطاق)
+    ✅ MEM-2: fallback ذكي إلى handlers_callback المدموج
+              في حال عدم توفر handlers_membership
     ✅ MEM-3: تسجيل MembershipHandler بعد chat_member.register()
-    ✅ MEM-4: تقارير إضافة البوت لقناة السجل جاهزة
+    ✅ MEM-4: logging تشخيصي واضح عند الفشل
 
+🆕 v5.5.19 (MEMBERSHIP INTEGRATION)
 🆕 v5.5.18 (CRITICAL FIXES — based on v5.5.17 review):
     ✅ #1 حرجة: `runner.cleanup()` في مسار Webhook — كان مفقوداً!
-           (aiohttp كان يبقى مفتوحاً حتى SIGKILL → لا graceful shutdown)
     ✅ #2: `watcher_task` داخل `try/finally` — لا تسريب عند الإلغاء
     ✅ #3: `_watch_runner` — كشف TCPSite مباشر + تحذير واضح عند الفشل
     ✅ #4: `_collect_admin_ids` — warning فقط عند فشل **كل** الطرق
-           (وليس عند رجوع [] من طريقة ناجحة)
-    ✅ #5: رسالة الإغلاق النهائية "👋 انتهت دورة حياة البوت" بدل "اكتمل الإقلاع"
+    ✅ #5: رسالة الإغلاق النهائية "👋 انتهت دورة حياة البوت"
     ✅ #6: معالجة `CancelledError` بشكل نمطي (Python 3.8+)
     ✅ #7: SIGTERM handler مُسجَّل فقط في وضع Webhook
     ✅ #8: `_watch_runner` — health probe داخلي (يكتشف التعليق أيضاً)
@@ -91,23 +92,57 @@ from handlers import (
     chat_member,
 )
 
-# ✅ v5.5.19 (MEM-1): استيراد register_membership_handlers
-#    (مراقبة إضافة البوت للمجموعات/القنوات)
+# ═════════════════════════════════════════════════════════════════════
+# ✅ v5.5.20 (MEM-1): استيراد MembershipHandler
+#    الأولوية:
+#      1) handlers_membership (المستقل — FIX-1/FIX-3)
+#      2) handlers_callback (المدموج — fallback)
+# ═════════════════════════════════════════════════════════════════════
+register_membership_handlers = None
+_MEMBERSHIP_AVAILABLE = False
+_MEMBERSHIP_IMPORT_ERROR = None
+_MEMBERSHIP_SOURCE = None  # 'standalone' | 'embedded' | None
+
+# ─── المحاولة 1: handlers_membership المستقل ───
 try:
-    from handlers_callback import register_membership_handlers
+    from handlers_membership import (
+        register_handlers as _register_membership_standalone,
+    )
+    register_membership_handlers = _register_membership_standalone
     _MEMBERSHIP_AVAILABLE = True
-    _MEMBERSHIP_IMPORT_ERROR = None
-except ImportError:
+    _MEMBERSHIP_SOURCE = 'standalone'
+except ImportError as _e1:
     try:
-        from handlers.handlers_callback import (
-            register_membership_handlers,
+        from handlers.handlers_membership import (
+            register_handlers as _register_membership_standalone,
         )
+        register_membership_handlers = _register_membership_standalone
         _MEMBERSHIP_AVAILABLE = True
-        _MEMBERSHIP_IMPORT_ERROR = None
-    except ImportError as _e:
-        register_membership_handlers = None
-        _MEMBERSHIP_AVAILABLE = False
-        _MEMBERSHIP_IMPORT_ERROR = str(_e)
+        _MEMBERSHIP_SOURCE = 'standalone'
+    except ImportError as _e2:
+        # ─── المحاولة 2: fallback إلى handlers_callback المدموج ───
+        try:
+            from handlers_callback import (
+                register_membership_handlers as _register_membership_embedded,
+            )
+            register_membership_handlers = _register_membership_embedded
+            _MEMBERSHIP_AVAILABLE = True
+            _MEMBERSHIP_SOURCE = 'embedded'
+        except ImportError as _e3:
+            try:
+                from handlers.handlers_callback import (
+                    register_membership_handlers as _register_membership_embedded,
+                )
+                register_membership_handlers = _register_membership_embedded
+                _MEMBERSHIP_AVAILABLE = True
+                _MEMBERSHIP_SOURCE = 'embedded'
+            except ImportError as _e4:
+                register_membership_handlers = None
+                _MEMBERSHIP_AVAILABLE = False
+                _MEMBERSHIP_SOURCE = None
+                _MEMBERSHIP_IMPORT_ERROR = (
+                    f"standalone: {_e2} | embedded: {_e4}"
+                )
 
 # ✅ v4: قائمة القنوات
 from handlers.handlers_channels_list import register_channels_list_handlers
@@ -287,13 +322,21 @@ else:
     )
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v5.5.19 (MEM-1): فحص توفر MembershipHandler
+# ✅ v5.5.20 (MEM-4): فحص توفر MembershipHandler مع تفصيل المصدر
 # ═══════════════════════════════════════════════════════════════════
 if _MEMBERSHIP_AVAILABLE:
-    logger.info(
-        "✅ register_membership_handlers متاح — "
-        "تقارير إضافة البوت جاهزة"
-    )
+    if _MEMBERSHIP_SOURCE == 'standalone':
+        logger.info(
+            "✅ MembershipHandler (standalone) متاح — "
+            "FIX-1 قناة المجموعة + FIX-3 عرض النطاق مُفعّلة"
+        )
+    elif _MEMBERSHIP_SOURCE == 'embedded':
+        logger.info(
+            "✅ MembershipHandler (embedded in handlers_callback) "
+            "متاح — تقارير إضافة البوت جاهزة"
+        )
+    else:
+        logger.info("✅ MembershipHandler متاح")
 else:
     logger.warning(
         f"⚠️ register_membership_handlers غير متاح: "
@@ -667,11 +710,11 @@ def _verify_group_log_handlers() -> bool:
 
 
 # =====================================================================
-# 🛡️ v5.5.19 (MEM-2): فحص توفر MembershipHandler
+# 🛡️ v5.5.20 (MEM-2): فحص توفر MembershipHandler
 # =====================================================================
 
 def _verify_membership_handler() -> bool:
-    """فحص توفر register_membership_handlers."""
+    """فحص توفر register_membership_handlers + تسجيل المصدر."""
     if not _MEMBERSHIP_AVAILABLE:
         logger.warning(
             f"⚠️ MembershipHandler غير متاح: "
@@ -683,7 +726,19 @@ def _verify_membership_handler() -> bool:
             "⚠️ register_membership_handlers غير قابل للاستدعاء"
         )
         return False
-    logger.info("✅ MembershipHandler متاح")
+
+    # ✅ v5.5.20 (MEM-4): تسجيل المصدر بشكل واضح
+    if _MEMBERSHIP_SOURCE == 'standalone':
+        logger.info(
+            "✅ MembershipHandler متاح (standalone — handlers_membership.py)"
+        )
+    elif _MEMBERSHIP_SOURCE == 'embedded':
+        logger.info(
+            "✅ MembershipHandler متاح (embedded — handlers_callback.py)"
+        )
+    else:
+        logger.info("✅ MembershipHandler متاح")
+
     return True
 
 
@@ -1389,7 +1444,7 @@ async def main():
         raise SystemExit(1)
 
     _verify_group_log_handlers()
-    # ✅ v5.5.19 (MEM-2): فحص MembershipHandler
+    # ✅ v5.5.20 (MEM-2): فحص MembershipHandler
     _verify_membership_handler()
 
     # ═══ تهيئة قاعدة البيانات ═══
@@ -1647,14 +1702,19 @@ async def main():
     logger.info("✅ ChatMemberHandler مُفعّل — تحديث المشرفين فوري")
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ v5.5.19 (MEM-3): تسجيل MembershipHandler
+    # ✅ v5.5.20 (MEM-3): تسجيل MembershipHandler
     # ═════════════════════════════════════════════════════════════
     if _MEMBERSHIP_AVAILABLE and callable(register_membership_handlers):
         try:
             register_membership_handlers(app)
+            _source_label = (
+                "standalone (FIX-1/FIX-3)" 
+                if _MEMBERSHIP_SOURCE == 'standalone'
+                else "embedded"
+            )
             logger.info(
-                "✅ MembershipHandler مُفعّل — "
-                "تقارير إضافة البوت جاهزة"
+                f"✅ MembershipHandler مُفعّل [{_source_label}] — "
+                f"تقارير إضافة البوت جاهزة"
             )
         except Exception as _e:
             logger.error(
