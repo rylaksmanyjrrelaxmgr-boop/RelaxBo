@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.27)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.28)
 ================================================================================
+🆕 v7.6.28 (MAINTENANCE-USERS-FIX):
+  ✅ FIX-HIGH: إضافة "users" إلى MAINTENANCE_TABLES
+       - المشكلة: users كان مفقوداً من MAINTENANCE_TABLES
+       - الأثر: VACUUM (ANALYZE, SKIP_LOCKED) الدوري لم يكن يشمل users
+                (autovacuum وحده يعمل — غير كافٍ لجداول كبيرة)
+       - الاكتشاف: db_diagnostics v6.4.0 (_check_maintenance_consistency)
+       - الإصلاح: إضافة "users" في مقدمة القائمة (بعد posts)
+
 🆕 v7.6.27 (VACUUM-OUTSIDE-TX-FIX) — إصلاح حرج:
   ✅ FIX-CRITICAL: إزالة _run_maintenance_postgres من fast-path
        - المشكلة: VACUUM (ANALYZE, SKIP_LOCKED) كان يُستدعى من داخل
@@ -71,8 +79,13 @@ ADMIN_LOGS_MAX_ROWS = 5000
 
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
+# ✅ v7.6.28 FIX-HIGH: إضافة "users" (كان مفقوداً)
+#    users جدول كبير في المشروع (يستقبل تحديثات متكررة:
+#    auto_publish, auto_recycle, active_channel, language, ...)
+#    بدون VACUUM دوري، dead tuples قد تتراكم حتى autovacuum وحده.
 MAINTENANCE_TABLES = (
     "posts",
+    "users",            # ✅ v7.6.28
     "auto_replies",
     "subscriptions",
     "user_channels",
@@ -2996,7 +3009,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.6.25-migration-order-fix"),
+             "v7.6.28-maintenance-users-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -3670,7 +3683,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.27-vacuum-outside-tx-fix",
+            "v7.6.28-maintenance-users-fix",
         )
     except Exception as e:
         if logger:
@@ -4334,7 +4347,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.27-vacuum-outside-tx-fix",
+                    "v7.6.28-maintenance-users-fix",
                 ),
             )
         except Exception as e:
