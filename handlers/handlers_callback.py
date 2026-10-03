@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v3)
+handlers_callback.py - معالج الأزرار (v9.7.0-final-fixed-v4)
 =====================================================================
+🆕 v9.7.0-final-fixed-v4 — إصلاحات أمان نهائية:
+    ✅ FIX-A: admin_restore_file — حماية من استعادة SQLite
+              على Postgres/MySQL (كان يمكن أن يُفسد القاعدة).
+    ✅ FIX-B: admin_disable_force — استخدام DB.set_setting
+              مع fallback بدل SQL مباشر (توافق أوسع).
+    ✅ FIX-C: تحديث رقم الإصدار.
+    ✅ FIX-D: __all__ محدَّث.
+
 🆕 v9.7.0-final-fixed-v3 — دمج handlers_membership:
     ✅ MEM-1: مراقبة إضافة البوت للمجموعات/القنوات
     ✅ MEM-2: إرسال تقرير لقناة السجل (مع Debounce 30s)
@@ -6909,6 +6917,7 @@ class CallbackHandlers:
                     update, context, query, user_id, lang)
                 return
 
+            # ✅ FIX-A: حماية من استعادة SQLite على Postgres/MySQL
             if data.startswith("admin_restore_file:"):
                 fname = data.split(":", 1)[1]
                 backup_file = PATHS.BACKUPS / fname
@@ -6921,6 +6930,28 @@ class CallbackHandlers:
                 if resolved.parent != base or not backup_file.exists():
                     await safe_edit(query, "❌", bot=context.bot)
                     return
+
+                # ✅ FIX-A: منع استعادة SQLite على Postgres/MySQL
+                try:
+                    _db_type = getattr(DB, "DB_TYPE", "sqlite")
+                except Exception:
+                    _db_type = "sqlite"
+                if _db_type != "sqlite":
+                    logger.warning(
+                        f"⚠️ v9.7.0-final-fixed-v4: رفض "
+                        f"admin_restore_file على DB_TYPE={_db_type}"
+                    )
+                    _unsup_key = (
+                        'restore_postgres_unsupported'
+                        if _db_type == "postgres"
+                        else 'restore_mysql_unsupported'
+                    )
+                    await safe_edit(
+                        query,
+                        await _trans(_unsup_key, lang, "⚠️"),
+                        bot=context.bot)
+                    return
+
                 try:
                     pre_restore = (
                         PATHS.BACKUPS
@@ -7209,10 +7240,19 @@ class CallbackHandlers:
                     bot=context.bot)
                 return
 
+            # ✅ FIX-B: استخدام DB.set_setting مع fallback
             if data == "admin_disable_force":
-                await DB.execute(
-                    "UPDATE settings SET value = '' "
-                    "WHERE key = 'force_subscribe_channel'")
+                try:
+                    await DB.set_setting('force_subscribe_channel', '')
+                except Exception as e:
+                    logger.warning(
+                        f"admin_disable_force set_setting: {e}")
+                    try:
+                        await DB.execute(
+                            "UPDATE settings SET value = '' "
+                            "WHERE key = 'force_subscribe_channel'")
+                    except Exception:
+                        pass
                 try:
                     _invalidate_force_sub_cache()
                 except Exception:
