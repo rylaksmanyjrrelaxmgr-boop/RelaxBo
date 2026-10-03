@@ -2,21 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.15 - Critical Integration Fixes)
+utils.py - الأدوات المساعدة للبوت (v7.9.16 - Pool Alerts Enhanced)
 =================================================================================
+🆕 v7.9.16 (POOL-ALERTS-ENHANCED):
+    ✅ PA-1: monitor_pool_alert v2 — يكتشف الآن:
+             - util >= 85%         (كما قبل)
+             - idle_tx >= 3        (جديد — تكامل مع pool_health_monitor)
+             - lock_waits >= 5     (جديد)
+    ✅ PA-2: cooldown مستقل لكل نوع تنبيه (لا إغراق)
+    ✅ PA-3: _read_pg_activity() — قراءة آمنة لـ pg_stat_activity
+    ✅ PA-4: _send_pool_alert() — رسائل موحّدة لـ 3 أنواع
+
 🆕 v7.9.15 (CRITICAL INTEGRATION FIXES — based on review of v5.5.18):
     ✅ #1 حرجة: `setup_webhook` يُرفق `site` بـ `runner`
-           → يُصلح `_watch_runner` في bot.py الذي كان معطّلاً صامتاً
     ✅ #2 حرجة: `apply_penalty` — حماية `DB.VALID_PENALTY_TYPES`
-           من AttributeError مع fallback مجموعة ثابتة
     ✅ #3: `ErrorHandler.handle_error` — fallback لـ stderr
-           (بدل الابتلاع الكامل عند فشل logger نفسه)
     ✅ #4: `safe_send` — عند RateLimiter timeout → report_429
-           (بدل تجاوز الحماية → 429 من Telegram)
-    ✅ #5: `_publish_single_channel` — تسجيل واضح عند فشل
-           mark_published بعد نجاح النشر (خطر نشر مزدوج)
+    ✅ #5: `_publish_single_channel` — تسجيل عند فشل mark_published
     ✅ #6: `fetch_json_from_url` — حماية SSRF (whitelist hosts)
-    ✅ #7: `_group_admins_cache` — حذف عشوائي بدل sort (أداء)
+    ✅ #7: `_group_admins_cache` — حذف عشوائي بدل sort
     ✅ #8: `webhook_handler` — content-type مع charset tolerance
 
 🆕 v7.9.14 (Contest Duration Buttons)
@@ -137,7 +141,6 @@ class SmartCache:
                     return value
 
                 loaded = await loader()
-                # ملاحظة: None لا يُخزَّن (لتجنّب negative caching دائم)
                 if loaded is not None:
                     await self.set(key, loaded, ttl)
                 return loaded
@@ -177,7 +180,6 @@ class SmartCache:
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
 
-# ✅ v7.9.11: TTL من 5 → 60 (تقليل الضغط 12x)
 _security_stats_cache = SmartCache(ttl=60, max_size=500)
 
 # =====================================================================
@@ -590,9 +592,6 @@ class TranslationManager:
 
     @classmethod
     def get_text(cls, lang: str, key: str, **kwargs) -> str:
-        """
-        ✅ v7.9.8: إذا لم تُمرَّر kwargs، يُعاد القالب كما هو.
-        """
         translations = cls.load_translation(lang)
         template = translations.get(key)
         if template is None and lang != cls._default_lang:
@@ -716,22 +715,15 @@ class UserState(Enum):
     WAIT_REPLY = auto()
     WAIT_LOG_CH = auto()
 
-    # ══════════════════════════════════════════════════════════════
-    # ✅ v7.9.14: مسابقات — أزرار مدة + نوع + quiz
-    # ══════════════════════════════════════════════════════════════
     WAIT_CONTEST_TITLE = auto()
     WAIT_CONTEST_DESC = auto()
     WAIT_CONTEST_PRIZE = auto()
-    # ✅ جديد — يُعالَج في handlers_callback.py عبر أزرار
     WAIT_CONTEST_DURATION = auto()
     WAIT_CONTEST_TYPE = auto()
-    # ✅ جديد — quiz flow
     WAIT_CONTEST_QUESTION = auto()
     WAIT_CONTEST_CORRECT_ANSWER = auto()
-    # ⚠️ قديم — للتوافق الخلفي (يمكن حذفه لاحقاً)
     WAIT_CONTEST_DATE = auto()
     WAIT_CONTEST_ANSWER = auto()
-    # ══════════════════════════════════════════════════════════════
 
     WAIT_MAX_LEN = auto()
     WAIT_WARN_COUNT = auto()
@@ -2116,11 +2108,6 @@ async def _send_media(bot, chat_id, media_type, media_file_id,
 
 async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
                     parse_mode: str = None, **kwargs):
-    """
-    ✅ v7.9.10: التعامل مع Forbidden كخطأ دائم (بدون retry).
-    ✅ v7.9.15 (#4): عند RateLimiter timeout → report_429
-                    (بدل تجاوز الحماية → 429 من Telegram).
-    """
     if not text and not any(
         k in kwargs for k in ['photo', 'video', 'document', 'audio',
                               'voice', 'animation', 'sticker', 'video_note']
@@ -2130,7 +2117,6 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None,
     try:
         await asyncio.wait_for(RATE_LIMITER.acquire(), timeout=5.0)
     except asyncio.TimeoutError:
-        # ✅ v7.9.15 (#4): خفّض المعدل استباقياً بدل تجاوز الحماية
         RATE_LIMITER.report_429()
         logger.warning("⚠️ RATE_LIMITER timeout — تم تخفيض المعدل استباقياً")
 
@@ -2845,11 +2831,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                         duration: int = 60, reason: str = "", moderator: int = None,
                         username: str = "", first_name: str = "",
                         chat_name: str = "", lang: str = "ar") -> Tuple[bool, str]:
-    """
-    ✅ v7.9.9: رسالة كاملة بـ 17 لغة — بدون سطر @username.
-
-    ✅ v7.9.15 (#2): حماية DB.VALID_PENALTY_TYPES من AttributeError.
-    """
     def T(key: str, **kw) -> str:
         return _penalty_t(key, lang, **kw)
 
@@ -2909,7 +2890,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
 
     full_msg = "\n".join(lines)
 
-    # ✅ v7.9.15 (#2): حماية DB.VALID_PENALTY_TYPES
     try:
         _valid_types = getattr(DB, "VALID_PENALTY_TYPES", None)
         if _valid_types is None:
@@ -2925,7 +2905,6 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
                 username=username, first_name=first_name, chat_name=chat_name,
             )
         except TypeError:
-            # fallback — قاعدة بيانات قديمة بدون الأعمدة الإضافية
             try:
                 await DB.add_penalty(
                     user_id=user_id, chat_id=chat_id, penalty_type=penalty,
@@ -3045,11 +3024,6 @@ async def import_auto_replies(chat_id: int,
 
 
 async def fetch_json_from_url(url: str) -> Optional[Union[list, dict]]:
-    """
-    ✅ v7.9.15 (#6): حماية SSRF — whitelist للنطاقات المسموحة.
-
-    فقط نطاقات GitHub المسموحة للاستيراد من المستودعات العامة.
-    """
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ('http', 'https'):
@@ -3179,6 +3153,10 @@ class BackgroundTasks:
     POOL_ALERT_THRESHOLD = 85.0
     POOL_ALERT_COOLDOWN = 600
 
+    # ✅ v7.9.16: عتبات جديدة للتنبيهات
+    POOL_IDLE_TX_ALERT = 3        # idle_tx >= هذا → تنبيه
+    POOL_LOCK_WAITS_ALERT = 5     # lock_waits >= هذا → تنبيه
+
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
         access = BackgroundTasks._group_admins_access_count.get(chat_id, 0)
@@ -3232,6 +3210,61 @@ class BackgroundTasks:
             return None
 
     @staticmethod
+    async def _read_pg_activity() -> Optional[Dict[str, int]]:
+        """
+        ✅ v7.9.16: قراءة pg_stat_activity بأمان.
+
+        Returns dict مع المفاتيح:
+          total, active, idle, idle_tx, lock_waits, waiting
+        أو None إذا ليس PostgreSQL / فشل الاستعلام.
+        """
+        try:
+            if not getattr(DB, 'USE_POSTGRES', False):
+                return None
+            row = await DB.fetchone(
+                """
+                SELECT 
+                    count(*) AS total,
+                    count(*) FILTER (WHERE state = 'active') AS active,
+                    count(*) FILTER (WHERE state = 'idle') AS idle,
+                    count(*) FILTER (WHERE state = 'idle in transaction')
+                        AS idle_tx,
+                    count(*) FILTER (WHERE wait_event_type = 'Lock')
+                        AS lock_waits,
+                    count(*) FILTER (
+                        WHERE wait_event_type IN ('Lock', 'LWLock', 'BufferPin')
+                    ) AS waiting
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                """
+            )
+            if isinstance(row, dict):
+                return {
+                    'total': int(row.get('total') or 0),
+                    'active': int(row.get('active') or 0),
+                    'idle': int(row.get('idle') or 0),
+                    'idle_tx': int(row.get('idle_tx') or 0),
+                    'lock_waits': int(row.get('lock_waits') or 0),
+                    'waiting': int(row.get('waiting') or 0),
+                }
+            elif row is not None:
+                try:
+                    data = dict(row)
+                    return {
+                        'total': int(data.get('total') or 0),
+                        'active': int(data.get('active') or 0),
+                        'idle': int(data.get('idle') or 0),
+                        'idle_tx': int(data.get('idle_tx') or 0),
+                        'lock_waits': int(data.get('lock_waits') or 0),
+                        'waiting': int(data.get('waiting') or 0),
+                    }
+                except (TypeError, ValueError):
+                    return None
+        except Exception as e:
+            logger.debug(f"_read_pg_activity: {e}")
+        return None
+
+    @staticmethod
     def _format_pool_line(stats: Dict[str, Any]) -> str:
         util = stats["utilization_pct"]
         if util < 50:
@@ -3267,36 +3300,105 @@ class BackgroundTasks:
             await asyncio.sleep(BackgroundTasks.POOL_MONITOR_INTERVAL)
 
     @staticmethod
+    async def _send_pool_alert(
+        bot,
+        stats: Optional[Dict[str, Any]],
+        pg_activity: Optional[Dict[str, int]],
+        alert_type: str,
+    ) -> None:
+        """✅ v7.9.16: إرسال تنبيه موحّد للمالك."""
+        try:
+            lines: List[str] = []
+            if alert_type == "util" and stats is not None:
+                lines.append("🚨 <b>تنبيه Pool</b>\n")
+                lines.append(
+                    f"📊 الاستخدام: {stats['in_use']}/{stats['max_size']} "
+                    f"({stats['utilization_pct']}%)"
+                )
+                lines.append(f"🆓 فاضي: {stats['idle_size']}")
+                lines.append(f"🔗 مفتوح: {stats['current_size']}")
+                lines.append("\n⚠️ راجع الاستعلامات البطيئة!")
+            elif alert_type == "idle_tx" and pg_activity is not None:
+                lines.append("🔴 <b>تنبيه: idle-in-transaction</b>\n")
+                lines.append(f"⏸️ <b>اتصالات عالقة:</b> {pg_activity.get('idle_tx')}")
+                lines.append(f"📊 إجمالي: {pg_activity.get('total')}")
+                lines.append(f"✅ نشطة: {pg_activity.get('active')}")
+                lines.append(f"💤 idle: {pg_activity.get('idle')}")
+                lines.append("")
+                lines.append("⚠️ اتصال بدأ معاملة ولم يُكملها —")
+                lines.append("قد يمنع VACUUM من تنظيف الصفوف القديمة.")
+            elif alert_type == "lock_waits" and pg_activity is not None:
+                lines.append("🔒 <b>تنبيه: قفل في الانتظار</b>\n")
+                lines.append(f"⏳ <b>منتظرون:</b> {pg_activity.get('lock_waits')}")
+                lines.append(f"🔗 waiting: {pg_activity.get('waiting')}")
+                lines.append(f"📊 إجمالي: {pg_activity.get('total')}")
+                lines.append("\n⚠️ احتمال deadlock أو استعلام طويل.")
+            else:
+                return
+
+            lines.append(f"\n🕐 {TimeUtils.mecca_iso()}")
+
+            await safe_send(
+                bot,
+                CONFIG.PRIMARY_OWNER_ID,
+                "\n".join(lines),
+                parse_mode='HTML',
+            )
+        except Exception as alert_err:
+            logger.debug(f"_send_pool_alert: {alert_err}")
+
+    @staticmethod
     async def monitor_pool_alert(bot) -> None:
-        last_alert_time = 0.0
+        """
+        ✅ v7.9.16: تنبيهات Pool محسّنة.
+
+        - util >= 85%           → تنبيه (كما قبل)
+        - idle_tx >= 3          → تنبيه جديد
+        - lock_waits >= 5       → تنبيه جديد
+
+        كل نوع له cooldown مستقل لتجنّب الإغراق.
+        """
+        last_util_alert = 0.0
+        last_idle_tx_alert = 0.0
+        last_lock_alert = 0.0
+
         await asyncio.sleep(60)
         while True:
             try:
                 stats = BackgroundTasks._read_pool_stats()
+                pg_activity = await BackgroundTasks._read_pg_activity()
+                now = time.time()
+
+                # ─── 1) util alert ───
                 if stats is not None:
                     util = stats["utilization_pct"]
-                    now = time.time()
                     if (util >= BackgroundTasks.POOL_ALERT_THRESHOLD and
-                            now - last_alert_time > BackgroundTasks.POOL_ALERT_COOLDOWN):
-                        last_alert_time = now
-                        try:
-                            await safe_send(
-                                bot,
-                                CONFIG.PRIMARY_OWNER_ID,
-                                (
-                                    f"🚨 <b>تنبيه Pool</b>\n\n"
-                                    f"📊 الاستخدام: "
-                                    f"{stats['in_use']}/{stats['max_size']} "
-                                    f"({util}%)\n"
-                                    f"🆓 فاضي: {stats['idle_size']}\n"
-                                    f"🔗 مفتوح: {stats['current_size']}\n"
-                                    f"🕐 {TimeUtils.mecca_iso()}\n\n"
-                                    f"⚠️ راجع الاستعلامات البطيئة!"
-                                ),
-                                parse_mode='HTML'
-                            )
-                        except Exception as alert_err:
-                            logger.debug(f"pool alert send: {alert_err}")
+                            now - last_util_alert > BackgroundTasks.POOL_ALERT_COOLDOWN):
+                        last_util_alert = now
+                        await BackgroundTasks._send_pool_alert(
+                            bot, stats, pg_activity, "util"
+                        )
+
+                # ─── 2) idle_tx alert (جديد) ───
+                if pg_activity is not None:
+                    idle_tx = pg_activity.get('idle_tx', 0)
+                    if (idle_tx >= BackgroundTasks.POOL_IDLE_TX_ALERT and
+                            now - last_idle_tx_alert > BackgroundTasks.POOL_ALERT_COOLDOWN):
+                        last_idle_tx_alert = now
+                        await BackgroundTasks._send_pool_alert(
+                            bot, stats, pg_activity, "idle_tx"
+                        )
+
+                # ─── 3) lock_waits alert (جديد) ───
+                if pg_activity is not None:
+                    lock_waits = pg_activity.get('lock_waits', 0)
+                    if (lock_waits >= BackgroundTasks.POOL_LOCK_WAITS_ALERT and
+                            now - last_lock_alert > BackgroundTasks.POOL_ALERT_COOLDOWN):
+                        last_lock_alert = now
+                        await BackgroundTasks._send_pool_alert(
+                            bot, stats, pg_activity, "lock_waits"
+                        )
+
             except Exception as e:
                 logger.debug(f"monitor_pool_alert: {e}")
             await asyncio.sleep(BackgroundTasks.POOL_MONITOR_INTERVAL)
@@ -3317,10 +3419,8 @@ class BackgroundTasks:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
 
-            # ✅ v7.9.15 (#7): حذف عشوائي بدل sort (O(n) بدل O(n log n))
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
                 evict_count = max(1, BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5)
-                # حماية chat_id الحالي من الحذف
                 candidates = [k for k in BackgroundTasks._group_admins_cache.keys()
                               if k != chat_id]
                 if candidates:
@@ -3400,11 +3500,6 @@ class BackgroundTasks:
     @staticmethod
     async def _publish_single_channel(bot, ch, published_count,
                                        has_sub: bool = None) -> bool:
-        """
-        ✅ v7.9.13: السلوك مطابق 100% لـ v7.9.11.
-        ✅ v7.9.15 (#5): تسجيل واضح عند فشل mark_published بعد
-                        نجاح النشر (خطر نشر مزدوج).
-        """
         user_id = None
         try:
             user_id = ch.get('user_id') if isinstance(ch, dict) else None
@@ -3422,7 +3517,6 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                # ✅ v7.9.15 (#5): حماية من خطر النشر المزدوج
                 try:
                     await DB.mark_published_and_advance(ch['id'], post['id'])
                 except Exception as _e:
@@ -3431,7 +3525,6 @@ class BackgroundTasks:
                         f"mark_published_and_advance: {_e} — "
                         f"خطر نشر مزدوج في الدورة التالية"
                     )
-                    # على الرغم من الفشل، نُعيد True (النشر نجح فعلاً)
                 if published_count == 0 or recycled:
                     if user_id:
                         with suppress(Exception):
@@ -3850,7 +3943,6 @@ async def webhook_handler(request):
         logger.error("❌ Webhook app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
-        # ✅ v7.9.15 (#8): تجاهل charset والمعاملات الإضافية
         raw_ct = request.content_type or ''
         ct = raw_ct.split(';')[0].strip().lower()
         if ct != 'application/json':
@@ -3872,9 +3964,6 @@ async def webhook_handler(request):
 class ErrorHandler:
     @staticmethod
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        ✅ v7.9.15 (#3): fallback لـ stderr عند فشل logger نفسه.
-        """
         try:
             error_msg = str(context.error)
             if update:
@@ -3901,7 +3990,6 @@ class ErrorHandler:
             except Exception:
                 pass
         except Exception:
-            # ✅ v7.9.15 (#3): آخر خط دفاع — لا نستخدم logger (قد يكون هو السبب)
             try:
                 print(
                     f"CRITICAL ErrorHandler failure: {context.error}",
