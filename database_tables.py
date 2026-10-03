@@ -2,9 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.25)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.26)
 ================================================================================
-🆕 v7.6.25 (MIGRATION-ORDER-FIX):
+🆕 v7.6.26 (AUTOVACUUM-DEDUP + CTE-INDEX):
+  ✅ FIX-1: إزالة الاستدعاء المكرر لـ _tune_autovacuum_postgres
+             - المشكلة: database.py::_tune_heavy_tables_autovacuum يعمل بعدنا
+                        بإعدادات أقوى (scale_factor=0.0 vs 0.05)
+             - الأعراض: رسالتان "ضُبط autovacuum" في السجل خلال 4 ثوان
+             - الأثر: توفير ~1.8s في كل إقلاع
+             - الحل: database.py هو المسؤول الوحيد عن autovacuum
+
+  ✅ FIX-2: إضافة idx_subs_status_end_active
+             - المشكلة: CTE active_subs (في SQLite query و PG_NO_MV)
+                        يمسح subscriptions(status, end_date)
+             - الأعراض: استعلام 4.5s على PostgreSQL
+             - الحل: فهرس مركّب (status, end_date) لتسريع الـ CTE
+
+🚀 v7.6.25 (MIGRATION-ORDER-FIX):
   ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
        - المشكلة: _create_indexes_* كان يُشغَّل قبل _migrate_missing_columns_*
        - الأعراض: asyncpg.exceptions.InFailedSQLTransactionError
@@ -101,7 +115,8 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-EXPECTED_INDEX_COUNT = 74
+# ✅ v7.6.26: 74 → 75 (إضافة idx_subs_status_end_active)
+EXPECTED_INDEX_COUNT = 75
 
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
@@ -190,6 +205,9 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
+    # ✅ v7.6.26: فهرس لتسريع CTE active_subs (status + end_date)
+    ("subscriptions", "idx_subs_status_end_active",
+     "subscriptions(status, end_date)"),
     ("subscriptions", "idx_subscriptions_user_status",
      "subscriptions(user_id, status)"),
     ("subscriptions", "idx_subscriptions_user_status_end",
@@ -686,6 +704,11 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 # =====================================================================
 # autovacuum
+# =====================================================================
+# ✅ v7.6.26: هذا الـ helper لم يعد يُستدعى تلقائياً من create_tables_postgres
+#            لأن database.py::_tune_heavy_tables_autovacuum يقوم بالمهمة
+#            بإعدادات أقوى (scale_factor=0.0) وبعد create_tables.
+#            أُبقي للاستخدام اليدوي/الاختباري فقط.
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
@@ -2984,7 +3007,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _drop_deprecated_indexes_postgres(conn, logger)
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
-        await _tune_autovacuum_postgres(conn, logger)
+        # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
+        # await _tune_autovacuum_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
         await _run_maintenance_postgres(conn, logger)
         if logger:
@@ -3604,7 +3628,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
-    await _tune_autovacuum_postgres(conn, logger)
+    # ✅ v7.6.26 FIX: إزالة _tune_autovacuum_postgres (database.py يتولى)
+    # await _tune_autovacuum_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
 
     try:
@@ -3614,7 +3639,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.25-migration-order-fix",
+            "v7.6.26-autovacuum-dedup",
         )
     except Exception as e:
         if logger:
@@ -4277,7 +4302,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.25-migration-order-fix",
+                    "v7.6.26-autovacuum-dedup",
                 ),
             )
         except Exception as e:
@@ -4322,4 +4347,5 @@ __all__ = [
     "_cleanup_old_admin_logs_postgres",
     "_cleanup_old_admin_logs_sqlite",
     "_cleanup_old_admin_logs_mysql",
+    "_tune_autovacuum_postgres",
 ]
