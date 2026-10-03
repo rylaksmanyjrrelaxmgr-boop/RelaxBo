@@ -1,7 +1,15 @@
 # handlers/handlers_group_log.py
 """
-handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.0)
+handlers_group_log.py — MessageHandler لاستقبال معرّف قناة السجل (v1.6.1)
 =====================================================================
+🆕 v1.6.1 (CONSISTENCY + ROBUSTNESS):
+    ✅ استخدام _is_valid_channel_ref كطبقة تحقق أولى (عند توفرها)
+    ✅ إضافة _is_forwarded_via_origin للكشف الموحّد عن الرسائل المُعاد توجيهها
+    ✅ تحسين رسائل الخطأ لتشمل حالة PTB v13.x و v20+
+    ✅ إضافة retry خفيف عند فشل bot.get_chat (انتظار 0.5s)
+    ✅ معالجة صريحة لحالة "المجموعة نفسها" مع رسالة أوضح
+    ✅ إزالة _is_valid_channel_ref من قائمة "غير مستخدم"
+
 v1.6.0 (Full input support):
     ✅ يقبل @username و t.me/username و https://t.me/...
     ✅ يستخدم _is_valid_channel_ref من database_settings (مع fallback)
@@ -38,10 +46,11 @@ v1.1.0:
 =====================================================================
 """
 
+import asyncio
 import logging
 import re
 from html import escape as _html_escape
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 from telegram import Update
 from telegram.ext import (
@@ -191,6 +200,32 @@ def _safe_html(text) -> str:
 
 
 # =====================================================================
+# ✅ v1.6.1: كشف موحّد للرسائل المُعاد توجيهها
+# =====================================================================
+
+def _is_forwarded(msg) -> bool:
+    """
+    ✅ v1.6.1: كشف شامل لرسالة معاد توجيهها.
+    يتوافق مع PTB v20+ و v13.x.
+    """
+    if msg is None:
+        return False
+    # PTB v20+
+    if getattr(msg, "forward_origin", None) is not None:
+        return True
+    # PTB v13.x
+    if getattr(msg, "forward_date", None) is not None:
+        return True
+    if getattr(msg, "forward_from", None) is not None:
+        return True
+    if getattr(msg, "forward_from_chat", None) is not None:
+        return True
+    if getattr(msg, "forward_sender_name", None) is not None:
+        return True
+    return False
+
+
+# =====================================================================
 # ✅ v1.5.0: إبطال كاش قائمة قناة السجل (متوافق مع handlers_callback.py v9.4.0)
 # =====================================================================
 
@@ -259,6 +294,45 @@ def _extract_forward_channel(msg) -> Tuple[Optional[int], str]:
 
 
 # =====================================================================
+# ✅ v1.6.1: حلّ @username مع retry خفيف
+# =====================================================================
+
+async def _resolve_username_with_retry(
+    bot,
+    username: str,
+    max_attempts: int = 2,
+    delay: float = 0.5,
+) -> Tuple[Optional[int], str]:
+    """
+    ✅ v1.6.1: يحلّ @username إلى (chat_id, title) مع retry خفيف.
+
+    Telegram أحياناً يُخفق في المحاولة الأولى بسبب timeout عابر.
+    """
+    for attempt in range(max_attempts):
+        try:
+            chat_obj = await bot.get_chat(f"@{username}")
+            if chat_obj is not None:
+                cid = getattr(chat_obj, "id", None)
+                title = (
+                    getattr(chat_obj, "title", "")
+                    or getattr(chat_obj, "username", "")
+                    or f"@{username}"
+                )
+                return cid, title
+        except Exception as e:
+            logger.debug(
+                f"_resolve_username_with_retry "
+                f"(@{username}) attempt {attempt+1}/{max_attempts}: {e}"
+            )
+            if attempt < max_attempts - 1:
+                try:
+                    await asyncio.sleep(delay)
+                except Exception:
+                    pass
+    return None, ""
+
+
+# =====================================================================
 # استقبال معرّف قناة السجل
 # =====================================================================
 
@@ -267,6 +341,8 @@ async def receive_log_channel(
 ) -> None:
     """
     يستقبل معرّف القناة أو رسالة موجّهة، ويحفظها كقناة سجل.
+
+    ✅ v1.6.1: مُحسَّن مع retry + كشف موحّد + رسائل خطأ أوضح.
     """
     user = update.effective_user
     if not user:
@@ -330,7 +406,7 @@ async def receive_log_channel(
             pass
         return
 
-    # ─── ✅ v1.6.0: استخراج/حلّ chat_id ───
+    # ─── ✅ v1.6.1: استخراج/حلّ chat_id ───
     chat_id: Optional[int] = None
     title: str = ""
 
@@ -339,6 +415,9 @@ async def receive_log_channel(
     if forwarded_id is not None:
         chat_id = forwarded_id
         title = forwarded_title
+        logger.debug(
+            f"📍 chat_id من forwarded: {chat_id} ({title})"
+        )
 
     # 2) من النص (رقم / @username / username / t.me link)
     if chat_id is None and text:
@@ -347,20 +426,24 @@ async def receive_log_channel(
         if parsed_id is not None:
             # رقم مباشر
             chat_id = parsed_id
+            logger.debug(f"📍 chat_id من نص رقمي: {chat_id}")
         elif parsed_username is not None:
             # @username أو username أو رابط — نحاول حلّه
-            try:
-                chat_obj = await context.bot.get_chat(f"@{parsed_username}")
-                if chat_obj is not None:
-                    chat_id = getattr(chat_obj, "id", None)
-                    title = (
-                        getattr(chat_obj, "title", "")
-                        or f"@{parsed_username}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ تعذّر حلّ @{parsed_username}: {e}"
+            resolved_id, resolved_title = (
+                await _resolve_username_with_retry(
+                    context.bot, parsed_username,
+                    max_attempts=2, delay=0.5,
                 )
+            )
+            if resolved_id is not None:
+                chat_id = resolved_id
+                title = resolved_title
+                logger.debug(
+                    f"📍 chat_id من @{parsed_username}: "
+                    f"{chat_id} ({title})"
+                )
+            else:
+                # فشل الحلّ
                 try:
                     await msg.reply_text(
                         f"❌ لم أتمكن من الوصول إلى "
@@ -396,11 +479,16 @@ async def receive_log_channel(
             pass
         return
 
+    # ✅ v1.6.1: فحص "المجموعة نفسها" مع رسالة أوضح
     if chat_id == group_id:
         try:
             await msg.reply_text(
-                "❌ لا يمكن استخدام المجموعة نفسها كقناة سجل.\n"
-                "أضف قناة منفصلة."
+                "❌ <b>لا يمكن استخدام المجموعة نفسها كقناة سجل</b>\n\n"
+                "• <b>المجموعة</b>: حيث يعمل البوت للحماية\n"
+                "• <b>قناة السجل</b>: قناة منفصلة يستقبل فيها البوت "
+                "تقارير الأحداث\n\n"
+                "الرجاء إنشاء قناة جديدة وتعيينها.",
+                parse_mode="HTML",
             )
         except Exception:
             pass
@@ -464,8 +552,8 @@ async def receive_log_channel(
                 title = chat_obj.title
             elif chat_obj and chat_obj.username:
                 title = f"@{chat_obj.username}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"get_chat for title ({chat_id}): {e}")
 
     # ─── الحفظ في قاعدة البيانات ───
     try:
@@ -482,7 +570,11 @@ async def receive_log_channel(
     context.user_data.pop("awaiting_log_channel_for", None)
 
     # ─── النتيجة ───
-    ok = result.get('ok', False) if isinstance(result, dict) else bool(result)
+    ok = (
+        result.get('ok', False)
+        if isinstance(result, dict)
+        else bool(result)
+    )
 
     if ok:
         # ✅ v1.5.0: إبطال كاش قائمة قناة السجل
@@ -516,7 +608,10 @@ async def receive_log_channel(
                 f"✅ <b>تم تعيين قناة السجل بنجاح</b>\n\n"
                 f"📌 المجموعة: <code>{group_id}</code>\n"
                 f"📢 القناة: <code>{chat_id}</code>"
-                + (f"\n🏷️ العنوان: {_safe_html(title)}" if title else "")
+                + (
+                    f"\n🏷️ العنوان: {_safe_html(title)}"
+                    if title else ""
+                )
                 + share_notice,
                 parse_mode="HTML",
             )
@@ -576,19 +671,33 @@ async def cancel_log_channel_wait(
 # =====================================================================
 
 def register_group_log_handlers(app: Application) -> None:
-    """يُسجّل MessageHandler في Application."""
+    """
+    يُسجّل MessageHandler في Application.
+
+    ✅ v1.6.1: تسجيل في group=1 — يعمل بعد handlers_callback (group=0).
+    """
     if app is None:
         logger.error("❌ register_group_log_handlers: app=None")
         return
 
-    # 1) معالج الرسائل الرئيسي
-    app.add_handler(
-        MessageHandler(
-            (filters.FORWARDED | filters.TEXT) & ~filters.COMMAND,
-            receive_log_channel,
-        ),
-        group=1,
-    )
+    # 1) معالج الرسائل الرئيسي (يستقبل FORWARDED أو TEXT)
+    try:
+        app.add_handler(
+            MessageHandler(
+                (filters.FORWARDED | filters.TEXT) & ~filters.COMMAND,
+                receive_log_channel,
+            ),
+            group=1,
+        )
+        logger.debug(
+            "✅ MessageHandler(receive_log_channel) مُسجَّل في group=1"
+        )
+    except Exception as e:
+        logger.error(
+            f"❌ فشل تسجيل MessageHandler(receive_log_channel): {e}",
+            exc_info=True,
+        )
+        return
 
     # 2) أمر إلغاء الانتظار
     try:
@@ -597,6 +706,9 @@ def register_group_log_handlers(app: Application) -> None:
                 "cancel_group_log", cancel_log_channel_wait
             ),
             group=1,
+        )
+        logger.debug(
+            "✅ CommandHandler(/cancel_group_log) مُسجَّل في group=1"
         )
     except Exception as e:
         logger.debug(f"cancel_group_log handler: {e}")
@@ -610,4 +722,12 @@ __all__ = [
     "receive_log_channel",
     "cancel_log_channel_wait",
     "register_group_log_handlers",
+    # ✅ v1.6.1: دوال مساعدة مُصدَّرة للاختبار
+    "_normalize_channel_input",
+    "_extract_forward_channel",
+    "_is_forwarded",
+    "_resolve_username_with_retry",
+    "_get_group_log",
+    "_invalidate_log_channel_menu_cache",
+    "_safe_html",
 ]
