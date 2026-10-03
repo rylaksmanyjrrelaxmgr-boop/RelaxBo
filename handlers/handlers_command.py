@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.0
+handlers_command.py - معالجات الأوامر (CommandHandlers) - v7.6.1
 ===================================================================================
+🆕 v7.6.1 (SAFE EDIT + ALL EXPORTS):
+    ✅ FIX-1: _safe_edit_or_send — حماية من effective_user=None
+              (رسائل القنوات / anonymous admin)
+    ✅ FIX-2: _send_and_auto_delete — fallback بدون parse_mode شامل
+    ✅ FIX-3: db_diag (split path) — استخدام _send_long_report الآمن
+    ✅ FIX-4: _invalidate_force_sub_cache مُصدَّر في __all__
+
 🆕 v7.6.0 (DEV LOG — SEPARATE CHANNEL):
     ✅ _notify_dev_log: قناة سجل المطور المنفصلة (dev_log_channel)
     ✅ fallback تلقائي لقناة السجل العامة (log_channel)
@@ -190,6 +197,27 @@ def _send_kwargs() -> dict:
     }
 
 
+def _resolve_target_id(update, context) -> Optional[int]:
+    """
+    ✅ FIX-1: استخراج معرف الهدف بشكل آمن.
+
+    الأولوية:
+        1. effective_user.id (رسالة عادية)
+        2. effective_chat.id (رسالة قناة / anonymous admin)
+    """
+    try:
+        if update and update.effective_user and update.effective_user.id:
+            return update.effective_user.id
+    except Exception:
+        pass
+    try:
+        if update and update.effective_chat and update.effective_chat.id:
+            return update.effective_chat.id
+    except Exception:
+        pass
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # ✅ v7.5.32: إرسال آمن مع retry
 # ═══════════════════════════════════════════════════════════════════
@@ -334,45 +362,50 @@ async def _send_and_auto_delete(
     context, chat_id: int, text: str,
     reply_markup=None, parse_mode=None, delay: int = 10,
 ):
-    """إرسال مع auto-delete + retry."""
-    try:
+    """
+    إرسال مع auto-delete + retry.
+
+    ✅ FIX-2: fallback موحّد بدون parse_mode في كل المسارات.
+    """
+    # ═══ محاولة 1: مع parse_mode الأصلي ═══
+    msg = await _safe_send_message(
+        context.bot, chat_id, text,
+        reply_markup=reply_markup, parse_mode=parse_mode,
+    )
+
+    # ═══ محاولة 2: fallback بدون parse_mode ═══
+    if msg is None and parse_mode:
+        logger.warning(
+            f"⚠️ _send_and_auto_delete: fallback without parse_mode "
+            f"(chat={chat_id})"
+        )
         msg = await _safe_send_message(
             context.bot, chat_id, text,
-            reply_markup=reply_markup, parse_mode=parse_mode,
+            reply_markup=reply_markup, parse_mode=None,
         )
-        if msg is None:
-            return None
 
-        asyncio.create_task(
-            _delete_message_after(context.bot, chat_id, msg.message_id, delay)
+    if msg is None:
+        logger.error(
+            f"❌ _send_and_auto_delete: فشل كامل "
+            f"(chat={chat_id}, parse_mode={parse_mode})"
         )
-        return msg
-    except BadRequest as e:
-        err = str(e).lower()
-        if "can't parse" in err or "parse" in err:
-            try:
-                msg = await _safe_send_message(
-                    context.bot, chat_id, text,
-                    reply_markup=reply_markup, parse_mode=None,
-                )
-                if msg:
-                    asyncio.create_task(
-                        _delete_message_after(
-                            context.bot, chat_id, msg.message_id, delay
-                        )
-                    )
-                return msg
-            except Exception as e2:
-                logger.error(f"فشل إرسال (بدون parse): {e2}")
-        logger.error(f"فشل إرسال+حذف: {e}")
         return None
+
+    # جدولة الحذف التلقائي
+    try:
+        asyncio.create_task(
+            _delete_message_after(
+                context.bot, chat_id, msg.message_id, delay
+            )
+        )
     except Exception as e:
-        logger.error(f"فشل إرسال+حذف: {e}")
-        return None
+        logger.debug(f"_send_and_auto_delete schedule: {e}")
+
+    return msg
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ v7.5.32: الرد في المكان الصحيح مع retry
+# ✅ v7.5.32 + FIX-1: الرد في المكان الصحيح مع retry
 # ═══════════════════════════════════════════════════════════════════
 
 async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mode=None):
@@ -382,13 +415,20 @@ async def _safe_edit_or_send(update, context, text, reply_markup=None, parse_mod
     - retry تلقائي حتى 3 محاولات
     - fallback: تعديل → إرسال جديدة
     - fallback: HTML → بدون parse_mode
+
+    ✅ FIX-1: يستخدم _resolve_target_id() للتعامل الآمن مع
+    رسائل القنوات / anonymous admin (حيث effective_user=None).
     """
     query = update.callback_query
-    chat = update.effective_chat if update else None
-    if chat and chat.type in ('group', 'supergroup'):
-        target = chat.id
-    else:
-        target = update.effective_user.id
+
+    # ✅ FIX-1: تحديد الهدف بأمان
+    target = _resolve_target_id(update, context)
+    if target is None:
+        logger.error(
+            "❌ _safe_edit_or_send: لا يمكن تحديد chat_id "
+            "(effective_user=None, effective_chat=None)"
+        )
+        return False
 
     # ═══ محاولة 1: تعديل الرسالة الموجودة ═══
     if query and query.message:
@@ -2210,7 +2250,12 @@ class CommandHandlers:
 
     @staticmethod
     async def db_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """✅ /db_diag — تشخيص قاعدة البيانات."""
+        """
+        ✅ /db_diag — تشخيص قاعدة البيانات.
+
+        ✅ FIX-3: استخدام _send_long_report في كل المسارات — يضمن
+        fallback بدون parse_mode للأجزاء الفردية.
+        """
         user_id = update.effective_user.id
         if not CONFIG.is_developer(user_id):
             return
@@ -2222,6 +2267,7 @@ class CommandHandlers:
             parse_mode='HTML',
         )
 
+        # ═══ المسار 1: diagnose_db_split (يرجع list[str]) ═══
         try:
             from db_diagnostics import diagnose_db_split
             _has_split = True
@@ -2239,25 +2285,21 @@ class CommandHandlers:
                     )
                     return
 
-                total = len(parts)
-                sent = 0
-
-                for i, part in enumerate(parts, 1):
-                    header = (
-                        f"<i>({i}/{total})</i>\n" if total > 1 else ""
+                # ✅ FIX-3: دمج الأجزاء ثم إرسالها عبر _send_long_report
+                # لضمان fallback بدون parse_mode
+                merged = "\n\n".join(parts)
+                sent = await _send_long_report(
+                    context, user_id, merged,
+                    parse_mode='HTML',
+                    limit=TELEGRAM_MESSAGE_LIMIT,
+                    split_delay=DB_DIAG_SPLIT_DELAY,
+                )
+                if sent == 0:
+                    await _safe_send_message(
+                        context.bot, user_id,
+                        "⚠️ فشل إرسال التقرير.",
                     )
-                    body = f"{header}{part}"
-
-                    msg = await _safe_send_message(
-                        context.bot, user_id, body, parse_mode='HTML',
-                    )
-                    if msg:
-                        sent += 1
-
-                    if i < total:
-                        await asyncio.sleep(DB_DIAG_SPLIT_DELAY)
-
-                logger.info(f"✅ db_diag: أُرسِلت {sent}/{total} جزء")
+                logger.info(f"✅ db_diag split: أُرسِلت {sent} جزء")
                 return
 
             except Exception as e:
@@ -2266,6 +2308,7 @@ class CommandHandlers:
                     exc_info=True,
                 )
 
+        # ═══ المسار 2: diagnose_db (legacy) ═══
         try:
             from db_diagnostics import diagnose_db
         except ImportError:
@@ -2358,4 +2401,8 @@ __all__ = [
     'CommandHandlers',
     '_notify_dev_log',
     '_safe_send_message',
+    '_safe_edit_or_send',          # ✅ FIX-4: مُصدَّر
+    '_invalidate_force_sub_cache', # ✅ FIX-4: مُصدَّر (يستخدمه handlers_callback)
+    '_trans',
+    '_get_lang',
 ]
