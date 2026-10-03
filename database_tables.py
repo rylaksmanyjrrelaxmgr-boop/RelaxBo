@@ -2,32 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.23)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.24)
 ================================================================================
+🚀 v7.6.24 (SOFT-DELETE-COLUMNS):
+  ✅ CURRENT_SCHEMA_VERSION: 22 → 23
+       - السبب: إضافة عمودي Soft Delete لجدول user_channels:
+            • removed_at      (TIMESTAMP/TEXT/DATETIME) — وقت الإزالة
+            • removal_reason  (TEXT/VARCHAR)             — سبب الإزالة
+       - الإصلاح: migration تلقائي يُضيف الأعمدة للقواعد القديمة
+       - الاستخدام:
+            • chat_member.py v1.3.0 → soft_delete (وسم)
+            • handlers_membership.py v1.3.0 → استرجاع
+            • main.py v5.5.22 → تنظيف دوري (كل 24h)
+
+  ✅ EXPECTED_INDEX_COUNT: 73 → 74
+       - إضافة idx_user_channels_removed_at
+         (partial index لتحسين الاستعلام الدوري)
+       - CREATE INDEX ... WHERE removed_at IS NOT NULL
+       - ملاحظة: PostgreSQL + SQLite يدعمان partial indexes.
+                  MySQL لا يدعمها → نستخدم فهرس عادي.
+
+  ✅ Migration للأعمدة الجديدة:
+       - _USER_CHANNELS_NEW_COLUMNS: قائمة جديدة
+       - _migrate_missing_columns_sqlite/postgres/mysql: مُحدَّثة
+       - يضمن إضافة الأعمدة للقواعد الحالية (بدون فقدان بيانات)
+
 🚀 v7.6.23 (BOT-ADDITION-LOG-FIX):
   ✅ CURRENT_SCHEMA_VERSION: 21 → 22
-       - السبب: إضافة جدول bot_addition_log (كان مفقوداً تماماً)
-       - الأعراض المُصلَحة:
-            • syntax error at or near "AUTOINCREMENT"  (PostgreSQL)
-            • relation "bot_addition_log" does not exist
-       - الإصلاح: الجدول الآن يُنشأ من هذا الملف بأسلوب موحّد
-         عبر SQLite/PostgreSQL/MySQL
-  ✅ EXPECTED_INDEX_COUNT: 72 → 73 (فهرس bot_addition_log)
-  ✅ دوال التنظيف الدوري (تُستدعى من main.py v5.5.21):
-       - _cleanup_old_admin_logs_postgres
-       - _cleanup_old_admin_logs_sqlite
-       - _cleanup_old_admin_logs_mysql
-       - ADMIN_LOGS_RETENTION_DAYS = 30
-       - ADMIN_LOGS_MAX_ROWS = 5000
+  ✅ جدول bot_addition_log (كان مفقوداً)
+  ✅ EXPECTED_INDEX_COUNT: 72 → 73
 
-🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS):
-  ✅ CURRENT_SCHEMA_VERSION: 20 → 21
-       - السبب: إضافة أعمدة لجدول contests لمسابقات quiz:
-            • contest_type   (كان موجوداً، نُبقيه للتوافق)
-            • question       (جديد — لمسابقات quiz)
-            • correct_answer (جديد — لمسابقات quiz)
-
-🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN — إصلاح جذري)
+🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS)
+🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN)
 🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
 🚀 v7.6.19 (AUTOVACUUM-COVERAGE-FIX)
 🚀 v7.6.18 (DIAGNOSIS-FIXES)
@@ -54,9 +60,8 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.23: 21 → 22 (إجبار database.py على إعادة create_tables)
-# السبب: إضافة جدول bot_addition_log المفقود
-CURRENT_SCHEMA_VERSION = 22
+# ✅ v7.6.24: 22 → 23 (إضافة أعمدة Soft Delete)
+CURRENT_SCHEMA_VERSION = 23
 
 # ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
@@ -67,11 +72,15 @@ MAINTENANCE_INTERVAL_SECONDS = 86400
 # ✅ v7.6.13: فاصل بين عمليات VACUUM لكل جدول
 VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 
-# ✅ v7.6.20: 60 → 30 (تنظيف أكثر شدة)
+# ✅ v7.6.20: تنظيف admin_logs بعد 30 يوماً
 ADMIN_LOGS_RETENTION_DAYS = 30
 
 # ✅ v7.6.20: حد أقصى لعدد الصفوف في admin_logs
 ADMIN_LOGS_MAX_ROWS = 5000
+
+# ✅ v7.6.24: فترة سماح Soft Delete (بالأيام)
+# يُستخدم من main.py v5.5.22 لتنظيف القنوات المُزالة
+REMOVED_CHANNELS_GRACE_DAYS = 30
 
 # ✅ v7.6.12: الجداول التي تحتاج VACUUM دوري
 MAINTENANCE_TABLES = (
@@ -108,6 +117,8 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "schedule",
     "user_reminder_settings",
     "support_tickets",
+    # ✅ v7.6.24: bot_addition_log
+    "bot_addition_log",
 )
 
 DEFAULT_SETTINGS = (
@@ -117,12 +128,15 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.23: 72 → 73 (فهرس bot_addition_log)
-EXPECTED_INDEX_COUNT = 73
+# ✅ v7.6.24: 73 → 74 (فهرس removed_at)
+EXPECTED_INDEX_COUNT = 74
 
 # ✅ v7.6.14: فهارس تُتخطى على MySQL
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
+    # ✅ v7.6.24: MySQL لا يدعم partial indexes
+    # لكن الفهرس العادي على removed_at مقبول
+    # (سنستخدم فهرس عادي بدلاً من partial)
 })
 
 COMMON_INDEXES = [
@@ -143,7 +157,7 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (4) — ✅ v7.6.16: حُذف 3 فهارس زائدة
+    # ═══ POSTS (4) ═══
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
@@ -316,10 +330,15 @@ COMMON_INDEXES = [
     # ═══ BOT_ADDITION_LOG (1) — ✅ v7.6.23 ═══
     ("bot_addition_log", "idx_bot_addition_log_chat",
      "bot_addition_log(chat_id, added_at DESC)"),
+
+    # ═══ USER_CHANNELS SOFT DELETE (1) — ✅ v7.6.24 ═══
+    # Partial index يُسرّع استعلام التنظيف في main.py v5.5.22
+    ("user_channels", "idx_user_channels_removed_at",
+     "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
 ]
 
 DEPRECATED_INDEXES = [
-    # ═══ POSTS — ✅ v7.6.16: حُذف 3 فهارس زائدة على published ═══
+    # ═══ POSTS ═══
     "idx_posts_channel",
     "idx_posts_published",
     "idx_posts_channel_published",
@@ -430,6 +449,8 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_bot_groups_banned_cover",
     # ✅ v7.6.23
     "idx_bot_addition_log_chat",
+    # ✅ v7.6.24
+    "idx_user_channels_removed_at",
 })
 
 if len(COMMON_INDEXES) != EXPECTED_INDEX_COUNT:
@@ -542,8 +563,7 @@ def _is_advanced_index(cols: str) -> bool:
 
 
 # =====================================================================
-# ✅ v7.6.18/v7.6.20: تنظيف admin_logs القديمة + حد أقصى للصفوف
-# (يُستدعى أيضاً من main.py v5.5.21 دورياً)
+# ✅ v7.6.18/v7.6.20: تنظيف admin_logs
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
@@ -755,7 +775,7 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
+# ✅ v7.6.18: autovacuum للجداول الصغيرة
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
@@ -796,7 +816,7 @@ async def _tune_autovacuum_postgres(conn, logger):
 
 
 # =====================================================================
-# فحص جماعي للفهارس (SCHEMA-AWARE)
+# فحص جماعي للفهارس
 # =====================================================================
 
 async def _ensure_all_indexes_exist_postgres(conn, logger):
@@ -1247,17 +1267,23 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
-# ✅ v7.6.22: group_security — أعمدة إضافية
+# ✅ v7.6.22: group_security
 _GROUP_SECURITY_NEW_COLUMNS = [
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
 ]
 
-# ✅ v7.6.22: contests — أعمدة مسابقات quiz
+# ✅ v7.6.22: contests
 _CONTESTS_NEW_COLUMNS = [
     ("contest_type", "TEXT DEFAULT 'raffle'"),
     ("question", "TEXT DEFAULT ''"),
     ("correct_answer", "TEXT DEFAULT ''"),
+]
+
+# ✅ v7.6.24: user_channels — Soft Delete columns
+_USER_CHANNELS_NEW_COLUMNS = [
+    ("removed_at", "TEXT DEFAULT NULL"),
+    ("removal_reason", "TEXT DEFAULT NULL"),
 ]
 
 
@@ -1285,7 +1311,7 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             if logger:
                 logger.debug(f"⚠️ SQLite migration {col_name}: {e}")
 
-    # ─── contests ─── (v7.6.22)
+    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1305,6 +1331,29 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             if logger:
                 logger.debug(
                     f"⚠️ SQLite migration contests.{col_name}: {e}"
+                )
+
+    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
+    for col_name, col_def in _USER_CHANNELS_NEW_COLUMNS:
+        checked += 1
+        try:
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ SQLite: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "duplicate" in err or "already exists" in err:
+                continue
+            if logger:
+                logger.debug(
+                    f"⚠️ SQLite migration user_channels.{col_name}: {e}"
                 )
 
     if added:
@@ -1345,7 +1394,7 @@ async def _migrate_missing_columns_postgres(conn, logger):
             if logger:
                 logger.debug(f"⚠️ PG migration {col_name}: {e}")
 
-    # ─── contests ─── (v7.6.22)
+    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1373,6 +1422,42 @@ async def _migrate_missing_columns_postgres(conn, logger):
             if logger:
                 logger.debug(
                     f"⚠️ PG migration contests.{col_name}: {e}"
+                )
+
+    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
+    # PostgreSQL يستخدم TIMESTAMP بدلاً من TEXT
+    _pg_user_channels_cols = [
+        ("removed_at", "TIMESTAMP DEFAULT NULL"),
+        ("removal_reason", "TEXT DEFAULT NULL"),
+    ]
+    for col_name, col_def in _pg_user_channels_cols:
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'user_channels' "
+                "AND column_name = $1 "
+                "AND table_schema = current_schema()",
+                col_name,
+            )
+            checked += 1
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ PG: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ PG migration user_channels.{col_name}: {e}"
                 )
 
     if logger and checked:
@@ -1426,7 +1511,7 @@ async def _migrate_missing_columns_mysql(conn, logger):
             if logger:
                 logger.debug(f"⚠️ MySQL migration {col_name}: {e}")
 
-    # ─── contests ─── (v7.6.22)
+    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1466,6 +1551,52 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration contests.{col_name}: {e}"
                 )
 
+    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
+    # MySQL يستخدم DATETIME + VARCHAR
+    _mysql_user_channels_cols = [
+        ("removed_at", "DATETIME DEFAULT NULL"),
+        ("removal_reason", "VARCHAR(50) DEFAULT NULL"),
+    ]
+    for col_name, col_def in _mysql_user_channels_cols:
+        checked += 1
+        try:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'user_channels' "
+                    "AND COLUMN_NAME = %s",
+                    (col_name,),
+                )
+                row = await cursor.fetchone()
+                exists = row and row[0] > 0
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
+
+            if exists:
+                skipped += 1
+                continue
+
+            await conn.execute(
+                f"ALTER TABLE user_channels "
+                f"ADD COLUMN {col_name} {col_def}"
+            )
+            added += 1
+            if logger:
+                logger.info(
+                    f"✅ MySQL: أُضيف عمود {col_name} "
+                    f"(user_channels — Soft Delete)"
+                )
+        except Exception as e:
+            if logger:
+                logger.debug(
+                    f"⚠️ MySQL migration user_channels.{col_name}: {e}"
+                )
+
     if logger and checked:
         logger.debug(
             f"📊 MySQL migration: فُحص {checked}، "
@@ -1475,7 +1606,7 @@ async def _migrate_missing_columns_mysql(conn, logger):
 
 
 # =====================================================================
-# Fast-path: قراءة schema_version
+# Fast-path: schema_version
 # =====================================================================
 
 async def _get_current_schema_version_postgres(conn):
@@ -2066,7 +2197,7 @@ async def _ensure_index_definitions_match_mysql(conn, logger):
 
 
 # =====================================================================
-# حذف الفهارس القديمة (SCHEMA-AWARE)
+# حذف الفهارس القديمة
 # =====================================================================
 
 async def _drop_deprecated_indexes_postgres(conn, logger):
@@ -2338,6 +2469,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.24: user_channels + Soft Delete columns
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2346,6 +2478,8 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             channel_name TEXT,
             banned INTEGER DEFAULT 0,
             created_at TEXT,
+            removed_at TEXT DEFAULT NULL,
+            removal_reason TEXT DEFAULT NULL,
             UNIQUE(user_id, channel_id)
         )
     """)
@@ -2595,7 +2729,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.23: bot_addition_log — سجل إضافة البوت (SQLite)
+    # ✅ v7.6.23: bot_addition_log
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_addition_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2670,7 +2804,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.22: contests — مع question/correct_answer
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2925,7 +3058,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.6.23-bot-addition-log"),
+             "v7.6.24-soft-delete-columns"),
         )
         await conn.commit()
     except Exception as e:
@@ -2989,6 +3122,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.24: user_channels + Soft Delete columns
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id SERIAL PRIMARY KEY,
@@ -2997,6 +3131,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             channel_name TEXT,
             banned INTEGER DEFAULT 0,
             created_at TIMESTAMP,
+            removed_at TIMESTAMP DEFAULT NULL,
+            removal_reason TEXT DEFAULT NULL,
             UNIQUE(user_id, channel_id)
         )
     """)
@@ -3246,7 +3382,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.23: bot_addition_log — PostgreSQL (BIGSERIAL + BIGINT)
+    # ✅ v7.6.23: bot_addition_log (PostgreSQL)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_addition_log (
             id BIGSERIAL PRIMARY KEY,
@@ -3321,7 +3457,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.22: contests — مع question/correct_answer
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS contests (
             id SERIAL PRIMARY KEY,
@@ -3583,7 +3718,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.23-bot-addition-log",
+            "v7.6.24-soft-delete-columns",
         )
     except Exception as e:
         if logger:
@@ -3643,6 +3778,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.24: user_channels + Soft Delete columns
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_channels (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -3651,6 +3787,8 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 channel_name VARCHAR(255),
                 banned TINYINT(1) DEFAULT 0,
                 created_at DATETIME,
+                removed_at DATETIME DEFAULT NULL,
+                removal_reason VARCHAR(50) DEFAULT NULL,
                 UNIQUE KEY (user_id, channel_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
@@ -3911,7 +4049,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.23: bot_addition_log — MySQL (AUTO_INCREMENT)
+        # ✅ v7.6.23: bot_addition_log (MySQL)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_addition_log (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -3986,7 +4124,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.22: contests — مع question/correct_answer
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -4244,7 +4381,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.23-bot-addition-log",
+                    "v7.6.24-soft-delete-columns",
                 ),
             )
         except Exception as e:
@@ -4283,9 +4420,11 @@ __all__ = [
     "MYSQL_SKIP_INDEXES",
     "ADMIN_LOGS_RETENTION_DAYS",
     "ADMIN_LOGS_MAX_ROWS",
+    # ✅ v7.6.24
+    "REMOVED_CHANNELS_GRACE_DAYS",
     "SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM",
     "_adapt_cols_for_db",
-    # ✅ v7.6.23: دوال التنظيف (تُستدعى من main.py v5.5.21)
+    # ✅ v7.6.23: دوال التنظيف
     "_cleanup_old_admin_logs_postgres",
     "_cleanup_old_admin_logs_sqlite",
     "_cleanup_old_admin_logs_mysql",
