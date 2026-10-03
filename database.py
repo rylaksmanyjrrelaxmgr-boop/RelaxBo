@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.46-ADD-ONLY)
+database.py - قاعدة البيانات المتكاملة (v7.7.47 — DEV-LOG-CHANNEL)
 ================================================================================
-🆕 v7.7.46-ADD-ONLY (إضافات فقط — بدون حذف أو تعديل):
-  ✅ ADD-1: flag `_in_bootstrap_tx` + `_pending_secondary_indexes` في __init__
-  ✅ ADD-2: gate على PostgreSQL في _create_secondary_indexes
-  ✅ ADD-3: كشف bootstrap-transaction في _create_secondary_indexes
-            (يؤجل الفهارس بدل تنفيذها داخل transaction)
-  ✅ ADD-4: _bootstrap يضبط flag قبل/بعد المرحلة 1
-  ✅ ADD-5: مرحلة جديدة بعد commit لتنفيذ الفهارس المؤجلة
+🆕 v7.7.47 (DEV-LOG-CHANNEL — قناة سجل المطور المنفصلة):
+  ✅ ADD-1: get_dev_log_channel() — قراءة قناة المطور المنفصلة
+  ✅ ADD-2: set_dev_log_channel(value) — حفظ/حذف قناة المطور
+  ✅ المفتاح: settings.dev_log_channel
+  ✅ عند عدم تعيينها → _notify_dev_log يتراجع للقناة العامة
 
-  ⚠️ كل الكود الأصلي v7.7.45 باقٍ كما هو بدون أي تعديل أو حذف.
-  ⚠️ _do_bootstrap_inner يبقى يستدعي _create_secondary_indexes — الفرق:
-     الدالة تكتشف أنها داخل bootstrap-tx وتؤجل تلقائياً.
-
-🆕 v7.7.45 (MIGRATIONS-EXTRACT — نقل منطق الترحيل إلى ملف منفصل)
-🆕 v7.7.44 (CACHES-EXTRACT — نقل Caches إلى ملف منفصل)
-🆕 v7.7.43 (REFACTOR-MIXIN — استخراج الدوال الكبيرة)
-🆕 v7.7.42 (AUDIT-FIX — إصلاحات ما بعد المراجعة الشاملة)
-🆕 v7.7.41 (POOL-LIFETIME-FIX — إصلاح بطء 1s+ لكل استعلام)
-🆕 v7.7.40 (BATCH-PUBLISH — تجميع تحديثات النشر)
+🆕 v7.7.46 (SECONDARY-INDEXES-FIX)
+🆕 v7.7.45 (MIGRATIONS-EXTRACT)
+🆕 v7.7.44 (CACHES-EXTRACT)
+🆕 v7.7.43 (REFACTOR-MIXIN)
+🆕 v7.7.42 (AUDIT-FIX)
+🆕 v7.7.41 (POOL-LIFETIME-FIX)
+🆕 v7.7.40 (BATCH-PUBLISH)
 🆕 v7.7.39 (SMALL-TABLES-AUTOVACUUM)
 🆕 v7.7.38 (STRICTER-AUTOVACUUM)
 🆕 v7.7.37 (USERS-AUTOVACUUM)
 🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX)
-🆕 v7.7.35 (FAST-COMMIT — إصلاح بطء النشر 1s+)
+🆕 v7.7.35 (FAST-COMMIT)
 ================================================================================
 """
 
@@ -480,7 +475,6 @@ UTC = timezone.utc
 
 GLOBAL_CHAT_ID = -1
 
-# ✅ v7.7.43: استخدام القيم من refactor_mixin إن وُجد، وإلا من env
 if REFACTOR_MIXIN_AVAILABLE and _R_DEFAULT_PUBLISH_INTERVAL_MINUTES is not None:
     DEFAULT_PUBLISH_INTERVAL_MINUTES = _R_DEFAULT_PUBLISH_INTERVAL_MINUTES
     PUBLISH_POLLING_COMPENSATION_SECONDS = _R_PUBLISH_POLLING_COMPENSATION_SECONDS
@@ -500,7 +494,6 @@ SETTINGS_BATCH_CACHE_TTL = 120
 
 SUB_CACHE_TTL = int(os.getenv("SUB_CACHE_TTL", "300"))
 
-# ✅ v7.7.37: أُضيف "users" لتفادي تراكم dead tuples
 HEAVY_TABLES_FOR_AUTOVACUUM = (
     "posts",
     "subscriptions",
@@ -508,7 +501,6 @@ HEAVY_TABLES_FOR_AUTOVACUUM = (
     "users",
 )
 
-# 🆕 v7.7.39: جداول صغيرة تحتاج autovacuum عدواني
 SMALL_TABLES_FOR_AUTOVACUUM = (
     "plans",
     "settings",
@@ -1862,7 +1854,7 @@ class Database(
             self._recovering_pool = False
             self._autovacuum_tuned = False
 
-            # ✅ v7.7.46-ADD-ONLY (ADD-1): flagان جديدان — إضافة فقط
+            # ✅ v7.7.46-ADD-ONLY: flagان جديدان
             self._in_bootstrap_tx = False
             self._pending_secondary_indexes: List[Tuple[str, str, str]] = []
 
@@ -2008,6 +2000,69 @@ class Database(
             logger.warning(f"⚠️ clear_slow_queries_log: {e}")
             return 0
 
+    # ═══════════════════════════════════════════════════════════════
+    # ✅ v7.7.47: قناة سجل المطور (منفصلة عن العامة)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def get_dev_log_channel(self) -> str:
+        """
+        جلب معرّف قناة سجل المطور.
+
+        Returns:
+            معرّف القناة (str)، أو '' إن لم تُعيَّن.
+        """
+        try:
+            if hasattr(self, 'get_setting'):
+                value = await self.get_setting(
+                    'dev_log_channel', default='')
+                return str(value).strip() if value else ''
+        except Exception as e:
+            logger.debug(f"get_setting(dev_log_channel): {e}")
+
+        try:
+            row = await self.fetchone(
+                "SELECT value FROM settings "
+                "WHERE key='dev_log_channel' LIMIT 1"
+            )
+            if row:
+                if hasattr(row, 'get'):
+                    value = row.get('value')
+                elif isinstance(row, (list, tuple)) and len(row) > 0:
+                    value = row[0]
+                else:
+                    value = None
+                return str(value).strip() if value else ''
+        except Exception as e:
+            logger.debug(f"query dev_log_channel: {e}")
+
+        return ''
+
+    async def set_dev_log_channel(self, value: str) -> bool:
+        """
+        تعيين قناة سجل المطور.
+
+        Args:
+            value: معرّف القناة أو '' للإزالة.
+
+        Returns:
+            True عند النجاح.
+        """
+        value = (value or '').strip()
+        try:
+            async with self.transaction() as conn:
+                await self._upsert_setting(
+                    conn, 'dev_log_channel', value
+                )
+            try:
+                await internal_cache.invalidate('dev_log_channel')
+                await internal_cache.invalidate('setting_dev_log_channel')
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.warning(f"set_dev_log_channel: {e}")
+            return False
+
     async def get_db_size_kb(self) -> float:
         try:
             if USE_POSTGRES:
@@ -2081,10 +2136,6 @@ class Database(
         except Exception as e:
             return {"type": "error", "message": str(e)}
 
-    # =================================================================
-    # 🆕 v7.7.34: VACUUM خارج transaction
-    # =================================================================
-
     async def vacuum(self, table: str) -> None:
         if DB_TYPE == "sqlite":
             try:
@@ -2141,10 +2192,6 @@ class Database(
                 logger.warning(
                     f"⚠️ release after VACUUM {table}: {e}"
                 )
-
-    # =================================================================
-    # 🆕 v7.7.32 + v7.7.38 + v7.7.39 + v7.7.42: ضبط autovacuum
-    # =================================================================
 
     async def _tune_heavy_tables_autovacuum(self, conn) -> int:
         if not USE_POSTGRES:
@@ -3962,24 +4009,15 @@ class Database(
             return False
 
     async def _create_secondary_indexes(self, indexes):
-        """
-        ✅ v7.7.46-ADD-ONLY (ADD-2 + ADD-3): إضافة gate + تأجيل.
-
-        - إذا ليست PostgreSQL → تخطي
-        - إذا نحن داخل bootstrap-transaction → تأجيل (ADD-3)
-        - وإلا → تنفيذ طبيعي
-        """
         if not indexes:
             return
 
-        # ✅ ADD-2: gate على PostgreSQL
         if not USE_POSTGRES:
             logger.debug(
                 "⏩ _create_secondary_indexes: تخطي (ليست PostgreSQL)"
             )
             return
 
-        # ✅ ADD-3: كشف bootstrap-transaction → تأجيل
         if self._in_bootstrap_tx:
             logger.debug(
                 f"⏸️ _create_secondary_indexes: تأجيل "
@@ -4938,10 +4976,9 @@ class Database(
                 )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
-        # ✅ v7.7.42: استدعاء _create_secondary_indexes
-        # ⚠️ v7.7.46-ADD-ONLY: هذا السطر يبقى كما هو.
-        #    _create_secondary_indexes ستكشف _in_bootstrap_tx=True
-        #    وتؤجل تلقائياً لبعد commit.
+        # v7.7.42: استدعاء _create_secondary_indexes
+        # v7.7.46-ADD-ONLY: هذه الدالة ستكتشف _in_bootstrap_tx=True
+        #                   وتؤجل تلقائياً لبعد commit
         try:
             secondary_indexes = self._get_secondary_indexes()
             if secondary_indexes:
@@ -4979,7 +5016,7 @@ class Database(
             try:
                 await self.initialize()
 
-                # ✅ ADD-4: ضبط flag قبل المرحلة 1
+                # ✅ v7.7.46-ADD-ONLY: ضبط flag قبل المرحلة 1
                 self._in_bootstrap_tx = True
                 try:
                     if USE_POSTGRES:
@@ -4992,10 +5029,10 @@ class Database(
                         async with self.connection() as conn:
                             await self._do_bootstrap_inner(conn)
                 finally:
-                    # ✅ ADD-4: رفع flag بعد المرحلة 1
+                    # ✅ v7.7.46-ADD-ONLY: رفع flag بعد المرحلة 1
                     self._in_bootstrap_tx = False
 
-                # ✅ ADD-5: تنفيذ الفهارس المؤجلة بعد commit
+                # ✅ v7.7.46-ADD-ONLY: تنفيذ الفهارس المؤجلة بعد commit
                 if USE_POSTGRES and self._pending_secondary_indexes:
                     try:
                         pending = self._pending_secondary_indexes
@@ -6826,7 +6863,7 @@ async def initialize_db() -> bool:
     return await DB.initialize_db()
 
 # =====================================================================
-# 5) __all__ (مع إضافة flagين جديدين — ADD-1)
+# 5) __all__
 # =====================================================================
 
 __all__ = [
