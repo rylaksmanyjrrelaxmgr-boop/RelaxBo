@@ -2,10 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.20 - Forwarded Delete Fix)
-=====================================================================
+handlers_message.py - معالجات الرسائل (v7.9.21 - Forward Origin Full Support)
+=============================================================================
+🆕 v7.9.21 (FORWARD-ORIGIN-FULL):
+    ✅ دعم كامل لأنواع ForwardOrigin الأربعة (User/HiddenUser/Chat/Channel)
+    ✅ دالة is_forwarded() موحّدة وآمنة لكل الإصدارات
+    ✅ دالة extract_forward_info() لاستخراج معلومات موحّدة من الإعادة
+    ✅ دالة _extract_legacy_forward_info() للحقول القديمة
+    ✅ logging تشخيصي مفصّل بنوع المصدر ومعرّفه واسمه
+    ✅ دالة _notify_admin_about_forward() اختيارية لتنبيه المشرف
+    ✅ توافق كامل مع Bot API 7.0+ و < 7.0 بدون كسر
+
 🆕 v7.9.20 (FORWARDED-DELETE-FIX):
-    ✅ إصلاح: حذف الرسائل المُعاد توجيهها يعمل الآن في كل الحالات
+    ✅ إصلاح: حذف الرسائل المُعاد توجيهها يعمل في كل الحالات
     ✅ فحص شامل: forward_origin + forward_date + forward_from
                    + forward_from_chat + forward_sender_name
     ✅ logging تشخيصي 🎯 عند كل حذف لمتابعة السلوك
@@ -66,6 +75,25 @@ try:
 except ImportError:
     logging.getLogger(__name__).warning("⚠️ replies.py not found")
     analyze_sentiment = None
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.9.21: استيراد أنواع MessageOrigin (Bot API 7.0+)
+# ═══════════════════════════════════════════════════════════════════
+try:
+    from telegram import (
+        MessageOriginUser,
+        MessageOriginHiddenUser,
+        MessageOriginChat,
+        MessageOriginChannel,
+    )
+    _HAS_MESSAGE_ORIGIN = True
+except ImportError:
+    MessageOriginUser = None
+    MessageOriginHiddenUser = None
+    MessageOriginChat = None
+    MessageOriginChannel = None
+    _HAS_MESSAGE_ORIGIN = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +294,213 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
             return True
         logger.warning(f"delete failed: {e}")
         return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.9.21: أدوات كشف الرسائل المُعاد توجيهها
+# ═══════════════════════════════════════════════════════════════════
+
+def is_forwarded(message) -> bool:
+    """
+    ✅ v7.9.21: فحص شامل وآمن لأي رسالة معاد توجيهها.
+
+    يغطّي:
+      • Bot API 7.0+  → message.forward_origin
+      • Bot API < 7.0 → forward_from / forward_from_chat
+                        / forward_sender_name / forward_date
+    """
+    if message is None:
+        return False
+    return (
+        getattr(message, 'forward_origin', None) is not None
+        or getattr(message, 'forward_date', None) is not None
+        or getattr(message, 'forward_from', None) is not None
+        or getattr(message, 'forward_from_chat', None) is not None
+        or getattr(message, 'forward_sender_name', None) is not None
+    )
+
+
+def _extract_legacy_forward_info(message) -> Optional[Dict[str, Any]]:
+    """
+    ✅ v7.9.21: استخراج معلومات الإعادة بالحقول القديمة (Bot API < 7.0).
+    """
+    try:
+        fwd_from = getattr(message, 'forward_from', None)
+        fwd_from_chat = getattr(message, 'forward_from_chat', None)
+        fwd_sender_name = getattr(message, 'forward_sender_name', None)
+        fwd_date = getattr(message, 'forward_date', None)
+        fwd_signature = getattr(message, 'forward_signature', None)
+
+        if fwd_from is not None:
+            full_name = ""
+            try:
+                full_name = (getattr(fwd_from, 'full_name', None)
+                             or getattr(fwd_from, 'first_name', None)
+                             or "")
+            except Exception:
+                full_name = ""
+            return {
+                'type': 'user',
+                'id': getattr(fwd_from, 'id', None),
+                'name': full_name or str(getattr(fwd_from, 'id', 'User')),
+                'date': fwd_date,
+                'signature': None,
+                'message_id': None,
+            }
+
+        if fwd_from_chat is not None:
+            chat_type = getattr(fwd_from_chat, 'type', '') or ''
+            is_channel = chat_type == 'channel'
+            return {
+                'type': 'channel' if is_channel else 'chat',
+                'id': getattr(fwd_from_chat, 'id', None),
+                'name': (getattr(fwd_from_chat, 'title', None)
+                         or getattr(fwd_from_chat, 'username', None)
+                         or str(getattr(fwd_from_chat, 'id', 'Chat'))),
+                'date': fwd_date,
+                'signature': fwd_signature,
+                'message_id': None,
+            }
+
+        if fwd_sender_name:
+            return {
+                'type': 'hidden_user',
+                'id': None,
+                'name': str(fwd_sender_name),
+                'date': fwd_date,
+                'signature': None,
+                'message_id': None,
+            }
+    except Exception as e:
+        logger.debug(f"_extract_legacy_forward_info: {e}")
+
+    return None
+
+
+def extract_forward_info(message) -> Optional[Dict[str, Any]]:
+    """
+    ✅ v7.9.21: يستخرج معلومات موحّدة من رسالة معاد توجيهها.
+    يعمل مع Bot API 7.0+ والقديم معاً.
+
+    Returns dict:
+        {
+          'type': 'user' | 'hidden_user' | 'chat' | 'channel' | 'legacy',
+          'id': int | None,
+          'name': str,
+          'date': datetime | None,
+          'signature': str | None,
+          'message_id': int | None,
+        }
+    أو None إذا لم تكن الرسالة معاد توجيهها.
+    """
+    if message is None:
+        return None
+
+    origin = getattr(message, 'forward_origin', None)
+
+    if origin is not None and _HAS_MESSAGE_ORIGIN:
+        try:
+            # 1) معاد من مستخدم
+            if isinstance(origin, MessageOriginUser):
+                u = origin.sender_user
+                name = ""
+                try:
+                    name = (getattr(u, 'full_name', None)
+                            or getattr(u, 'first_name', None)
+                            or str(getattr(u, 'id', 'User')))
+                except Exception:
+                    name = str(getattr(u, 'id', 'User'))
+                return {
+                    'type': 'user',
+                    'id': getattr(u, 'id', None),
+                    'name': name,
+                    'date': getattr(origin, 'date', None),
+                    'signature': None,
+                    'message_id': None,
+                }
+
+            # 2) معاد من مستخدم مخفي
+            if isinstance(origin, MessageOriginHiddenUser):
+                return {
+                    'type': 'hidden_user',
+                    'id': None,
+                    'name': (getattr(origin, 'sender_user_name', None)
+                             or 'Hidden'),
+                    'date': getattr(origin, 'date', None),
+                    'signature': None,
+                    'message_id': None,
+                }
+
+            # 3) معاد من مجموعة
+            if isinstance(origin, MessageOriginChat):
+                c = origin.sender_chat
+                return {
+                    'type': 'chat',
+                    'id': getattr(c, 'id', None),
+                    'name': (getattr(c, 'title', None)
+                             or getattr(c, 'username', None)
+                             or str(getattr(c, 'id', 'Chat'))),
+                    'date': getattr(origin, 'date', None),
+                    'signature': getattr(origin, 'author_signature', None),
+                    'message_id': None,
+                }
+
+            # 4) معاد من قناة
+            if isinstance(origin, MessageOriginChannel):
+                c = origin.chat
+                return {
+                    'type': 'channel',
+                    'id': getattr(c, 'id', None),
+                    'name': (getattr(c, 'title', None)
+                             or getattr(c, 'username', None)
+                             or str(getattr(c, 'id', 'Channel'))),
+                    'date': getattr(origin, 'date', None),
+                    'signature': getattr(origin, 'author_signature', None),
+                    'message_id': getattr(origin, 'message_id', None),
+                }
+        except Exception as e:
+            logger.debug(f"extract_forward_info(origin): {e}")
+
+    # Fallback: الحقول القديمة
+    return _extract_legacy_forward_info(message)
+
+
+async def _notify_admin_about_forward(context, admin_id: int, info: Dict[str, Any]) -> None:
+    """
+    ✅ v7.9.21: يرسل تنبيهاً اختيارياً لمشرف بمصدر رسالة معاد توجيهها.
+    لا يفشل أبداً — يتجاهل الأخطاء بصمت.
+    """
+    if not info or not admin_id:
+        return
+    try:
+        type_labels = {
+            'user': '👤 مستخدم',
+            'hidden_user': '👻 مستخدم مخفي',
+            'chat': '👥 مجموعة',
+            'channel': '📢 قناة',
+        }
+        label = type_labels.get(info.get('type', ''), f"❔ {info.get('type')}")
+
+        lines = ["↩️ <b>رسالة معاد توجيهها</b>", ""]
+        lines.append(f"📌 النوع: {label}")
+        if info.get('id'):
+            lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
+        if info.get('name'):
+            lines.append(f"📛 الاسم: {escape(str(info['name']))}")
+        if info.get('signature'):
+            lines.append(f"✍️ التوقيع: {escape(str(info['signature']))}")
+        if info.get('message_id'):
+            lines.append(f"🔢 رقم الرسالة الأصلية: <code>{info['message_id']}</code>")
+        if info.get('date'):
+            lines.append(f"📅 تاريخ الإعادة: <code>{info['date']}</code>")
+
+        await safe_send(
+            context.bot, admin_id,
+            "\n".join(lines),
+            parse_mode='HTML',
+        )
+    except Exception as e:
+        logger.debug(f"_notify_admin_about_forward: {e}")
 
 
 # =====================================================================
@@ -1237,7 +1472,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # رسائل المجموعات — ✅ v7.9.20: الإصلاح الجديد
+    # رسائل المجموعات — ✅ v7.9.21: الإصلاح الجديد
     # =================================================================
 
     @staticmethod
@@ -1296,30 +1531,35 @@ class MessageHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # ✅ v7.9.20 (FIX): فحص شامل للرسائل المُعاد توجيهها
+        # ✅ v7.9.21 (FULL SUPPORT): فحص شامل للرسائل المُعاد توجيهها
+        #    يدعم MessageOriginUser / HiddenUser / Chat / Channel
+        #    + الحقول القديمة كاحتياط
         # ═══════════════════════════════════════════════════════════════
         if settings.get('delete_forwarded'):
-            _is_fwd = (
-                getattr(message, 'forward_origin', None) is not None
-                or getattr(message, 'forward_date', None) is not None
-                or getattr(message, 'forward_from', None) is not None
-                or getattr(message, 'forward_from_chat', None) is not None
-                or getattr(message, 'forward_sender_name', None) is not None
-            )
-            if _is_fwd:
+            if is_forwarded(message):
                 try:
-                    fwd_from = (
-                        getattr(message, 'forward_from_chat', None)
-                        or getattr(message, 'forward_from', None)
+                    info = extract_forward_info(message)
+                    if info:
+                        logger.info(
+                            f"🎯 v7.9.21: حذف رسالة معاد توجيهها | "
+                            f"chat={chat_id} user={user_id} "
+                            f"type={info.get('type')} "
+                            f"from_id={info.get('id')} "
+                            f"from_name={info.get('name')!r} "
+                            f"orig_msg_id={info.get('message_id')} "
+                            f"orig_date={info.get('date')}"
+                        )
+                    else:
+                        logger.info(
+                            f"🎯 v7.9.21: حذف رسالة معاد (نوع غير معروف) | "
+                            f"chat={chat_id} user={user_id}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"🎯 v7.9.21: extract_forward_info فشل: {e}",
+                        exc_info=True,
                     )
-                    fwd_id = getattr(fwd_from, 'id', None) if fwd_from else None
-                    logger.info(
-                        f"🎯 v7.9.20: حذف رسالة معاد توجيهها | "
-                        f"chat={chat_id} user={user_id} "
-                        f"fwd_from={fwd_id}"
-                    )
-                except Exception:
-                    pass
+
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "forwarded", settings)
                 return
@@ -3403,4 +3643,9 @@ __all__ = [
     "apply_violation_penalty",
     "_verify_bot_in_log_channel",
     "_notify_dev_log",
+    # 🆕 v7.9.21
+    "is_forwarded",
+    "extract_forward_info",
+    "_extract_legacy_forward_info",
+    "_notify_admin_about_forward",
 ]
