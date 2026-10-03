@@ -2,8 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.1.0-final)
+handlers_membership.py - مراقبة إضافة/إزالة البوت (v1.2.0-final)
 =====================================================================
+🆕 v1.2.0-final — إصلاح PostgreSQL (AUTOINCREMENT → SERIAL):
+    ✅ FIX-4: استخدام SQL صحيح لكل قاعدة بيانات
+              (SQLite: AUTOINCREMENT, PG: BIGSERIAL, MySQL: AUTO_INCREMENT)
+    ✅ FIX-5: الاعتماد على database_tables.py لإنشاء الجدول
+              (إنشاء الجدول من database_tables.py أصبح المسار الأساسي)
+    ✅ FIX-6: _ensure_table_exists أصبحت no-op لـ PostgreSQL/MySQL
+              (لأن database_tables.py تولّى المسؤولية)
+    ✅ FIX-7: الإبقاء على الإنشاء لـ SQLite فقط (للتوافق)
+
 🆕 v1.1.0-final — إصلاح قناة السجل:
     ✅ FIX-1: استخدام قناة السجل الخاصة بالمجموعة أولاً
               (fallback للقناة العامة) — يتوافق مع سلوك
@@ -74,12 +83,62 @@ _table_created: bool = False
 
 async def _ensure_table_exists() -> None:
     """
-    ✅ v1.0.1: إنشاء جدول bot_addition_log مرة واحدة فقط.
+    ✅ v1.2.0 (FIX-4 + FIX-5 + FIX-6 + FIX-7): إنشاء جدول bot_addition_log.
+
+    ملاحظة مهمة:
+      - PostgreSQL/MySQL: الجدول يُنشأ تلقائياً من database_tables.py
+        → نتحقق فقط من وجوده (بدون إنشاء) — no-op تقريباً
+      - SQLite: نُبقيه كـ fallback (للتوافق مع البيئات القديمة)
+
+    هذا يمنع خطأ AUTOINCREMENT على PostgreSQL نهائياً.
     """
     global _table_created
     if _table_created:
         return
+
     try:
+        # ═══════════════════════════════════════════════════════════
+        # ✅ FIX-6: PostgreSQL/MySQL — الاعتماد على database_tables.py
+        # ═══════════════════════════════════════════════════════════
+        if getattr(DB, 'USE_POSTGRES', False) or \
+           getattr(DB, 'USE_MYSQL', False):
+            # التحقق فقط من وجود الجدول
+            try:
+                if getattr(DB, 'USE_POSTGRES', False):
+                    exists = await DB.fetchval(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = 'bot_addition_log' "
+                        "AND table_schema = current_schema()"
+                    )
+                else:  # MySQL
+                    exists = await DB.fetchval(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = 'bot_addition_log' "
+                        "AND table_schema = DATABASE()"
+                    )
+
+                if exists:
+                    _table_created = True
+                    logger.debug(
+                        "✅ جدول bot_addition_log موجود "
+                        "(مُنشأ من database_tables.py)")
+                    return
+                else:
+                    logger.warning(
+                        "⚠️ bot_addition_log غير موجود على "
+                        f"{'PostgreSQL' if getattr(DB, 'USE_POSTGRES', False) else 'MySQL'} "
+                        "— تأكد من رفع database_tables.py المُصحَّح")
+                    # لا نُنشئ هنا — نتركها لـ database_tables.py
+                    # نُعلّم كـ "فشل مؤقت" حتى نحاول مرة أخرى
+                    return
+            except Exception as e:
+                logger.debug(
+                    f"_ensure_table_exists check failed: {e}")
+                return
+
+        # ═══════════════════════════════════════════════════════════
+        # ✅ FIX-7: SQLite — الإنشاء المحلي (للتوافق)
+        # ═══════════════════════════════════════════════════════════
         await DB.execute(
             "CREATE TABLE IF NOT EXISTS bot_addition_log ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -95,7 +154,8 @@ async def _ensure_table_exists() -> None:
             ")"
         )
         _table_created = True
-        logger.debug("✅ جدول bot_addition_log جاهز")
+        logger.debug("✅ جدول bot_addition_log جاهز (SQLite)")
+
     except Exception as e:
         logger.debug(
             f"_ensure_table_exists: {type(e).__name__}: {e}")
@@ -281,9 +341,11 @@ async def _save_addition_to_db(
 ) -> bool:
     """
     حفظ حدث الإضافة في قاعدة البيانات.
+
+    ✅ v1.2.0: يعتمد على database_tables.py لإنشاء الجدول.
     """
     try:
-        # ✅ v1.0.1: إنشاء الجدول مرة واحدة
+        # ✅ v1.0.1: إنشاء الجدول مرة واحدة (no-op لـ PG/MySQL)
         await _ensure_table_exists()
 
         await DB.execute(
@@ -705,7 +767,7 @@ __all__ = [
     "register_handlers",
     "_should_send",
     "_prune_recent_reports",
-    "_get_effective_log_channel",   # ✅ v1.1.0: دالة جديدة
+    "_get_effective_log_channel",
     "_save_addition_to_db",
     "_ensure_table_exists",
     "_build_report_text",
