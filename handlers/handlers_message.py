@@ -2,8 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.21 - Forward Origin Full Support)
+handlers_message.py - معالجات الرسائل (v7.9.22 - Forward Notify Integration)
 =============================================================================
+🆕 v7.9.22 (FORWARD-NOTIFY-INTEGRATION):
+    ✅ FN-1: استدعاء _notify_admin_about_forward بعد حذف رسالة معاد توجيهها
+             - يُرسل للمالك PRIMARY_OWNER_ID فقط
+             - في الخلفية (non-blocking) — لا يحجب معالجة الرسالة
+             - لا يفشل أبداً (fallback صامت)
+    ✅ FN-2: cooldown 5 دقائق لكل مجموعة (يمنع إغراق المالك)
+    ✅ FN-3: استخراج forward_info BEFORE الحذف (أمان أكبر)
+
 🆕 v7.9.21 (FORWARD-ORIGIN-FULL):
     ✅ دعم كامل لأنواع ForwardOrigin الأربعة (User/HiddenUser/Chat/Channel)
     ✅ دالة is_forwarded() موحّدة وآمنة لكل الإصدارات
@@ -155,6 +163,9 @@ MAX_GROUP_LIMITERS_CACHE = 1000
 MAX_SEC_AUTH_CACHE_SIZE = 5000
 SEC_AUTH_CACHE_TTL = 300
 CACHE_CLEANUP_INTERVAL = 3600
+
+# ✅ v7.9.22: cooldown لإشعارات الإعادة (5 دقائق)
+_FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
@@ -503,6 +514,34 @@ async def _notify_admin_about_forward(context, admin_id: int, info: Dict[str, An
         logger.debug(f"_notify_admin_about_forward: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.9.22: cooldown لإشعارات الإعادة (تفادي إغراق المالك)
+# ═══════════════════════════════════════════════════════════════════
+
+def _should_notify_forward(context, chat_id: int) -> bool:
+    """
+    ✅ v7.9.22: يُحدّد ما إذا كان يجب إرسال إشعار إعادة لـ chat_id.
+
+    يستخدم cooldown لمدة _FORWARD_NOTIFY_COOLDOWN_SECONDS لكل مجموعة.
+    الهدف: منع إغراق المالك عند قيام مستخدم بإعادة توجيه رسائل كثيرة.
+    """
+    try:
+        bot_data = getattr(context, 'bot_data', None)
+        if not isinstance(bot_data, dict):
+            return False
+        key = f"_forward_notify_{chat_id}"
+        now = time.monotonic()
+        last = bot_data.get(key, 0.0)
+        if not isinstance(last, (int, float)):
+            last = 0.0
+        if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
+            return False
+        bot_data[key] = now
+        return True
+    except Exception:
+        return False
+
+
 # =====================================================================
 # 🆕 v7.9.12: تحديث أوامر الأدمن (lazy import — لا circular)
 # =====================================================================
@@ -651,7 +690,6 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
     return default or key
 
 
-# ✅ v7.9.10: _fmt مُصلَح — اسم البارامتر template بدل text
 def _fmt(template: str, **kwargs) -> str:
     try:
         return template.format(**kwargs)
@@ -1472,7 +1510,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # رسائل المجموعات — ✅ v7.9.21: الإصلاح الجديد
+    # رسائل المجموعات — ✅ v7.9.22: استدعاء الإشعار + cooldown
     # =================================================================
 
     @staticmethod
@@ -1531,7 +1569,7 @@ class MessageHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # ✅ v7.9.21 (FULL SUPPORT): فحص شامل للرسائل المُعاد توجيهها
+        # ✅ v7.9.21: فحص شامل للرسائل المُعاد توجيهها
         #    يدعم MessageOriginUser / HiddenUser / Chat / Channel
         #    + الحقول القديمة كاحتياط
         # ═══════════════════════════════════════════════════════════════
@@ -1625,6 +1663,19 @@ class MessageHandlers:
                                 violation_type, settings):
         lang = await _ensure_lang(update, context)
 
+        # ═══════════════════════════════════════════════════════════════
+        # ✅ v7.9.22: استخراج معلومات الإعادة BEFORE حذف الرسالة
+        #    (أمان أكبر: الرسالة الأصلية لا تزال موجودة عند الاستخراج)
+        # ═══════════════════════════════════════════════════════════════
+        forward_info: Optional[Dict[str, Any]] = None
+        if violation_type == 'forwarded':
+            try:
+                _msg_pre = update.effective_message
+                if _msg_pre is not None:
+                    forward_info = extract_forward_info(_msg_pre)
+            except Exception as e:
+                logger.debug(f"extract_forward_info (pre-delete): {e}")
+
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
@@ -1632,6 +1683,33 @@ class MessageHandlers:
         except Exception as e:
             if not _is_delete_ignore_error(e):
                 logger.warning(f"delete failed: {e}")
+
+        # ═══════════════════════════════════════════════════════════════
+        # ✅ v7.9.22: إشعار المالك عن مصدر الرسالة المعاد توجيهها
+        #    - في الخلفية (non-blocking)
+        #    - cooldown 5 دقائق لكل chat_id (تفادي إغراق المالك)
+        #    - لا يفشل أبداً
+        # ═══════════════════════════════════════════════════════════════
+        if forward_info and _should_notify_forward(context, chat_id):
+            try:
+                owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+                if owner_id:
+                    _notify_task = asyncio.create_task(
+                        _notify_admin_about_forward(context, owner_id, forward_info)
+                    )
+                    # مهمة تشخيصية — لا نضيفها إلى ACTIVE_TASKS
+                    _notify_task.add_done_callback(
+                        lambda t: (
+                            t.exception() if not t.cancelled()
+                            else None
+                        )
+                    )
+                    logger.debug(
+                        f"↩️ forward notify spawned "
+                        f"(chat={chat_id}, owner={owner_id})"
+                    )
+            except Exception as e:
+                logger.debug(f"forward notify spawn: {e}")
 
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
@@ -2425,9 +2503,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_global_ban_input(update, context):
-        """
-        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         word = (update.effective_message.text or "").strip().lower()
@@ -2463,9 +2538,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_group_ban_input(update, context):
-        """
-        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('ban_chat')
@@ -3648,4 +3720,6 @@ __all__ = [
     "extract_forward_info",
     "_extract_legacy_forward_info",
     "_notify_admin_about_forward",
+    # 🆕 v7.9.22
+    "_should_notify_forward",
 ]
