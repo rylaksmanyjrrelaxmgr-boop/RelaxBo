@@ -2,15 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.22 - Forward Notify Integration)
+handlers_message.py - معالجات الرسائل (v7.9.23 - Language + Safety Fixes)
 =============================================================================
+🆕 v7.9.23 (LANG + SAFETY FIXES):
+    ✅ FIX-1 (CRITICAL): _handle_penalty_input يمرّر lang لـ apply_penalty
+             - كان يستخدم 'ar' دائماً بغض النظر عن لغة المستخدم
+             - يؤثر على أزرار act_ban/mute/warn/kick/restrict/unban
+    ✅ FIX-2: _notify_dev_log — تخفيض logging من INFO إلى DEBUG
+             - كان يطبع 4 سطور INFO عند كل استدعاء (إغراق السجل)
+    ✅ FIX-3: handle_group — فحص effective_user قبل الاستخدام
+             - حماية دفاعية ضد channel posts / anonymous admins
+    ✅ FIX-4: try/except حول unpacking في add_banned_word
+             - منع انهيار صامت عند تغيير التوقيع مستقبلاً
+
 🆕 v7.9.22 (FORWARD-NOTIFY-INTEGRATION):
     ✅ FN-1: استدعاء _notify_admin_about_forward بعد حذف رسالة معاد توجيهها
-             - يُرسل للمالك PRIMARY_OWNER_ID فقط
-             - في الخلفية (non-blocking) — لا يحجب معالجة الرسالة
-             - لا يفشل أبداً (fallback صامت)
-    ✅ FN-2: cooldown 5 دقائق لكل مجموعة (يمنع إغراق المالك)
-    ✅ FN-3: استخراج forward_info BEFORE الحذف (أمان أكبر)
+    ✅ FN-2: cooldown 5 دقائق لكل مجموعة
+    ✅ FN-3: استخراج forward_info BEFORE الحذف
 
 🆕 v7.9.21 (FORWARD-ORIGIN-FULL):
     ✅ دعم كامل لأنواع ForwardOrigin الأربعة (User/HiddenUser/Chat/Channel)
@@ -19,14 +27,8 @@ handlers_message.py - معالجات الرسائل (v7.9.22 - Forward Notify In
     ✅ دالة _extract_legacy_forward_info() للحقول القديمة
     ✅ logging تشخيصي مفصّل بنوع المصدر ومعرّفه واسمه
     ✅ دالة _notify_admin_about_forward() اختيارية لتنبيه المشرف
-    ✅ توافق كامل مع Bot API 7.0+ و < 7.0 بدون كسر
 
-🆕 v7.9.20 (FORWARDED-DELETE-FIX):
-    ✅ إصلاح: حذف الرسائل المُعاد توجيهها يعمل في كل الحالات
-    ✅ فحص شامل: forward_origin + forward_date + forward_from
-                   + forward_from_chat + forward_sender_name
-    ✅ logging تشخيصي 🎯 عند كل حذف لمتابعة السلوك
-
+🆕 v7.9.20 (FORWARDED-DELETE-FIX)
 🆕 v7.9.19 (DEV LOG DIAGNOSTIC)
 🆕 v7.9.18 (DEV LOG DIAGNOSTIC)
 🆕 v7.9.17 (إشعار قناة سجل المطور)
@@ -186,7 +188,8 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # =====================================================================
-# ✅ v7.9.18: إشعار قناة سجل المطور (مع تتبّع تشخيصي 🔔)
+# ✅ v7.9.18: إشعار قناة سجل المطور
+# ✅ v7.9.23 (FIX-2): logging من INFO إلى DEBUG
 # =====================================================================
 
 async def _notify_dev_log(context, text: str) -> None:
@@ -194,22 +197,20 @@ async def _notify_dev_log(context, text: str) -> None:
     ✅ v7.9.17: يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
     لا يفشل أبداً — يتجاهل الأخطاء بصمت.
 
-    ✅ v7.9.18: أُضيف تتبّع تشخيصي كامل (علامة 🔔).
+    ✅ v7.9.23 (FIX-2): logging من INFO → DEBUG (كان يُغرق السجل).
     """
-    logger.info("🔔 _notify_dev_log CALLED (from message handler)")
-
     try:
         log_ch = await DB.get_log_channel()
 
-        logger.info(f"🔔 log_ch from DB = {log_ch!r}")
+        logger.debug(f"🔔 log_ch from DB = {log_ch!r}")
 
         if not log_ch:
-            logger.warning("🔔 log_ch EMPTY → abort")
+            logger.debug("🔔 log_ch EMPTY → abort")
             return
 
         ch_str = str(log_ch).strip()
         if not ch_str:
-            logger.warning("🔔 log_ch is whitespace → abort")
+            logger.debug("🔔 log_ch is whitespace → abort")
             return
 
         if ch_str.lstrip('-').isdigit():
@@ -224,7 +225,7 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
-        logger.info(f"🔔 target = {target!r} → sending...")
+        logger.debug(f"🔔 target = {target!r} → sending...")
 
         await context.bot.send_message(
             chat_id=target,
@@ -233,7 +234,7 @@ async def _notify_dev_log(context, text: str) -> None:
             disable_web_page_preview=True,
         )
 
-        logger.info(f"🔔 _notify_dev_log SUCCESS → {target}")
+        logger.debug(f"🔔 _notify_dev_log SUCCESS → {target}")
 
     except Exception as e:
         logger.warning(
@@ -1510,13 +1511,18 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # رسائل المجموعات — ✅ v7.9.22: استدعاء الإشعار + cooldown
+    # رسائل المجموعات — ✅ v7.9.23: فحص effective_user
     # =================================================================
 
     @staticmethod
     async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat or not update.effective_message:
             return
+
+        # ✅ v7.9.23 (FIX-3): حماية دفاعية ضد channel posts / anonymous
+        if not update.effective_user:
+            return
+
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         message = update.effective_message
@@ -1697,7 +1703,6 @@ class MessageHandlers:
                     _notify_task = asyncio.create_task(
                         _notify_admin_about_forward(context, owner_id, forward_info)
                     )
-                    # مهمة تشخيصية — لا نضيفها إلى ACTIVE_TASKS
                     _notify_task.add_done_callback(
                         lambda t: (
                             t.exception() if not t.cancelled()
@@ -2499,14 +2504,34 @@ class MessageHandlers:
 
     # =================================================================
     # الكلمات المحظورة
+    # ✅ v7.9.23 (FIX-4): try/except حول unpacking
     # =================================================================
 
     @staticmethod
     async def _handle_global_ban_input(update, context):
+        """
+        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
+        ✅ v7.9.23 (FIX-4): try/except حول unpacking.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         word = (update.effective_message.text or "").strip().lower()
-        success, duplicate = await DB.add_banned_word(word, -1, user_id)
+
+        # ✅ FIX-4: unpacking آمن
+        try:
+            result = await DB.add_banned_word(word, -1, user_id)
+            if isinstance(result, tuple) and len(result) >= 2:
+                success, duplicate = bool(result[0]), bool(result[1])
+            else:
+                success = bool(result)
+                duplicate = False
+        except Exception as e:
+            logger.error(
+                f"❌ add_banned_word (global) exception: {e}",
+                exc_info=True,
+            )
+            success, duplicate = False, False
+
         if success:
             invalidate_banned_words_cache(-1)
             msg = _fmt(await _trans('word_added', lang, "✅ {word}"),
@@ -2538,6 +2563,10 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_group_ban_input(update, context):
+        """
+        ✅ v7.9.19: logging تشخيصي عند فشل الإضافة.
+        ✅ v7.9.23 (FIX-4): try/except حول unpacking.
+        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('ban_chat')
@@ -2547,7 +2576,22 @@ class MessageHandlers:
             StateManager.clear(user_id)
             return
         word = (update.effective_message.text or "").strip().lower()
-        success, duplicate = await DB.add_banned_word(word, chat_id, user_id)
+
+        # ✅ FIX-4: unpacking آمن
+        try:
+            result = await DB.add_banned_word(word, chat_id, user_id)
+            if isinstance(result, tuple) and len(result) >= 2:
+                success, duplicate = bool(result[0]), bool(result[1])
+            else:
+                success = bool(result)
+                duplicate = False
+        except Exception as e:
+            logger.error(
+                f"❌ add_banned_word (group) exception: {e}",
+                exc_info=True,
+            )
+            success, duplicate = False, False
+
         if success:
             invalidate_banned_words_cache(chat_id)
             msg = _fmt(await _trans('word_added', lang, "✅ {word}"),
@@ -3270,6 +3314,7 @@ class MessageHandlers:
         await MessageHandlers._handle_penalty_input(
             update, context, 'unban', needs_duration=False)
 
+    # ✅ v7.9.23 (FIX-1): تمرير lang إلى apply_penalty
     @staticmethod
     async def _handle_penalty_input(update, context, action, needs_duration):
         user_id = update.effective_user.id
@@ -3309,8 +3354,10 @@ class MessageHandlers:
             if duration < 0:
                 raise ValueError("negative duration")
 
+            # ✅ v7.9.23 (FIX-1): تمرير lang
             success, msg = await apply_penalty(
-                context.bot, chat_id, target, action, duration, "", user_id)
+                context.bot, chat_id, target, action, duration, "", user_id,
+                lang=lang)
             await safe_send(context.bot, user_id, msg if success else f"❌ {msg}")
         except ValueError:
             msg = await _trans('invalid_format', lang, "❌")
@@ -3715,11 +3762,11 @@ __all__ = [
     "apply_violation_penalty",
     "_verify_bot_in_log_channel",
     "_notify_dev_log",
-    # 🆕 v7.9.21
+    # v7.9.21
     "is_forwarded",
     "extract_forward_info",
     "_extract_legacy_forward_info",
     "_notify_admin_about_forward",
-    # 🆕 v7.9.22
+    # v7.9.22
     "_should_notify_forward",
 ]
