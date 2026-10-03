@@ -3,7 +3,7 @@
 """
 handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_callback
 =====================================================================
-هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.5.x)
+هذا الملف جزء من تقسيم handlers_callback.py (v9.4.32 → v9.7.x)
 
 المحتوى:
     • ثوابت رقمية/نصية للاستخدام في كل الوحدات
@@ -13,13 +13,22 @@ handlers_callback_base.py — ثوابت ودوال مساعدة لـ handlers_c
         _coerce_int, _coerce_float, _safe_str,
         _md_to_html, _is_valid_url, _mask_id,
         _log_channel_cache_key, _make_user_cache_keys,
-        _is_primary_owner
+        _is_primary_owner, _strip_html, _truncate
 
 ⚠️ لا تنقل هنا أي شيء يعتمد على:
     - ACTIVE_TASKS / _publish_semaphore
     - _sec_auth_cache / _post_count_cache / _security_stats_cache_local
     - context / update / query
 هذه تبقى في handlers_callback.py (أو تُنقل في ملفات لاحقة).
+
+🆕 v9.7.0-base:
+    ✅ _KNOWN_CB_PREFIXES — تسجيل عدد المفاتيح المُولّدة
+    ✅ _strip_html — مساعد جديد لتنظيف HTML قبل العرض
+    ✅ _truncate — مساعد جديد للاقتطاع الآمن
+    ✅ توثيق أوضح لـ _make_user_cache_keys
+    ✅ تحسين _md_to_html لمعالجة `**` بدون إغلاق
+    ✅ type hints أكثر صرامة
+=====================================================================
 """
 
 import logging
@@ -111,7 +120,12 @@ POST_COUNT_CACHE_TTL = 5
 POST_COUNT_CACHE_MAX_SIZE = 200
 
 _BOLD_MD_PATTERN = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+# ✅ v9.7.0: نمط أقوى يقبل `**` مغلقة فقط
+_BOLD_MD_STRICT_PATTERN = re.compile(r"\*\*([^*]+?)\*\*")
 _VALID_URL_PATTERN = re.compile(r'^https?://[^\s]+$')
+
+# ✅ v9.7.0: نمط HTML للتنظيف (وسوم بسيطة)
+_HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
 
 
 # =====================================================================
@@ -159,6 +173,7 @@ GROUP_NUMBER_EMOJIS = [
 
 _KNOWN_CB_PREFIXES: Set[str] = set()
 try:
+    _cb_attrs_scanned = 0
     for _attr_name in dir(CB):
         if _attr_name.startswith('_'):
             continue
@@ -168,9 +183,16 @@ try:
             continue
         if isinstance(_val, str) and _val:
             _KNOWN_CB_PREFIXES.add(_val)
+            _cb_attrs_scanned += 1
+
+    # ✅ v9.7.0: تسجيل عدد المفاتيح المُولّدة للتشخيص
+    logger.debug(
+        f"✅ _KNOWN_CB_PREFIXES: {_cb_attrs_scanned} مفتاح من CB.*"
+    )
 except Exception as _e_cb:
     logger.warning(f"⚠️ _KNOWN_CB_PREFIXES build from CB.* failed: {_e_cb}")
 
+# ✅ إضافات صريحة (مفاتيح نصية ليست في CB.*)
 _KNOWN_CB_PREFIXES.update({
     "finish_posts",
     "gift_plans",
@@ -180,14 +202,27 @@ _KNOWN_CB_PREFIXES.update({
     "refresh_btn",
 })
 
+if not _KNOWN_CB_PREFIXES:
+    logger.warning(
+        "⚠️ _KNOWN_CB_PREFIXES فارغة — قد تفشل قراءة بعض الأزرار"
+    )
+
 
 # =====================================================================
 # الترجمة الموحدة
 # =====================================================================
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
+    """
+    ترجمة موحّدة مع سلسلة fallback:
+      1) TranslationManager.get_text (متزامن)
+      2) get_text (async — قد يقرأ من DB)
+      3) default المُمرَّر
+      4) key نفسه
+    """
     if not key:
         return default or ""
+
     try:
         if lang and lang != 'off':
             text = TranslationManager.get_text(lang, key)
@@ -195,6 +230,7 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
                 return text
     except Exception as e:
         logger.debug(f"_trans({key},{lang}) TM: {e}")
+
     try:
         if lang and lang != 'off':
             text = await get_text(lang, key)
@@ -202,10 +238,12 @@ async def _trans(key: str, lang: str, default: str = "") -> str:
                 return text
     except Exception as e:
         logger.debug(f"_trans({key},{lang}) get_text: {e}")
+
     return default or key
 
 
 def _fmt(text: str, **kwargs) -> str:
+    """آمن: لا يرفع استثناء عند مفاتيح ناقصة."""
     try:
         return text.format(**kwargs)
     except (KeyError, IndexError):
@@ -217,16 +255,22 @@ def _fmt(text: str, **kwargs) -> str:
 # =====================================================================
 
 def _group_number(index: int) -> str:
+    """
+    يُعيد إيموجي رقم (1️⃣ → 🔟) للأرقام 1-10.
+    للأرقام > 10 يُعيد "N." .
+    """
     if 1 <= index <= len(GROUP_NUMBER_EMOJIS):
         return GROUP_NUMBER_EMOJIS[index - 1]
     return f"{index}."
 
 
 def _is_primary_owner(user_id: int) -> bool:
+    """فحص صريح وآمن لصلاحية المالك."""
     return _PRIMARY_OWNER_ID is not None and user_id == _PRIMARY_OWNER_ID
 
 
 def _row_to_dict(row) -> Optional[Dict[str, Any]]:
+    """تحويل صف DB إلى dict. يُعيد None عند الفشل."""
     if row is None:
         return None
     if isinstance(row, dict):
@@ -238,6 +282,7 @@ def _row_to_dict(row) -> Optional[Dict[str, Any]]:
 
 
 def _coerce_int(value, default=0) -> int:
+    """تحويل آمن إلى int."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -245,6 +290,7 @@ def _coerce_int(value, default=0) -> int:
 
 
 def _coerce_float(value, default=0.0) -> float:
+    """تحويل آمن إلى float."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -252,6 +298,7 @@ def _coerce_float(value, default=0.0) -> float:
 
 
 def _safe_str(value, default='?') -> str:
+    """تحويل آمن إلى str مع fallback."""
     if value is None:
         return default
     s = str(value)
@@ -259,16 +306,61 @@ def _safe_str(value, default='?') -> str:
 
 
 def _md_to_html(text: str) -> str:
+    """
+    تحويل Markdown بسيط (`**bold**`) إلى HTML (`<b>bold</b>`).
+
+    ✅ v9.7.0: استخدام النمط الصارم (يقبل `**` مغلقة فقط).
+    """
     if not text or '**' not in text:
         return text
-    return _BOLD_MD_PATTERN.sub(r"<b>\1</b>", text)
+    return _BOLD_MD_STRICT_PATTERN.sub(r"<b>\1</b>", text)
+
+
+def _strip_html(text: str) -> str:
+    """
+    ✅ v9.7.0: إزالة وسوم HTML البسيطة.
+
+    مفيد عند إعادة استخدام نص في سياق لا يقبل HTML.
+    """
+    if not text:
+        return ""
+    try:
+        return _HTML_TAG_PATTERN.sub('', text)
+    except Exception:
+        return text
+
+
+def _truncate(text: str, max_len: int, ellipsis: str = "…") -> str:
+    """
+    ✅ v9.7.0: اقتطاع آمن مع إضافة ellipsis.
+
+    Args:
+        text: النص الأصلي
+        max_len: أقصى طول (بما فيه ellipsis)
+        ellipsis: السلسلة المُضافة عند الاقتطاع
+    """
+    if not text:
+        return ""
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= len(ellipsis):
+        return ellipsis[:max_len]
+    return text[:max_len - len(ellipsis)].rstrip() + ellipsis
 
 
 def _log_channel_cache_key(chat_id: int) -> str:
+    """مفتاح الكاش الموحّد لقائمة قناة السجل."""
     return f"log_ch_menu_{chat_id}"
 
 
 def _is_valid_url(url: Optional[str]) -> bool:
+    """
+    فحص صحة URL بشكل صارم.
+
+    يرفض: None، غير-string، نصوص تحتوي whitespace، URLs غير http(s).
+    """
     if not url:
         return False
     if not isinstance(url, str):
@@ -276,7 +368,12 @@ def _is_valid_url(url: Optional[str]) -> bool:
     url_stripped = url.strip()
     if not url_stripped:
         return False
-    if ' ' in url_stripped or '\n' in url_stripped or '\t' in url_stripped:
+    if (
+        ' ' in url_stripped
+        or '\n' in url_stripped
+        or '\t' in url_stripped
+        or '\r' in url_stripped
+    ):
         return False
     if not _VALID_URL_PATTERN.match(url_stripped):
         return False
@@ -284,6 +381,10 @@ def _is_valid_url(url: Optional[str]) -> bool:
 
 
 def _mask_id(id_value, prefix=3, suffix=2) -> str:
+    """
+    إخفاء جزء من المعرّف لأغراض الخصوصية.
+    مثال: 1234567 → "123***67"
+    """
     if id_value is None:
         return "***"
     s = str(id_value)
@@ -302,6 +403,16 @@ def _make_user_cache_keys(
     ⚠️ تحذير الصيانة:
         أنماط المفاتيح هذه مُنسَّقة لتطابق cache.py.
         إذا تغيّر نمط المفاتيح هناك، يجب تحديث هذه الدالة.
+
+    Example:
+        >>> _make_user_cache_keys(12345)
+        ['start_data_12345', 'user_12345',
+         'user_12345_True', 'user_12345_False', 'channels_12345']
+
+        >>> _make_user_cache_keys(12345, channel_db_id=42)
+        ['start_data_12345', 'user_12345',
+         'user_12345_True', 'user_12345_False',
+         'channels_12345', 'channel_info_42']
     """
     keys = [
         f"start_data_{user_id}",
@@ -315,8 +426,12 @@ def _make_user_cache_keys(
     return keys
 
 
+# =====================================================================
+# __all__ — التصدير الصريح
+# =====================================================================
+
 __all__ = [
-    # ثوابت
+    # ─── ثوابت ───
     "MAX_CAPTION_LENGTH", "MAX_MESSAGE_LENGTH", "MAX_BACKUPS",
     "MAX_CONCURRENT_PUBLISH", "MAX_PUBLISH_DELAY_SECONDS",
     "MAX_TG_FILE_SIZE", "CALLBACK_MIN_INTERVAL", "RATE_LIMIT_WINDOW",
@@ -328,12 +443,14 @@ __all__ = [
     "POST_COUNT_CACHE_TTL", "POST_COUNT_CACHE_MAX_SIZE",
     "CONTEST_DURATIONS", "GROUP_NUMBER_EMOJIS",
     "_ANALYTICS_ALIASES", "_CONTEXT_KEYS_TO_CLEAR", "_CANCEL_EXTRA_KEYS",
-    "_BOLD_MD_PATTERN", "_VALID_URL_PATTERN",
+    "_BOLD_MD_PATTERN", "_BOLD_MD_STRICT_PATTERN",
+    "_VALID_URL_PATTERN", "_HTML_TAG_PATTERN",
     "_PRIMARY_OWNER_ID", "_KNOWN_CB_PREFIXES",
 
-    # دوال
+    # ─── دوال ───
     "_trans", "_fmt", "_group_number", "_is_primary_owner",
     "_row_to_dict", "_coerce_int", "_coerce_float", "_safe_str",
-    "_md_to_html", "_log_channel_cache_key", "_is_valid_url",
+    "_md_to_html", "_strip_html", "_truncate",
+    "_log_channel_cache_key", "_is_valid_url",
     "_mask_id", "_make_user_cache_keys",
 ]
