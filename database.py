@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.47 — DEV-LOG-CHANNEL)
+database.py - قاعدة البيانات المتكاملة (v7.7.48 — PG-NO-MV-FALLBACK-FIX)
 ================================================================================
-🆕 v7.7.47 (DEV-LOG-CHANNEL — قناة سجل المطور المنفصلة):
-  ✅ ADD-1: get_dev_log_channel() — قراءة قناة المطور المنفصلة
-  ✅ ADD-2: set_dev_log_channel(value) — حفظ/حذف قناة المطور
-  ✅ المفتاح: settings.dev_log_channel
-  ✅ عند عدم تعيينها → _notify_dev_log يتراجع للقناة العامة
+🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX):
+  ✅ FIX-1: get_channels_to_publish — إصلاح race condition خطير
+       - المشكلة: قبل bootstrap، _mv_available=False → يقع في فرع
+                  USE_MYSQL (False) → ثم else (SQLite branch) → يُرسل
+                  استعلام SQLite بـ CTEs إلى PostgreSQL
+       - الأعراض: استعلام بطيء 4.54s في كل إقلاع (قبل تفعيل MV)
+       - الإصلاح: فرع PG مُستقل، يستخدم CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
+                  عند عدم توفر MV (fallback حقيقي بدون CTEs ثقيلة)
 
+  ✅ FIX-2: _get_secondary_indexes — إزالة فهرسين deprecated
+       - المشكلة: database_tables.py يحذفهما (DEPRECATED_INDEXES)،
+                  ثم هذا الملف يعيد إنشاءهما بعد commit
+       - الأعراض: 🧹 "حُذف فهرس قديم idx_user_penalties_active_end"
+                  ثم "⏭️ تنفيذ 6 فهرس مؤجل" → إعادة إنشائه
+       - الإصلاح: إزالتهما من القائمة — الاتساق مع database_tables.py
+
+🆕 v7.7.47 (DEV-LOG-CHANNEL — قناة سجل المطور المنفصلة)
 🆕 v7.7.46 (SECONDARY-INDEXES-FIX)
 🆕 v7.7.45 (MIGRATIONS-EXTRACT)
 🆕 v7.7.44 (CACHES-EXTRACT)
@@ -204,6 +215,7 @@ except ImportError as e:
 
 # =====================================================================
 # 🆕 v7.7.43: RefactorMixin — استيراد بحماية
+# 🆕 v7.7.48: إضافة CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
 # =====================================================================
 
 try:
@@ -215,6 +227,8 @@ try:
         EXPIRED_PENALTIES_BATCH as _R_EXPIRED_PENALTIES_BATCH,
         PENALTY_ARCHIVE_RETENTION_DAYS as _R_PENALTY_ARCHIVE_RETENTION_DAYS,
         CHANNELS_TO_PUBLISH_SQL_PG as _R_CHANNELS_TO_PUBLISH_SQL_PG,
+        # ✅ v7.7.48: fallback حقيقي بدون MV (يُستخدم قبل bootstrap)
+        CHANNELS_TO_PUBLISH_SQL_PG_NO_MV as _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
         CHANNELS_TO_PUBLISH_SQL_MYSQL as _R_CHANNELS_TO_PUBLISH_SQL_MYSQL,
         CHANNELS_TO_PUBLISH_SQL_SQLITE as _R_CHANNELS_TO_PUBLISH_SQL_SQLITE,
     )
@@ -233,6 +247,7 @@ except ImportError as _re:
     _R_EXPIRED_PENALTIES_BATCH = None
     _R_PENALTY_ARCHIVE_RETENTION_DAYS = None
     _R_CHANNELS_TO_PUBLISH_SQL_PG = None
+    _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV = None   # ✅ v7.7.48
     _R_CHANNELS_TO_PUBLISH_SQL_MYSQL = None
     _R_CHANNELS_TO_PUBLISH_SQL_SQLITE = None
     REFACTOR_MIXIN_AVAILABLE = False
@@ -1854,7 +1869,6 @@ class Database(
             self._recovering_pool = False
             self._autovacuum_tuned = False
 
-            # ✅ v7.7.46-ADD-ONLY: flagان جديدان
             self._in_bootstrap_tx = False
             self._pending_secondary_indexes: List[Tuple[str, str, str]] = []
 
@@ -2005,12 +2019,6 @@ class Database(
     # ═══════════════════════════════════════════════════════════════
 
     async def get_dev_log_channel(self) -> str:
-        """
-        جلب معرّف قناة سجل المطور.
-
-        Returns:
-            معرّف القناة (str)، أو '' إن لم تُعيَّن.
-        """
         try:
             if hasattr(self, 'get_setting'):
                 value = await self.get_setting(
@@ -2038,15 +2046,6 @@ class Database(
         return ''
 
     async def set_dev_log_channel(self, value: str) -> bool:
-        """
-        تعيين قناة سجل المطور.
-
-        Args:
-            value: معرّف القناة أو '' للإزالة.
-
-        Returns:
-            True عند النجاح.
-        """
         value = (value or '').strip()
         try:
             async with self.transaction() as conn:
@@ -4667,15 +4666,19 @@ class Database(
             logger.error(f"❌ auto_replies: {e}", exc_info=True)
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
+        """
+        ✅ v7.7.48: إزالة فهرسين deprecated كانا يُحذفان من
+                    database_tables.py ثم يُعاد إنشاؤهما هنا:
+          - idx_user_penalties_active_end
+          - idx_posts_channel_created
+
+        الفهارس المتبقية مكملة (غير موجودة في COMMON_INDEXES):
+          - idx_user_penalties_user_status  (prefix للفهرس الأكبر)
+          - idx_auto_replies_chat_keyword   (مكرر بلا is_active)
+          - idx_user_violations_user_chat
+          - idx_posts_channel_published_partial
+        """
         return [
-            (
-                "user_penalties",
-                "idx_user_penalties_active_end",
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-                "idx_user_penalties_active_end "
-                "ON user_penalties(status, end_time) "
-                "WHERE status = 'active'",
-            ),
             (
                 "user_penalties",
                 "idx_user_penalties_user_status",
@@ -4696,13 +4699,6 @@ class Database(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
                 "idx_user_violations_user_chat "
                 "ON user_violations(user_id, chat_id)",
-            ),
-            (
-                "posts",
-                "idx_posts_channel_created",
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-                "idx_posts_channel_created "
-                "ON posts(channel_db_id, created_at)",
             ),
             (
                 "posts",
@@ -4976,9 +4972,6 @@ class Database(
                 )
             logger.info(f"✅ ترحيل في {elapsed:.2f}s")
 
-        # v7.7.42: استدعاء _create_secondary_indexes
-        # v7.7.46-ADD-ONLY: هذه الدالة ستكتشف _in_bootstrap_tx=True
-        #                   وتؤجل تلقائياً لبعد commit
         try:
             secondary_indexes = self._get_secondary_indexes()
             if secondary_indexes:
@@ -5016,7 +5009,6 @@ class Database(
             try:
                 await self.initialize()
 
-                # ✅ v7.7.46-ADD-ONLY: ضبط flag قبل المرحلة 1
                 self._in_bootstrap_tx = True
                 try:
                     if USE_POSTGRES:
@@ -5029,10 +5021,8 @@ class Database(
                         async with self.connection() as conn:
                             await self._do_bootstrap_inner(conn)
                 finally:
-                    # ✅ v7.7.46-ADD-ONLY: رفع flag بعد المرحلة 1
                     self._in_bootstrap_tx = False
 
-                # ✅ v7.7.46-ADD-ONLY: تنفيذ الفهارس المؤجلة بعد commit
                 if USE_POSTGRES and self._pending_secondary_indexes:
                     try:
                         pending = self._pending_secondary_indexes
@@ -6323,28 +6313,68 @@ class Database(
             logger.error(f"❌ update_last_publish: {e}")
             return False
 
+    # ═════════════════════════════════════════════════════════════════
+    # ✅ v7.7.48: get_channels_to_publish — إصلاح race condition
+    # ═════════════════════════════════════════════════════════════════
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
+        """
+        جلب القنوات الجاهزة للنشر.
+
+        ✅ v7.7.48: إصلاح خطير —
+          - قبل bootstrap: _mv_available=False
+          - كان الكود يسقط إلى فرع else (SQLite) ويُرسل استعلام
+            SQLite بـ CTEs إلى PostgreSQL → 4.5s
+          - الإصلاح: فرع PostgreSQL مُستقل يستخدم
+            CHANNELS_TO_PUBLISH_SQL_PG_NO_MV عند غياب MV.
+        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
-        if USE_POSTGRES and self._mv_available:
-            now_mono = time.monotonic()
-            if (now_mono - self._mv_last_refresh_mono
-                    >= self._mv_refresh_cooldown):
-                try:
-                    self._spawn_bg_task(self._maybe_refresh_mv())
-                except Exception as e:
-                    logger.debug(f"MV refresh spawn: {e}")
+        # ═══ PostgreSQL ═══
+        if USE_POSTGRES:
+            # جدولة refresh الـ MV في الخلفية (لا يحجب)
+            if self._mv_available:
+                now_mono = time.monotonic()
+                if (now_mono - self._mv_last_refresh_mono
+                        >= self._mv_refresh_cooldown):
+                    try:
+                        self._spawn_bg_task(self._maybe_refresh_mv())
+                    except Exception as e:
+                        logger.debug(f"MV refresh spawn: {e}")
 
-        if USE_POSTGRES and self._mv_available:
-            if _R_CHANNELS_TO_PUBLISH_SQL_PG is not None:
-                query = _R_CHANNELS_TO_PUBLISH_SQL_PG
-            else:
-                query = _get_pg_query_fallback()
-            return await self.fetchall(query, (owner_id, now, limit))
+            # Fast path: MV جاهز → استعلام محسّن يستخدمه
+            if self._mv_available:
+                if _R_CHANNELS_TO_PUBLISH_SQL_PG is not None:
+                    query = _R_CHANNELS_TO_PUBLISH_SQL_PG
+                else:
+                    query = _get_pg_query_fallback()
+                return await self.fetchall(
+                    query, (owner_id, now, limit)
+                )
 
+            # ✅ FIX v7.7.48: fallback حقيقي بدون MV — لا نسقط إلى SQLite
+            if _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV is not None:
+                logger.debug(
+                    "ℹ️ PG: MV غير جاهز — استخدام PG_NO_MV fallback"
+                )
+                return await self.fetchall(
+                    _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
+                    (now, owner_id, now, limit),
+                )
+
+            # آخر حل: _get_pg_query_fallback (يحتاج MV — سيفشل إن لم يوجد)
+            logger.warning(
+                "⚠️ PG: PG_NO_MV غير متاح — استخدام "
+                "_get_pg_query_fallback (يفترض MV موجود)"
+            )
+            return await self.fetchall(
+                _get_pg_query_fallback(),
+                (owner_id, now, limit),
+            )
+
+        # ═══ MySQL ═══
         elif USE_MYSQL:
             now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             if _R_CHANNELS_TO_PUBLISH_SQL_MYSQL is not None:
@@ -6356,6 +6386,7 @@ class Database(
                 (now_str, owner_id, now_str, limit),
             )
 
+        # ═══ SQLite ═══
         else:
             if _R_CHANNELS_TO_PUBLISH_SQL_SQLITE is not None:
                 query = _R_CHANNELS_TO_PUBLISH_SQL_SQLITE
