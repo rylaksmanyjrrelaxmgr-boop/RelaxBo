@@ -2,36 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.24)
+database_tables.py — إنشاء الجداول والفهارس لكل قواعد البيانات (v7.6.25)
 ================================================================================
-🚀 v7.6.24 (SOFT-DELETE-COLUMNS):
-  ✅ CURRENT_SCHEMA_VERSION: 22 → 23
-       - السبب: إضافة عمودي Soft Delete لجدول user_channels:
-            • removed_at      (TIMESTAMP/TEXT/DATETIME) — وقت الإزالة
-            • removal_reason  (TEXT/VARCHAR)             — سبب الإزالة
-       - الإصلاح: migration تلقائي يُضيف الأعمدة للقواعد القديمة
-       - الاستخدام:
-            • chat_member.py v1.3.0 → soft_delete (وسم)
-            • handlers_membership.py v1.3.0 → استرجاع
-            • main.py v5.5.22 → تنظيف دوري (كل 24h)
+🆕 v7.6.25 (MIGRATION-ORDER-FIX):
+  ✅ FIX-CRITICAL: إعادة ترتيب الـ migrations
+       - المشكلة: _create_indexes_* كان يُشغَّل قبل _migrate_missing_columns_*
+       - الأعراض: asyncpg.exceptions.InFailedSQLTransactionError
+                  current transaction is aborted
+       - السبب: CREATE INDEX على removed_at (غير موجود بعد) → transaction aborted
+       - الإصلاح: تشغيل _migrate_missing_columns_* أولاً
+       - السيناريو: عند ترقية v22 → v23 على قاعدة موجودة
 
-  ✅ EXPECTED_INDEX_COUNT: 73 → 74
-       - إضافة idx_user_channels_removed_at
-         (partial index لتحسين الاستعلام الدوري)
-       - CREATE INDEX ... WHERE removed_at IS NOT NULL
-       - ملاحظة: PostgreSQL + SQLite يدعمان partial indexes.
-                  MySQL لا يدعمها → نستخدم فهرس عادي.
-
-  ✅ Migration للأعمدة الجديدة:
-       - _USER_CHANNELS_NEW_COLUMNS: قائمة جديدة
-       - _migrate_missing_columns_sqlite/postgres/mysql: مُحدَّثة
-       - يضمن إضافة الأعمدة للقواعد الحالية (بدون فقدان بيانات)
-
-🚀 v7.6.23 (BOT-ADDITION-LOG-FIX):
-  ✅ CURRENT_SCHEMA_VERSION: 21 → 22
-  ✅ جدول bot_addition_log (كان مفقوداً)
-  ✅ EXPECTED_INDEX_COUNT: 72 → 73
-
+🚀 v7.6.24 (SOFT-DELETE-COLUMNS)
+🚀 v7.6.23 (BOT-ADDITION-LOG-FIX)
 🚀 v7.6.22 (CONTEST-QUIZ-COLUMNS)
 🚀 v7.6.21 (FORCE-BOOTSTRAP-RERUN)
 🚀 v7.6.20 (FORCE-DEPRECATED-INDEX-DROP + ADMIN_LOGS-MAX-ROWS)
@@ -60,29 +43,21 @@ from datetime import datetime, timezone, timedelta
 # 0. ثوابت
 # =====================================================================
 
-# ✅ v7.6.24: 22 → 23 (إضافة أعمدة Soft Delete)
+# ✅ v7.6.24: 22 → 23
 CURRENT_SCHEMA_VERSION = 23
 
-# ✅ v7.6.10: معرّفات بوتات تليجرام الرسمية
 CLEANUP_ANONYMOUS_BOT_IDS = (1087968824, 136817688)
 
-# ✅ v7.6.12: فاصل VACUUM التلقائي (24 ساعة)
 MAINTENANCE_INTERVAL_SECONDS = 86400
 
-# ✅ v7.6.13: فاصل بين عمليات VACUUM لكل جدول
 VACUUM_INTER_TABLE_DELAY_SECONDS = 0.5
 
-# ✅ v7.6.20: تنظيف admin_logs بعد 30 يوماً
 ADMIN_LOGS_RETENTION_DAYS = 30
 
-# ✅ v7.6.20: حد أقصى لعدد الصفوف في admin_logs
 ADMIN_LOGS_MAX_ROWS = 5000
 
-# ✅ v7.6.24: فترة سماح Soft Delete (بالأيام)
-# يُستخدم من main.py v5.5.22 لتنظيف القنوات المُزالة
 REMOVED_CHANNELS_GRACE_DAYS = 30
 
-# ✅ v7.6.12: الجداول التي تحتاج VACUUM دوري
 MAINTENANCE_TABLES = (
     "posts",
     "auto_replies",
@@ -94,7 +69,6 @@ MAINTENANCE_TABLES = (
     "admin_logs",
 )
 
-# ✅ v7.6.19: جداول صغيرة تحتاج autovacuum عدواني
 SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "auto_replies",
     "auto_reply_settings",
@@ -117,7 +91,6 @@ SMALL_TABLES_FOR_AGGRESSIVE_AUTOVACUUM = (
     "schedule",
     "user_reminder_settings",
     "support_tickets",
-    # ✅ v7.6.24: bot_addition_log
     "bot_addition_log",
 )
 
@@ -128,16 +101,13 @@ DEFAULT_SETTINGS = (
     ("last_backup", ""),
 )
 
-# ✅ v7.6.24: 73 → 74 (فهرس removed_at)
 EXPECTED_INDEX_COUNT = 74
 
-# ✅ v7.6.14: فهارس تُتخطى على MySQL
 MYSQL_SKIP_INDEXES = frozenset({
     "idx_penalties_active_id",
 })
 
 COMMON_INDEXES = [
-    # ═══ USERS (6) ═══
     ("users", "idx_users_banned", "users(banned)"),
     ("users", "idx_users_active_channel", "users(active_channel)"),
     ("users", "idx_users_auto_publish_banned", "users(auto_publish, banned)"),
@@ -145,7 +115,6 @@ COMMON_INDEXES = [
     ("users", "idx_users_subscription_end", "users(subscription_end)"),
     ("users", "idx_users_auto_recycle", "users(auto_recycle)"),
 
-    # ═══ USER_CHANNELS (4) ═══
     ("user_channels", "idx_uc_user", "user_channels(user_id)"),
     ("user_channels", "idx_user_channels_user_created",
      "user_channels(user_id, created_at DESC)"),
@@ -154,7 +123,6 @@ COMMON_INDEXES = [
     ("user_channels", "idx_user_channels_banned_user",
      "user_channels(banned, user_id)"),
 
-    # ═══ POSTS (4) ═══
     ("posts", "idx_posts_text_hash", "posts(text_hash)"),
     ("posts", "idx_posts_channel_pub_fail_created",
      "posts(channel_db_id, published, fail_count, created_at)"),
@@ -164,7 +132,6 @@ COMMON_INDEXES = [
      "posts(channel_db_id, id) WHERE published = 0 "
      "AND (fail_count IS NULL OR fail_count < 3)"),
 
-    # ═══ BOT_GROUPS (4) ═══
     ("bot_groups", "idx_groups_banned", "bot_groups(banned)"),
     ("bot_groups", "idx_bot_groups_added_by", "bot_groups(added_by)"),
     ("bot_groups", "idx_bot_groups_log_channel",
@@ -172,29 +139,24 @@ COMMON_INDEXES = [
     ("bot_groups", "idx_bot_groups_banned_cover",
      "bot_groups(banned) INCLUDE (chat_id, chat_name, username)"),
 
-    # ═══ USER_GROUPS_LINK (1) ═══
     ("user_groups_link", "idx_user_groups_link_user_id",
      "user_groups_link(user_id)"),
 
-    # ═══ GROUP_ADMINS (2) ═══
     ("group_admins", "idx_group_admins_user_id",
      "group_admins(user_id)"),
     ("group_admins", "idx_group_admins_user_chat",
      "group_admins(user_id, chat_id)"),
 
-    # ═══ HIDDEN_OWNER_GROUPS (2) ═══
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_id",
      "hidden_owner_groups(owner_id)"),
     ("hidden_owner_groups", "idx_hidden_owner_groups_owner_chat",
      "hidden_owner_groups(owner_id, chat_id)"),
 
-    # ═══ HIDDEN_ADMINS (2) ═══
     ("hidden_admins", "idx_hidden_admins_admin_id",
      "hidden_admins(admin_id)"),
     ("hidden_admins", "idx_hidden_admins_admin_chat",
      "hidden_admins(admin_id, chat_id)"),
 
-    # ═══ ANONYMOUS_ADMINS (4) ═══
     ("anonymous_admins", "idx_anonymous_admins_user_id",
      "anonymous_admins(user_id)"),
     ("anonymous_admins", "idx_anonymous_admins_anonymous_id",
@@ -204,12 +166,10 @@ COMMON_INDEXES = [
     ("anonymous_admins", "idx_anon_anon_chat",
      "anonymous_admins(anonymous_id, chat_id)"),
 
-    # ═══ BANNED_WORDS (2) ═══
     ("banned_words", "idx_banned_words_chat", "banned_words(chat_id)"),
     ("banned_words", "idx_banned_words_chat_word",
      "banned_words(chat_id, word)"),
 
-    # ═══ AUTO_REPLIES (6) ═══
     ("auto_replies", "idx_ar_chat", "auto_replies(chat_id)"),
     ("auto_replies", "idx_auto_replies_lookup",
      "auto_replies(chat_id, keyword, is_active)"),
@@ -222,13 +182,11 @@ COMMON_INDEXES = [
     ("auto_replies", "idx_auto_replies_active_keyword",
      "auto_replies(is_active, keyword, chat_id)"),
 
-    # ═══ SCHEDULE (2) ═══
     ("schedule", "idx_schedule_next_publish",
      "schedule(next_publish_date)"),
     ("schedule", "idx_schedule_channel_next",
      "schedule(channel_db_id, next_publish_date)"),
 
-    # ═══ SUBSCRIPTIONS (5) ═══
     ("subscriptions", "idx_sub_user", "subscriptions(user_id)"),
     ("subscriptions", "idx_sub_status", "subscriptions(status)"),
     ("subscriptions", "idx_sub_end", "subscriptions(end_date)"),
@@ -237,32 +195,25 @@ COMMON_INDEXES = [
     ("subscriptions", "idx_subscriptions_user_status_end",
      "subscriptions(user_id, status, end_date)"),
 
-    # ═══ INVOICES (1) ═══
     ("invoices", "idx_inv_user", "invoices(user_id)"),
 
-    # ═══ REFERRALS (2) ═══
     ("referrals", "idx_referrals_referrer", "referrals(referrer_id)"),
     ("referrals", "idx_referrals_referrer_created",
      "referrals(referrer_id, created_at DESC)"),
 
-    # ═══ REFERRAL_REWARDS (1) ═══
     ("referral_rewards", "idx_referral_rewards_count",
      "referral_rewards(referral_count)"),
 
-    # ═══ CONTESTS (2) ═══
     ("contests", "idx_contests_status", "contests(status)"),
     ("contests", "idx_contests_status_end",
      "contests(status, end_date)"),
 
-    # ═══ CONTEST_PARTICIPANTS (1) ═══
     ("contest_participants", "idx_contest_participants_contest",
      "contest_participants(contest_id)"),
 
-    # ═══ GIFT_CODES (1) ═══
     ("gift_codes", "idx_gift_codes_plan",
      "gift_codes(plan_id)"),
 
-    # ═══ USER_PENALTIES (6) ═══
     ("user_penalties", "idx_penalties_user",
      "user_penalties(user_id)"),
     ("user_penalties", "idx_penalties_chat",
@@ -277,65 +228,50 @@ COMMON_INDEXES = [
      "user_penalties(id) WHERE status = 'active' "
      "AND end_time IS NOT NULL"),
 
-    # ═══ USER_POINTS (2) ═══
     ("user_points", "idx_points_user", "user_points(user_id)"),
     ("user_points", "idx_user_points_value", "user_points(points DESC)"),
 
-    # ═══ SUPPORT_TICKETS (2) ═══
     ("support_tickets", "idx_tickets_status",
      "support_tickets(status)"),
     ("support_tickets", "idx_tickets_status_created",
      "support_tickets(status, created_at DESC)"),
 
-    # ═══ PAYMENT_LOGS (1) ═══
     ("payment_logs", "idx_payment_logs_user", "payment_logs(user_id)"),
 
-    # ═══ ADMIN_LOGS (1) ═══
     ("admin_logs", "idx_admin_logs_chat",
      "admin_logs(chat_id, id DESC)"),
 
-    # ═══ PENALTY_ARCHIVE (1) ═══
     ("penalty_archive", "idx_penalty_archive_archived",
      "penalty_archive(archived_at)"),
 
-    # ═══ SENTIMENT_HISTORY (2) ═══
     ("sentiment_history", "idx_sentiment_user_chat",
      "sentiment_history(user_id, chat_id)"),
     ("sentiment_history", "idx_sentiment_created",
      "sentiment_history(created_at)"),
 
-    # ═══ USER_MESSAGES (1) ═══
     ("user_messages", "idx_user_messages_chat",
      "user_messages(chat_id)"),
 
-    # ═══ SCHEDULED_POSTS (1) ═══
     ("scheduled_posts", "idx_scheduled_posts_time",
      "scheduled_posts(publish_time)"),
 
-    # ═══ USER_REMINDER_SETTINGS (1) ═══
     ("user_reminder_settings", "idx_reminder_subscription",
      "user_reminder_settings(subscription_reminder)"),
 
-    # ═══ USER_VIOLATIONS (1) ═══
     ("user_violations", "idx_user_violations_chat",
      "user_violations(chat_id)"),
 
-    # ═══ USER_WARNINGS (1) ═══
     ("user_warnings", "idx_user_warnings_chat",
      "user_warnings(chat_id)"),
 
-    # ═══ BOT_ADDITION_LOG (1) — ✅ v7.6.23 ═══
     ("bot_addition_log", "idx_bot_addition_log_chat",
      "bot_addition_log(chat_id, added_at DESC)"),
 
-    # ═══ USER_CHANNELS SOFT DELETE (1) — ✅ v7.6.24 ═══
-    # Partial index يُسرّع استعلام التنظيف في main.py v5.5.22
     ("user_channels", "idx_user_channels_removed_at",
      "user_channels(removed_at) WHERE removed_at IS NOT NULL"),
 ]
 
 DEPRECATED_INDEXES = [
-    # ═══ POSTS ═══
     "idx_posts_channel",
     "idx_posts_published",
     "idx_posts_channel_published",
@@ -347,17 +283,14 @@ DEPRECATED_INDEXES = [
     "idx_posts_fail_count", "idx_posts_channel_created",
     "idx_posts_channel_fail",
 
-    # ═══ SUBSCRIPTIONS ═══
     "idx_sub_user_status_end", "idx_subscriptions_active",
     "idx_subscriptions_active_end",
 
-    # ═══ USER_CHANNELS ═══
     "idx_user_channels_user_banned_only",
     "idx_user_channels_user_banned_id",
     "idx_user_channels_id_user", "idx_uc_user_banned",
     "idx_uc_channel_id", "idx_uc_active",
 
-    # ═══ USER_PENALTIES ═══
     "idx_penalties_user_chat_status", "idx_penalties_user_chat",
     "idx_user_penalties_active_end", "idx_user_penalties_expiry",
     "idx_user_penalties_cleanup", "idx_penalties_chat_status",
@@ -367,62 +300,44 @@ DEPRECATED_INDEXES = [
     "idx_security_chat",
     "idx_group_security_chat",
 
-    # ═══ BANNED_WORDS ═══
     "idx_banned_words_word",
 
-    # ═══ REMINDERS ═══
     "idx_reminders_subscription", "idx_reminders_user",
 
-    # ═══ ADMIN_LOGS ═══
     "idx_admin_logs_created", "idx_admin_logs_admin",
 
-    # ═══ ANONYMOUS_ADMINS ═══
     "idx_anonymous_admins_chat", "idx_anonymous_admins_user",
 
-    # ═══ HIDDEN_ADMINS ═══
     "idx_hidden_admin_admin",
 
-    # ═══ GROUP_ADMINS ═══
     "idx_group_admins_user", "idx_group_admins_chat",
 
-    # ═══ SCHEDULE ═══
     "idx_sched_next", "idx_schedule_next", "idx_schedule_next_channel",
 
-    # ═══ CONTEST_PARTICIPANTS ═══
     "idx_contest_participants_user",
 
-    # ═══ USERS ═══
     "idx_users_updated", "idx_users_trial_used",
     "idx_users_subscription", "idx_users_referral",
     "idx_users_banned_publish",
 
-    # ═══ REFERRALS ═══
     "idx_referrals_referred", "idx_referrals_created",
 
-    # ═══ CONTESTS ═══
     "idx_contests_end",
 
-    # ═══ HIDDEN_OWNER_GROUPS ═══
     "idx_hidden_owner_owner",
 
-    # ═══ SUPPORT_TICKETS ═══
     "idx_tickets_user", "idx_tickets_number",
 
-    # ═══ INVOICES ═══
     "idx_inv_status", "idx_inv_number",
 
-    # ═══ AUTO_REPLIES ═══
     "idx_auto_replies_keyword", "idx_ar_keyword",
 
-    # ═══ SETTINGS ═══
     "idx_settings_key",
 
-    # ═══ USER_VIOLATIONS / WARNINGS ═══
     "idx_user_violations_user",
     "idx_violations_user_chat",
     "idx_user_warnings_user",
 
-    # ═══ USER_GROUPS_LINK ═══
     "idx_ugl_user",
 ]
 
@@ -444,9 +359,7 @@ CRITICAL_INDEX_NAMES = frozenset({
     "idx_user_violations_chat",
     "idx_user_warnings_chat",
     "idx_bot_groups_banned_cover",
-    # ✅ v7.6.23
     "idx_bot_addition_log_chat",
-    # ✅ v7.6.24
     "idx_user_channels_removed_at",
 })
 
@@ -560,8 +473,7 @@ def _is_advanced_index(cols: str) -> bool:
 
 
 # =====================================================================
-# ✅ v7.6.18/v7.6.20: تنظيف admin_logs القديمة + حد أقصى للصفوف
-# (يُستدعى أيضاً من main.py v5.5.21 دورياً)
+# تنظيف admin_logs
 # =====================================================================
 
 async def _cleanup_old_admin_logs_postgres(conn, logger):
@@ -773,7 +685,7 @@ async def _cleanup_old_admin_logs_mysql(conn, logger):
 
 
 # =====================================================================
-# ✅ v7.6.18: ضبط autovacuum للجداول الصغيرة
+# autovacuum
 # =====================================================================
 
 async def _tune_autovacuum_postgres(conn, logger):
@@ -1265,20 +1177,17 @@ async def _run_maintenance_mysql(conn, logger):
 # Migrations — إضافة أعمدة مفقودة
 # =====================================================================
 
-# ✅ v7.6.22: group_security
 _GROUP_SECURITY_NEW_COLUMNS = [
     ("violation_penalty", "TEXT DEFAULT 'none'"),
     ("violation_penalty_duration", "INTEGER DEFAULT 3600"),
 ]
 
-# ✅ v7.6.22: contests
 _CONTESTS_NEW_COLUMNS = [
     ("contest_type", "TEXT DEFAULT 'raffle'"),
     ("question", "TEXT DEFAULT ''"),
     ("correct_answer", "TEXT DEFAULT ''"),
 ]
 
-# ✅ v7.6.24: user_channels — Soft Delete columns (SQLite)
 _USER_CHANNELS_NEW_COLUMNS = [
     ("removed_at", "TEXT DEFAULT NULL"),
     ("removal_reason", "TEXT DEFAULT NULL"),
@@ -1289,7 +1198,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
     checked = 0
     added = 0
 
-    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
         try:
@@ -1309,7 +1217,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
             if logger:
                 logger.debug(f"⚠️ SQLite migration {col_name}: {e}")
 
-    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1331,7 +1238,6 @@ async def _migrate_missing_columns_sqlite(conn, logger):
                     f"⚠️ SQLite migration contests.{col_name}: {e}"
                 )
 
-    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
     for col_name, col_def in _USER_CHANNELS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1364,7 +1270,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
     added = 0
     skipped = 0
 
-    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1392,7 +1297,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
             if logger:
                 logger.debug(f"⚠️ PG migration {col_name}: {e}")
 
-    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         try:
             exists = await conn.fetchval(
@@ -1422,8 +1326,6 @@ async def _migrate_missing_columns_postgres(conn, logger):
                     f"⚠️ PG migration contests.{col_name}: {e}"
                 )
 
-    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
-    # PostgreSQL يستخدم TIMESTAMP بدلاً من TEXT
     _pg_user_channels_cols = [
         ("removed_at", "TIMESTAMP DEFAULT NULL"),
         ("removal_reason", "TEXT DEFAULT NULL"),
@@ -1471,7 +1373,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
     added = 0
     skipped = 0
 
-    # ─── group_security ───
     for col_name, col_def in _GROUP_SECURITY_NEW_COLUMNS:
         checked += 1
         try:
@@ -1509,7 +1410,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
             if logger:
                 logger.debug(f"⚠️ MySQL migration {col_name}: {e}")
 
-    # ─── contests ───
     for col_name, col_def in _CONTESTS_NEW_COLUMNS:
         checked += 1
         try:
@@ -1549,8 +1449,6 @@ async def _migrate_missing_columns_mysql(conn, logger):
                     f"⚠️ MySQL migration contests.{col_name}: {e}"
                 )
 
-    # ─── user_channels (Soft Delete) — ✅ v7.6.24 ───
-    # MySQL يستخدم DATETIME + VARCHAR
     _mysql_user_channels_cols = [
         ("removed_at", "DATETIME DEFAULT NULL"),
         ("removal_reason", "VARCHAR(50) DEFAULT NULL"),
@@ -2428,12 +2326,13 @@ async def _create_indexes_mysql(conn, logger):
 async def create_tables_sqlite(conn, logger, TimeUtils):
     current = await _get_current_schema_version_sqlite(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.25 FIX: migrations أولاً
+        await _migrate_missing_columns_sqlite(conn, logger)
         await _verify_critical_indexes_sqlite(conn, logger)
         await _ensure_all_indexes_exist_sqlite(conn, logger)
         await _drop_deprecated_indexes_sqlite(conn, logger)
         await _cleanup_stale_links_sqlite(conn, logger)
         await _cleanup_old_admin_logs_sqlite(conn, logger)
-        await _migrate_missing_columns_sqlite(conn, logger)
         await _run_maintenance_sqlite(conn, logger)
         if logger:
             logger.info(
@@ -2467,7 +2366,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.24: user_channels + Soft Delete
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2727,7 +2625,6 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.23: bot_addition_log
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_addition_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3043,12 +2940,13 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.25 FIX: migrations أولاً (يضيف removed_at قبل الفهرس)
+    await _migrate_missing_columns_sqlite(conn, logger)
     await _drop_deprecated_indexes_sqlite(conn, logger)
     await _ensure_index_definitions_match_sqlite(conn, logger)
     await _create_indexes_sqlite(conn, logger)
     await _cleanup_stale_links_sqlite(conn, logger)
     await _cleanup_old_admin_logs_sqlite(conn, logger)
-    await _migrate_missing_columns_sqlite(conn, logger)
 
     try:
         await conn.execute(
@@ -3056,7 +2954,7 @@ async def create_tables_sqlite(conn, logger, TimeUtils):
             "(version, applied_at, description) "
             "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
             (CURRENT_SCHEMA_VERSION, _safe_now_iso(TimeUtils),
-             "v7.6.24-soft-delete-columns"),
+             "v7.6.25-migration-order-fix"),
         )
         await conn.commit()
     except Exception as e:
@@ -3078,6 +2976,8 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             logger.info(
                 f"⏩ PG fast-path: schema v{current} — بدء الفحوصات"
             )
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_postgres(conn, logger)
         await _verify_critical_indexes_postgres(conn, logger)
         await _ensure_all_indexes_exist_postgres(conn, logger)
         await _ensure_index_definitions_match_postgres(conn, logger)
@@ -3085,7 +2985,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         await _cleanup_stale_links_postgres(conn, logger)
         await _cleanup_old_admin_logs_postgres(conn, logger)
         await _tune_autovacuum_postgres(conn, logger)
-        await _migrate_missing_columns_postgres(conn, logger)
         await _quick_analyze_postgres(conn, logger)
         await _run_maintenance_postgres(conn, logger)
         if logger:
@@ -3120,7 +3019,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.24: user_channels + Soft Delete
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_channels (
             id SERIAL PRIMARY KEY,
@@ -3380,7 +3278,6 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
-    # ✅ v7.6.23: bot_addition_log (PostgreSQL)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS bot_addition_log (
             id BIGSERIAL PRIMARY KEY,
@@ -3700,13 +3597,14 @@ async def create_tables_postgres(conn, logger, TimeUtils):
         )
     """)
 
+    # ✅ v7.6.25 FIX: migrations FIRST (قبل الفهارس)
+    await _migrate_missing_columns_postgres(conn, logger)
     await _drop_deprecated_indexes_postgres(conn, logger)
     await _ensure_index_definitions_match_postgres(conn, logger)
     await _create_indexes_postgres(conn, logger)
     await _cleanup_stale_links_postgres(conn, logger)
     await _cleanup_old_admin_logs_postgres(conn, logger)
     await _tune_autovacuum_postgres(conn, logger)
-    await _migrate_missing_columns_postgres(conn, logger)
     await _quick_analyze_postgres(conn, logger)
 
     try:
@@ -3716,7 +3614,7 @@ async def create_tables_postgres(conn, logger, TimeUtils):
             "VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
             CURRENT_SCHEMA_VERSION,
             _safe_now_dt(TimeUtils),
-            "v7.6.24-soft-delete-columns",
+            "v7.6.25-migration-order-fix",
         )
     except Exception as e:
         if logger:
@@ -3733,13 +3631,14 @@ async def create_tables_postgres(conn, logger, TimeUtils):
 async def create_tables_mysql(conn, logger, TimeUtils):
     current = await _get_current_schema_version_mysql(conn)
     if current >= CURRENT_SCHEMA_VERSION:
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_mysql(conn, logger)
         await _verify_critical_indexes_mysql(conn, logger)
         await _ensure_all_indexes_exist_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _drop_deprecated_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
-        await _migrate_missing_columns_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
         await _run_maintenance_mysql(conn, logger)
         if logger:
@@ -3776,7 +3675,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.24: user_channels + Soft Delete
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_channels (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -4047,7 +3945,6 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
-        # ✅ v7.6.23: bot_addition_log (MySQL)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_addition_log (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -4363,12 +4260,13 @@ async def create_tables_mysql(conn, logger, TimeUtils):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
 
+        # ✅ v7.6.25 FIX: migrations FIRST
+        await _migrate_missing_columns_mysql(conn, logger)
         await _drop_deprecated_indexes_mysql(conn, logger)
         await _ensure_index_definitions_match_mysql(conn, logger)
         await _create_indexes_mysql(conn, logger)
         await _cleanup_stale_links_mysql(conn, logger)
         await _cleanup_old_admin_logs_mysql(conn, logger)
-        await _migrate_missing_columns_mysql(conn, logger)
         await _quick_analyze_mysql(conn, logger)
 
         try:
@@ -4379,7 +4277,7 @@ async def create_tables_mysql(conn, logger, TimeUtils):
                 (
                     CURRENT_SCHEMA_VERSION,
                     _safe_now_iso(TimeUtils),
-                    "v7.6.24-soft-delete-columns",
+                    "v7.6.25-migration-order-fix",
                 ),
             )
         except Exception as e:
