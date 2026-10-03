@@ -4,20 +4,37 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.3.0 — PARAMETER-BINDING FIX + THRESHOLD TUNING
+v6.4.0 — PARAMETER-BINDING HOTFIX + HTML-SAFE SPLIT + INDEX FALLBACK
 
-التحسينات على v6.2.0:
-    ✅ إصلاح جذري لتمرير المعاملات: IN ($1,$2,...) بدل ANY($1::text[])
-       - السبب: ANY($1::text[]) قد لا يعمل مع list في asyncpg على Aiven
-       - النتيجة: الجداول والفهارس تُكتشف بشكل صحيح
-    ✅ إصلاح pg_table_is_visible: استخدام pg_namespace + current_schemas(false)
-       - أكثر تسامحاً من pg_table_is_visible
-    ✅ عرض current_schemas(false) في التقرير للتشخيص
-    ✅ تعديل thresholds للجداول الصغيرة
-       - auto_replies (dead=51): لم يعد حرجاً
-       - critical يتطلب dead ≥ 100
-    ✅ فحص مزدوج (fallback) لـ pg_class و pg_indexes
-    ✅ دالة _build_in_clause مساعدة
+التحسينات على v6.3.0:
+    🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً
+       - المشكلة: DB.fetchall("...> $1...", LONG_TX_WARN_SECONDS)
+                  كان يُمرِّر int (وليس tuple) → TypeError
+                  عند *p في Database._fetchall_with_conn
+       - الأثر: long transactions و idle-in-transaction لم تُرصد أبداً
+       - الحل: (_safe_params(LONG_TX_WARN_SECONDS))
+       - إضافة helper _safe_params في هذا الملف أيضاً (defense in depth)
+
+    🆕 fallback ثانٍ حقيقي لـ _get_indexes:
+       - المسار الأول: pg_indexes (المُفضَّل)
+       - المسار الثاني: pg_class + pg_index (fallback فعلي)
+       - السبب: بعض إعدادات Aiven تتقيّد على pg_indexes تحت RLS محددة
+
+    🆕 _get_per_table_autovacuum: سبب واضح بدلاً من "غير مرئي"
+       - reason: not_found | not_in_schema | query_failed | ok
+       - التقرير يعرض سبباً دقيقاً بدلاً من تخمين مضلل
+
+    🆕 _split_for_telegram آمن لـ HTML:
+       - تتبع الوسوم المفتوحة عبر _get_open_html_tags
+       - إغلاقها في نهاية كل جزء وإعادة فتحها في بداية الجزء التالي
+       - يمنع BadRequest: can't parse entities
+
+    🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح في التقرير
+       - لا نُظهر جدول MySQL كـ "✅ صحّي" بسبب dead_tup=0 غير حقيقي
+
+    🆕 فحص تناسق MAINTENANCE_TABLES vs HEAVY_TABLES_FOR_AUTOVACUUM
+       - إذا users مفقود من MAINTENANCE_TABLES → تحذير
+         (VACUUM في database_tables لن يشمل users)
 
 المبادئ (محفوظة من v6.0.0):
     ✅ لا نخلط بين "الدليل" و"الاحتمال".
@@ -48,7 +65,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.3.0"
+VERSION = "6.4.0"
 
 
 # =============================================================================
@@ -61,16 +78,12 @@ DEAD_TUPLE_CRIT_PCT = 20.0
 DEAD_TUPLE_WARN_ABS = 1_000
 DEAD_TUPLE_CRIT_ABS = 10_000
 
-# 🆕 v6.3.0: عتبة أهمية الجدول
-# لا نُطلق critical على جدول إجمالي صفوفه < هذا الرقم
 MIN_TABLE_SIZE_FOR_ALERT = 200
 
-# 🆕 v6.3.0: للجداول الصغيرة (بين 200 و 500)، نحتاج dead أعلى للحرج
 SMALL_TABLE_THRESHOLD = 500
 SMALL_TABLE_MIN_DEAD_CRIT = 100
 SMALL_TABLE_MIN_DEAD_WARN = 50
 
-# admin_logs
 ADMIN_LOGS_WARN_ROWS = 10_000
 ADMIN_LOGS_CRIT_ROWS = 50_000
 
@@ -265,21 +278,12 @@ def _is_significant_table(dead: int, live: int) -> bool:
 
 
 def _dead_severity(dead: int, live: int) -> str:
-    """
-    🆕 v6.3.0: منع critical على جداول صغيرة
-
-    المنطق:
-      • جدول < 200 صف: دائماً "ok"
-      • جدول 200-500 صف: يحتاج dead ≥ 100 للحرج، ≥ 50 للتحذير
-      • جدول > 500 صف: النسبة المئوية كافية
-    """
     total = max(dead, 0) + max(live, 0)
     if total < MIN_TABLE_SIZE_FOR_ALERT:
         return "ok"
 
     pct = _dead_pct(dead, live)
 
-    # 🆕 v6.3.0: للجداول الصغيرة
     if total < SMALL_TABLE_THRESHOLD:
         if dead >= DEAD_TUPLE_CRIT_ABS:
             return "critical"
@@ -289,7 +293,6 @@ def _dead_severity(dead: int, live: int) -> str:
             return "warning"
         return "ok"
 
-    # جداول كبيرة: النسبة كافية
     if dead >= DEAD_TUPLE_CRIT_ABS or pct >= DEAD_TUPLE_CRIT_PCT:
         return "critical"
     if dead >= DEAD_TUPLE_WARN_ABS or pct >= DEAD_TUPLE_WARN_PCT:
@@ -346,18 +349,42 @@ def _parse_interval_seconds(value: Any) -> Optional[int]:
 
 
 # =============================================================================
-# 🆕 v6.3.0: IN CLAUSE BUILDER
+# 🆕 v6.4.0: PARAMETER SAFETY
 # =============================================================================
+
+def _safe_params(*args: Any) -> tuple:
+    """
+    🆕 v6.4.0: يضمن أن المعاملات دائماً tuple.
+
+    السبب: Database.fetchall/fetchone/fetchval يستخدمون *p
+    داخلياً. تمرير scalar (مثل int) يُسبِّب:
+        TypeError: argument after * must be an iterable
+
+    أنماط الاستخدام:
+        _safe_params()               → ()
+        _safe_params(300)            → (300,)
+        _safe_params((a, b))         → (a, b)
+        _safe_params([a, b])         → (a, b)
+        _safe_params(a, b)           → (a, b)
+    """
+    if not args:
+        return ()
+    if len(args) == 1:
+        single = args[0]
+        if single is None:
+            return ()
+        if isinstance(single, tuple):
+            return single
+        if isinstance(single, (list, set, frozenset)):
+            return tuple(single)
+        return (single,)
+    return tuple(args)
+
 
 def _build_pg_in_clause(
     items: List[str], start_index: int = 1
 ) -> Tuple[str, List[str]]:
-    """
-    🆕 v6.3.0: يبني IN ($1, $2, ...) مع placeholders صريحة.
-
-    السبب: ANY($1::text[]) قد لا يعمل بشكل صحيح مع asyncpg
-    على بعض إعدادات Aiven.
-    """
+    """يبني IN ($1, $2, ...) مع placeholders صريحة."""
     if not items:
         return ("NULL", [])
     placeholders = []
@@ -523,6 +550,8 @@ async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
                 "table_name": row.get("table_name"),
                 "live_tup": _safe_int(row.get("live_tup")),
                 "dead_tup": 0,
+                # 🆕 v6.4.0: MySQL لا يدعم dead_tup بنفس نموذج PG
+                "dead_unsupported": True,
                 "data_free_bytes": _safe_int(row.get("data_free_bytes")),
                 "data_bytes": _safe_int(row.get("data_bytes")),
                 "index_bytes": _safe_int(row.get("index_bytes")),
@@ -567,6 +596,7 @@ async def _get_dead_tuples_sqlite() -> List[Dict[str, Any]]:
                 "table_name": name,
                 "live_tup": count,
                 "dead_tup": 0,
+                "dead_unsupported": True,   # 🆕 v6.4.0
                 "inserts": 0, "updates": 0, "deletes": 0,
                 "mod_since_analyze": 0,
                 "last_vacuum": None, "last_autovacuum": None,
@@ -670,7 +700,7 @@ async def _get_table_sizes() -> List[Dict[str, Any]]:
 
 
 # =============================================================================
-# 🆕 v6.3.0: SCHEMA INFO (مُوسَّع)
+# SCHEMA INFO
 # =============================================================================
 
 async def _get_schema_info() -> Dict[str, Any]:
@@ -696,7 +726,6 @@ async def _get_schema_info() -> Dict[str, Any]:
         pass
 
     try:
-        # 🆕 v6.3.0: قائمة الـ schemas الفعّالة في search_path
         schemas_str = await DB.fetchval(
             "SELECT array_to_string(current_schemas(false), ',')"
         )
@@ -734,17 +763,16 @@ async def _get_schema_info() -> Dict[str, Any]:
 
 
 # =============================================================================
-# 🆕 v6.3.0: PER-TABLE AUTOVACUUM (FIXED AGAIN)
+# 🆕 v6.4.0: PER-TABLE AUTOVACUUM (مع reason)
 # =============================================================================
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     """
-    🆕 v6.3.0: إصلاح جذري.
-
-    المشكلة السابقة: `pg_table_is_visible(c.oid)` قد يُرجع False
-    حتى للجداول الموجودة (Aiven مع asyncpg).
-
-    الحل: استخدام pg_namespace + current_schemas(false).
+    🆕 v6.4.0: يعرض سبب دقيق عند غياب الجدول:
+      - "ok"            : موجود ومُحمَّل
+      - "not_found"     : لم يُرجعه الاستعلام (غير موجود فعلاً؟)
+      - "not_in_schema" : موجود في pg_class لكن خارج current_schemas
+      - "query_failed"  : الاستعلامان فشلا
     """
     from database import DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM
 
@@ -755,14 +783,15 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             "reloptions": {},
             "is_tuned": False,
             "exists": False,
+            "reason": "not_found",
         }
 
     if not USE_POSTGRES or not heavy:
         return result
 
-    # 🆕 v6.3.0: بناء IN clause صريح
     in_clause, params = _build_pg_in_clause(heavy, 1)
 
+    # ── المسار الأول: pg_class + current_schemas ──
     query = f"""
         SELECT c.relname AS table_name,
                c.reloptions,
@@ -774,11 +803,16 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
           AND n.nspname = ANY(current_schemas(false))
     """
 
+    rows: List[Dict[str, Any]] = []
+    primary_failed = False
     try:
-        rows = await DB.fetchall(query, tuple(params))
+        rows = await DB.fetchall(query, tuple(params)) or []
     except Exception as exc:
-        logger.warning("_get_per_table_autovacuum: %s", exc)
-        # 🆕 v6.3.0: fallback بدون فلترة schema
+        primary_failed = True
+        logger.warning("_get_per_table_autovacuum primary: %s", exc)
+
+    # ── fallback: بدون فلترة schema ──
+    if not rows:
         try:
             fallback_query = f"""
                 SELECT c.relname AS table_name,
@@ -788,17 +822,31 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE c.relname IN ({in_clause})
                   AND c.relkind IN ('r', 'p')
-                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND n.nspname NOT IN (
+                      'pg_catalog', 'information_schema'
+                  )
             """
-            rows = await DB.fetchall(fallback_query, tuple(params))
+            fallback_rows = await DB.fetchall(
+                fallback_query, tuple(params)
+            ) or []
+            if fallback_rows:
+                rows = fallback_rows
         except Exception as exc2:
-            logger.warning("_get_per_table_autovacuum fallback: %s", exc2)
-            return result
+            logger.warning(
+                "_get_per_table_autovacuum fallback: %s", exc2
+            )
+            if primary_failed:
+                # كلا المسارين فشل
+                for table in heavy:
+                    result[table]["reason"] = "query_failed"
+                return result
 
+    found_names = set()
     for row in rows or []:
         name = row.get("table_name")
         if not name:
             continue
+        found_names.add(name)
         options = _parse_reloptions(row.get("reloptions"))
         vacuum_factor = _normalize_factor(
             options.get("autovacuum_vacuum_scale_factor")
@@ -807,23 +855,61 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             options.get("autovacuum_analyze_scale_factor")
         )
         tuned = (
-            vacuum_factor == _normalize_factor(EXPECTED_VACUUM_SCALE_FACTOR)
-            and analyze_factor == _normalize_factor(EXPECTED_ANALYZE_SCALE_FACTOR)
+            vacuum_factor == _normalize_factor(
+                EXPECTED_VACUUM_SCALE_FACTOR
+            )
+            and analyze_factor == _normalize_factor(
+                EXPECTED_ANALYZE_SCALE_FACTOR
+            )
         )
         result[name] = {
             "reloptions": options,
             "is_tuned": tuned,
             "exists": True,
+            "reason": "ok",
             "schema": row.get("schema_name"),
         }
+
+    # ── تشخيص الغائبين ──
+    missing = [t for t in heavy if t not in found_names]
+    if missing:
+        # هل هم موجودون في pg_class لكن خارج schema؟
+        try:
+            miss_clause, miss_params = _build_pg_in_clause(
+                missing, 1
+            )
+            exist_rows = await DB.fetchall(
+                f"""
+                    SELECT c.relname, n.nspname
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname IN ({miss_clause})
+                      AND c.relkind IN ('r', 'p')
+                """,
+                tuple(miss_params),
+            ) or []
+            for r in exist_rows:
+                nm = r.get("relname")
+                if nm in result and not result[nm]["exists"]:
+                    result[nm]["reason"] = "not_in_schema"
+        except Exception as exc:
+            logger.debug("missing-tables probe: %s", exc)
+
     return result
 
 
 # =============================================================================
-# 4. BLOCKERS
+# 4. BLOCKERS (مع إصلاح v6.4.0)
 # =============================================================================
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
+    """
+    🔴 v6.4.0 FIX-CRITICAL:
+    كان DB.fetchall(q, LONG_TX_WARN_SECONDS) يُمرِّر int لا tuple
+    → TypeError يُبتلع في except → long_tx لا تُرصد أبداً.
+
+    الحل: _safe_params() لكل استدعاء.
+    """
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -831,6 +917,7 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
 
     blockers: List[Dict[str, Any]] = []
 
+    # ── long_transaction ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, state, usename, application_name,
@@ -849,7 +936,7 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
               AND EXTRACT(EPOCH FROM (now() - xact_start)) > $1
             ORDER BY tx_age_sec DESC
             LIMIT 20
-        """, LONG_TX_WARN_SECONDS)
+        """, _safe_params(LONG_TX_WARN_SECONDS))
         for row in rows or []:
             blockers.append({
                 "type": "long_transaction",
@@ -865,8 +952,9 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
                 "query": (row.get("query") or "")[:300],
             })
     except Exception as exc:
-        logger.debug("blockers(long transaction): %s", exc)
+        logger.warning("blockers(long transaction): %s", exc)
 
+    # ── idle_in_transaction ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, usename, application_name,
@@ -882,7 +970,7 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
               AND EXTRACT(EPOCH FROM (now() - state_change)) > $1
             ORDER BY idle_sec DESC
             LIMIT 20
-        """, IDLE_TX_WARN_SECONDS)
+        """, _safe_params(IDLE_TX_WARN_SECONDS))
         for row in rows or []:
             blockers.append({
                 "type": "idle_in_transaction",
@@ -896,8 +984,9 @@ async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
                 "query": (row.get("query") or "")[:300],
             })
     except Exception as exc:
-        logger.debug("blockers(idle transaction): %s", exc)
+        logger.warning("blockers(idle transaction): %s", exc)
 
+    # ── running_vacuum ──
     try:
         rows = await DB.fetchall("""
             SELECT pid, datname,
@@ -1041,17 +1130,18 @@ def _detect_xmin_blocker(
 
 
 # =============================================================================
-# 5. INDEXES (FIXED AGAIN v6.3.0)
+# 5. INDEXES — 🆕 v6.4.0 مع fallback حقيقي
 # =============================================================================
 
 async def _get_indexes(
     tables: List[str],
 ) -> Dict[str, List[str]]:
     """
-    🆕 v6.3.0: إصلاح جذري.
+    🆕 v6.4.0: fallback فعلي.
 
-    المشكلة: `tablename = ANY($1::text[])` لا يعمل.
-    الحل: IN clause صريح بـ placeholders.
+    المسار الأول: pg_indexes (المُفضَّل — يحتوي تعريف الفهرس)
+    المسار الثاني: pg_class + pg_index (يعمل حتى لو pg_indexes
+                    مقيّد بـ RLS معينة على Aiven)
     """
     from database import DB
 
@@ -1059,10 +1149,11 @@ async def _get_indexes(
     if not tables:
         return result
 
-    try:
-        if _is_postgres():
-            # 🆕 v6.3.0: IN clause صريح
-            in_clause, params = _build_pg_in_clause(tables, 1)
+    if _is_postgres():
+        in_clause, params = _build_pg_in_clause(tables, 1)
+
+        # ── المحاولة الأولى: pg_indexes ──
+        try:
             query = f"""
                 SELECT tablename AS table_name,
                        indexname AS index_name
@@ -1080,8 +1171,44 @@ async def _get_indexes(
                 if (table in result and index
                         and index not in result[table]):
                     result[table].append(index)
+            if any(result.values()):
+                return result
+        except Exception as exc:
+            logger.warning("_get_indexes (pg_indexes): %s", exc)
 
-        elif _is_mysql():
+        # ── fallback: pg_class + pg_index ──
+        try:
+            query = f"""
+                SELECT c.relname AS table_name,
+                       ic.relname AS index_name
+                FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indrelid
+                JOIN pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relname IN ({in_clause})
+                  AND n.nspname = ANY(current_schemas(false))
+                ORDER BY c.relname, ic.relname
+            """
+            rows = await DB.fetchall(query, tuple(params))
+            for row in rows or []:
+                table = row.get("table_name")
+                index = row.get("index_name")
+                if (table in result and index
+                        and index not in result[table]):
+                    result[table].append(index)
+            if any(result.values()):
+                logger.info(
+                    "ℹ️ _get_indexes: استُخدم fallback "
+                    "(pg_class + pg_index)"
+                )
+                return result
+        except Exception as exc:
+            logger.warning("_get_indexes (pg_class fallback): %s", exc)
+
+        return result
+
+    if _is_mysql():
+        try:
             rows = await DB.fetchall("""
                 SELECT TABLE_NAME AS table_name,
                        INDEX_NAME AS index_name
@@ -1095,23 +1222,26 @@ async def _get_indexes(
                 if (table in result and index
                         and index not in result[table]):
                     result[table].append(index)
+        except Exception as exc:
+            logger.warning("_get_indexes mysql: %s", exc)
+        return result
 
-        else:
-            rows = await DB.fetchall("""
-                SELECT name AS index_name,
-                       tbl_name AS table_name
-                FROM sqlite_master
-                WHERE type = 'index'
-            """)
-            for row in rows or []:
-                table = row.get("table_name")
-                index = row.get("index_name")
-                if (table in result and index
-                        and index not in result[table]):
-                    result[table].append(index)
-
+    # SQLite
+    try:
+        rows = await DB.fetchall("""
+            SELECT name AS index_name,
+                   tbl_name AS table_name
+            FROM sqlite_master
+            WHERE type = 'index'
+        """)
+        for row in rows or []:
+            table = row.get("table_name")
+            index = row.get("index_name")
+            if (table in result and index
+                    and index not in result[table]):
+                result[table].append(index)
     except Exception as exc:
-        logger.warning("_get_indexes: %s", exc)
+        logger.warning("_get_indexes sqlite: %s", exc)
 
     return result
 
@@ -1221,6 +1351,38 @@ def _check_project_heavy_tables() -> Optional[str]:
     return None
 
 
+# 🆕 v6.4.0: فحص تناسق MAINTENANCE_TABLES
+def _check_maintenance_consistency() -> Optional[str]:
+    """
+    🆕 v6.4.0: MAINTENANCE_TABLES في database_tables.py تُحدد
+    الجداول التي يستهدفها VACUUM (ANALYZE, SKIP_LOCKED) الدوري.
+    إذا كان جدول حرج (users مثلاً) مفقوداً منها → لن يُنظَّف دورياً.
+    """
+    try:
+        from database_tables import MAINTENANCE_TABLES
+        from database import HEAVY_TABLES_FOR_AUTOVACUUM
+    except Exception as exc:
+        logger.debug("_check_maintenance_consistency: %s", exc)
+        return None
+
+    maint = set(MAINTENANCE_TABLES or ())
+    heavy = set(HEAVY_TABLES_FOR_AUTOVACUUM or ())
+
+    missing = heavy - maint
+    if not missing:
+        return None
+
+    missing_str = ", ".join(sorted(missing))
+    return (
+        "🟡 <b>VACUUM الدوري لا يشمل جداول حرجة:</b> "
+        f"<code>{_escape_html(missing_str)}</code>\n"
+        "💡 <b>السبب:</b> مفقودة من "
+        "<code>MAINTENANCE_TABLES</code> في database_tables.py\n"
+        "💡 <b>الأثر:</b> VACUUM (ANALYZE, SKIP_LOCKED) الدوري "
+        "لن يعمل عليها — autovacuum وحده يعمل."
+    )
+
+
 async def _check_admin_logs_size() -> Optional[str]:
     from database import DB
 
@@ -1309,6 +1471,11 @@ async def _analyze_root_causes(
     project_warning = _check_project_heavy_tables()
     if project_warning:
         general_notes.append(project_warning)
+
+    # 🆕 v6.4.0
+    maint_warning = _check_maintenance_consistency()
+    if maint_warning:
+        general_notes.append(maint_warning)
 
     admin_logs_warning = await _check_admin_logs_size()
     if admin_logs_warning:
@@ -1875,10 +2042,68 @@ class _ReportBuilder:
         return len(self._lines)
 
 
+# =============================================================================
+# 🆕 v6.4.0: HTML-SAFE SPLIT
+# =============================================================================
+
+_HTML_TAG_RE = re.compile(
+    r'<(/?)(\w+)((?:\s+[^>]*?)?)(/?)>',
+    re.DOTALL,
+)
+
+_VOID_HTML_TAGS = frozenset({
+    "br", "hr", "img", "input", "meta", "link", "area",
+    "base", "col", "embed", "source", "track", "wbr",
+})
+
+
+def _html_tag_name(full_open_tag: str) -> str:
+    m = re.match(r'<(\w+)', full_open_tag)
+    return m.group(1) if m else ""
+
+
+def _get_open_html_tags(text: str) -> List[str]:
+    """
+    🆕 v6.4.0: يُرجع قائمة الوسوم المفتوحة (كنص فتح كامل)
+    بالترتيب. تُستخدم لإغلاقها قبل القطع وإعادة فتحها بعده.
+    """
+    stack: List[str] = []
+    for m in _HTML_TAG_RE.finditer(text):
+        is_closing = bool(m.group(1))
+        tag_name_raw = m.group(2)
+        tag_name = tag_name_raw.lower()
+        attrs = m.group(3) or ""
+        self_closing = bool(m.group(4))
+
+        if tag_name in _VOID_HTML_TAGS:
+            continue
+        if self_closing:
+            continue
+
+        full_open = f"<{tag_name_raw}{attrs}>"
+
+        if is_closing:
+            for i in range(len(stack) - 1, -1, -1):
+                if _html_tag_name(stack[i]).lower() == tag_name:
+                    del stack[i:]
+                    break
+        else:
+            stack.append(full_open)
+    return stack
+
+
 def _split_for_telegram(
     text: str,
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
+    """
+    🆕 v6.4.0: قطع آمن لـ HTML.
+
+    - يتتبع الوسوم المفتوحة في كل جزء
+    - يُغلقها في نهاية الجزء
+    - يعيد فتحها في بداية الجزء التالي
+    → يمنع BadRequest: can't parse entities من تيليجرام
+    """
     if not text:
         return [""]
     if len(text) <= limit:
@@ -1886,14 +2111,25 @@ def _split_for_telegram(
 
     parts: List[str] = []
     remaining = text
-    safe_limit = max(1, limit - 100)
+    # نترك هامشاً للوسوم المضافة
+    safe_limit = max(1, limit - 200)
 
-    while len(remaining) > safe_limit:
+    while len(remaining) > limit:
         cut = remaining.rfind("\n", 0, safe_limit)
         if cut < safe_limit // 2:
             cut = safe_limit
-        parts.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip("\n")
+
+        chunk = remaining[:cut]
+        open_tags = _get_open_html_tags(chunk)
+
+        closing = "".join(
+            f"</{_html_tag_name(t)}>"
+            for t in reversed(open_tags)
+        )
+        reopening = "".join(open_tags)
+
+        parts.append(chunk.rstrip() + closing)
+        remaining = reopening + remaining[cut:].lstrip("\n")
 
     if remaining:
         parts.append(remaining)
@@ -1925,7 +2161,6 @@ async def _build_diagnose_lines() -> List[str]:
     except Exception as exc:
         logger.debug("get_db_size_kb failed: %s", exc)
 
-    # Schema info
     if USE_POSTGRES:
         schema_info = await _get_schema_info()
         if schema_info.get("current_schema"):
@@ -2104,11 +2339,23 @@ async def _build_diagnose_lines() -> List[str]:
         lines.append("")
         for table in HEAVY_TABLES_FOR_AUTOVACUUM:
             info = per_table.get(table, {})
+            reason = info.get("reason", "not_found")
             if not info.get("exists"):
-                lines.append(
-                    f"❓ <code>{_escape_html(table)}</code> — "
-                    f"غير مرئي في schema الحالي"
-                )
+                if reason == "query_failed":
+                    lines.append(
+                        f"🔴 <code>{_escape_html(table)}</code> — "
+                        f"<b>فشل الاستعلام</b> (تحقق من الصلاحيات)"
+                    )
+                elif reason == "not_in_schema":
+                    lines.append(
+                        f"🟠 <code>{_escape_html(table)}</code> — "
+                        f"موجود لكن خارج <code>search_path</code>"
+                    )
+                else:
+                    lines.append(
+                        f"❓ <code>{_escape_html(table)}</code> — "
+                        f"غير موجود في pg_class"
+                    )
                 continue
             if info.get("is_tuned"):
                 lines.append(
@@ -2160,6 +2407,11 @@ async def _build_diagnose_lines() -> List[str]:
                     f"{_escape_html(item.get('phase'))} "
                     f"({_escape_html(item.get('progress'))})"
                 )
+    elif USE_POSTGRES:
+        lines.append("")
+        lines.append("<b>3. نشاط PostgreSQL / Blockers</b>")
+        lines.append("")
+        lines.append("✅ لا توجد معاملات طويلة / idle-in-tx / VACUUM جارٍ.")
 
     if sizes:
         lines.append("")
@@ -2228,6 +2480,11 @@ async def _build_diagnose_lines() -> List[str]:
         lines.append(
             "ℹ️ MySQL لا يستخدم dead tuples بنفس نموذج PostgreSQL؛ "
             "يتم عرض DATA_FREE كإشارة تقريبية للمساحة الحرة/المجزأة."
+        )
+        lines.append(
+            "⚠️ <b>لا تعتمد على هذا التقرير للحكم على صحة MySQL</b> "
+            "— DATA_FREE يعني مساحة قابلة لإعادة الاستخدام، وليس "
+            "بالضرورة dead tuples."
         )
 
     if not USE_POSTGRES and not USE_MYSQL:
@@ -2397,9 +2654,12 @@ __all__ = [
     "_autovacuum_vacuum_trigger",
     "_autovacuum_analyze_trigger",
     "_check_project_heavy_tables",
+    "_check_maintenance_consistency",
     "_check_admin_logs_size",
     "_get_schema_info",
     "_split_for_telegram",
+    "_get_open_html_tags",
+    "_safe_params",
     "_ReportBuilder",
     "_is_significant_table",
     "_build_pg_in_clause",
