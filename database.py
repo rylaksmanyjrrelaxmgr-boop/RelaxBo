@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.48 — PG-NO-MV-FALLBACK-FIX)
+database.py - قاعدة البيانات المتكاملة (v7.7.49 — VACUUM-OUTSIDE-TX-FIX)
 ================================================================================
-🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX):
-  ✅ FIX-1: get_channels_to_publish — إصلاح race condition خطير
-       - المشكلة: قبل bootstrap، _mv_available=False → يقع في فرع
-                  USE_MYSQL (False) → ثم else (SQLite branch) → يُرسل
-                  استعلام SQLite بـ CTEs إلى PostgreSQL
-       - الأعراض: استعلام بطيء 4.54s في كل إقلاع (قبل تفعيل MV)
-       - الإصلاح: فرع PG مُستقل، يستخدم CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
-                  عند عدم توفر MV (fallback حقيقي بدون CTEs ثقيلة)
+🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL):
+  ✅ FIX-CRITICAL: نقل VACUUM (maintenance_postgres) خارج bootstrap tx
+       - المشكلة: create_tables_postgres (fast-path) كان ينفذ
+                  _run_maintenance_postgres داخل transaction الـ bootstrap
+       - الأعراض: "current transaction is aborted" في كل استعلام لاحق
+                  (UNIQUE settings، حفظ tables_hash، حفظ bootstrap_hash،
+                   SELECT value FROM settings، إلخ)
+       - السجل: database_tables.py::_run_maintenance_postgres كان يُستدعى
+                من داخل database.py::transaction() → PostgreSQL يُلغِي
+                الـ tx بالكامل بسبب VACUUM inside transaction
+       - الإصلاح:
+           1) database_tables.py v7.6.27: حذف _run_maintenance_postgres
+              من fast-path (تم في ملف منفصل)
+           2) database.py v7.7.49: إضافة استدعاء _run_maintenance_postgres
+              في _bootstrap بعد commit، باستخدام self.connection()
+              (autocommit mode — لا tx) → VACUUM يعمل بنجاح
+       - الأثر المتوقع: اختفاء كل الأخطاء "current transaction is aborted"
 
-  ✅ FIX-2: _get_secondary_indexes — إزالة فهرسين deprecated
-       - المشكلة: database_tables.py يحذفهما (DEPRECATED_INDEXES)،
-                  ثم هذا الملف يعيد إنشاءهما بعد commit
-       - الأعراض: 🧹 "حُذف فهرس قديم idx_user_penalties_active_end"
-                  ثم "⏭️ تنفيذ 6 فهرس مؤجل" → إعادة إنشائه
-       - الإصلاح: إزالتهما من القائمة — الاتساق مع database_tables.py
-
-🆕 v7.7.47 (DEV-LOG-CHANNEL — قناة سجل المطور المنفصلة)
+🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX)
+🆕 v7.7.47 (DEV-LOG-CHANNEL)
 🆕 v7.7.46 (SECONDARY-INDEXES-FIX)
 🆕 v7.7.45 (MIGRATIONS-EXTRACT)
 🆕 v7.7.44 (CACHES-EXTRACT)
@@ -4671,12 +4674,6 @@ class Database(
                     database_tables.py ثم يُعاد إنشاؤهما هنا:
           - idx_user_penalties_active_end
           - idx_posts_channel_created
-
-        الفهارس المتبقية مكملة (غير موجودة في COMMON_INDEXES):
-          - idx_user_penalties_user_status  (prefix للفهرس الأكبر)
-          - idx_auto_replies_chat_keyword   (مكرر بلا is_active)
-          - idx_user_violations_user_chat
-          - idx_posts_channel_published_partial
         """
         return [
             (
@@ -5035,6 +5032,27 @@ class Database(
                     except Exception as e:
                         logger.warning(
                             f"⚠️ الفهارس المؤجلة: {e}"
+                        )
+
+                # ✅ v7.7.49: VACUUM + ANALYZE خارج transaction
+                #    السبب: PostgreSQL لا يسمح بـ VACUUM داخل
+                #    transaction block — كان يُلغِي الـ tx بالكامل
+                #    ويُسبِّب فشل كل العمليات اللاحقة.
+                #    self.connection() يُعطي conn في autocommit mode
+                #    → VACUUM يعمل بنجاح.
+                if USE_POSTGRES:
+                    try:
+                        from database_tables import (
+                            _run_maintenance_postgres,
+                        )
+                        async with self.connection() as _vac_conn:
+                            await _run_maintenance_postgres(
+                                _vac_conn, logger
+                            )
+                    except Exception as _vac_e:
+                        logger.debug(
+                            f"⚠️ maintenance post-bootstrap: "
+                            f"{_vac_e}"
                         )
 
                 if with_background:
