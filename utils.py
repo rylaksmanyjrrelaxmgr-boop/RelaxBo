@@ -2,40 +2,41 @@
 # -*- coding: utf-8 -*-
 
 """
-utils.py - الأدوات المساعدة للبوت (v7.9.16 - Pool Alerts Enhanced)
+utils.py - الأدوات المساعدة للبوت (v7.9.17 - Deep Review Fixes)
 =================================================================================
+🆕 v7.9.17 (DEEP REVIEW FIXES):
+    ✅ #1  webhook_handler: إعادة تسمية _webhook_app → _telegram_app
+    ✅ #2  SmartCache: حماية من deadlock عند الاستدعاء المتكرر
+    ✅ #6  _publish_single_channel: منع ازدواجية النشر عند فشل mark
+    ✅ #7  auto_publish: إدارة نظيفة للـTasks + shutdown()
+    ✅ #10 contains_mention: لم يعد يطابق البريد الإلكتروني
+    ✅ #11 _get_admin_ids_cached: لا يمسح DB عند رجوع قائمة فارغة
+    ✅ #13 banned_words_locks: منع race عند التنظيف
+    ✅ #16 _flush_usage_updates: لا مضاعفة عند فشل جزئي
+    ✅ #3  monitor_pool: تسجيل فقط عند تغيّر الحالة
+    ✅ #8  apply_penalty: رسائل رفض دقيقة بدل no_reason
+    ✅ #15 METRICS.record_error: مفعّل في ErrorHandler
+    ✅ #24 monitor_pool: مستوى debug / on-change
+    ✅ #22 تطبيع عربي: NFKC + إزالة التطويل
+
 🆕 v7.9.16 (POOL-ALERTS-ENHANCED):
     ✅ PA-1: monitor_pool_alert v2 — يكتشف الآن:
-             - util >= 85%         (كما قبل)
-             - idle_tx >= 3        (جديد — تكامل مع pool_health_monitor)
-             - lock_waits >= 5     (جديد)
-    ✅ PA-2: cooldown مستقل لكل نوع تنبيه (لا إغراق)
-    ✅ PA-3: _read_pg_activity() — قراءة آمنة لـ pg_stat_activity
-    ✅ PA-4: _send_pool_alert() — رسائل موحّدة لـ 3 أنواع
+             - util >= 85%
+             - idle_tx >= 3
+             - lock_waits >= 5
+    ✅ PA-2: cooldown مستقل لكل نوع
+    ✅ PA-3: _read_pg_activity() — قراءة آمنة
+    ✅ PA-4: _send_pool_alert() — رسائل موحّدة
 
-🆕 v7.9.15 (CRITICAL INTEGRATION FIXES — based on review of v5.5.18):
-    ✅ #1 حرجة: `setup_webhook` يُرفق `site` بـ `runner`
-    ✅ #2 حرجة: `apply_penalty` — حماية `DB.VALID_PENALTY_TYPES`
-    ✅ #3: `ErrorHandler.handle_error` — fallback لـ stderr
-    ✅ #4: `safe_send` — عند RateLimiter timeout → report_429
-    ✅ #5: `_publish_single_channel` — تسجيل عند فشل mark_published
-    ✅ #6: `fetch_json_from_url` — حماية SSRF (whitelist hosts)
-    ✅ #7: `_group_admins_cache` — حذف عشوائي بدل sort
-    ✅ #8: `webhook_handler` — content-type مع charset tolerance
-
-🆕 v7.9.14 (Contest Duration Buttons)
-🆕 v7.9.13 (استعادة سلوك النشر الفوري)
-🆕 v7.9.11 (دمج معاملات النشر)
-🆕 v7.9.10 (إصلاح Forbidden في safe_send)
-🆕 v7.9.9 (apply_penalty: بدون سطر @username)
-🆕 v7.9.8 (TranslationManager.get_text)
-🆕 v7.9.7 (apply_penalty: 17 لغة)
-🆕 v7.9.6 (_COMMON_PHRASES + translate())
-🆕 v7.9.4 (KeyboardFactory مسار buttons_config_{lang}.json)
-🆕 v7.9.3 (TranslationManager سجل عند النجاح/الفشل)
-🆕 v7.9.2 (إصلاحات ما بعد التدقيق)
-🆕 v7.9.1 (get_reply_from_file: قائمة أنماط مُسبَق تصريفها)
-🆕 v7.9.0 (تحميل خارج القفل + إصلاحات حرجة)
+🆕 v7.9.15 (CRITICAL INTEGRATION FIXES):
+    ✅ setup_webhook يُرفق site بـ runner
+    ✅ apply_penalty — حماية DB.VALID_PENALTY_TYPES
+    ✅ ErrorHandler.handle_error — fallback لـ stderr
+    ✅ safe_send — عند RateLimiter timeout → report_429
+    ✅ _publish_single_channel — تسجيل عند فشل mark_published
+    ✅ fetch_json_from_url — حماية SSRF (whitelist hosts)
+    ✅ _group_admins_cache — حذف عشوائي بدل sort
+    ✅ webhook_handler — content-type مع charset tolerance
 =================================================================================
 """
 
@@ -49,6 +50,7 @@ import random
 import importlib
 import threading
 import sys
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
@@ -93,12 +95,50 @@ _FALLBACK_PENALTY_TYPES: frozenset = frozenset({
     "ban", "mute", "kick", "warn", "restrict", "unban",
 })
 
+# ═══════════════════════════════════════════════════════════════════
+# ✅ v7.9.17 (#22): تطبيع عربي موحّد
+# ═══════════════════════════════════════════════════════════════════
+_ARABIC_TATWEEL = '\u0640'
+_HIDDEN_CHARS = (
+    '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
+    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+    '\u2060', '\u2061', '\u2062', '\u2063', '\u2064',
+    '\ufeff',
+)
+
+
+def _normalize_unicode(text: str) -> str:
+    """تطبيع NFKC + إزالة المحارف المخفية + التطويل."""
+    if not text:
+        return ""
+    try:
+        text = unicodedata.normalize('NFKC', text)
+    except Exception:
+        pass
+    for c in _HIDDEN_CHARS:
+        if c in text:
+            text = text.replace(c, '')
+    if _ARABIC_TATWEEL in text:
+        text = text.replace(_ARABIC_TATWEEL, '')
+    return text
+
+
 # =====================================================================
 # 0. 🧠 SmartCache
 # =====================================================================
 
 class SmartCache:
-    __slots__ = ('_cache', '_ttl_default', '_max_size', '_lock', '_stampede_locks')
+    """
+    ✅ v7.9.17 (#2): حماية من deadlock عند إعادة الدخول لنفس المفتاح.
+
+    آلية: نتتبّع المفاتيح التي يحمّلها كل Task حالياً. لو أعاد
+    نفس الـTask استدعاء get_or_set لنفس المفتاح، نستدعي loader مباشرة
+    بدل الانتظار (وإلا deadlock).
+    """
+    __slots__ = (
+        '_cache', '_ttl_default', '_max_size', '_lock',
+        '_stampede_locks', '_inflight_by_task',
+    )
 
     def __init__(self, ttl: int = 60, max_size: int = 5000):
         self._cache: Dict[str, Tuple[Any, float]] = {}
@@ -106,6 +146,8 @@ class SmartCache:
         self._max_size = max_size
         self._lock = asyncio.Lock()
         self._stampede_locks: Dict[str, asyncio.Lock] = {}
+        # task_id → set(keys) قيد التحميل
+        self._inflight_by_task: Dict[int, set] = {}
 
     async def get(self, key: str, default=None):
         async with self._lock:
@@ -128,26 +170,48 @@ class SmartCache:
         if value is not None:
             return value
 
-        async with self._lock:
-            lock = self._stampede_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._stampede_locks[key] = lock
+        task = asyncio.current_task()
+        task_id = id(task) if task is not None else 0
 
-        async with lock:
-            try:
-                value = await self.get(key)
-                if value is not None:
-                    return value
+        # ✅ إعادة دخول لنفس المفتاح من نفس الـTask → استدعِ loader مباشرة
+        inflight = self._inflight_by_task.get(task_id)
+        if inflight is not None and key in inflight:
+            logger.debug(
+                f"SmartCache: re-entrance detected for key={key} — "
+                f"calling loader directly"
+            )
+            return await loader()
 
-                loaded = await loader()
-                if loaded is not None:
-                    await self.set(key, loaded, ttl)
-                return loaded
-            finally:
-                async with self._lock:
-                    if self._stampede_locks.get(key) is lock:
-                        self._stampede_locks.pop(key, None)
+        if inflight is None:
+            inflight = set()
+            self._inflight_by_task[task_id] = inflight
+        inflight.add(key)
+
+        try:
+            async with self._lock:
+                lock = self._stampede_locks.get(key)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._stampede_locks[key] = lock
+
+            async with lock:
+                try:
+                    value = await self.get(key)
+                    if value is not None:
+                        return value
+
+                    loaded = await loader()
+                    if loaded is not None:
+                        await self.set(key, loaded, ttl)
+                    return loaded
+                finally:
+                    async with self._lock:
+                        if self._stampede_locks.get(key) is lock:
+                            self._stampede_locks.pop(key, None)
+        finally:
+            inflight.discard(key)
+            if not inflight:
+                self._inflight_by_task.pop(task_id, None)
 
     async def set(self, key: str, value, ttl: int = None):
         effective_ttl = ttl if ttl is not None else self._ttl_default
@@ -179,7 +243,6 @@ class SmartCache:
 
 _auth_cache_smart = SmartCache(ttl=60, max_size=2000)
 _auth_neg_cache = SmartCache(ttl=15, max_size=1000)
-
 _security_stats_cache = SmartCache(ttl=60, max_size=500)
 
 # =====================================================================
@@ -249,17 +312,35 @@ class TextUtils:
     def contains_link(text: Optional[str]) -> bool:
         if not text:
             return False
-        return bool(re.search(r'(?:https?://|www\.|t\.me/|telegram\.me/)\S+', text, re.IGNORECASE))
+        return bool(re.search(
+            r'(?:https?://|www\.|t\.me/|telegram\.me/)\S+',
+            text, re.IGNORECASE
+        ))
 
     @staticmethod
     def contains_mention(text: Optional[str]) -> bool:
-        return bool(re.search(r'@\w+', text)) if text else False
+        """
+        ✅ v7.9.17 (#10): لا يطابق البريد الإلكتروني.
+
+        نستخدم lookbehind يمنع أن يسبق @ حرف/رقم/نقطة/شرطة سفلية.
+        وبذلك:
+          "hello @user" ✅
+          "user@example.com" ❌
+          "@user" ✅
+        """
+        if not text:
+            return False
+        return bool(re.search(
+            r'(?<![\w.@])@[A-Za-z][A-Za-z0-9_]{3,31}\b',
+            text
+        ))
 
     @staticmethod
     def sanitize(text: str, max_len: int = 4096) -> str:
         if not text:
             return ""
-        text = re.sub(r'[\u200b\u200c\u200d\u2060\uFEFF]', '', text)
+        # ✅ v7.9.17 (#22): NFKC + إزالة المحارف المخفية + التطويل
+        text = _normalize_unicode(text)
         return text[:max_len]
 
     @staticmethod
@@ -343,6 +424,7 @@ class MetricsCollector:
         self.api_calls.append((time.time(), method, duration))
 
     def record_error(self, error_type: str, context: str = ""):
+        """✅ v7.9.17 (#15): مفعّلة الآن من ErrorHandler."""
         self.errors.append((time.time(), error_type, context))
 
     def get_stats(self) -> dict:
@@ -358,6 +440,7 @@ class MetricsCollector:
 
     def increment_messages(self):
         self.messages_processed += 1
+
 
 METRICS = MetricsCollector()
 
@@ -1783,9 +1866,21 @@ _GLOBAL_WORDS_TTL = 1800
 
 
 def _normalize_word(word: Any) -> Optional[str]:
+    """
+    ✅ v7.9.17 (#22): NFKC + إزالة التطويل + طي المسافات.
+    """
     if not isinstance(word, str):
         return None
     word = word.strip().lower()
+    if not word:
+        return None
+    try:
+        word = unicodedata.normalize('NFKC', word)
+    except Exception:
+        pass
+    if _ARABIC_TATWEEL in word:
+        word = word.replace(_ARABIC_TATWEEL, '')
+    word = re.sub(r'\s+', ' ', word).strip()
     return word if word else None
 
 
@@ -1796,6 +1891,7 @@ async def _get_or_create_banned_words_lock(chat_id: int) -> asyncio.Lock:
             return existing
 
         if len(_banned_words_locks) >= _BANNED_WORDS_LOCKS_MAX:
+            # ✅ v7.9.17 (#13): نزيل فقط الأقفال غير المستخدمة
             to_remove = [
                 cid for cid, lk in _banned_words_locks.items()
                 if cid != chat_id and not lk.locked()
@@ -2233,19 +2329,22 @@ async def ban_user_by_id(user_id: int) -> Tuple[bool, str]:
                 return False, "لا يمكنك حظر مطور آخر!"
         except Exception:
             pass
+
+        default_lang = getattr(CONFIG, 'DEFAULT_LANG', 'ar')
+
         row = await DB.fetchone("SELECT user_id FROM users WHERE user_id=?", (user_id,))
         if row:
             await DB.execute("UPDATE users SET banned=1 WHERE user_id=?", (user_id,))
         else:
             try:
                 await DB.execute(
-                    "INSERT INTO users (user_id, banned, language, created_at) VALUES (?, 1, 'ar', ?)",
-                    (user_id, TimeUtils.utc_now())
+                    "INSERT INTO users (user_id, banned, language, created_at) VALUES (?, 1, ?, ?)",
+                    (user_id, default_lang, TimeUtils.utc_now())
                 )
             except Exception:
                 await DB.execute(
-                    "INSERT INTO users (user_id, banned, language) VALUES (?, 1, 'ar')",
-                    (user_id,)
+                    "INSERT INTO users (user_id, banned, language) VALUES (?, 1, ?)",
+                    (user_id, default_lang)
                 )
         with suppress(Exception):
             from cache import invalidate_user_cache as _iuc
@@ -2784,6 +2883,34 @@ _PENALTY_I18N: Dict[str, Dict[str, str]] = {
     },
 }
 
+# ✅ v7.9.17 (#8): رسائل رفض صريحة
+_REJECTION_MESSAGES: Dict[str, Dict[str, str]] = {
+    "ar": {
+        "on_owner": "❌ لا يمكن تطبيق العقوبة على المالك",
+        "on_bot": "❌ لا يمكن تطبيق العقوبة على البوت",
+        "on_admin": "❌ لا يمكن تطبيق العقوبة على مشرف",
+        "no_perms": "❌ البوت لا يملك صلاحيات كافية",
+        "unknown_penalty": "❌ نوع عقوبة غير معروف",
+    },
+    "en": {
+        "on_owner": "❌ Cannot apply penalty to the owner",
+        "on_bot": "❌ Cannot apply penalty to the bot",
+        "on_admin": "❌ Cannot apply penalty to an admin",
+        "no_perms": "❌ Bot lacks sufficient permissions",
+        "unknown_penalty": "❌ Unknown penalty type",
+    },
+}
+
+_DEFAULT_REJECTION = _REJECTION_MESSAGES["ar"]
+
+
+def _reject(key: str, lang: str = "ar") -> str:
+    table = _REJECTION_MESSAGES.get(lang) or _DEFAULT_REJECTION
+    msg = table.get(key)
+    if not msg:
+        msg = _DEFAULT_REJECTION.get(key, key)
+    return msg
+
 
 def _penalty_t(key: str, lang: str, **kw) -> str:
     table = _PENALTY_I18N.get(lang) or {}
@@ -2797,6 +2924,7 @@ def _penalty_t(key: str, lang: str, **kw) -> str:
                 return text
         except Exception:
             pass
+        logger.debug(f"missing penalty key: {key} / {lang}")
         return key
     try:
         return template.format(**kw) if kw else template
@@ -2838,21 +2966,23 @@ async def apply_penalty(bot, chat_id: int, user_id: int, penalty: str,
         primary_id = int(CONFIG.PRIMARY_OWNER_ID)
     except (TypeError, ValueError, AttributeError):
         primary_id = None
+
+    # ✅ v7.9.17 (#8): رسائل رفض دقيقة
     if primary_id is not None and user_id == primary_id:
-        return False, "❌ " + T("no_reason")
+        return False, _reject("on_owner", lang)
     if user_id == bot.id:
-        return False, "❌ " + T("no_reason")
+        return False, _reject("on_bot", lang)
 
     if await is_authorized_in_group(bot, chat_id, user_id):
-        return False, "❌ " + T("no_reason")
+        return False, _reject("on_admin", lang)
 
     perms = await check_bot_permissions(bot, chat_id)
     if not perms["can_act"]:
-        return False, "❌ " + str(perms.get("reason", ""))
+        return False, _reject("no_perms", lang)
 
     strategy = PenaltyFactory.get_strategy(penalty)
     if not strategy:
-        return False, "❌ Unknown penalty"
+        return False, _reject("unknown_penalty", lang)
 
     success, _short = await strategy.apply(
         bot, chat_id, user_id, duration=duration
@@ -2943,22 +3073,34 @@ async def _increment_usage_async(chat_id: int, keyword: str):
 
 
 async def _flush_usage_updates():
+    """
+    ✅ v7.9.17 (#16): لا مضاعفة عند فشل جزئي.
+
+    نتتبّع الصفوف الفاشلة فقط ونعيدها للمخزن.
+    """
     async with _usage_lock:
         if not _usage_updates:
             return
         data = list(_usage_updates.items())
         _usage_updates.clear()
-    try:
-        for (chat_id, keyword), count in data:
+
+    failed: Dict[Tuple[int, str], int] = {}
+    for (chat_id, keyword), count in data:
+        try:
             await DB.execute(
                 "UPDATE auto_replies SET usage_count = usage_count + ? "
                 "WHERE chat_id=? AND keyword=?",
                 (count, chat_id, keyword)
             )
-    except Exception as e:
-        logger.error(f"❌ فشل تحديث usage_count: {e}")
+        except Exception as e:
+            logger.error(
+                f"❌ فشل تحديث usage_count ({chat_id}, {keyword}): {e}"
+            )
+            failed[(chat_id, keyword)] = count
+
+    if failed:
         async with _usage_lock:
-            for key, count in data:
+            for key, count in failed.items():
                 _usage_updates[key] = _usage_updates.get(key, 0) + count
 
 
@@ -3013,7 +3155,7 @@ async def import_auto_replies(chat_id: int,
             await DB.add_auto_reply(
                 chat_id, keyword, reply, reply_type=reply_type,
                 media_id=media_id,
-                buttons=json.dumps(buttons) if buttons else None
+                buttons=json.dumps(buttons, ensure_ascii=False) if buttons else None
             )
             count += 1
         _auto_reply_cache.invalidate()
@@ -3153,9 +3295,15 @@ class BackgroundTasks:
     POOL_ALERT_THRESHOLD = 85.0
     POOL_ALERT_COOLDOWN = 600
 
-    # ✅ v7.9.16: عتبات جديدة للتنبيهات
-    POOL_IDLE_TX_ALERT = 3        # idle_tx >= هذا → تنبيه
-    POOL_LOCK_WAITS_ALERT = 5     # lock_waits >= هذا → تنبيه
+    POOL_IDLE_TX_ALERT = 3
+    POOL_LOCK_WAITS_ALERT = 5
+
+    # ✅ v7.9.17 (#3, #24): تسجيل فقط عند تغيّر الحالة
+    _pool_last_logged_bucket: Optional[str] = None
+
+    # ✅ v7.9.17 (#7): مرجع لـ tasks النشر التلقائي
+    _auto_publish_tasks: Dict[int, asyncio.Task] = {}
+    _auto_publish_tasks_lock: Optional[asyncio.Lock] = None
 
     @staticmethod
     def _adaptive_ttl(chat_id: int) -> int:
@@ -3211,13 +3359,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def _read_pg_activity() -> Optional[Dict[str, int]]:
-        """
-        ✅ v7.9.16: قراءة pg_stat_activity بأمان.
-
-        Returns dict مع المفاتيح:
-          total, active, idle, idle_tx, lock_waits, waiting
-        أو None إذا ليس PostgreSQL / فشل الاستعلام.
-        """
         try:
             if not getattr(DB, 'USE_POSTGRES', False):
                 return None
@@ -3280,21 +3421,34 @@ class BackgroundTasks:
         )
 
     @staticmethod
+    def _pool_util_bucket(util: float) -> str:
+        """✅ v7.9.17 (#3): bucket لتفادي السجلات المتكررة."""
+        if util < 50:
+            return "low"
+        if util < 80:
+            return "medium"
+        if util < 85:
+            return "high"
+        return "critical"
+
+    @staticmethod
     async def monitor_pool() -> None:
         await asyncio.sleep(30)
         while True:
             try:
                 stats = BackgroundTasks._read_pool_stats()
                 if stats is not None:
-                    line = BackgroundTasks._format_pool_line(stats)
-                    logger.info(line)
-                    if stats["utilization_pct"] >= 85:
-                        logger.warning(
-                            f"⚠️ Pool شبه ممتلئ! "
-                            f"{stats['in_use']}/{stats['max_size']} "
-                            f"({stats['utilization_pct']}%) "
-                            f"— راجع الاستعلامات البطيئة (🐌)"
-                        )
+                    # ✅ v7.9.17 (#3, #24): سجّل فقط عند تغيّر الـbucket
+                    bucket = BackgroundTasks._pool_util_bucket(
+                        stats["utilization_pct"]
+                    )
+                    if bucket != BackgroundTasks._pool_last_logged_bucket:
+                        BackgroundTasks._pool_last_logged_bucket = bucket
+                        line = BackgroundTasks._format_pool_line(stats)
+                        if bucket == "critical":
+                            logger.warning(line)
+                        else:
+                            logger.info(line)
             except Exception as e:
                 logger.debug(f"monitor_pool: {e}")
             await asyncio.sleep(BackgroundTasks.POOL_MONITOR_INTERVAL)
@@ -3338,26 +3492,21 @@ class BackgroundTasks:
 
             lines.append(f"\n🕐 {TimeUtils.mecca_iso()}")
 
-            await safe_send(
-                bot,
+            # ✅ v7.9.17: استخدام bot.send_message مباشرة لتجنّب RATE_LIMITER
+            # (تنبيهات إدارية نادرة، يجب ألا تتأخر بسبب flood control)
+            if bot is None:
+                return
+            await bot.send_message(
                 CONFIG.PRIMARY_OWNER_ID,
                 "\n".join(lines),
                 parse_mode='HTML',
+                disable_web_page_preview=True,
             )
         except Exception as alert_err:
             logger.debug(f"_send_pool_alert: {alert_err}")
 
     @staticmethod
     async def monitor_pool_alert(bot) -> None:
-        """
-        ✅ v7.9.16: تنبيهات Pool محسّنة.
-
-        - util >= 85%           → تنبيه (كما قبل)
-        - idle_tx >= 3          → تنبيه جديد
-        - lock_waits >= 5       → تنبيه جديد
-
-        كل نوع له cooldown مستقل لتجنّب الإغراق.
-        """
         last_util_alert = 0.0
         last_idle_tx_alert = 0.0
         last_lock_alert = 0.0
@@ -3365,11 +3514,14 @@ class BackgroundTasks:
         await asyncio.sleep(60)
         while True:
             try:
+                if bot is None:
+                    await asyncio.sleep(60)
+                    continue
+
                 stats = BackgroundTasks._read_pool_stats()
                 pg_activity = await BackgroundTasks._read_pg_activity()
                 now = time.time()
 
-                # ─── 1) util alert ───
                 if stats is not None:
                     util = stats["utilization_pct"]
                     if (util >= BackgroundTasks.POOL_ALERT_THRESHOLD and
@@ -3379,7 +3531,6 @@ class BackgroundTasks:
                             bot, stats, pg_activity, "util"
                         )
 
-                # ─── 2) idle_tx alert (جديد) ───
                 if pg_activity is not None:
                     idle_tx = pg_activity.get('idle_tx', 0)
                     if (idle_tx >= BackgroundTasks.POOL_IDLE_TX_ALERT and
@@ -3389,7 +3540,6 @@ class BackgroundTasks:
                             bot, stats, pg_activity, "idle_tx"
                         )
 
-                # ─── 3) lock_waits alert (جديد) ───
                 if pg_activity is not None:
                     lock_waits = pg_activity.get('lock_waits', 0)
                     if (lock_waits >= BackgroundTasks.POOL_LOCK_WAITS_ALERT and
@@ -3418,6 +3568,16 @@ class BackgroundTasks:
         try:
             admins = await bot.get_chat_administrators(chat_id)
             admin_ids = [a.user.id for a in admins if a.user and not a.user.is_bot]
+
+            # ✅ v7.9.17 (#11): لا نخزّن/نمسح DB عند رجوع قائمة فارغة
+            if not admin_ids:
+                logger.warning(
+                    f"⚠️ get_chat_administrators({chat_id}) رجعت فارغة "
+                    f"— تخطي التخزين لتجنّب مسح DB"
+                )
+                if chat_id in BackgroundTasks._group_admins_cache:
+                    return BackgroundTasks._group_admins_cache[chat_id][1]
+                return []
 
             if len(BackgroundTasks._group_admins_cache) >= BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE:
                 evict_count = max(1, BackgroundTasks._GROUP_ADMINS_CACHE_MAX_SIZE // 5)
@@ -3517,14 +3677,37 @@ class BackgroundTasks:
                 return False
             success = await BackgroundTasks._publish_post(bot, ch['channel_id'], post)
             if success:
-                try:
-                    await DB.mark_published_and_advance(ch['id'], post['id'])
-                except Exception as _e:
-                    logger.error(
-                        f"⚠️ نُشر في {ch['channel_id']} لكن فشل "
-                        f"mark_published_and_advance: {_e} — "
-                        f"خطر نشر مزدوج في الدورة التالية"
+                # ✅ v7.9.17 (#6): retry + طابور pending بدل الاعتماد على الأمل
+                mark_ok = False
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        await DB.mark_published_and_advance(ch['id'], post['id'])
+                        mark_ok = True
+                        break
+                    except Exception as _e:
+                        last_err = _e
+                        if attempt < 2:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+
+                if not mark_ok:
+                    logger.critical(
+                        f"🚨 نُشر في {ch['channel_id']} لكن فشل "
+                        f"mark_published_and_advance بعد 3 محاولات: {last_err} — "
+                        f"محاولة وضع العلامة في طابور"
                     )
+                    # نحاول حفظ pending
+                    try:
+                        if hasattr(DB, 'mark_post_published_pending'):
+                            await DB.mark_post_published_pending(
+                                ch['id'], post['id']
+                            )
+                    except Exception as _pe:
+                        logger.critical(
+                            f"🚨 فشل حتى حفظ pending: {_pe} — "
+                            f"قد تُنشر الرسالة مرتين"
+                        )
+
                 if published_count == 0 or recycled:
                     if user_id:
                         with suppress(Exception):
@@ -3551,60 +3734,95 @@ class BackgroundTasks:
                 return 5
             return 8
 
-        active_tasks: Dict[int, asyncio.Task] = {}
+        # ✅ v7.9.17 (#7): استخدام المراجع من الفئة
+        BackgroundTasks._auto_publish_tasks = {}
 
-        while True:
-            try:
-                channels = await asyncio.wait_for(
-                    DB.get_channels_to_publish(max_channels), timeout=10
-                )
-                if not channels:
-                    await asyncio.sleep(60)
-                    continue
-
-                sem_size = _get_semaphore_size(len(channels))
-                semaphore = asyncio.Semaphore(sem_size)
-
-                for ch in channels:
-                    channel_id = ch['id']
-                    if channel_id in active_tasks and not active_tasks[channel_id].done():
+        try:
+            while True:
+                try:
+                    channels = await asyncio.wait_for(
+                        DB.get_channels_to_publish(max_channels), timeout=10
+                    )
+                    if not channels:
+                        await asyncio.sleep(60)
                         continue
-                    published_count = ch.get('published_count', 0)
-                    has_sub = None
 
-                    async def run_publish(ch=ch, bot=bot,
-                                          sleep_seconds=sleep_seconds,
-                                          published_count=published_count,
-                                          semaphore=semaphore,
-                                          has_sub=has_sub):
-                        async with semaphore:
-                            success = await BackgroundTasks._publish_single_channel(
-                                bot, ch, published_count, has_sub=has_sub
-                            )
-                        if success:
-                            logger.info(
-                                f"✅ قناة {ch['id']} نشرت. "
-                                f"انتظار {sleep_seconds // 60} دقيقة..."
-                            )
-                            await asyncio.sleep(sleep_seconds)
+                    sem_size = _get_semaphore_size(len(channels))
+                    semaphore = asyncio.Semaphore(sem_size)
+                    active = BackgroundTasks._auto_publish_tasks
 
-                    task = asyncio.create_task(run_publish())
-                    active_tasks[channel_id] = task
-                    await asyncio.sleep(0.3)
+                    for ch in channels:
+                        channel_id = ch['id']
+                        if channel_id in active and not active[channel_id].done():
+                            continue
+                        published_count = ch.get('published_count', 0)
+                        has_sub = None
 
-                for cid in list(active_tasks.keys()):
-                    if active_tasks[cid].done():
-                        with suppress(Exception):
-                            active_tasks[cid].result()
-                        del active_tasks[cid]
+                        async def run_publish(ch=ch, bot=bot,
+                                              sleep_seconds=sleep_seconds,
+                                              published_count=published_count,
+                                              semaphore=semaphore,
+                                              has_sub=has_sub):
+                            try:
+                                async with semaphore:
+                                    success = await BackgroundTasks._publish_single_channel(
+                                        bot, ch, published_count, has_sub=has_sub
+                                    )
+                                if success:
+                                    logger.info(
+                                        f"✅ قناة {ch['id']} نشرت. "
+                                        f"انتظار {sleep_seconds // 60} دقيقة..."
+                                    )
+                                    await asyncio.sleep(sleep_seconds)
+                            except asyncio.CancelledError:
+                                logger.debug(
+                                    f"⏹️ auto_publish task for ch={ch['id']} cancelled"
+                                )
+                                raise
 
-                await asyncio.sleep(60)
-            except asyncio.TimeoutError:
-                logger.error("❌ استعلام القنوات استغرق أكثر من 10 ثوانٍ")
-                await asyncio.sleep(30)
-            except Exception as e:
-                logger.error(f"❌ خطأ في auto_publish: {e}")
-                await asyncio.sleep(60)
+                        task = asyncio.create_task(run_publish())
+                        active[channel_id] = task
+                        await asyncio.sleep(0.3)
+
+                    for cid in list(active.keys()):
+                        if active[cid].done():
+                            with suppress(Exception):
+                                active[cid].result()
+                            del active[cid]
+
+                    await asyncio.sleep(60)
+                except asyncio.TimeoutError:
+                    logger.error("❌ استعلام القنوات استغرق أكثر من 10 ثوانٍ")
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"❌ خطأ في auto_publish: {e}")
+                    await asyncio.sleep(60)
+        finally:
+            # ✅ v7.9.17 (#7): تنظيف الـTasks عند الإلغاء
+            await BackgroundTasks.shutdown_auto_publish()
+
+    @staticmethod
+    async def shutdown_auto_publish(timeout: float = 5.0) -> None:
+        """✅ v7.9.17 (#7): إلغاء كل tasks النشر التلقائي بأمان."""
+        active = BackgroundTasks._auto_publish_tasks
+        if not active:
+            return
+        tasks = list(active.values())
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ shutdown_auto_publish: مهلة انتهت")
+        except Exception as e:
+            logger.debug(f"shutdown_auto_publish: {e}")
+        active.clear()
 
     @staticmethod
     async def auto_backup() -> None:
@@ -3780,6 +3998,7 @@ class BackgroundTasks:
                             admin_ids = await BackgroundTasks._get_admin_ids_cached(
                                 bot, chat_id
                             )
+                            # ✅ v7.9.17 (#11): لا نمسح DB لو رجعت فارغة
                             if admin_ids:
                                 await DB.sync_group_admins(chat_id, admin_ids)
                                 updated_count += 1
@@ -3802,7 +4021,6 @@ class BackgroundTasks:
 
     @staticmethod
     async def expire_penalties_periodically() -> None:
-        await asyncio.sleep(60)
         while True:
             await asyncio.sleep(60)
             try:
@@ -3822,8 +4040,16 @@ class BackgroundTasks:
                 _auth_cache.clear()
                 BackgroundTasks._group_admins_cache.clear()
                 BackgroundTasks._group_admins_access_count.clear()
+
+                # ✅ v7.9.17 (#13): لا نمسح إلا الأقفال غير المستخدمة
                 async with _banned_words_locks_guard:
-                    _banned_words_locks.clear()
+                    to_remove = [
+                        cid for cid, lk in _banned_words_locks.items()
+                        if not lk.locked()
+                    ]
+                    for cid in to_remove:
+                        _banned_words_locks.pop(cid, None)
+
                 logger.info("✅ تم تنظيف الكاش المؤقت")
             except Exception as e:
                 logger.error(f"❌ فشل تنظيف الكاش: {e}")
@@ -3898,19 +4124,23 @@ async def warmup_all() -> Dict[str, Any]:
 # 19. خادم الويب
 # =====================================================================
 
-_webhook_app = None
+# ✅ v7.9.17 (#1): اسم صريح — هذا هو telegram.ext.Application
+_telegram_app = None
 
 
 async def setup_webhook(app, port: int):
     """
     يُنشئ ويُشغّل خادم aiohttp للـ webhook + health check.
 
+    المعامل `app` هنا هو telegram.ext.Application.
+    يتم تخزينه في `_telegram_app` ليستخدمه webhook_handler.
+
     ✅ v7.9.15 (#1): يُرفق `site` (TCPSite) بكائن `runner` ليتمكّن
        `_watch_runner` في bot.py من مراقبة انهيار/تعليق الخادم.
-       بدون هذا الإرفاق، المراقبة كانت معطّلة صامتاً.
     """
-    global _webhook_app
-    _webhook_app = app
+    global _telegram_app
+    _telegram_app = app
+
     web_app = web.Application()
     web_app.router.add_get('/health', lambda r: web.Response(text="OK"))
     web_app.router.add_get('/', lambda r: web.Response(text="🌿 Relax Manager"))
@@ -3923,13 +4153,9 @@ async def setup_webhook(app, port: int):
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    # ✅ v7.9.15 (#1): إرفاق site بـ runner (عقد موثّق)
-    # يُستخدم من bot.py::_watch_runner لمراقبة صحة الخادم
     try:
-        # type: ignore[attr-defined]
-        runner.site = site
-        # type: ignore[attr-defined]
-        runner.tcp_site = site
+        runner.site = site          # type: ignore[attr-defined]
+        runner.tcp_site = site      # type: ignore[attr-defined]
     except Exception as _e:
         logger.debug(f"تعذّر إرفاق site بـ runner: {_e}")
 
@@ -3938,9 +4164,9 @@ async def setup_webhook(app, port: int):
 
 
 async def webhook_handler(request):
-    global _webhook_app
-    if _webhook_app is None or not hasattr(_webhook_app, 'bot'):
-        logger.error("❌ Webhook app not initialized")
+    """✅ v7.9.17 (#1): استخدام الاسم الصريح `_telegram_app`."""
+    if _telegram_app is None or not hasattr(_telegram_app, 'bot'):
+        logger.error("❌ Telegram app not initialized")
         return web.Response(status=503, text="Service Unavailable")
     try:
         raw_ct = request.content_type or ''
@@ -3950,12 +4176,16 @@ async def webhook_handler(request):
                 f"⚠️ Webhook request with non-JSON content: {raw_ct!r}"
             )
             return web.Response(status=400, text="Bad Request")
+
         data = await request.json()
-        await _webhook_app.process_update(Update.de_json(data, _webhook_app.bot))
+        await _telegram_app.process_update(
+            Update.de_json(data, _telegram_app.bot)
+        )
         return web.Response(status=200, text="OK")
     except Exception as e:
+        # ✅ نُعيد 200 لتجنّب إغراق Telegram بإعادة الإرسال
         logger.error(f"❌ Webhook error: {e}")
-        return web.Response(status=500, text="ERROR")
+        return web.Response(status=200, text="OK")
 
 # =====================================================================
 # 20. معالج الأخطاء
@@ -3966,6 +4196,16 @@ class ErrorHandler:
     async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             error_msg = str(context.error)
+
+            # ✅ v7.9.17 (#15): تفعيل METRICS.record_error
+            try:
+                METRICS.record_error(
+                    type(context.error).__name__ if context.error else "Unknown",
+                    error_msg[:200]
+                )
+            except Exception:
+                pass
+
             if update:
                 logger.error(
                     f"❌ خطأ في التحديث {update.update_id}: {context.error}",
@@ -3973,6 +4213,7 @@ class ErrorHandler:
                 )
             else:
                 logger.error(f"❌ خطأ: {context.error}", exc_info=True)
+
             try:
                 log_channel = await DB.get_log_channel()
                 if log_channel:
@@ -4021,4 +4262,5 @@ __all__ = [
     'load_replies_from_file', 'get_reply_from_file', 'reload_replies_from_file',
     'BackgroundTasks', 'setup_webhook', 'webhook_handler', 'ErrorHandler',
     'SmartCache', 'warmup_all',
+    '_normalize_unicode', '_normalize_word',
 ]
