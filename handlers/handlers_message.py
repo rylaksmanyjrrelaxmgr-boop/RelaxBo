@@ -2,30 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.26 - Forward Priority Fix)
+handlers_message.py - معالجات الرسائل (v7.9.27 - Group Log Notify)
 =============================================================================
-🆕 v7.9.26 (FORWARD-PRIORITY-FIX):
-    ✅ FIX-1 (CRITICAL): نقل فحص "المُعاد توجيهها" قبل "الروابط/المنشن"
-             - كان: delete_links يلتقط الرسائل المعاد توجيهها أولاً
-                    → حذف كـ "link" بدون استخراج forward_info
-             - الآن: delete_forwarded له الأولوية القصوى
-                    → حذف كـ "forwarded" مع الإشعار الكامل
-             - الأثر: الإشعار للمالك يعمل + تصنيف صحيح في admin_logs
-    ✅ FIX-2: logging واضح "PRIORITY" في اللوج
-             - يوضّح أن forwarded تُلتقط قبل link/mention
+🆕 v7.9.27 (GROUP-LOG-NOTIFY):
+    ✅ FIX-1: إرسال إشعار قناة السجل الخاصة بالمجموعة عند كل حذف
+             - يُرسل إلى DB.get_group_log_channel(chat_id)
+             - يتضمن: نوع الحذف، المستخدم، المصدر (لو كان forward)
+             - لا يؤثر على إشعار المالك في الخاص (يبقى كما هو)
+    ✅ FIX-2: دالة notify_group_log عامة وقابلة للاستدعاء من أي مكان
+    ✅ FIX-3: تشخيص logging واضح لكل خطوة
 
-التحسينات الموروثة من v7.9.25:
-    ✅ تشخيص كامل لكل خطوة (FWD-CHECK, HANDLE-FWD, DELETE-WARN)
-    ✅ get_forward_detection_reason() لتشخيص دقيق
+التحسينات الموروثة من v7.9.26:
+    ✅ FIX (CRITICAL): forwarded له الأولوية قبل links/mentions/banned_words
+    ✅ logging "PRIORITY" واضح
+    ✅ get_forward_detection_reason() للتشخيص
 
-التحسينات الموروثة من v7.9.24:
+التحسينات الموروثة من v7.9.25 / v7.9.24 / v7.9.23:
     ✅ _safe_delete_message لا يُخفي فشل الحذف
-
-التحسينات الموروثة من v7.9.23:
-    ✅ _handle_penalty_input يمرّر lang
-    ✅ _notify_dev_log — logging DEBUG
-    ✅ handle_group — فحص effective_user
-    ✅ try/except حول unpacking في add_banned_word
+    ✅ تشخيص كامل لكل خطوة
 =====================================================================
 """
 
@@ -151,14 +145,15 @@ CACHE_CLEANUP_INTERVAL = 3600
 
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 
-# ✅ v7.9.24: لا نتجاهل "message can't be deleted" — فشل حقيقي
+# 🆕 v7.9.27: حجم المعاينة في إشعار قناة السجل
+_GROUP_LOG_PREVIEW_LENGTH = 150
+
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
     "message identifier is not specified",
     "message is not found",
 )
 
-# ✅ v7.9.24: نمط فشل الحذف الحقيقي
 _DELETE_PERMISSION_ERROR = "message can't be deleted"
 
 _MEDIA_REPLY_TYPES = frozenset({
@@ -210,6 +205,177 @@ async def _notify_dev_log(context, text: str) -> None:
 
     except Exception as e:
         logger.warning(f"🔔 _notify_dev_log FAILED: {e}", exc_info=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.9.27: إشعار قناة السجل الخاصة بالمجموعة
+# ═══════════════════════════════════════════════════════════════════
+
+_VIOLATION_LABELS_AR = {
+    'forwarded': '↩️ رسالة معاد توجيهها',
+    'link': '🔗 رابط',
+    'mention': '📢 منشن',
+    'banned_word': '🚫 كلمة محظورة',
+    'max_len': '📏 طول زائد',
+    'video': '🎬 فيديو',
+    'photo': '📷 صورة',
+    'audio': '🎵 صوت',
+    'voice': '🎤 فويس',
+    'sticker': '🖼️ ملصق',
+    'document': '📄 ملف',
+    'animation': '🎞️ أنيميشن',
+    'video_note': '🎥 فيديو نوت',
+}
+
+_FORWARD_TYPE_LABELS_AR = {
+    'user': '👤 مستخدم',
+    'hidden_user': '👻 مستخدم مخفي',
+    'chat': '👥 مجموعة',
+    'channel': '📢 قناة',
+}
+
+
+async def notify_group_log(
+    context,
+    chat_id: int,
+    text: str,
+    disable_preview: bool = True,
+) -> bool:
+    """
+    🆕 v7.9.27: يُرسل إشعاراً لقناة السجل الخاصة بهذه المجموعة.
+
+    Args:
+        context: ContextTypes
+        chat_id: معرّف المجموعة (للقراءة من DB.get_group_log_channel)
+        text: نص الإشعار (HTML)
+        disable_preview: تعطيل معاينة الروابط
+
+    Returns:
+        True إذا نجح الإرسال، False خلاف ذلك.
+    """
+    try:
+        getter = getattr(DB, 'get_group_log_channel', None)
+        if not callable(getter):
+            logger.debug("ℹ️ DB.get_group_log_channel غير موجود")
+            return False
+
+        channel_id = await getter(chat_id)
+        if not channel_id:
+            logger.debug(f"ℹ️ لا توجد قناة سجل للمجموعة {chat_id}")
+            return False
+
+        # تحويل القيمة إلى int إن كانت نصاً رقمياً
+        if isinstance(channel_id, str) and channel_id.lstrip('-').isdigit():
+            channel_id = int(channel_id)
+
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode='HTML',
+            disable_web_page_preview=disable_preview,
+        )
+        logger.info(
+            f"✅ notify_group_log OK | group={chat_id} → "
+            f"channel={channel_id}"
+        )
+        return True
+
+    except BadRequest as e:
+        err = str(e).lower()
+        if "chat not found" in err:
+            logger.error(
+                f"❌ notify_group_log: القناة غير موجودة | group={chat_id} "
+                f"| تأكد أن البوت مضاف كعضو/مشرف في القناة"
+            )
+        elif "not enough rights" in err or "bot is not a member" in err:
+            logger.error(
+                f"❌ notify_group_log: البوت ليس عضواً/مشرفاً | group={chat_id}"
+            )
+        else:
+            logger.warning(
+                f"⚠️ notify_group_log BadRequest | group={chat_id}: {e}"
+            )
+        return False
+    except Exception as e:
+        logger.error(
+            f"❌ notify_group_log FAILED | group={chat_id}: {e}",
+            exc_info=True,
+        )
+        return False
+
+
+def _build_delete_log_text(
+    chat_id: int,
+    user_id: int,
+    user_first_name: str,
+    user_username: Optional[str],
+    violation_type: str,
+    forward_info: Optional[Dict[str, Any]] = None,
+    message_preview: Optional[str] = None,
+) -> str:
+    """
+    🆕 v7.9.27: يبني نص إشعار الحذف لقناة السجل.
+    """
+    label = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
+
+    user_display = escape(user_first_name or 'User')
+    if user_username:
+        user_display_lnk = (
+            f"<a href='tg://user?id={user_id}'>{user_display}</a> "
+            f"(@{escape(user_username)})"
+        )
+    else:
+        user_display_lnk = (
+            f"<a href='tg://user?id={user_id}'>{user_display}</a>"
+        )
+
+    lines = [
+        "🗑️ <b>حذف رسالة</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📌 النوع: {label}",
+        f"👤 المستخدم: {user_display_lnk}",
+        f"🆔 المعرّف: <code>{user_id}</code>",
+    ]
+
+    if message_preview:
+        preview = message_preview.strip().replace("\n", " ")
+        if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
+            preview = preview[:_GROUP_LOG_PREVIEW_LENGTH] + "…"
+        lines.append(f"💬 النص: <i>{escape(preview)}</i>")
+
+    if forward_info:
+        ftype = forward_info.get('type') or '؟'
+        ftype_label = _FORWARD_TYPE_LABELS_AR.get(ftype, ftype)
+        lines.append("")
+        lines.append("📤 <b>المصدر:</b>")
+        lines.append(f"   • النوع: {ftype_label}")
+        fname = forward_info.get('name')
+        if fname:
+            fname_str = str(fname)
+            if len(fname_str) > 60:
+                fname_str = fname_str[:60] + "…"
+            lines.append(f"   • الاسم: {escape(fname_str)}")
+        fid = forward_info.get('id')
+        if fid:
+            lines.append(f"   • المعرّف: <code>{fid}</code>")
+        if forward_info.get('signature'):
+            lines.append(
+                f"   • التوقيع: {escape(str(forward_info['signature']))}"
+            )
+        if forward_info.get('message_id'):
+            lines.append(
+                f"   • رقم الرسالة الأصلية: "
+                f"<code>{forward_info['message_id']}</code>"
+            )
+
+    try:
+        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    lines.append("")
+    lines.append(f"🕐 {now_str}")
+
+    return "\n".join(lines)
 
 
 # =====================================================================
@@ -1508,14 +1674,16 @@ class MessageHandlers:
 
     # =================================================================
     # 🆕 v7.9.26: رسائل المجموعات — Forward Priority Fix
+    # 🆕 v7.9.27: إرسال إشعار لقناة السجل الخاصة بالمجموعة
     # =================================================================
 
     @staticmethod
     async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         ✅ v7.9.26: فحص forwarded له الأولوية القصوى.
+        ✅ v7.9.27: إرسال إشعار لقناة السجل عند الحذف.
 
-        الترتيب الجديد:
+        الترتيب:
           1. service (delete_service)
           2. 🎯 FORWARDED (delete_forwarded) ← الأولوية القصوى
           3. links (delete_links)
@@ -1525,9 +1693,6 @@ class MessageHandlers:
           7. media (photos/videos/...)
           8. translation
           9. auto_reply
-
-        السبب: أي رسالة معاد توجيهها (حتى لو فيها رابط)
-        تُحذف كـ "forwarded" مع استخراج forward_info.
         """
         if not update.effective_chat or not update.effective_message:
             return
@@ -1558,7 +1723,7 @@ class MessageHandlers:
         settings = await get_security_settings_cached(chat_id)
 
         # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.9.25: DIAGNOSTIC BLOCK
+        # DIAGNOSTIC BLOCK
         # ═══════════════════════════════════════════════════════════════
         _df_raw = settings.get('delete_forwarded')
         _df_bool = bool(_df_raw)
@@ -1575,7 +1740,7 @@ class MessageHandlers:
             f"chat={chat_id} user={user_id} msg={msg_id} | "
             f"delete_forwarded={_df_raw!r} (bool={_df_bool}) | "
             f"is_forwarded={_is_fwd} | "
-            f"HAS_ORIGIN={_det.get('has_message_origin_module')} | "
+            f"module_supports_origin={_det.get('has_message_origin_module')} | "
             f"has_text={bool(msg_text)} has_caption={bool(msg_caption)}"
         )
 
@@ -1621,9 +1786,7 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════════
-        # 2) 🎯 v7.9.26: FORWARDED — الأولوية القصوى
-        #    يأتي قبل delete_links و delete_banned_words
-        #    حتى لا تُلتقط الرسالة كـ "link" عند وجود رابط فيها
+        # 2) 🎯 FORWARDED — الأولوية القصوى
         # ═══════════════════════════════════════════════════════════════
         if settings.get('delete_forwarded'):
             if is_forwarded(message):
@@ -1738,6 +1901,7 @@ class MessageHandlers:
                                 violation_type, settings):
         """
         ✅ v7.9.25: تشخيص كامل — يطبع كل خطوة.
+        ✅ v7.9.27: إرسال إشعار لقناة السجل الخاصة بالمجموعة عند نجاح الحذف.
         """
         logger.warning(
             f"🔧 DELETE-WARN | start | "
@@ -1747,6 +1911,9 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
+        # ═══════════════════════════════════════════════════════════
+        # استخراج forward_info قبل الحذف (لو الرسالة معاد توجيهها)
+        # ═══════════════════════════════════════════════════════════
         forward_info: Optional[Dict[str, Any]] = None
         if violation_type == 'forwarded':
             try:
@@ -1768,6 +1935,22 @@ class MessageHandlers:
                     exc_info=True,
                 )
 
+        # ═══════════════════════════════════════════════════════════
+        # حفظ معاينة النص قبل الحذف (لقناة السجل)
+        # ═══════════════════════════════════════════════════════════
+        message_preview: Optional[str] = None
+        try:
+            _m = update.effective_message
+            if _m is not None:
+                message_preview = (
+                    _m.text or _m.caption or ""
+                ).strip() or None
+        except Exception:
+            pass
+
+        # ═══════════════════════════════════════════════════════════
+        # تنفيذ الحذف
+        # ═══════════════════════════════════════════════════════════
         delete_ok = False
         _msg_id_to_delete = None
         try:
@@ -1797,7 +1980,51 @@ class MessageHandlers:
             )
             delete_ok = False
 
-        # ─── إشعار المالك ───
+        # ═══════════════════════════════════════════════════════════
+        # 🆕 v7.9.27: إشعار قناة السجل الخاصة بالمجموعة
+        # ═══════════════════════════════════════════════════════════
+        if delete_ok:
+            try:
+                user_obj = update.effective_user
+                user_first = (
+                    getattr(user_obj, 'first_name', None) or "User"
+                ) if user_obj else "User"
+                user_username = (
+                    getattr(user_obj, 'username', None)
+                ) if user_obj else None
+
+                log_text = _build_delete_log_text(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    user_first_name=user_first,
+                    user_username=user_username,
+                    violation_type=violation_type,
+                    forward_info=forward_info,
+                    message_preview=message_preview,
+                )
+
+                # إرسال غير متزامن حتى لا يُعطّل المعالجة
+                _log_task = asyncio.create_task(
+                    notify_group_log(context, chat_id, log_text)
+                )
+                _log_task.add_done_callback(
+                    lambda t: (
+                        t.exception() if not t.cancelled() else None
+                    )
+                )
+                logger.info(
+                    f"📢 group_log notify spawned | "
+                    f"chat={chat_id} violation={violation_type}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ group_log notify spawn فشل: {e}",
+                    exc_info=True,
+                )
+
+        # ═══════════════════════════════════════════════════════════
+        # إشعار المالك في الخاص (لو الرسالة معاد توجيهها)
+        # ═══════════════════════════════════════════════════════════
         if forward_info and _should_notify_forward(context, chat_id):
             try:
                 owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
@@ -1827,6 +2054,9 @@ class MessageHandlers:
             )
             return
 
+        # ═══════════════════════════════════════════════════════════
+        # العقوبات والتحذير
+        # ═══════════════════════════════════════════════════════════
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
         except Exception:
@@ -3867,4 +4097,6 @@ __all__ = [
     "_extract_legacy_forward_info",
     "_notify_admin_about_forward",
     "_should_notify_forward",
+    "notify_group_log",
+    "_build_delete_log_text",
 ]
