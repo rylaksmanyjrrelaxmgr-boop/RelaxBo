@@ -4,17 +4,13 @@
 """
 handlers_message.py - معالجات الرسائل (v7.10.2 - Delete All Channel Forwards)
 =============================================================================
-🆕 v7.10.2 (DELETE-ALL-CHANNEL-FORWARDS):
+🆕 v7.10.2:
     ✅ delete_protected_any: حذف كل forward من قنوات محمية
-       - يشمل النصوص والروابط والوسائط
-       - يعمل حتى لو البوت ليس مشرفاً في القناة المصدر
-       - يستثني فقط is_automatic_forward (قناة مرتبطة)
     ✅ is_forwarded يقبل allow_protected_any
     ✅ HARD-DIAG يعرض has_automatic_forward + protected_any
     ✅ extract_forward_info يعرض protected_any type
-
 الموروث من v7.10.1:
-    ✅ HARD-DIAG + protected_fallback (caption hint)
+    ✅ HARD-DIAG + protected_fallback
 الموروث من v7.10.0:
     ✅ Feature Flags + Rate Limiting + Retry + Cache
 الموروث من v7.9.30 → v7.9.26:
@@ -79,10 +75,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# FEATURE FLAGS
-# ═══════════════════════════════════════════════════════════════════
-
 def _env_flag(name: str, default: bool = True) -> bool:
     val = os.getenv(name)
     if val is None:
@@ -94,11 +86,6 @@ FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
 FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
 FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
 FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════
 
 MAX_PENALTY_MINUTES = 30 * 24 * 60
 LOG_RATE_LIMIT_PER_MIN = 30
@@ -143,11 +130,6 @@ _MEDIA_REPLY_TYPES = frozenset({
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Cache قناة سجل المطور
-# ═══════════════════════════════════════════════════════════════════
 
 _dev_log_cache: Optional[Any] = None
 _dev_log_cache_ts: float = 0.0
@@ -206,11 +188,6 @@ async def _notify_dev_log(context, text: str) -> None:
         )
     except Exception as e:
         logger.warning(f"🔔 _notify_dev_log FAILED: {e}", exc_info=True)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Rate Limiting
-# ═══════════════════════════════════════════════════════════════════
 
 _log_rate_tracker: Dict[int, deque] = defaultdict(
     lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
@@ -273,11 +250,6 @@ async def _safe_invalidate(*keys: str) -> None:
         except Exception as e:
             logger.debug(f"_safe_invalidate({k}): {e}")
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Labels
-# ═══════════════════════════════════════════════════════════════════
-
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة معاد توجيهها',
     'link': '🔗 رابط', 'mention': '📢 منشن',
@@ -323,10 +295,6 @@ def _format_duration(seconds: int) -> str:
     return " و ".join(parts) if parts else f"{seconds} ثانية"
 
 
-# ═══════════════════════════════════════════════════════════════════
-# notify_group_log
-# ═══════════════════════════════════════════════════════════════════
-
 async def notify_group_log(
     context, chat_id: int, text: str,
     disable_preview: bool = True,
@@ -359,10 +327,6 @@ async def notify_group_log(
         logger.error(f"❌ group_log FAILED: {e}", exc_info=True)
         return False
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Build log texts
-# ═══════════════════════════════════════════════════════════════════
 
 def _build_delete_log_text(
     chat_id: int, user_id: int,
@@ -514,11 +478,6 @@ async def _notify_group_log_penalty(
     except Exception as e:
         logger.warning(f"⚠️ _notify_group_log_penalty: {e}")
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Delete helpers
-# ═══════════════════════════════════════════════════════════════════
-
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 _sec_auth_cache_lock = asyncio.Lock()
 
@@ -582,10 +541,6 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.10.2: Forward detection with protected_any
-# ═══════════════════════════════════════════════════════════════════
-
 def _has_forward_hint(text: str) -> bool:
     if not text:
         return False
@@ -599,12 +554,6 @@ def _has_forward_hint(text: str) -> bool:
 def is_forwarded(message, *,
                  allow_protected_fallback: bool = False,
                  allow_protected_any: bool = False) -> bool:
-    """
-    v7.10.2: كشف شامل مع 3 أوضاع:
-    1) الطرق الرسمية
-    2) allow_protected_fallback: protected + caption hint
-    3) allow_protected_any: أي protected content (عدواني)
-    """
     if message is None:
         return False
 
@@ -824,10 +773,6 @@ def _should_notify_forward(context, chat_id: int) -> bool:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Admin helpers
-# ═══════════════════════════════════════════════════════════════════
-
 async def _refresh_admin_commands_safe(bot, user_id: int,
                                         is_admin: bool) -> bool:
     if not user_id:
@@ -914,10 +859,6 @@ class GroupRateLimiterManager:
             except Exception as e:
                 logger.error(f"❌ periodic_cleanup: {e}")
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Translation helpers
-# ═══════════════════════════════════════════════════════════════════
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
     if not key:
@@ -1065,10 +1006,6 @@ async def _send_translation_reply(bot, chat_id, original_message_id,
     except Exception as e:
         logger.debug(f"_send_translation_reply: {e}")
 
-
-# ═══════════════════════════════════════════════════════════════════
-# Misc helpers
-# ═══════════════════════════════════════════════════════════════════
 
 async def apply_violation_penalty(update, context, chat_id, user_id,
                                    violation_type, penalty_type,
@@ -1234,10 +1171,6 @@ def _verify_bot_in_log_channel_error_text(reason: str, lang: str) -> str:
     return mapping.get(reason, "❌ تعذّر التحقق من قناة السجل.")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# MessageHandlers
-# ═══════════════════════════════════════════════════════════════════
-
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[UserState, str] = {
@@ -1306,7 +1239,6 @@ class MessageHandlers:
         UserState.WAIT_PENALTY_RESTRICT_DURATION: "_handle_penalty_restrict_duration",
     }
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def handle_private(update, context):
         lang = 'ar'
@@ -1473,7 +1405,6 @@ class MessageHandlers:
         context.user_data.pop('log_group_id', None)
         return True
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_ban_user_input(update, context):
         user_id = update.effective_user.id
@@ -1531,7 +1462,6 @@ class MessageHandlers:
                 pass
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_penalty_default_duration(update, context):
         user_id = update.effective_user.id
@@ -1710,9 +1640,6 @@ class MessageHandlers:
                             await _trans('execution_failed', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ═════════════════════════════════════════════════════════════
-    # 🎯 handle_group — main
-    # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_group(update, context):
         if not update.effective_chat or not update.effective_message:
@@ -1722,13 +1649,11 @@ class MessageHandlers:
         message = update.effective_message
         msg_id = getattr(message, 'message_id', None)
 
-        # 1) تخطي auto-forward (قناة مرتبطة بالمجموعة)
         if getattr(message, 'is_automatic_forward', False):
             logger.debug(
                 f"⏭️ AUTO-FORWARD-SKIP | chat={chat_id} msg={msg_id}")
             return
 
-        # 2) هوية المرسل
         is_anonymous = False
         if update.effective_user:
             user_id = update.effective_user.id
@@ -1780,7 +1705,6 @@ class MessageHandlers:
         ) and _df_bool
         _log_level = logging.WARNING if _fwd_active else logging.INFO
 
-        # ═══ HARD-DIAG ═══
         logger.log(
             _log_level,
             f"🚨 HARD-DIAG | chat={chat_id} user={user_id} msg={msg_id} "
@@ -1816,14 +1740,12 @@ class MessageHandlers:
                     f"id={_info.get('id')} "
                     f"name={_info.get('name')!r}")
 
-        # ─── 1) service ───
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
                     context.bot, chat_id, message.message_id)
                 return
 
-        # ─── 2) FORWARDED (أولوية قصوى) ───
         if settings.get('delete_forwarded'):
             effective_forwarded = is_forwarded(
                 message,
@@ -1844,7 +1766,6 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
-        # ─── 3) links ───
         if settings.get('delete_links'):
             if TextUtils.contains_link(full_text):
                 await MessageHandlers._delete_and_warn(
@@ -1852,7 +1773,6 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
-        # ─── 4) mentions ───
         if settings.get('mentions'):
             if TextUtils.contains_mention(full_text):
                 await MessageHandlers._delete_and_warn(
@@ -1860,7 +1780,6 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
-        # ─── 5) banned words ───
         if settings.get('delete_banned_words'):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
@@ -1873,7 +1792,6 @@ class MessageHandlers:
                             is_anonymous=is_anonymous)
                         return
 
-        # ─── 6) max_len ───
         max_len = settings.get('max_message_length', 0)
         if max_len > 0 and len(full_text) > max_len:
             await MessageHandlers._delete_and_warn(
@@ -1881,7 +1799,6 @@ class MessageHandlers:
                 settings, is_anonymous=is_anonymous)
             return
 
-        # ─── 7) media ───
         media_checks = [
             (message.video, 'delete_videos', 'video'),
             (message.audio, 'delete_audio', 'audio'),
@@ -1899,7 +1816,6 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
-        # ─── 8) translation ───
         if msg_text and not is_anonymous:
             try:
                 translated = await _detect_and_translate(
@@ -1912,12 +1828,10 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        # ─── 9) auto reply ───
         if msg_text:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, msg_text, user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     def _get_penalty_duration(settings: dict, violation_type: str) -> int:
         if violation_type in ('flood', 'antiflood'):
@@ -1984,7 +1898,6 @@ class MessageHandlers:
             logger.error(f"delete exception: {e}", exc_info=True)
             delete_ok = False
 
-        # إشعار قناة السجل
         if delete_ok and FEATURE_LOG_DELETIONS:
             if await _can_send_log(chat_id):
                 try:
@@ -2014,7 +1927,6 @@ class MessageHandlers:
                 except Exception as e:
                     logger.warning(f"group_log spawn: {e}")
 
-        # إشعار المالك
         if (forward_info and not is_anonymous
                 and _should_notify_forward(context, chat_id)):
             try:
@@ -2034,7 +1946,6 @@ class MessageHandlers:
             logger.error(f"⏭️ توقف — الحذف فشل")
             return
 
-        # المجهول: لا عقوبات
         if is_anonymous:
             logger.info(f"👻 ANONYMOUS SKIP-PENALTY | chat={chat_id}")
             try:
@@ -2057,7 +1968,6 @@ class MessageHandlers:
                 logger.warning(f"anon violation message: {e}")
             return
 
-        # عداد المخالفات
         try:
             violation_count = await DB.increment_violation_count(
                 user_id, chat_id)
@@ -2169,7 +2079,6 @@ class MessageHandlers:
                     except Exception as e:
                         logger.debug(f"penalty send/delete: {e}")
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _process_auto_reply(update, context, chat_id, text,
                                    user_id=None):
@@ -2233,7 +2142,6 @@ class MessageHandlers:
             logger.error(f"❌ auto_reply: {e}")
             return False
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_channel_input(update, context):
         user_id = update.effective_user.id
@@ -2645,7 +2553,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, msg)
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_admin_add_input(update, context):
         user_id = update.effective_user.id
@@ -2765,7 +2672,6 @@ class MessageHandlers:
                             await _trans('error_occurred', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_keyword_input(update, context):
         user_id = update.effective_user.id
@@ -2873,7 +2779,6 @@ class MessageHandlers:
                         await _trans('deleted_success', lang, "✅"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_global_ban_input(update, context):
         user_id = update.effective_user.id
@@ -2964,7 +2869,6 @@ class MessageHandlers:
                         await _trans('removed_success', lang, "✅"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_contest_title(update, context):
         user_id = update.effective_user.id
@@ -3153,7 +3057,6 @@ class MessageHandlers:
                             await _trans('no_active_contest', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_import_file(update, context):
         user_id = update.effective_user.id
@@ -3254,7 +3157,6 @@ class MessageHandlers:
                             await _trans('usage_format', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_min_input(update, context):
         user_id = update.effective_user.id
@@ -3374,7 +3276,6 @@ class MessageHandlers:
                             await _trans('invalid_number', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_max_len_input(update, context):
         user_id = update.effective_user.id
@@ -3579,7 +3480,6 @@ class MessageHandlers:
         await safe_send(context.bot, user_id, f"✅ {time_val}")
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_ban_input(update, context):
         await MessageHandlers._handle_penalty_input(
@@ -3802,7 +3702,6 @@ class MessageHandlers:
                             await _trans('execution_failed', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _handle_redeem_gift_input(update, context):
         user_id = update.effective_user.id
@@ -3865,7 +3764,6 @@ class MessageHandlers:
                             await _trans('invalid_code', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def _do_db_restore(update, context, user_id, lang):
         if await _is_postgres_db():
@@ -3998,7 +3896,6 @@ class MessageHandlers:
         await MessageHandlers._do_db_restore(update, context, user_id, lang)
         StateManager.clear(user_id)
 
-    # ─────────────────────────────────────────────────────────────
     @staticmethod
     async def handle_service(update, context) -> None:
         if not update.effective_chat or not update.effective_message:
