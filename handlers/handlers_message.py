@@ -2,19 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v8.0.0 - FULL MERGED)
+handlers_message.py - معالجات الرسائل (v8.0.1 - FULL MERGED + FIXES)
 =====================================================================
-🆕 v8.0.0 — كشف شامل لكل أنواع الرسائل:
-    ✅ _has_forward_hint (كان مفقوداً — NameError)
-    ✅ _has_suspicious_inline_keyboard (جديد)
-    ✅ _count_forward_signals (جديد)
-    ✅ _is_likely_channel_forward (جديد)
-    ✅ _is_service_message (جديد)
-    ✅ _raw_diag (جديد)
-    ✅ is_forwarded: كشف sender_chat + via_bot + bot_sender + kb
-    ✅ get_forward_detection_reason: حقول جديدة
-    ✅ handle_group: RAW-DIAG قبل أي شرط
-    ✅ FEATURE_RAW_DIAG
+🆕 v8.0.1 — إصلاحات تراكمية:
+    ✅ matched_word يُسجَّل في DELETE-WARN
+    ✅ WAIT_CONTEST_DURATION مُضاف للجدول
+    ✅ WAIT_CONTEST_WINNER الميت مُزال
+    ✅ _delete_and_warn يستقبل matched_word
+    ✅ حماية إضافية في handle_group من user=None
+    ✅ _raw_diag لا ينهار على قيم None
+
+v8.0.0 — كشف شامل:
+    ✅ _has_forward_hint
+    ✅ _has_suspicious_inline_keyboard
+    ✅ _count_forward_signals
+    ✅ _is_likely_channel_forward
+    ✅ _is_service_message
+    ✅ _raw_diag
+    ✅ is_forwarded شامل
+    ✅ get_forward_detection_reason
 =====================================================================
 """
 
@@ -341,11 +347,10 @@ def _format_duration(seconds: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# دوال الكشف الأساسية (كانت مفقودة → NameError)
+# دوال الكشف الأساسية
 # ═══════════════════════════════════════════════════════════════
 
 def _has_forward_hint(text: str) -> bool:
-    """كشف إشارات الفوروارد النصية."""
     if not text:
         return False
     tail = text[-200:] if len(text) > 200 else text
@@ -356,7 +361,6 @@ def _has_forward_hint(text: str) -> bool:
 
 
 def _has_suspicious_inline_keyboard(message) -> Tuple[bool, int, int]:
-    """يكتشف الأزرار Inline URL المشبوهة."""
     try:
         rm = getattr(message, 'reply_markup', None)
         if rm is None:
@@ -385,7 +389,6 @@ def _has_suspicious_inline_keyboard(message) -> Tuple[bool, int, int]:
 
 
 def _count_forward_signals(message, text: str) -> Tuple[int, List[str]]:
-    """يحسب عدد إشارات الفوروارد."""
     if not text:
         return 0, []
     signals: List[str] = []
@@ -417,7 +420,6 @@ def _is_likely_channel_forward(
     message,
     min_signals: int = _FORWARD_DETECTION_MIN_SIGNALS,
 ) -> Tuple[bool, int, List[str]]:
-    """كشف ذكي للفوروارد من قنوات خاصة/بوتات."""
     if message is None:
         return False, 0, []
     text = (message.caption or message.text or "")
@@ -430,7 +432,6 @@ def _is_likely_channel_forward(
 
 
 def _is_service_message(message) -> bool:
-    """كشف رسائل الخدمة."""
     return bool(
         getattr(message, 'new_chat_members', None) or
         getattr(message, 'left_chat_member', None) or
@@ -451,8 +452,10 @@ def _is_service_message(message) -> bool:
 
 
 def _raw_diag(message, chat_id: int, user_id: int) -> None:
-    """طباعة تشخيصية شاملة لكل حقل."""
+    """v8.0.1: حماية إضافية من None."""
     if not FEATURE_RAW_DIAG:
+        return
+    if message is None:
         return
     try:
         msg_id = getattr(message, 'message_id', '?')
@@ -462,8 +465,8 @@ def _raw_diag(message, chat_id: int, user_id: int) -> None:
         fwd_origin = getattr(message, 'forward_origin', None)
         fwd_from = getattr(message, 'forward_from', None)
         fwd_from_chat = getattr(message, 'forward_from_chat', None)
-        is_auto_fwd = getattr(message, 'is_automatic_forward', False)
-        has_protected = getattr(message, 'has_protected_content', False)
+        is_auto_fwd = bool(getattr(message, 'is_automatic_forward', False))
+        has_protected = bool(getattr(message, 'has_protected_content', False))
         reply_markup = getattr(message, 'reply_markup', None)
         text = getattr(message, 'text', None) or ""
         caption = getattr(message, 'caption', None) or ""
@@ -485,13 +488,30 @@ def _raw_diag(message, chat_id: int, user_id: int) -> None:
             else:
                 kb_info = type(reply_markup).__name__
 
-        from_str = (
-            f"id={from_user.id} is_bot={from_user.is_bot}"
-            if from_user else "None")
-        sender_str = (
-            f"id={sender_chat.id} type={getattr(sender_chat, 'type', '?')}"
-            if sender_chat else "None")
-        via_str = f"id={via_bot.id}" if via_bot else "None"
+        from_str = "None"
+        if from_user is not None:
+            try:
+                from_str = (
+                    f"id={getattr(from_user, 'id', '?')} "
+                    f"is_bot={getattr(from_user, 'is_bot', False)}")
+            except Exception:
+                from_str = "error"
+
+        sender_str = "None"
+        if sender_chat is not None:
+            try:
+                sender_str = (
+                    f"id={getattr(sender_chat, 'id', '?')} "
+                    f"type={getattr(sender_chat, 'type', '?')}")
+            except Exception:
+                sender_str = "error"
+
+        via_str = "None"
+        if via_bot is not None:
+            try:
+                via_str = f"id={getattr(via_bot, 'id', '?')}"
+            except Exception:
+                via_str = "error"
 
         logger.warning(
             f"🔬 RAW-DIAG | msg={msg_id} chat={chat_id} user={user_id} | "
@@ -562,7 +582,7 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Forward detection (v8.0.0)
+# Forward detection (v8.0.1)
 # ═══════════════════════════════════════════════════════════════
 
 def is_forwarded(message, *,
@@ -574,11 +594,9 @@ def is_forwarded(message, *,
                  allow_bot_sender: bool = True,
                  allow_kb_detection: bool = True,
                  allow_auto_channel: bool = True) -> bool:
-    """كشف شامل لكل أنواع الرسائل المُعاد توجيهها."""
     if message is None:
         return False
 
-    # 1) Forward حقيقي
     if getattr(message, 'forward_origin', None) is not None:
         return True
     if getattr(message, 'forward_date', None) is not None:
@@ -590,7 +608,6 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
-    # 2) sender_chat
     if allow_sender_chat:
         sender_chat = getattr(message, 'sender_chat', None)
         if sender_chat is not None:
@@ -601,14 +618,12 @@ def is_forwarded(message, *,
                     f"id={sender_chat.id}")
                 return True
 
-    # 3) via_bot
     if allow_via_bot:
         via_bot = getattr(message, 'via_bot', None)
         if via_bot is not None:
             logger.info(f"🎯 VIA-BOT-DETECT | bot_id={via_bot.id}")
             return True
 
-    # 4) from_user.is_bot
     if allow_bot_sender:
         from_user = getattr(message, 'from_user', None)
         if from_user and getattr(from_user, 'is_bot', False):
@@ -617,13 +632,11 @@ def is_forwarded(message, *,
                 f"name={getattr(from_user, 'first_name', '?')}")
             return True
 
-    # 5) محتوى محمي
     if allow_protected_any:
         if getattr(message, 'has_protected_content', False):
             if not getattr(message, 'is_automatic_forward', False):
                 return True
 
-    # 6) كشف Inline Keyboard
     if allow_kb_detection:
         suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(
             message)
@@ -647,14 +660,12 @@ def is_forwarded(message, *,
                         f"promo={has_promo} hint={has_hint}")
                     return True
 
-    # 7) auto_forward مزيّف
     if allow_auto_channel:
         if getattr(message, 'is_automatic_forward', False):
             if getattr(message, 'reply_markup', None) is not None:
                 logger.warning("🎯 AUTO-CHANNEL-FAKE | has_kb + auto_fwd")
                 return True
 
-    # 8) كشف نصي متعدد الإشارات
     if allow_text_detection:
         is_likely, count, signals = _is_likely_channel_forward(message)
         if is_likely:
@@ -662,7 +673,6 @@ def is_forwarded(message, *,
                 f"🎯 TEXT-DETECT | signals={signals} count={count}")
             return True
 
-    # 9) protected_fallback
     if allow_protected_fallback:
         if getattr(message, 'has_protected_content', False):
             caption = (message.caption or message.text or "")
@@ -679,7 +689,6 @@ def is_forwarded(message, *,
 
 
 def get_forward_detection_reason(message) -> Dict[str, Any]:
-    """يحسب حالة الكشف لكل نوع."""
     if message is None:
         return {"error": "message is None"}
     fields = {}
@@ -829,7 +838,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
 
     caption = (message.caption or message.text or "")
 
-    # sender_chat
     sender_chat = getattr(message, 'sender_chat', None)
     if sender_chat is not None:
         sender_type = getattr(sender_chat, 'type', '')
@@ -844,7 +852,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                 'signals': f"sender_type={sender_type}",
             }
 
-    # via_bot
     via_bot = getattr(message, 'via_bot', None)
     if via_bot is not None:
         return {
@@ -854,7 +861,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
             'date': None, 'signature': None, 'message_id': None,
         }
 
-    # from_user.is_bot
     from_user = getattr(message, 'from_user', None)
     if from_user and getattr(from_user, 'is_bot', False):
         return {
@@ -864,7 +870,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
             'date': None, 'signature': None, 'message_id': None,
         }
 
-    # KB suspicious
     suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(message)
     if suspicious and url_cnt >= 3:
         return {
@@ -874,7 +879,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
             'signals': f"inline_urls={url_cnt}/{total_cnt}",
         }
 
-    # auto_forward fake
     if getattr(message, 'is_automatic_forward', False):
         if getattr(message, 'reply_markup', None) is not None:
             return {
@@ -883,7 +887,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                 'date': None, 'signature': None, 'message_id': None,
             }
 
-    # text channel detection
     is_likely, count, signals = _is_likely_channel_forward(message)
     if is_likely:
         return {
@@ -920,6 +923,7 @@ def _build_delete_log_text(
     forward_info: Optional[Dict[str, Any]] = None,
     message_preview: Optional[str] = None,
     is_anonymous: bool = False,
+    matched_word: Optional[str] = None,
 ) -> str:
     label = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
     if is_anonymous:
@@ -945,6 +949,13 @@ def _build_delete_log_text(
         lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
     else:
         lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
+
+    if matched_word:
+        mw = str(matched_word)
+        if len(mw) > 60:
+            mw = mw[:60] + "…"
+        lines.append(f"🎯 الكلمة المطابقة: <code>{escape(mw)}</code>")
+
     if message_preview:
         preview = message_preview.strip().replace("\n", " ")
         if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
@@ -1476,6 +1487,8 @@ class GroupRateLimiterManager:
 
 class MessageHandlers:
 
+    # ✅ v8.0.1: WAIT_CONTEST_DURATION مُضاف — يُعالج كـ no-op إذا كتب المستخدم نصاً
+    # ✅ WAIT_CONTEST_WINNER المُزال (لا يوجد مكان يضبطه)
     _PRIVATE_HANDLERS_MAP: Dict[UserState, str] = {
         UserState.WAIT_CHANNEL: "_handle_channel_input",
         UserState.ADDING_POSTS: "_handle_adding_posts",
@@ -1536,7 +1549,6 @@ class MessageHandlers:
         UserState.WAIT_BAN_USER_ID: "_handle_ban_user_input",
         UserState.WAIT_UNBAN_USER_ID: "_handle_unban_user_input",
         UserState.WAIT_PENALTY_DEFAULT_DURATION: "_handle_penalty_default_duration",
-        UserState.WAIT_CONTEST_WINNER: "_handle_contest_winner",
         UserState.WAIT_PENALTY_MUTE_DURATION: "_handle_penalty_mute_duration",
         UserState.WAIT_PENALTY_BAN_DURATION: "_handle_penalty_ban_duration",
         UserState.WAIT_PENALTY_RESTRICT_DURATION: "_handle_penalty_restrict_duration",
@@ -1941,9 +1953,13 @@ class MessageHandlers:
                             await _trans('execution_failed', lang, "❌"))
         StateManager.clear(user_id)
 
+    # ═══════════════════════════════════════════════════════════
+    # handle_group — المعالج الرئيسي
+    # ═══════════════════════════════════════════════════════════
+
     @staticmethod
     async def handle_group(update, context):
-        # ✅ v8.0.0: RAW-DIAG أول شيء — قبل أي شرط
+        # ✅ v8.0.1: حماية كاملة
         try:
             _chat = update.effective_chat if update else None
             _msg = update.effective_message if update else None
@@ -1961,7 +1977,6 @@ class MessageHandlers:
         message = update.effective_message
         msg_id = getattr(message, 'message_id', None)
 
-        # ✅ v8.0.0: auto_forward مع أزرار = مزيّف → عالجه
         if getattr(message, 'is_automatic_forward', False):
             has_kb = getattr(message, 'reply_markup', None) is not None
             if not has_kb:
@@ -1973,7 +1988,6 @@ class MessageHandlers:
                 f"🎯 AUTO-FORWARD-FAKE (مع أزرار) | "
                 f"chat={chat_id} msg={msg_id}")
 
-        # ✅ v8.0.0: استخراج user_id (كل الحالات)
         is_anonymous = False
         user_id = None
 
@@ -2012,7 +2026,6 @@ class MessageHandlers:
         _protected_fb = bool(settings.get('delete_protected_forward'))
         _protected_any = bool(settings.get('delete_protected_any'))
 
-        # ✅ v8.0.0: تشخيص كامل
         _det = get_forward_detection_reason(message)
         _is_fwd = _det.get('is_forwarded', False)
         _is_protected = _det.get('is_protected', False)
@@ -2063,7 +2076,6 @@ class MessageHandlers:
             f"is_forwarded={_is_fwd}"
         )
 
-        # ✅ v8.0.0: الفحص الرئيسي للفوروارد
         if settings.get('delete_forwarded'):
             effective_forwarded = is_forwarded(
                 message,
@@ -2114,17 +2126,25 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
+        # ✅ v8.0.1: تسجيل الكلمة المطابقة
         if settings.get('delete_banned_words'):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
                 text_lower = full_text.lower()
+                matched_word = None
                 for word in banned_words:
+                    if not word:
+                        continue
                     if word in text_lower:
-                        await MessageHandlers._delete_and_warn(
-                            update, context, chat_id, user_id,
-                            "banned_word", settings,
-                            is_anonymous=is_anonymous)
-                        return
+                        matched_word = word
+                        break
+                if matched_word:
+                    await MessageHandlers._delete_and_warn(
+                        update, context, chat_id, user_id,
+                        "banned_word", settings,
+                        is_anonymous=is_anonymous,
+                        matched_word=matched_word)
+                    return
 
         max_len = settings.get('max_message_length', 0)
         if max_len > 0 and len(full_text) > max_len:
@@ -2192,12 +2212,15 @@ class MessageHandlers:
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id,
                                 violation_type, settings,
-                                is_anonymous: bool = False):
+                                is_anonymous: bool = False,
+                                matched_word: Optional[str] = None):
+        # ✅ v8.0.1: تسجيل matched_word
+        log_extra = f" | matched={matched_word!r}" if matched_word else ""
         logger.warning(
             f"🔧 DELETE-WARN | start | "
             f"chat={chat_id} user={user_id} "
             f"{'[ANON]' if is_anonymous else ''} | "
-            f"violation={violation_type}")
+            f"violation={violation_type}{log_extra}")
 
         lang = await _ensure_lang(update, context)
 
@@ -2252,7 +2275,8 @@ class MessageHandlers:
                         violation_type=violation_type,
                         forward_info=forward_info,
                         message_preview=message_preview,
-                        is_anonymous=is_anonymous)
+                        is_anonymous=is_anonymous,
+                        matched_word=matched_word)
                     await _dispatch_log(
                         notify_group_log(context, chat_id, log_text),
                         label=f"delete-{violation_type}")
@@ -3228,6 +3252,7 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_prize(update, context):
+        # ✅ v8.0.1: يبقى WAIT_CONTEST_DURATION حتى يختار المستخدم من الأزرار
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         context.user_data['contest_prize'] = (
