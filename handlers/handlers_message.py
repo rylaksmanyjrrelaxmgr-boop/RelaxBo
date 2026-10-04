@@ -2,26 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.25 - Forward Delete Full Diagnostics)
+handlers_message.py - معالجات الرسائل (v7.9.26 - Forward Priority Fix)
 =============================================================================
-🆕 v7.9.25 (FULL-DIAGNOSTIC-MODE):
-    ✅ FIX-1: تشخيص كامل لكل خطوة في فحص forwarded
-             - يطبع القيمة الفعلية لـ delete_forwarded
-             - يطبع كل الحقول الخام للرسالة (forward_*)
-             - يطبع نتيجة is_forwarded() مع السبب
-             - يطبع نتيجة extract_forward_info() بالتفصيل
-             - يطبع نتيجة الحذف (نجح/فشل) مع السبب
-    ✅ FIX-2: طباعة سبب تخطي الفرع صراحةً
-             - إذا delete_forwarded=0 → يطبع "⏭️ SKIP: delete_forwarded=0"
-             - إذا is_forwarded=False → يطبع "⏭️ SKIP: is_forwarded=False"
-             - لا مزيد من الغموض
-    ✅ FIX-3: logging.info بدل warning للأحداث العادية
-             - العادي (df=0): info
-             - المهم (df=1): warning
-             - الأخطاء: error
+🆕 v7.9.26 (FORWARD-PRIORITY-FIX):
+    ✅ FIX-1 (CRITICAL): نقل فحص "المُعاد توجيهها" قبل "الروابط/المنشن"
+             - كان: delete_links يلتقط الرسائل المعاد توجيهها أولاً
+                    → حذف كـ "link" بدون استخراج forward_info
+             - الآن: delete_forwarded له الأولوية القصوى
+                    → حذف كـ "forwarded" مع الإشعار الكامل
+             - الأثر: الإشعار للمالك يعمل + تصنيف صحيح في admin_logs
+    ✅ FIX-2: logging واضح "PRIORITY" في اللوج
+             - يوضّح أن forwarded تُلتقط قبل link/mention
 
-🆕 v7.9.24 (FORWARD-DELETE-DIAGNOSIS)
-🆕 v7.9.23 (LANG + SAFETY FIXES)
+التحسينات الموروثة من v7.9.25:
+    ✅ تشخيص كامل لكل خطوة (FWD-CHECK, HANDLE-FWD, DELETE-WARN)
+    ✅ get_forward_detection_reason() لتشخيص دقيق
+
+التحسينات الموروثة من v7.9.24:
+    ✅ _safe_delete_message لا يُخفي فشل الحذف
+
+التحسينات الموروثة من v7.9.23:
+    ✅ _handle_penalty_input يمرّر lang
+    ✅ _notify_dev_log — logging DEBUG
+    ✅ handle_group — فحص effective_user
+    ✅ try/except حول unpacking في add_banned_word
 =====================================================================
 """
 
@@ -339,8 +343,6 @@ def is_forwarded(message) -> bool:
 def get_forward_detection_reason(message) -> Dict[str, Any]:
     """
     ✅ v7.9.25: يُرجع dict يشرح بالضبط لماذا is_forwarded أعاد True/False.
-
-    مفيد جداً للتشخيص — يكشف أي حقل ممتلئ وأي فارغ.
     """
     if message is None:
         return {"error": "message is None"}
@@ -1505,21 +1507,27 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # 🆕 v7.9.25: رسائل المجموعات — تشخيص كامل
+    # 🆕 v7.9.26: رسائل المجموعات — Forward Priority Fix
     # =================================================================
 
     @staticmethod
     async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        ✅ v7.9.25: تشخيص كامل لكل خطوة.
+        ✅ v7.9.26: فحص forwarded له الأولوية القصوى.
 
-        يطبع صراحةً:
-          - معلومات الرسالة الأساسية (chat, user, msg_id)
-          - قيمة delete_forwarded الفعلية
-          - كل حقول forward_* (present/absent)
-          - نتيجة is_forwarded() مع السبب
-          - نتيجة extract_forward_info()
-          - نتيجة الحذف مع السبب
+        الترتيب الجديد:
+          1. service (delete_service)
+          2. 🎯 FORWARDED (delete_forwarded) ← الأولوية القصوى
+          3. links (delete_links)
+          4. mentions
+          5. banned_words
+          6. max_len
+          7. media (photos/videos/...)
+          8. translation
+          9. auto_reply
+
+        السبب: أي رسالة معاد توجيهها (حتى لو فيها رابط)
+        تُحذف كـ "forwarded" مع استخراج forward_info.
         """
         if not update.effective_chat or not update.effective_message:
             return
@@ -1550,7 +1558,7 @@ class MessageHandlers:
         settings = await get_security_settings_cached(chat_id)
 
         # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.9.25: DIAGNOSTIC BLOCK — تشخيص كامل
+        # 🆕 v7.9.25: DIAGNOSTIC BLOCK
         # ═══════════════════════════════════════════════════════════════
         _df_raw = settings.get('delete_forwarded')
         _df_bool = bool(_df_raw)
@@ -1558,7 +1566,6 @@ class MessageHandlers:
         _det = get_forward_detection_reason(message)
         _is_fwd = _det.get('is_forwarded', False)
 
-        # ─── تحديد نوع اللوج ───
         _fwd_active = _is_fwd and _df_bool
         _log_level = logging.WARNING if _fwd_active else logging.INFO
 
@@ -1572,7 +1579,6 @@ class MessageHandlers:
             f"has_text={bool(msg_text)} has_caption={bool(msg_caption)}"
         )
 
-        # ─── طباعة تفاصيل كل حقل ───
         for _fname, _finfo in _det.get('fields', {}).items():
             logger.log(
                 _log_level,
@@ -1581,7 +1587,6 @@ class MessageHandlers:
                 f"val={_finfo['repr_short']}"
             )
 
-        # ─── إذا الرسالة معاد توجيهها فعلاً ───
         if _is_fwd:
             _info = extract_forward_info(message)
             if _info:
@@ -1602,65 +1607,30 @@ class MessageHandlers:
                     f"(نوع غير معروف — راجع Bot API)"
                 )
 
-        # ─── إذا لم يكن الفحص نشطاً، اطبع سبب التخطي ───
         if not _df_bool:
             logger.info(
                 f"   ⏭️ SKIP: delete_forwarded=0/None "
                 f"(chat={chat_id}) — التفعيل غير مفعّل"
             )
-        elif not _is_fwd:
-            # هذا طبيعي لمعظم الرسائل — لا نطبع warning
-            pass
         # ═══════════════════════════════════════════════════════════════
 
-        # ─── مسار الخدمة ───
+        # ─── 1) الخدمة ───
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(context.bot, chat_id, message.message_id)
                 return
 
-        # ─── مسار الروابط ───
-        if settings.get('delete_links'):
-            if TextUtils.contains_link(full_text):
-                await MessageHandlers._delete_and_warn(
-                    update, context, chat_id, user_id, "link", settings)
-                return
-
-        # ─── مسار المنشن ───
-        if settings.get('mentions'):
-            if TextUtils.contains_mention(full_text):
-                await MessageHandlers._delete_and_warn(
-                    update, context, chat_id, user_id, "mention", settings)
-                return
-
-        # ─── مسار الكلمات المحظورة ───
-        if settings.get('delete_banned_words'):
-            banned_words = await get_banned_words_cached(chat_id)
-            if banned_words:
-                text_lower = full_text.lower()
-                for word in banned_words:
-                    if word in text_lower:
-                        await MessageHandlers._delete_and_warn(
-                            update, context, chat_id, user_id,
-                            "banned_word", settings)
-                        return
-
-        # ─── مسار الطول ───
-        max_len = settings.get('max_message_length', 0)
-        if max_len > 0 and len(full_text) > max_len:
-            await MessageHandlers._delete_and_warn(
-                update, context, chat_id, user_id, "max_len", settings)
-            return
-
         # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.9.25: مسار الرسائل المُعاد توجيهها — تشخيص كامل
+        # 2) 🎯 v7.9.26: FORWARDED — الأولوية القصوى
+        #    يأتي قبل delete_links و delete_banned_words
+        #    حتى لا تُلتقط الرسالة كـ "link" عند وجود رابط فيها
         # ═══════════════════════════════════════════════════════════════
         if settings.get('delete_forwarded'):
             if is_forwarded(message):
                 logger.warning(
-                    f"🎯 HANDLE-FWD | بدء إجراء الحذف | "
+                    f"🎯 HANDLE-FWD (PRIORITY) | "
                     f"chat={chat_id} user={user_id} msg={msg_id} | "
-                    f"انتقل إلى _delete_and_warn(violation_type='forwarded')"
+                    f"يُعالَج كـ forwarded قبل link/mention/banned_words"
                 )
 
                 await MessageHandlers._delete_and_warn(
@@ -1672,7 +1642,40 @@ class MessageHandlers:
                 )
                 return
 
-        # ─── باقي المسارات (وسائط، ترجمة، ردود تلقائية) ───
+        # ─── 3) الروابط ───
+        if settings.get('delete_links'):
+            if TextUtils.contains_link(full_text):
+                await MessageHandlers._delete_and_warn(
+                    update, context, chat_id, user_id, "link", settings)
+                return
+
+        # ─── 4) المنشن ───
+        if settings.get('mentions'):
+            if TextUtils.contains_mention(full_text):
+                await MessageHandlers._delete_and_warn(
+                    update, context, chat_id, user_id, "mention", settings)
+                return
+
+        # ─── 5) الكلمات المحظورة ───
+        if settings.get('delete_banned_words'):
+            banned_words = await get_banned_words_cached(chat_id)
+            if banned_words:
+                text_lower = full_text.lower()
+                for word in banned_words:
+                    if word in text_lower:
+                        await MessageHandlers._delete_and_warn(
+                            update, context, chat_id, user_id,
+                            "banned_word", settings)
+                        return
+
+        # ─── 6) الطول ───
+        max_len = settings.get('max_message_length', 0)
+        if max_len > 0 and len(full_text) > max_len:
+            await MessageHandlers._delete_and_warn(
+                update, context, chat_id, user_id, "max_len", settings)
+            return
+
+        # ─── 7) الوسائط ───
         media_checks = [
             (message.video, 'delete_videos', 'video'),
             (message.audio, 'delete_audio', 'audio'),
@@ -1689,6 +1692,7 @@ class MessageHandlers:
                     update, context, chat_id, user_id, violation_type, settings)
                 return
 
+        # ─── 8) الترجمة التلقائية ───
         if msg_text:
             try:
                 translated = await _detect_and_translate(
@@ -1701,6 +1705,7 @@ class MessageHandlers:
             except Exception:
                 pass
 
+        # ─── 9) الردود التلقائية ───
         if msg_text:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, msg_text, user_id)
@@ -1742,7 +1747,6 @@ class MessageHandlers:
 
         lang = await _ensure_lang(update, context)
 
-        # ─── استخراج معلومات الإعادة قبل الحذف ───
         forward_info: Optional[Dict[str, Any]] = None
         if violation_type == 'forwarded':
             try:
@@ -1764,7 +1768,6 @@ class MessageHandlers:
                     exc_info=True,
                 )
 
-        # ─── محاولة الحذف ───
         delete_ok = False
         _msg_id_to_delete = None
         try:
@@ -1815,7 +1818,6 @@ class MessageHandlers:
             except Exception as e:
                 logger.debug(f"forward notify spawn: {e}")
 
-        # ─── إذا فشل الحذف عند forwarded → توقف واطبع السبب ───
         if not delete_ok and violation_type == 'forwarded':
             logger.error(
                 f"⏭️ DELETE-WARN | توقف — الحذف فشل | "
@@ -1825,7 +1827,6 @@ class MessageHandlers:
             )
             return
 
-        # ─── بقية العقوبات (فقط إذا نجح الحذف) ───
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
         except Exception:
