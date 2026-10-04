@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.10.8 (AUTO-DETECT SPAM - No Config Needed)
+handlers_message.py - v7.10.8 (Auto Spam Detection + Enhanced Diagnostics)
 =============================================================================
 🆕 v7.10.8:
     ✅ كشف تلقائي عبر spam_score (5+ نقاط = حذف)
-    ✅ لا يحتاج أي إعداد (يعمل مباشرة)
-    ✅ يميز Post Bot ورسائل Spam المشابهة
-    ✅ يدمج كل الطبقات السابقة
+    ✅ لا يحتاج أي إعداد
+    ✅ تشخيص محسّن (يعرض النص والأزرار والـ reasons)
 =====================================================================
 """
 
@@ -92,8 +91,9 @@ def _normalize_text(text: str) -> str:
         ' ', text)
     return text.strip()
 
+
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.10.8: Auto Spam Detection via Score
+# Spam Detection via Score
 # ═══════════════════════════════════════════════════════════════════
 
 _SPAM_KEYWORDS = (
@@ -107,6 +107,7 @@ _SPAM_KEYWORDS = (
     'bj', 'mfm', 'cartoon', 'korean',
     'colombian', 'pierced', 'petite',
     'busty', 'taboo', 'step', 'mom',
+    'euro', 'scenes', 'footage',
 )
 
 _SPAM_EMOJIS = (
@@ -119,21 +120,16 @@ _SPAM_EMOJIS = (
 _URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
 
 
-def _compute_spam_score(message) -> Tuple[int, List[str]]:
-    """
-    v7.10.8: يحسب نقاط spam تلقائياً.
-    Returns: (score, reasons)
-    """
+def _compute_spam_score(message):
     score = 0
-    reasons: List[str] = []
+    reasons = []
 
     try:
         text = (message.text or message.caption or "")
         normalized = _normalize_text(text)
         text_lower = normalized.lower()
 
-        # 1) عدد الأزرار
-        urls: List[str] = []
+        urls = []
         button_count = 0
         try:
             markup = getattr(message, 'reply_markup', None)
@@ -156,7 +152,6 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             score += 1
             reasons.append("buttons=2")
 
-        # 2) صورة + أزرار
         if message.photo and button_count >= 1:
             score += 2
             reasons.append("photo+buttons")
@@ -164,7 +159,6 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             score += 2
             reasons.append("video+buttons")
 
-        # 3) إيموجي spam
         emoji_count = 0
         for e in _SPAM_EMOJIS:
             if e in text:
@@ -174,8 +168,8 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             reasons.append(f"emoji={emoji_count}")
         elif emoji_count >= 1:
             score += 1
+            reasons.append(f"emoji={emoji_count}")
 
-        # 4) كلمات مفتاحية
         kw_matches = sum(1 for kw in _SPAM_KEYWORDS if kw in text_lower)
         if kw_matches >= 3:
             score += 3
@@ -185,8 +179,8 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             reasons.append(f"keywords={kw_matches}")
         elif kw_matches >= 1:
             score += 1
+            reasons.append(f"keywords={kw_matches}")
 
-        # 5) CAPS WORDS (كلمات كبيرة متعددة)
         caps_words = re.findall(r'\b[A-Z]{4,}\b', normalized)
         if len(caps_words) >= 4:
             score += 2
@@ -195,7 +189,6 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             score += 1
             reasons.append(f"CAPS={len(caps_words)}")
 
-        # 6) روابط t.me في الأزرار
         tme_count = sum(1 for u in urls if 't.me/' in u.lower())
         if tme_count >= 2:
             score += 2
@@ -204,15 +197,14 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
             score += 1
             reasons.append(f"tme_buttons={tme_count}")
 
-        # 7) روابط في النص
         text_urls = _URL_RE.findall(text)
         if len(text_urls) >= 2:
             score += 2
             reasons.append(f"text_urls={len(text_urls)}")
         elif len(text_urls) >= 1:
             score += 1
+            reasons.append(f"text_urls={len(text_urls)}")
 
-        # 8) طول النص قصير جداً + أزرار (مؤشر)
         if len(normalized) < 30 and button_count >= 2:
             score += 1
             reasons.append("short_text+buttons")
@@ -224,7 +216,7 @@ def _compute_spam_score(message) -> Tuple[int, List[str]]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Post Bot Pattern (legacy - kept for compatibility)
+# Post Bot Pattern (legacy)
 # ═══════════════════════════════════════════════════════════════════
 
 _POSTBOT_EMOJI = r'[⭐💀🔥✨🍑🔞🚨💎🎁🎉🌟💥⚡🌸🌺💋👑🥇🏆🎯💯🆕🆗🔴🟢🔵🟡🟣🟠]'
@@ -239,7 +231,7 @@ _POSTBOT_PATTERN_LOOSE = re.compile(
 )
 
 
-def _is_postbot_pattern(text: str) -> bool:
+def _is_postbot_pattern(text):
     if not text or len(text) < 15:
         return False
     try:
@@ -252,7 +244,7 @@ def _is_postbot_pattern(text: str) -> bool:
     return False
 
 
-def _env_flag(name: str, default: bool = True) -> bool:
+def _env_flag(name, default=True):
     val = os.getenv(name)
     if val is None:
         return default
@@ -307,7 +299,6 @@ TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
-# threshold
 SPAM_SCORE_THRESHOLD = 5
 
 _columns_initialized = False
@@ -1366,7 +1357,7 @@ class MessageHandlers:
                                   and not _is_auto_fwd and not _is_fwd
                                   and not _is_protected_forward)
 
-        # 🆕 spam_score
+        # spam_score
         _spam_score = 0
         _spam_reasons = []
         if _spam_enabled:
@@ -1377,15 +1368,36 @@ class MessageHandlers:
 
         _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
 
+        # زر العدّ للأزرار
+        _btn_count = 0
+        _btn_urls = []
+        try:
+            mk = getattr(message, 'reply_markup', None)
+            if mk:
+                kb = getattr(mk, 'inline_keyboard', None)
+                if kb:
+                    for r in kb:
+                        for b in r:
+                            _btn_count += 1
+                            u = getattr(b, 'url', None)
+                            if u:
+                                _btn_urls.append(u[:80])
+        except Exception:
+            pass
+
         _fwd_active = (_is_fwd or _is_protected_forward
                        or _is_protected_any_fwd) and _df_bool
         _log_level = logging.WARNING if (_fwd_active or _is_spam) else logging.INFO
 
+        # ═══ HARD-DIAG (v7.10.8 Enhanced) ═══
         logger.log(
             _log_level,
             f"🚨 HARD-DIAG | chat={chat_id} user={user_id} msg={msg_id} "
             f"{'[ANON]' if is_anonymous else ''} | "
-            f"has_photo={bool(message.photo)} has_caption={bool(message.caption)} | "
+            f"has_text={bool(msg_text)} has_caption={bool(msg_caption)} "
+            f"text_len={len(full_text)} | "
+            f"has_photo={bool(message.photo)} has_video={bool(message.video)} | "
+            f"buttons={_btn_count} | "
             f"has_protected={_is_protected} is_auto_fwd={_is_auto_fwd} | "
             f"delete_forwarded={_df_raw!r} "
             f"protected_fb={_protected_fb} protected_any={_protected_any} | "
@@ -1395,10 +1407,19 @@ class MessageHandlers:
             f"protected_any_forward={_is_protected_any_fwd}"
         )
 
+        if full_text:
+            logger.info(f"   📝 TEXT | {full_text[:250]!r}")
+        else:
+            logger.info(f"   📝 TEXT | (empty)")
+
+        if _btn_urls:
+            logger.info(f"   🔗 BTN_URLS | {_btn_urls[:5]}")
+
         if _spam_score > 0:
-            logger.log(_log_level,
-                       f"   🎯 SPAM-SCORE={_spam_score} | "
-                       f"reasons={_spam_reasons}")
+            logger.info(f"   🎯 SPAM-SCORE={_spam_score} | "
+                        f"reasons={_spam_reasons}")
+        elif _spam_enabled:
+            logger.info(f"   ⏭️ SPAM-SCORE=0 | no matches")
 
         if normalized_text and normalized_text != full_text:
             logger.info(
