@@ -2,24 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.10.4 - Fix has_protected None)
+handlers_message.py - معالجات الرسائل (v7.10.5 - Unicode Normalization Fix)
 =============================================================================
-🆕 v7.10.4 (FIX None-PROTECTED):
-    ✅ CRITICAL FIX: has_protected_content قد تُرجع None وليس False
-       - كان: if getattr(message, 'has_protected_content', False): → None
-       - صار: bool(getattr(message, 'has_protected_content', False) or False)
-       - الأثر: الآن يحذف الرسائل من القنوات المحمية (Post Bot وغيرها)
+🆕 v7.10.5 (UNICODE-NORMALIZATION):
+    ✅ CRITICAL FIX: الحروف المزخرفة (𝐁𝐄𝐒𝐓, 𝔅, 𝘣) لم تكن تُطابق
+       - NFKC normalization: 𝐀 → A
+       - إزالة zero-width chars (\u200b, \u200c, ...)
+       - إزالة RTL/LTR marks
+       - توحيد المسافات (NBSP, ideographic spaces)
+       - تطبيق على banned_words + links + mentions
 
+الموروث من v7.10.4:
+    ✅ bool() صريح لـ has_protected_content
 الموروث من v7.10.3:
     ✅ Auto-migration لـ delete_protected_any
 الموروث من v7.10.2:
-    ✅ delete_protected_any: حذف كل forward من قنوات محمية
-الموروث من v7.10.1:
-    ✅ HARD-DIAG + protected_fallback
-الموروث من v7.10.0:
-    ✅ Feature Flags + Rate Limiting + Retry + Cache
-الموروث من v7.9.30 → v7.9.26:
-    ✅ إشعارات كاملة + anonymous + auto-forward skip
+    ✅ delete_protected_any
 =====================================================================
 """
 
@@ -32,6 +30,7 @@ import json
 import shutil
 import tempfile
 import ipaddress
+import unicodedata
 from pathlib import Path
 from html import escape
 from typing import Optional, Dict, Any, List, Tuple, Coroutine
@@ -78,6 +77,50 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.10.5: Unicode Normalization
+# ═══════════════════════════════════════════════════════════════════
+
+_HIDDEN_CHARS = (
+    '\u200b',  # ZWSP
+    '\u200c',  # ZWNJ
+    '\u200d',  # ZWJ
+    '\u200e',  # LRM
+    '\u200f',  # RLM
+    '\u202a',  # LRE
+    '\u202b',  # RLE
+    '\u202c',  # PDF
+    '\u202d',  # LRO
+    '\u202e',  # RLO
+    '\u2060',  # WJ
+    '\u2061',  # FA
+    '\u2062',  # IT
+    '\u2063',  # IS
+    '\u2064',  # IP
+    '\ufeff',  # BOM
+)
+
+
+def _normalize_text(text: str) -> str:
+    """
+    v7.10.5: تطبيع النص:
+      1) NFKC: 𝐁 → B، 𝔞 → a، ٣ → 3، إلخ
+      2) إزالة zero-width / RTL / LTR marks
+      3) توحيد المسافات
+    """
+    if not text:
+        return ""
+    try:
+        text = unicodedata.normalize('NFKC', text)
+    except Exception:
+        pass
+    for c in _HIDDEN_CHARS:
+        if c in text:
+            text = text.replace(c, '')
+    text = re.sub(r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+', ' ', text)
+    return text.strip()
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -138,7 +181,7 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # ═══════════════════════════════════════════════════════════════════
-# v7.10.3: Auto-migration
+# Auto-migration
 # ═══════════════════════════════════════════════════════════════════
 
 _protected_any_initialized = False
@@ -151,7 +194,7 @@ async def _lazy_init_protected_any():
     _protected_any_initialized = True
 
     db_type = getattr(DB, "DB_TYPE", "sqlite")
-    logger.info(f"🔧 v7.10.3: Auto-migration يبدأ (DB_TYPE={db_type})")
+    logger.info(f"🔧 v7.10.5: Auto-migration يبدأ (DB_TYPE={db_type})")
 
     try:
         if db_type == "postgres":
@@ -164,7 +207,6 @@ async def _lazy_init_protected_any():
                 logger.info("✅ PostgreSQL: عمود delete_protected_any جاهز")
             except Exception as e:
                 logger.warning(f"⚠️ ALTER PG: {e}")
-
         elif db_type == "mysql":
             try:
                 await DB.execute(
@@ -203,7 +245,7 @@ async def _lazy_init_protected_any():
             "       OR delete_protected_any = 0)"
         )
         logger.info(
-            "✅ v7.10.3: تم تفعيل delete_protected_any لكل "
+            "✅ v7.10.5: تم تفعيل delete_protected_any لكل "
             "المجموعات التي عندها delete_forwarded=1"
         )
     except Exception as e:
@@ -285,6 +327,7 @@ async def _notify_dev_log(context, text: str) -> None:
     except Exception as e:
         logger.warning(f"🔔 _notify_dev_log FAILED: {e}", exc_info=True)
 
+
 _log_rate_tracker: Dict[int, deque] = defaultdict(
     lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
 )
@@ -345,6 +388,7 @@ async def _safe_invalidate(*keys: str) -> None:
             await internal_cache.invalidate(k)
         except Exception as e:
             logger.debug(f"_safe_invalidate({k}): {e}")
+
 
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة معاد توجيهها',
@@ -574,6 +618,7 @@ async def _notify_group_log_penalty(
     except Exception as e:
         logger.warning(f"⚠️ _notify_group_log_penalty: {e}")
 
+
 _sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 _sec_auth_cache_lock = asyncio.Lock()
 
@@ -647,16 +692,9 @@ def _has_forward_hint(text: str) -> bool:
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.10.4: is_forwarded مع bool() صريح
-# ═══════════════════════════════════════════════════════════════════
-
 def is_forwarded(message, *,
                  allow_protected_fallback: bool = False,
                  allow_protected_any: bool = False) -> bool:
-    """
-    v7.10.4: fixed has_protected_content=None issue
-    """
     if message is None:
         return False
 
@@ -671,7 +709,6 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
-    # ⚠️ v7.10.4: bool() صريح — لأن None != False
     is_protected = bool(
         getattr(message, 'has_protected_content', False) or False
     )
@@ -692,10 +729,6 @@ def is_forwarded(message, *,
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.10.4: get_forward_detection_reason مع bool() صريح
-# ═══════════════════════════════════════════════════════════════════
-
 def get_forward_detection_reason(message) -> Dict[str, Any]:
     if message is None:
         return {"error": "message is None"}
@@ -709,8 +742,6 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
             "repr_short": (str(val)[:80] if val is not None else None),
         }
     any_present = any(f["present"] for f in fields.values())
-
-    # ⚠️ v7.10.4: bool() صريح
     protected = bool(
         getattr(message, 'has_protected_content', False) or False
     )
@@ -826,7 +857,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
     if info:
         return info
 
-    # ⚠️ v7.10.4: bool() صريح
     is_protected = bool(
         getattr(message, 'has_protected_content', False) or False
     )
@@ -1766,7 +1796,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # ═════════════════════════════════════════════════════════════
-    # 🎯 handle_group (v7.10.4)
+    # handle_group (v7.10.5) — مع Unicode normalization
     # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_group(update, context):
@@ -1807,12 +1837,14 @@ class MessageHandlers:
         msg_caption = message.caption or ""
         full_text = (msg_text + " " + msg_caption).strip()
 
+        # 🆕 v7.10.5: نص مُطبَّع للفحص
+        normalized_text = _normalize_text(full_text)
+
         METRICS.increment_messages()
         settings = await get_security_settings_cached(chat_id)
 
         _df_raw = settings.get('delete_forwarded')
         _df_bool = bool(_df_raw)
-        # ⚠️ v7.10.4: bool() صريح
         _protected_fb = bool(
             settings.get('delete_protected_forward') or False
         )
@@ -1860,6 +1892,16 @@ class MessageHandlers:
             f"protected_any_forward={_is_protected_any_fwd}"
         )
 
+        # 🆕 v7.10.5: سجل النص المُطبَّع (للتشخيص)
+        if normalized_text and normalized_text != full_text:
+            logger.info(
+                f"   🧹 NORMALIZED | "
+                f"raw_len={len(full_text)} "
+                f"norm_len={len(normalized_text)} | "
+                f"raw_head={full_text[:60]!r} | "
+                f"norm_head={normalized_text[:60]!r}"
+            )
+
         for _fname, _finfo in _det.get('fields', {}).items():
             logger.log(
                 _log_level,
@@ -1903,14 +1945,15 @@ class MessageHandlers:
                 return
 
         if settings.get('delete_links'):
-            if TextUtils.contains_link(full_text):
+            # 🆕 v7.10.5: استخدم النص المُطبَّع
+            if TextUtils.contains_link(normalized_text):
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "link",
                     settings, is_anonymous=is_anonymous)
                 return
 
         if settings.get('mentions'):
-            if TextUtils.contains_mention(full_text):
+            if TextUtils.contains_mention(normalized_text):
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "mention",
                     settings, is_anonymous=is_anonymous)
@@ -1919,9 +1962,19 @@ class MessageHandlers:
         if settings.get('delete_banned_words'):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
-                text_lower = full_text.lower()
+                # 🆕 v7.10.5: نص مُطبَّع lowercase
+                text_lower = normalized_text.lower()
                 for word in banned_words:
-                    if word in text_lower:
+                    # 🆕 v7.10.5: طبّع الكلمة المحظورة أيضاً
+                    word_norm = _normalize_text(word).lower()
+                    if not word_norm:
+                        continue
+                    if word_norm in text_lower:
+                        logger.info(
+                            f"   🎯 BANNED-WORD-MATCH | "
+                            f"word={word!r} "
+                            f"word_norm={word_norm!r}"
+                        )
                         await MessageHandlers._delete_and_warn(
                             update, context, chat_id, user_id,
                             "banned_word", settings,
@@ -1929,7 +1982,7 @@ class MessageHandlers:
                         return
 
         max_len = settings.get('max_message_length', 0)
-        if max_len > 0 and len(full_text) > max_len:
+        if max_len > 0 and len(normalized_text) > max_len:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id, "max_len",
                 settings, is_anonymous=is_anonymous)
@@ -4123,4 +4176,5 @@ __all__ = [
     "FEATURE_LOG_GIFTS",
     "FEATURE_LOG_ADMIN_CHANGES",
     "_lazy_init_protected_any",
+    "_normalize_text",
 ]
