@@ -2,32 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.9.24 - Forward Delete Diagnosis)
+handlers_message.py - معالجات الرسائل (v7.9.25 - Forward Delete Full Diagnostics)
 =============================================================================
-🆕 v7.9.24 (FORWARD-DELETE-DIAGNOSIS):
-    ✅ FIX-1 (DIAGNOSTIC): إضافة DEBUG_FWD قبل فحص delete_forwarded
-             - يكشف سبب عدم الحذف (كاش/إذن/كود) في سطر واحد
-             - يستخدم logger.warning لضمان ظهوره
-             - يحتوي: df, is_fwd, origin_type, has_text, has_caption
-             - 💡 احذفه بعد التشخيص
-    ✅ FIX-2 (CRITICAL): _safe_delete_message لا يُخفي فشل الحذف
-             - كان: "message can't be deleted" → return True (خطأ!)
-             - الآن: → logger.error + return False
-             - الأثر: ظهور فشل الإذن في السجل بدل تجاهله بصمت
-    ✅ FIX-3: إزالة "message can't be deleted" من _DELETE_IGNORED_PATTERNS
-             - لأنه ليس خطأً قابلاً للتجاهل — هو فشل فعلي
-             - بقية الأنماط (not found, not specified) تبقى متجاهلة
+🆕 v7.9.25 (FULL-DIAGNOSTIC-MODE):
+    ✅ FIX-1: تشخيص كامل لكل خطوة في فحص forwarded
+             - يطبع القيمة الفعلية لـ delete_forwarded
+             - يطبع كل الحقول الخام للرسالة (forward_*)
+             - يطبع نتيجة is_forwarded() مع السبب
+             - يطبع نتيجة extract_forward_info() بالتفصيل
+             - يطبع نتيجة الحذف (نجح/فشل) مع السبب
+    ✅ FIX-2: طباعة سبب تخطي الفرع صراحةً
+             - إذا delete_forwarded=0 → يطبع "⏭️ SKIP: delete_forwarded=0"
+             - إذا is_forwarded=False → يطبع "⏭️ SKIP: is_forwarded=False"
+             - لا مزيد من الغموض
+    ✅ FIX-3: logging.info بدل warning للأحداث العادية
+             - العادي (df=0): info
+             - المهم (df=1): warning
+             - الأخطاء: error
 
-🆕 v7.9.23 (LANG + SAFETY FIXES):
-    ✅ _handle_penalty_input يمرّر lang لـ apply_penalty
-    ✅ _notify_dev_log — تخفيض logging من INFO إلى DEBUG
-    ✅ handle_group — فحص effective_user قبل الاستخدام
-    ✅ try/except حول unpacking في add_banned_word
-
-🆕 v7.9.22 (FORWARD-NOTIFY-INTEGRATION)
-🆕 v7.9.21 (FORWARD-ORIGIN-FULL)
-🆕 v7.9.20 (FORWARDED-DELETE-FIX)
-🆕 v7.9.19 (DEV LOG DIAGNOSTIC)
+🆕 v7.9.24 (FORWARD-DELETE-DIAGNOSIS)
+🆕 v7.9.23 (LANG + SAFETY FIXES)
 =====================================================================
 """
 
@@ -151,18 +145,16 @@ MAX_SEC_AUTH_CACHE_SIZE = 5000
 SEC_AUTH_CACHE_TTL = 300
 CACHE_CLEANUP_INTERVAL = 3600
 
-# cooldown لإشعارات الإعادة (5 دقائق)
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 
-# ✅ v7.9.24 (FIX-3): إزالة "message can't be deleted"
-# كان يُبتلع كخطأ غير مهم، لكنه فشل حقيقي (صلاحية ناقصة).
+# ✅ v7.9.24: لا نتجاهل "message can't be deleted" — فشل حقيقي
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
     "message identifier is not specified",
     "message is not found",
 )
 
-# ✅ v7.9.24 (FIX-2): نمط فشل الحذف الحقيقي (يكشف نقص الإذن)
+# ✅ v7.9.24: نمط فشل الحذف الحقيقي
 _DELETE_PERMISSION_ERROR = "message can't be deleted"
 
 _MEDIA_REPLY_TYPES = frozenset({
@@ -181,19 +173,12 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 # =====================================================================
 
 async def _notify_dev_log(context, text: str) -> None:
-    """
-    يرسل إشعاراً إلى قناة سجل المطور (DB.get_log_channel).
-    لا يفشل أبداً — يتجاهل الأخطاء بصمت.
-    """
     try:
         log_ch = await DB.get_log_channel()
-
         logger.debug(f"🔔 log_ch from DB = {log_ch!r}")
-
         if not log_ch:
             logger.debug("🔔 log_ch EMPTY → abort")
             return
-
         ch_str = str(log_ch).strip()
         if not ch_str:
             logger.debug("🔔 log_ch is whitespace → abort")
@@ -211,22 +196,16 @@ async def _notify_dev_log(context, text: str) -> None:
         else:
             target = f"@{ch_str}"
 
-        logger.debug(f"🔔 target = {target!r} → sending...")
-
         await context.bot.send_message(
             chat_id=target,
             text=text,
             parse_mode='HTML',
             disable_web_page_preview=True,
         )
-
         logger.debug(f"🔔 _notify_dev_log SUCCESS → {target}")
 
     except Exception as e:
-        logger.warning(
-            f"🔔 _notify_dev_log FAILED: {e}",
-            exc_info=True,
-        )
+        logger.warning(f"🔔 _notify_dev_log FAILED: {e}", exc_info=True)
 
 
 # =====================================================================
@@ -279,7 +258,6 @@ def _is_delete_ignore_error(exc: Exception) -> bool:
 
 
 def _is_delete_permission_error(exc: Exception) -> bool:
-    """✅ v7.9.24: يكشف فشل الحذف بسبب نقص الإذن."""
     try:
         err = str(exc).lower()
         return _DELETE_PERMISSION_ERROR in err
@@ -289,38 +267,56 @@ def _is_delete_permission_error(exc: Exception) -> bool:
 
 async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
     """
-    ✅ v7.9.24 (FIX-2): لا يُخفي فشل الحذف.
-
-    - "message can't be deleted" → ERROR log + return False
-      (السبب: البوت admin بدون can_delete_messages، أو الرسالة محمية)
-    - بقية الأنماط (not found) → return True (لا فائدة من إعادة المحاولة)
-    - أخطاء أخرى → warning + return False
+    ✅ v7.9.24: لا يُخفي فشل الحذف.
+    ✅ v7.9.25: logging مفصّل مع السبب.
     """
     try:
         await bot.delete_message(chat_id, message_id)
+        logger.info(
+            f"✅ DELETE OK | chat={chat_id} msg={message_id}"
+        )
         return True
     except BadRequest as e:
+        err_str = str(e)
         if _is_delete_permission_error(e):
             logger.error(
-                f"❌ DELETE FAILED in chat={chat_id} msg={message_id} — "
-                f"البوت لا يملك can_delete_messages "
-                f"أو الرسالة محمية من الحذف: {e}"
+                f"❌ DELETE FAILED (permission) | "
+                f"chat={chat_id} msg={message_id} | "
+                f"السبب: البوت لا يملك صلاحية can_delete_messages "
+                f"أو الرسالة محمية | "
+                f"raw_error={err_str!r}"
             )
             return False
         if _is_delete_ignore_error(e):
+            logger.info(
+                f"ℹ️ DELETE ignored | chat={chat_id} msg={message_id} | "
+                f"raw_error={err_str!r}"
+            )
             return True
-        logger.warning(f"delete failed: {e}")
+        logger.warning(
+            f"⚠️ DELETE failed (BadRequest) | "
+            f"chat={chat_id} msg={message_id} | raw_error={err_str!r}"
+        )
         return False
     except Exception as e:
+        err_str = str(e)
         if _is_delete_permission_error(e):
             logger.error(
-                f"❌ DELETE FAILED in chat={chat_id} msg={message_id} "
-                f"(non-BadRequest): {e}"
+                f"❌ DELETE FAILED (permission, non-BadRequest) | "
+                f"chat={chat_id} msg={message_id} | raw_error={err_str!r}"
             )
             return False
         if _is_delete_ignore_error(e):
+            logger.info(
+                f"ℹ️ DELETE ignored (non-BadRequest) | "
+                f"chat={chat_id} msg={message_id} | raw_error={err_str!r}"
+            )
             return True
-        logger.warning(f"delete failed: {e}")
+        logger.warning(
+            f"⚠️ DELETE failed (unexpected) | "
+            f"chat={chat_id} msg={message_id} | "
+            f"exc_type={type(e).__name__} | raw_error={err_str!r}"
+        )
         return False
 
 
@@ -329,14 +325,6 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def is_forwarded(message) -> bool:
-    """
-    فحص شامل وآمن لأي رسالة معاد توجيهها.
-
-    يغطّي:
-      • Bot API 7.0+  → message.forward_origin
-      • Bot API < 7.0 → forward_from / forward_from_chat
-                        / forward_sender_name / forward_date
-    """
     if message is None:
         return False
     return (
@@ -348,10 +336,37 @@ def is_forwarded(message) -> bool:
     )
 
 
+def get_forward_detection_reason(message) -> Dict[str, Any]:
+    """
+    ✅ v7.9.25: يُرجع dict يشرح بالضبط لماذا is_forwarded أعاد True/False.
+
+    مفيد جداً للتشخيص — يكشف أي حقل ممتلئ وأي فارغ.
+    """
+    if message is None:
+        return {"error": "message is None"}
+
+    fields = {}
+    for name in (
+        'forward_origin', 'forward_date',
+        'forward_from', 'forward_from_chat', 'forward_sender_name',
+    ):
+        val = getattr(message, name, None)
+        fields[name] = {
+            "present": val is not None,
+            "type": type(val).__name__ if val is not None else None,
+            "repr_short": (str(val)[:80] if val is not None else None),
+        }
+
+    any_present = any(f["present"] for f in fields.values())
+
+    return {
+        "is_forwarded": any_present,
+        "fields": fields,
+        "has_message_origin_module": _HAS_MESSAGE_ORIGIN,
+    }
+
+
 def _extract_legacy_forward_info(message) -> Optional[Dict[str, Any]]:
-    """
-    استخراج معلومات الإعادة بالحقول القديمة (Bot API < 7.0).
-    """
     try:
         fwd_from = getattr(message, 'forward_from', None)
         fwd_from_chat = getattr(message, 'forward_from_chat', None)
@@ -406,21 +421,6 @@ def _extract_legacy_forward_info(message) -> Optional[Dict[str, Any]]:
 
 
 def extract_forward_info(message) -> Optional[Dict[str, Any]]:
-    """
-    يستخرج معلومات موحّدة من رسالة معاد توجيهها.
-    يعمل مع Bot API 7.0+ والقديم معاً.
-
-    Returns dict:
-        {
-          'type': 'user' | 'hidden_user' | 'chat' | 'channel' | 'legacy',
-          'id': int | None,
-          'name': str,
-          'date': datetime | None,
-          'signature': str | None,
-          'message_id': int | None,
-        }
-    أو None إذا لم تكن الرسالة معاد توجيهها.
-    """
     if message is None:
         return None
 
@@ -428,7 +428,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
 
     if origin is not None and _HAS_MESSAGE_ORIGIN:
         try:
-            # 1) معاد من مستخدم
             if isinstance(origin, MessageOriginUser):
                 u = origin.sender_user
                 name = ""
@@ -447,7 +446,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                     'message_id': None,
                 }
 
-            # 2) معاد من مستخدم مخفي
             if isinstance(origin, MessageOriginHiddenUser):
                 return {
                     'type': 'hidden_user',
@@ -459,7 +457,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                     'message_id': None,
                 }
 
-            # 3) معاد من مجموعة
             if isinstance(origin, MessageOriginChat):
                 c = origin.sender_chat
                 return {
@@ -473,7 +470,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                     'message_id': None,
                 }
 
-            # 4) معاد من قناة
             if isinstance(origin, MessageOriginChannel):
                 c = origin.chat
                 return {
@@ -489,15 +485,10 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"extract_forward_info(origin): {e}")
 
-    # Fallback: الحقول القديمة
     return _extract_legacy_forward_info(message)
 
 
 async def _notify_admin_about_forward(context, admin_id: int, info: Dict[str, Any]) -> None:
-    """
-    يرسل تنبيهاً اختيارياً لمشرف بمصدر رسالة معاد توجيهها.
-    لا يفشل أبداً — يتجاهل الأخطاء بصمت.
-    """
     if not info or not admin_id:
         return
     try:
@@ -531,16 +522,7 @@ async def _notify_admin_about_forward(context, admin_id: int, info: Dict[str, An
         logger.debug(f"_notify_admin_about_forward: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# cooldown لإشعارات الإعادة (تفادي إغراق المالك)
-# ═══════════════════════════════════════════════════════════════════
-
 def _should_notify_forward(context, chat_id: int) -> bool:
-    """
-    يُحدّد ما إذا كان يجب إرسال إشعار إعادة لـ chat_id.
-
-    يستخدم cooldown لمدة _FORWARD_NOTIFY_COOLDOWN_SECONDS لكل مجموعة.
-    """
     try:
         bot_data = getattr(context, 'bot_data', None)
         if not isinstance(bot_data, dict):
@@ -559,7 +541,7 @@ def _should_notify_forward(context, chat_id: int) -> bool:
 
 
 # =====================================================================
-# تحديث أوامر الأدمن (lazy import — لا circular)
+# تحديث أوامر الأدمن
 # =====================================================================
 
 async def _refresh_admin_commands_safe(bot, user_id: int, is_admin: bool) -> bool:
@@ -838,14 +820,13 @@ async def _send_translation_reply(bot, chat_id, original_message_id, translated,
 
 
 # ═══════════════════════════════════════════════════════════════════
-# apply_violation_penalty — يقبل lang
+# apply_violation_penalty
 # ═══════════════════════════════════════════════════════════════════
 
 async def apply_violation_penalty(update, context, chat_id, user_id,
                                    violation_type, penalty_type,
                                    duration_seconds,
                                    lang: str = 'ar') -> Tuple[bool, str]:
-    """تدعم تمرير lang."""
     try:
         username = first_name = chat_name = ""
         try:
@@ -1033,7 +1014,6 @@ class MessageHandlers:
         UserState.WAIT_REM_GLOBAL_BAN: "_handle_rem_global_ban_input",
         UserState.WAIT_GROUP_BAN: "_handle_group_ban_input",
         UserState.WAIT_REM_GROUP_BAN: "_handle_rem_group_ban_input",
-
         UserState.WAIT_CONTEST_TITLE: "_handle_contest_title",
         UserState.WAIT_CONTEST_DESC: "_handle_contest_desc",
         UserState.WAIT_CONTEST_PRIZE: "_handle_contest_prize",
@@ -1041,7 +1021,6 @@ class MessageHandlers:
         UserState.WAIT_CONTEST_CORRECT_ANSWER: "_handle_contest_correct_answer",
         UserState.WAIT_CONTEST_DATE: "_handle_contest_date",
         UserState.WAIT_CONTEST_ANSWER: "_handle_contest_answer",
-
         UserState.WAIT_AUTO_KEY: "_handle_auto_key",
         UserState.WAIT_AUTO_REPLY: "_handle_auto_reply_input",
         UserState.WAIT_AUTO_DEL: "_handle_auto_del",
@@ -1163,7 +1142,7 @@ class MessageHandlers:
                 pass
 
     # =================================================================
-    # handle_log_group_input — مع فحص صلاحيات البوت
+    # handle_log_group_input
     # =================================================================
 
     @staticmethod
@@ -1526,21 +1505,36 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # رسائل المجموعات — مع DEBUG_FWD للتشخيص
+    # 🆕 v7.9.25: رسائل المجموعات — تشخيص كامل
     # =================================================================
 
     @staticmethod
     async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ✅ v7.9.25: تشخيص كامل لكل خطوة.
+
+        يطبع صراحةً:
+          - معلومات الرسالة الأساسية (chat, user, msg_id)
+          - قيمة delete_forwarded الفعلية
+          - كل حقول forward_* (present/absent)
+          - نتيجة is_forwarded() مع السبب
+          - نتيجة extract_forward_info()
+          - نتيجة الحذف مع السبب
+        """
         if not update.effective_chat or not update.effective_message:
             return
 
-        # حماية دفاعية ضد channel posts / anonymous
         if not update.effective_user:
+            logger.debug(
+                "handle_group: effective_user=None — تخطي "
+                "(channel post / anonymous)"
+            )
             return
 
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         message = update.effective_message
+        msg_id = getattr(message, 'message_id', None)
 
         try:
             limiter = await GroupRateLimiterManager.get(chat_id)
@@ -1555,23 +1549,91 @@ class MessageHandlers:
         METRICS.increment_messages()
         settings = await get_security_settings_cached(chat_id)
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🆕 v7.9.25: DIAGNOSTIC BLOCK — تشخيص كامل
+        # ═══════════════════════════════════════════════════════════════
+        _df_raw = settings.get('delete_forwarded')
+        _df_bool = bool(_df_raw)
+
+        _det = get_forward_detection_reason(message)
+        _is_fwd = _det.get('is_forwarded', False)
+
+        # ─── تحديد نوع اللوج ───
+        _fwd_active = _is_fwd and _df_bool
+        _log_level = logging.WARNING if _fwd_active else logging.INFO
+
+        logger.log(
+            _log_level,
+            f"🔍 FWD-CHECK | "
+            f"chat={chat_id} user={user_id} msg={msg_id} | "
+            f"delete_forwarded={_df_raw!r} (bool={_df_bool}) | "
+            f"is_forwarded={_is_fwd} | "
+            f"HAS_ORIGIN={_det.get('has_message_origin_module')} | "
+            f"has_text={bool(msg_text)} has_caption={bool(msg_caption)}"
+        )
+
+        # ─── طباعة تفاصيل كل حقل ───
+        for _fname, _finfo in _det.get('fields', {}).items():
+            logger.log(
+                _log_level,
+                f"   ↳ {_fname}: present={_finfo['present']} "
+                f"type={_finfo['type']} "
+                f"val={_finfo['repr_short']}"
+            )
+
+        # ─── إذا الرسالة معاد توجيهها فعلاً ───
+        if _is_fwd:
+            _info = extract_forward_info(message)
+            if _info:
+                logger.log(
+                    _log_level,
+                    f"   ✅ forward_info: "
+                    f"type={_info.get('type')} "
+                    f"id={_info.get('id')} "
+                    f"name={_info.get('name')!r} "
+                    f"orig_msg_id={_info.get('message_id')} "
+                    f"date={_info.get('date')}"
+                )
+            else:
+                logger.log(
+                    _log_level,
+                    f"   ⚠️ is_forwarded=True لكن "
+                    f"extract_forward_info=None "
+                    f"(نوع غير معروف — راجع Bot API)"
+                )
+
+        # ─── إذا لم يكن الفحص نشطاً، اطبع سبب التخطي ───
+        if not _df_bool:
+            logger.info(
+                f"   ⏭️ SKIP: delete_forwarded=0/None "
+                f"(chat={chat_id}) — التفعيل غير مفعّل"
+            )
+        elif not _is_fwd:
+            # هذا طبيعي لمعظم الرسائل — لا نطبع warning
+            pass
+        # ═══════════════════════════════════════════════════════════════
+
+        # ─── مسار الخدمة ───
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(context.bot, chat_id, message.message_id)
                 return
 
+        # ─── مسار الروابط ───
         if settings.get('delete_links'):
             if TextUtils.contains_link(full_text):
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "link", settings)
                 return
 
+        # ─── مسار المنشن ───
         if settings.get('mentions'):
             if TextUtils.contains_mention(full_text):
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "mention", settings)
                 return
 
+        # ─── مسار الكلمات المحظورة ───
         if settings.get('delete_banned_words'):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
@@ -1583,6 +1645,7 @@ class MessageHandlers:
                             "banned_word", settings)
                         return
 
+        # ─── مسار الطول ───
         max_len = settings.get('max_message_length', 0)
         if max_len > 0 and len(full_text) > max_len:
             await MessageHandlers._delete_and_warn(
@@ -1590,68 +1653,26 @@ class MessageHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # 🆕 v7.9.24 (FIX-1): DEBUG_FWD — تشخيص سبب عدم الحذف
-        #    ⚠️ مؤقت — احذفه بعد التشخيص
-        # ═══════════════════════════════════════════════════════════════
-        try:
-            _o = getattr(message, 'forward_origin', None)
-            _df = settings.get('delete_forwarded')
-            _fwd_keys = {
-                k: (getattr(message, k, None) is not None)
-                for k in (
-                    'forward_origin', 'forward_date',
-                    'forward_from', 'forward_from_chat',
-                    'forward_sender_name',
-                )
-            }
-            logger.warning(
-                f"🔍 DEBUG_FWD | chat={chat_id} | "
-                f"df={_df!r} type={type(_df).__name__} | "
-                f"is_fwd={is_forwarded(message)} | "
-                f"origin={type(_o).__name__ if _o else None} | "
-                f"has_text={bool(msg_text)} | "
-                f"has_caption={bool(msg_caption)} | "
-                f"keys={_fwd_keys}"
-            )
-        except Exception as _de:
-            logger.warning(f"🔍 DEBUG_FWD exc: {_de}")
-        # ═══════════════════════════════════════════════════════════════
-
-        # ═══════════════════════════════════════════════════════════════
-        # فحص شامل للرسائل المُعاد توجيهها
-        #    يدعم MessageOriginUser / HiddenUser / Chat / Channel
-        #    + الحقول القديمة كاحتياط
+        # 🆕 v7.9.25: مسار الرسائل المُعاد توجيهها — تشخيص كامل
         # ═══════════════════════════════════════════════════════════════
         if settings.get('delete_forwarded'):
             if is_forwarded(message):
-                try:
-                    info = extract_forward_info(message)
-                    if info:
-                        logger.info(
-                            f"🎯 v7.9.24: حذف رسالة معاد توجيهها | "
-                            f"chat={chat_id} user={user_id} "
-                            f"type={info.get('type')} "
-                            f"from_id={info.get('id')} "
-                            f"from_name={info.get('name')!r} "
-                            f"orig_msg_id={info.get('message_id')} "
-                            f"orig_date={info.get('date')}"
-                        )
-                    else:
-                        logger.info(
-                            f"🎯 v7.9.24: حذف رسالة معاد (نوع غير معروف) | "
-                            f"chat={chat_id} user={user_id}"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"🎯 v7.9.24: extract_forward_info فشل: {e}",
-                        exc_info=True,
-                    )
+                logger.warning(
+                    f"🎯 HANDLE-FWD | بدء إجراء الحذف | "
+                    f"chat={chat_id} user={user_id} msg={msg_id} | "
+                    f"انتقل إلى _delete_and_warn(violation_type='forwarded')"
+                )
 
                 await MessageHandlers._delete_and_warn(
                     update, context, chat_id, user_id, "forwarded", settings)
-                return
-        # ═══════════════════════════════════════════════════════════════
 
+                logger.warning(
+                    f"🎯 HANDLE-FWD | انتهى _delete_and_warn | "
+                    f"chat={chat_id} msg={msg_id}"
+                )
+                return
+
+        # ─── باقي المسارات (وسائط، ترجمة، ردود تلقائية) ───
         media_checks = [
             (message.video, 'delete_videos', 'video'),
             (message.audio, 'delete_audio', 'audio'),
@@ -1710,39 +1731,70 @@ class MessageHandlers:
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id,
                                 violation_type, settings):
+        """
+        ✅ v7.9.25: تشخيص كامل — يطبع كل خطوة.
+        """
+        logger.warning(
+            f"🔧 DELETE-WARN | start | "
+            f"chat={chat_id} user={user_id} "
+            f"violation={violation_type}"
+        )
+
         lang = await _ensure_lang(update, context)
 
-        # ═══════════════════════════════════════════════════════════════
-        # استخراج معلومات الإعادة BEFORE حذف الرسالة
-        #    (أمان أكبر: الرسالة الأصلية لا تزال موجودة عند الاستخراج)
-        # ═══════════════════════════════════════════════════════════════
+        # ─── استخراج معلومات الإعادة قبل الحذف ───
         forward_info: Optional[Dict[str, Any]] = None
         if violation_type == 'forwarded':
             try:
                 _msg_pre = update.effective_message
                 if _msg_pre is not None:
                     forward_info = extract_forward_info(_msg_pre)
+                    logger.warning(
+                        f"🔧 DELETE-WARN | forward_info قبل الحذف: "
+                        f"{forward_info}"
+                    )
+                else:
+                    logger.warning(
+                        f"🔧 DELETE-WARN | effective_message=None — "
+                        f"لا يمكن استخراج forward_info"
+                    )
             except Exception as e:
-                logger.debug(f"extract_forward_info (pre-delete): {e}")
+                logger.warning(
+                    f"🔧 DELETE-WARN | extract_forward_info فشل: {e}",
+                    exc_info=True,
+                )
 
-        delete_ok = True
+        # ─── محاولة الحذف ───
+        delete_ok = False
+        _msg_id_to_delete = None
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
+                _msg_id_to_delete = msg_obj.message_id
+                logger.warning(
+                    f"🔧 DELETE-WARN | محاولة حذف msg={_msg_id_to_delete} "
+                    f"من chat={chat_id}"
+                )
                 delete_ok = await _safe_delete_message(
                     context.bot, chat_id, msg_obj.message_id
                 )
+                logger.warning(
+                    f"🔧 DELETE-WARN | نتيجة الحذف: "
+                    f"{'✅ نجح' if delete_ok else '❌ فشل'} | "
+                    f"chat={chat_id} msg={_msg_id_to_delete}"
+                )
+            else:
+                logger.warning(
+                    f"🔧 DELETE-WARN | لا يوجد message_id للحذف"
+                )
         except Exception as e:
-            if not _is_delete_ignore_error(e):
-                logger.warning(f"delete failed: {e}")
+            logger.error(
+                f"🔧 DELETE-WARN | استثناء أثناء الحذف: {e}",
+                exc_info=True,
+            )
             delete_ok = False
 
-        # ═══════════════════════════════════════════════════════════════
-        # إشعار المالك عن مصدر الرسالة المعاد توجيهها
-        #    - في الخلفية (non-blocking)
-        #    - cooldown 5 دقائق لكل chat_id (تفادي إغراق المالك)
-        #    - لا يفشل أبداً
-        # ═══════════════════════════════════════════════════════════════
+        # ─── إشعار المالك ───
         if forward_info and _should_notify_forward(context, chat_id):
             try:
                 owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
@@ -1756,22 +1808,24 @@ class MessageHandlers:
                             else None
                         )
                     )
-                    logger.debug(
+                    logger.info(
                         f"↩️ forward notify spawned "
                         f"(chat={chat_id}, owner={owner_id})"
                     )
             except Exception as e:
                 logger.debug(f"forward notify spawn: {e}")
 
-        # ✅ v7.9.24: لا نكمل العقوبات إذا فشل الحذف
-        # (لأن السبب غالباً نقص إذن — لا فائدة من تكرار المحاولة)
+        # ─── إذا فشل الحذف عند forwarded → توقف واطبع السبب ───
         if not delete_ok and violation_type == 'forwarded':
-            logger.warning(
-                f"⏭️ v7.9.24: تخطي _delete_and_warn التالي — "
-                f"فشل الحذف (chat={chat_id} msg={msg_obj.message_id if msg_obj else '?'})"
+            logger.error(
+                f"⏭️ DELETE-WARN | توقف — الحذف فشل | "
+                f"chat={chat_id} msg={_msg_id_to_delete} | "
+                f"السبب الأرجح: البوت لا يملك can_delete_messages "
+                f"أو ليس admin"
             )
             return
 
+        # ─── بقية العقوبات (فقط إذا نجح الحذف) ───
         try:
             violation_count = await DB.increment_violation_count(user_id, chat_id)
         except Exception:
@@ -2559,15 +2613,11 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # =================================================================
-    # الكلمات المحظورة — مع try/except حول unpacking
+    # الكلمات المحظورة
     # =================================================================
 
     @staticmethod
     async def _handle_global_ban_input(update, context):
-        """
-        logging تشخيصي عند فشل الإضافة.
-        try/except حول unpacking.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         word = (update.effective_message.text or "").strip().lower()
@@ -2617,10 +2667,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_group_ban_input(update, context):
-        """
-        logging تشخيصي عند فشل الإضافة.
-        try/except حول unpacking.
-        """
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         chat_id = context.user_data.get('ban_chat')
@@ -2681,7 +2727,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # ═════════════════════════════════════════════════════════════════
-    # المسابقات — quiz flow مع أزرار مدة (i18n)
+    # المسابقات
     # ═════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2821,7 +2867,7 @@ class MessageHandlers:
                 title=title_line,
                 id=cid,
                 prize=prize_line,
-                duration=duration_label,
+                duration=duration_line,
                 question=escape(question),
                 answer=escape(correct_answer),
             )
@@ -3816,6 +3862,7 @@ __all__ = [
     "_notify_dev_log",
     "is_forwarded",
     "extract_forward_info",
+    "get_forward_detection_reason",
     "_extract_legacy_forward_info",
     "_notify_admin_about_forward",
     "_should_notify_forward",
