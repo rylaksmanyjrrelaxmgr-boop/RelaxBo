@@ -2,25 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v8.0.1 - FULL MERGED + FIXES)
+handlers_message.py - معالجات الرسائل (v8.0.2 - BOT-FORWARD-FIX)
 =====================================================================
+🆕 v8.0.2 — إصلاح جوهري:
+    ✅ FIX-FWD-3: كشف التحويل من البوتات (News Post Bot وغيرها)
+        - كان البوت لا يحذف الرسائل المحوّلة من بوتات القنوات
+        - السبب: from_user = المستخدم الذي حوّل (ليس البوت)
+        - الحل: فحص forward_origin.sender_user.is_bot
+        - يشمل: MessageOriginUser / MessageOriginHiddenUser /
+                MessageOriginChannel / MessageOriginChat
+
 🆕 v8.0.1 — إصلاحات تراكمية:
     ✅ matched_word يُسجَّل في DELETE-WARN
-    ✅ WAIT_CONTEST_DURATION مُضاف للجدول
-    ✅ WAIT_CONTEST_WINNER الميت مُزال
+    ✅ WAIT_CONTEST_DURATION مُضاف
     ✅ _delete_and_warn يستقبل matched_word
-    ✅ حماية إضافية في handle_group من user=None
-    ✅ _raw_diag لا ينهار على قيم None
+    ✅ حماية إضافية في handle_group
 
-v8.0.0 — كشف شامل:
-    ✅ _has_forward_hint
-    ✅ _has_suspicious_inline_keyboard
-    ✅ _count_forward_signals
-    ✅ _is_likely_channel_forward
-    ✅ _is_service_message
-    ✅ _raw_diag
-    ✅ is_forwarded شامل
-    ✅ get_forward_detection_reason
+v8.0.0 — كشف شامل لكل أنواع الرسائل
 =====================================================================
 """
 
@@ -315,6 +313,9 @@ _FORWARD_TYPE_LABELS_AR = {
     'via_bot': '🤖 عبر بوت',
     'bot_sender': '🤖 بوت مرسل',
     'auto_channel': '📡 قناة مرتبطة (Auto)',
+    'forward_bot': '🤖 محوّلة من بوت',
+    'forward_hidden': '👻 محوّلة من مستخدم مخفي',
+    'forward_channel': '📡 محوّلة من قناة',
 }
 
 _PENALTY_LABELS_AR = {
@@ -452,7 +453,6 @@ def _is_service_message(message) -> bool:
 
 
 def _raw_diag(message, chat_id: int, user_id: int) -> None:
-    """v8.0.1: حماية إضافية من None."""
     if not FEATURE_RAW_DIAG:
         return
     if message is None:
@@ -513,11 +513,23 @@ def _raw_diag(message, chat_id: int, user_id: int) -> None:
             except Exception:
                 via_str = "error"
 
+        fwd_origin_type = "None"
+        if fwd_origin is not None:
+            try:
+                fwd_origin_type = type(fwd_origin).__name__
+                sender_user = getattr(fwd_origin, 'sender_user', None)
+                if sender_user is not None:
+                    fwd_origin_type += (
+                        f"(bot={getattr(sender_user, 'is_bot', False)})"
+                    )
+            except Exception:
+                fwd_origin_type = "error"
+
         logger.warning(
             f"🔬 RAW-DIAG | msg={msg_id} chat={chat_id} user={user_id} | "
             f"from={from_str} | sender_chat={sender_str} | "
             f"via_bot={via_str} | "
-            f"fwd_origin={'present' if fwd_origin else 'None'} | "
+            f"fwd_origin={fwd_origin_type} | "
             f"fwd_from={'present' if fwd_from else 'None'} | "
             f"fwd_from_chat={'present' if fwd_from_chat else 'None'} | "
             f"auto_fwd={is_auto_fwd} | protected={has_protected} | "
@@ -582,7 +594,7 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Forward detection (v8.0.1)
+# ✅ FIX-FWD-3: كشف التحويل من البوتات (مُدرج في is_forwarded)
 # ═══════════════════════════════════════════════════════════════
 
 def is_forwarded(message, *,
@@ -597,6 +609,39 @@ def is_forwarded(message, *,
     if message is None:
         return False
 
+    # ═════════════════════════════════════════════════════════════
+    # ✅ FIX-FWD-3: كشف فوروارد البوتات (أولوية عالية)
+    # ═════════════════════════════════════════════════════════════
+    try:
+        fwd_origin = getattr(message, 'forward_origin', None)
+        if fwd_origin is not None:
+            # 1) MessageOriginUser مع sender_user.is_bot = True
+            sender_user = getattr(fwd_origin, 'sender_user', None)
+            if sender_user is not None and getattr(
+                    sender_user, 'is_bot', False):
+                logger.info(
+                    f"🎯 FWD-FROM-BOT-DETECT | "
+                    f"bot_id={getattr(sender_user, 'id', '?')} "
+                    f"name={getattr(sender_user, 'first_name', '?')}")
+                return True
+
+            # 2) MessageOriginHiddenUser
+            if getattr(fwd_origin, 'sender_user_name', None):
+                logger.info("🎯 FWD-FROM-HIDDEN-DETECT")
+                return True
+
+            # 3) MessageOriginChannel
+            origin_chat = getattr(fwd_origin, 'chat', None)
+            if origin_chat is not None:
+                if getattr(origin_chat, 'type', '') == 'channel':
+                    logger.info(
+                        f"🎯 FWD-FROM-CHANNEL-DETECT | "
+                        f"chat_id={getattr(origin_chat, 'id', '?')}")
+                    return True
+    except Exception as e:
+        logger.debug(f"FWD-FROM-BOT check: {e}")
+
+    # 1) Forward حقيقي
     if getattr(message, 'forward_origin', None) is not None:
         return True
     if getattr(message, 'forward_date', None) is not None:
@@ -608,6 +653,7 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
+    # 2) sender_chat
     if allow_sender_chat:
         sender_chat = getattr(message, 'sender_chat', None)
         if sender_chat is not None:
@@ -618,12 +664,14 @@ def is_forwarded(message, *,
                     f"id={sender_chat.id}")
                 return True
 
+    # 3) via_bot
     if allow_via_bot:
         via_bot = getattr(message, 'via_bot', None)
         if via_bot is not None:
             logger.info(f"🎯 VIA-BOT-DETECT | bot_id={via_bot.id}")
             return True
 
+    # 4) from_user.is_bot
     if allow_bot_sender:
         from_user = getattr(message, 'from_user', None)
         if from_user and getattr(from_user, 'is_bot', False):
@@ -632,11 +680,13 @@ def is_forwarded(message, *,
                 f"name={getattr(from_user, 'first_name', '?')}")
             return True
 
+    # 5) محتوى محمي
     if allow_protected_any:
         if getattr(message, 'has_protected_content', False):
             if not getattr(message, 'is_automatic_forward', False):
                 return True
 
+    # 6) كشف Inline Keyboard
     if allow_kb_detection:
         suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(
             message)
@@ -660,12 +710,14 @@ def is_forwarded(message, *,
                         f"promo={has_promo} hint={has_hint}")
                     return True
 
+    # 7) auto_forward مزيّف
     if allow_auto_channel:
         if getattr(message, 'is_automatic_forward', False):
             if getattr(message, 'reply_markup', None) is not None:
                 logger.warning("🎯 AUTO-CHANNEL-FAKE | has_kb + auto_fwd")
                 return True
 
+    # 8) كشف نصي متعدد الإشارات
     if allow_text_detection:
         is_likely, count, signals = _is_likely_channel_forward(message)
         if is_likely:
@@ -673,6 +725,7 @@ def is_forwarded(message, *,
                 f"🎯 TEXT-DETECT | signals={signals} count={count}")
             return True
 
+    # 9) protected_fallback
     if allow_protected_fallback:
         if getattr(message, 'has_protected_content', False):
             caption = (message.caption or message.text or "")
@@ -716,6 +769,21 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
     via_bot = getattr(message, 'via_bot', None)
     from_user = getattr(message, 'from_user', None)
 
+    # ✅ FIX-FWD-3: كشف نوع forward_origin
+    fwd_origin = getattr(message, 'forward_origin', None)
+    fwd_is_bot = False
+    fwd_is_hidden = False
+    fwd_is_channel = False
+    if fwd_origin is not None:
+        sender_user = getattr(fwd_origin, 'sender_user', None)
+        if sender_user is not None and getattr(sender_user, 'is_bot', False):
+            fwd_is_bot = True
+        if getattr(fwd_origin, 'sender_user_name', None):
+            fwd_is_hidden = True
+        origin_chat = getattr(fwd_origin, 'chat', None)
+        if origin_chat is not None and getattr(origin_chat, 'type', '') == 'channel':
+            fwd_is_channel = True
+
     return {
         "is_forwarded": any_present,
         "is_protected": protected,
@@ -735,6 +803,9 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
                        if via_bot else None),
         "from_is_bot": bool(
             from_user and getattr(from_user, 'is_bot', False)),
+        "fwd_is_bot": fwd_is_bot,
+        "fwd_is_hidden": fwd_is_hidden,
+        "fwd_is_channel": fwd_is_channel,
         "fields": fields,
         "has_message_origin_module": _HAS_MESSAGE_ORIGIN,
     }
@@ -795,14 +866,17 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                             or str(getattr(u, 'id', 'User')))
                 except Exception:
                     name = str(getattr(u, 'id', 'User'))
+                # ✅ FIX-FWD-3: لو المرسل بوت → صنّفه كـ forward_bot
+                is_bot = bool(getattr(u, 'is_bot', False))
                 return {
-                    'type': 'user', 'id': getattr(u, 'id', None),
+                    'type': 'forward_bot' if is_bot else 'user',
+                    'id': getattr(u, 'id', None),
                     'name': name, 'date': getattr(origin, 'date', None),
                     'signature': None, 'message_id': None,
                 }
             if isinstance(origin, MessageOriginHiddenUser):
                 return {
-                    'type': 'hidden_user', 'id': None,
+                    'type': 'forward_hidden', 'id': None,
                     'name': (getattr(origin, 'sender_user_name', None)
                              or 'Hidden'),
                     'date': getattr(origin, 'date', None),
@@ -822,7 +896,7 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
             if isinstance(origin, MessageOriginChannel):
                 c = origin.chat
                 return {
-                    'type': 'channel', 'id': getattr(c, 'id', None),
+                    'type': 'forward_channel', 'id': getattr(c, 'id', None),
                     'name': (getattr(c, 'title', None)
                              or getattr(c, 'username', None)
                              or str(getattr(c, 'id', 'Channel'))),
@@ -1487,8 +1561,6 @@ class GroupRateLimiterManager:
 
 class MessageHandlers:
 
-    # ✅ v8.0.1: WAIT_CONTEST_DURATION مُضاف — يُعالج كـ no-op إذا كتب المستخدم نصاً
-    # ✅ WAIT_CONTEST_WINNER المُزال (لا يوجد مكان يضبطه)
     _PRIVATE_HANDLERS_MAP: Dict[UserState, str] = {
         UserState.WAIT_CHANNEL: "_handle_channel_input",
         UserState.ADDING_POSTS: "_handle_adding_posts",
@@ -1959,7 +2031,6 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_group(update, context):
-        # ✅ v8.0.1: حماية كاملة
         try:
             _chat = update.effective_chat if update else None
             _msg = update.effective_message if update else None
@@ -2040,6 +2111,10 @@ class MessageHandlers:
         _sender_chat_type = _det.get('sender_chat_type', None)
         _has_via_bot = _det.get('has_via_bot', False)
         _from_is_bot = _det.get('from_is_bot', False)
+        # ✅ FIX-FWD-3: الحقول الجديدة
+        _fwd_is_bot = _det.get('fwd_is_bot', False)
+        _fwd_is_hidden = _det.get('fwd_is_hidden', False)
+        _fwd_is_channel = _det.get('fwd_is_channel', False)
 
         _is_protected_forward = (
             _protected_fb and _is_protected and _has_hint
@@ -2055,6 +2130,7 @@ class MessageHandlers:
             _is_fwd or _is_protected_forward or _is_protected_any_fwd
             or _text_detect or _kb_suspicious
             or _has_sender_chat or _has_via_bot or _from_is_bot
+            or _fwd_is_bot or _fwd_is_hidden or _fwd_is_channel
         ) and _df_bool
         _log_level = logging.WARNING if _fwd_active else logging.INFO
 
@@ -2072,6 +2148,9 @@ class MessageHandlers:
             f"sender_chat_type={_sender_chat_type} | "
             f"has_via_bot={_has_via_bot} | "
             f"from_is_bot={_from_is_bot} | "
+            f"fwd_is_bot={_fwd_is_bot} | "
+            f"fwd_is_hidden={_fwd_is_hidden} | "
+            f"fwd_is_channel={_fwd_is_channel} | "
             f"delete_forwarded={_df_raw!r} | "
             f"is_forwarded={_is_fwd}"
         )
@@ -2089,7 +2168,13 @@ class MessageHandlers:
                 allow_auto_channel=True)
             if effective_forwarded:
                 tag = ""
-                if _has_sender_chat:
+                if _fwd_is_bot:
+                    tag = " [FWD-FROM-BOT]"
+                elif _fwd_is_hidden:
+                    tag = " [FWD-FROM-HIDDEN]"
+                elif _fwd_is_channel:
+                    tag = " [FWD-FROM-CHANNEL]"
+                elif _has_sender_chat:
                     tag = f" [SENDER-CHAT:{_sender_chat_type}]"
                 elif _has_via_bot:
                     tag = " [VIA-BOT]"
@@ -2126,7 +2211,6 @@ class MessageHandlers:
                     settings, is_anonymous=is_anonymous)
                 return
 
-        # ✅ v8.0.1: تسجيل الكلمة المطابقة
         if settings.get('delete_banned_words'):
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
@@ -2214,7 +2298,6 @@ class MessageHandlers:
                                 violation_type, settings,
                                 is_anonymous: bool = False,
                                 matched_word: Optional[str] = None):
-        # ✅ v8.0.1: تسجيل matched_word
         log_extra = f" | matched={matched_word!r}" if matched_word else ""
         logger.warning(
             f"🔧 DELETE-WARN | start | "
@@ -3252,7 +3335,6 @@ class MessageHandlers:
 
     @staticmethod
     async def _handle_contest_prize(update, context):
-        # ✅ v8.0.1: يبقى WAIT_CONTEST_DURATION حتى يختار المستخدم من الأزرار
         user_id = update.effective_user.id
         lang = await _ensure_lang(update, context)
         context.user_data['contest_prize'] = (
