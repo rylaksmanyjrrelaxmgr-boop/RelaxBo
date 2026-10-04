@@ -2,24 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.10.3 - Smart Channel Forward Detection)
-=================================================================================
-🆕 v7.10.3:
-    ✅ _is_likely_channel_forward: كشف ذكي متعدد الإشارات
-       - يعمل مع copyMessage والقنوات الخاصة غير المحمية
-       - يحتاج إشارتين على الأقل لتجنب False Positives
-    ✅ is_forwarded يقبل allow_text_detection
-    ✅ protected_fallback لم يعد يشترط has_protected_content
-    ✅ HARD-DIAG يعرض text_detect + signal_count
-    ✅ extract_forward_info يعرض 'text_channel' type
-    ✅ كشف إشارات: "محولة من" + "channel/bot" + promo words + emoji
-الموروث من v7.10.2:
-    ✅ delete_protected_any
-الموروث من v7.10.1:
-    ✅ HARD-DIAG + protected_fallback
-الموروث من v7.10.0:
-    ✅ Feature Flags + Rate Limiting + Retry + Cache
-=================================================================================
+handlers_message.py - معالجات الرسائل (v7.10.4 - KB Detection)
+=================================================================
+🆕 v7.10.4 (الإصلاح الجذري لرسائل News Post Bot):
+    ✅ _has_suspicious_inline_keyboard: كشف أزرار Inline الدعائية
+    ✅ auto_forward لم يعد يتجاهل الرسائل التي فيها أزرار
+    ✅ is_forwarded يكتشف الأزرار المشبوهة قبل أي شيء
+=================================================================
 """
 
 import asyncio
@@ -119,26 +108,22 @@ _PROTECTED_FORWARD_HINTS = (
     "Forwarded from", "من قناة",
 )
 
-# 🆕 v7.10.3: إشارات قنوات/بوتات للكشف الذكي
 _CHANNEL_SIGNALS = (
     'channel', 'قناة', 'bot', 'بوت',
     'news', 'أخبار', 'اعلان', 'إعلان', 'تحديث',
 )
 
-# 🆕 v7.10.3: كلمات ترويجية
 _PROMO_SIGNALS = (
     'view', 'open', 'join', 'subscribe', 'click', 'watch', 'download',
     'اشترك', 'انضم', 'رابط', 'تحميل', 'شاهد', 'اضغط', 'افتح',
     'leak', 'viral', 'pack', 'premium', 'exclusive',
 )
 
-# 🆕 v7.10.3: إيموجي شائعة في رسائل القنوات
 _CHANNEL_EMOJIS = (
     '📢', '🔔', '📣', '🔥', '💎', '🎁', '⭐', '✅', '💥', '🎬',
     '▶️', '🔴', '🟢', '🔵',
 )
 
-# 🆕 v7.10.3: الحد الأدنى من الإشارات للتصنيف كفوروارد قناة
 _FORWARD_DETECTION_MIN_SIGNALS = 2
 
 _DELETE_IGNORED_PATTERNS = (
@@ -291,6 +276,7 @@ _FORWARD_TYPE_LABELS_AR = {
     'protected': '🛡️ محتوى محمي',
     'protected_any': '🛡️ forward من قناة محمية',
     'text_channel': '📡 قناة (كشف نصي)',
+    'kb_bot': '🤖 بوت (أزرار Inline)',
 }
 
 _PENALTY_LABELS_AR = {
@@ -404,18 +390,6 @@ def _build_delete_log_text(
             if len(fname_str) > 60:
                 fname_str = fname_str[:60] + "…"
             lines.append(f"   • الاسم: {escape(fname_str)}")
-        fid = forward_info.get('id')
-        if fid:
-            lines.append(f"   • المعرّف: <code>{fid}</code>")
-        if forward_info.get('signature'):
-            lines.append(
-                f"   • التوقيع: {escape(str(forward_info['signature']))}"
-            )
-        if forward_info.get('message_id'):
-            lines.append(
-                f"   • رقم الرسالة الأصلية: "
-                f"<code>{forward_info['message_id']}</code>"
-            )
         signals = forward_info.get('signals')
         if signals:
             lines.append(f"   • الإشارات: <code>{signals}</code>")
@@ -582,48 +556,81 @@ def _has_forward_hint(text: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🆕 v7.10.3: كشف ذكي للفوروارد من قنوات خاصة/بوتات
+# 🆕 v7.10.4: كشف الأزرار المشبوهة (بصمة بوتات النشر)
 # ═══════════════════════════════════════════════════════════════
 
+def _has_suspicious_inline_keyboard(message) -> Tuple[bool, int, int]:
+    """
+    🆕 v7.10.4: يكتشف الأزرار Inline المشبوهة.
+    
+    بوتات النشر مثل "News Post Bot" تستخدم 2-3 أزرار URL ملونة
+    في كل رسالة.
+    
+    يعيد: (هل مشبوه؟, url_count, total_count)
+    """
+    try:
+        rm = getattr(message, 'reply_markup', None)
+        if rm is None:
+            return False, 0, 0
+        kb = getattr(rm, 'inline_keyboard', None)
+        if not kb:
+            return False, 0, 0
+        
+        url_count = 0
+        total = 0
+        for row in kb:
+            for btn in row:
+                total += 1
+                if getattr(btn, 'url', None):
+                    url_count += 1
+        
+        if total == 0:
+            return False, 0, 0
+        
+        # مشبوه إذا:
+        # - 3 أزرار URLs أو أكثر → حتمي
+        # - أو نصف الأزرار URLs (2/3 على الأقل)
+        if url_count >= 3:
+            return True, url_count, total
+        ratio = url_count / total
+        if url_count >= 2 and ratio >= 0.5:
+            return True, url_count, total
+        
+        return False, url_count, total
+    except Exception as e:
+        logger.debug(f"_has_suspicious_inline_keyboard: {e}")
+        return False, 0, 0
+
+
 def _count_forward_signals(message, text: str) -> Tuple[int, List[str]]:
-    """
-    يحسب عدد إشارات الفوروارد في الرسالة.
-    يعيد (عدد الإشارات، قائمة بأسماء الإشارات المكتشفة).
-    """
+    """يحسب عدد إشارات الفوروارد في الرسالة."""
     if not text:
         return 0, []
     
     signals: List[str] = []
     text_lower = text.lower()
     
-    # إشارة 1: عبارة "محولة من"
     if _has_forward_hint(text):
         signals.append("hint")
     
-    # إشارة 2: كلمات قناة/بوت
     if any(w in text_lower for w in _CHANNEL_SIGNALS):
         signals.append("channel_word")
     
-    # إشارة 3: كلمات ترويجية
     if any(w in text_lower for w in _PROMO_SIGNALS):
         signals.append("promo_word")
     
-    # إشارة 4: إيموجي قنوات
     if any(e in text for e in _CHANNEL_EMOJIS):
         signals.append("channel_emoji")
     
-    # إشارة 5: زر Inline Keyboard (مؤشر قوي لبوت)
     try:
         if message.reply_markup is not None:
             signals.append("inline_keyboard")
     except Exception:
         pass
     
-    # إشارة 6: رسالة طويلة جداً (indicative of channel posts)
     if len(text) > 400:
         signals.append("long_text")
     
-    # إشارة 7: وجود "via_bot"
     try:
         if getattr(message, 'via_bot', None) is not None:
             signals.append("via_bot")
@@ -637,21 +644,13 @@ def _is_likely_channel_forward(
     message,
     min_signals: int = _FORWARD_DETECTION_MIN_SIGNALS,
 ) -> Tuple[bool, int, List[str]]:
-    """
-    🆕 v7.10.3: كشف ذكي للفوروارد من قنوات خاصة/بوتات تستخدم copyMessage.
-    
-    يعيد: (هل هو فوروارد؟، عدد الإشارات، قائمة الإشارات)
-    """
+    """كشف ذكي للفوروارد من قنوات خاصة/بوتات تستخدم copyMessage."""
     if message is None:
         return False, 0, []
     
     text = (message.caption or message.text or "")
-    if not text:
-        return False, 0, []
-    
     count, signals = _count_forward_signals(message, text)
     
-    # يجب أن يحتوي على إشارة "محولة من" أو "inline_keyboard" كإشارة أساسية
     has_primary = ("hint" in signals or "inline_keyboard" in signals
                    or "via_bot" in signals)
     
@@ -666,10 +665,7 @@ def is_forwarded(message, *,
                  allow_protected_any: bool = False,
                  allow_text_detection: bool = False) -> bool:
     """
-    كشف شامل للفوروارد.
-    
-    المعاملات الجديدة في v7.10.3:
-        allow_text_detection: كشف ذكي للفوروارد المزيّف من قنوات خاصة.
+    v7.10.4: كشف شامل للفوروارد + أزرار Inline المشبوهة.
     """
     if message is None:
         return False
@@ -686,34 +682,51 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
-    # 2) محتوى محمي (protected_any) — الأكثر شمولاً
+    # 2) محتوى محمي
     if allow_protected_any:
         if getattr(message, 'has_protected_content', False):
             if not getattr(message, 'is_automatic_forward', False):
                 return True
 
-    # 3) 🆕 v7.10.3: كشف ذكي متعدد الإشارات
-    #    لا يشترط has_protected_content — يعمل مع copyMessage
+    # 🆕 v7.10.4: 3) كشف Inline Keyboard المشبوه
+    suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(message)
+    if suspicious:
+        logger.warning(
+            f"🎯 KB-SUSPICIOUS | urls={url_cnt}/{total_cnt}")
+        # يحتاج تأكيد نصي إضافي (إلا إذا 3+ URLs)
+        if url_cnt >= 3:
+            logger.warning(f"🎯 KB-FORCE-DELETE (urls>=3)")
+            return True
+        # مع 2 URLs: نتحقق من نص ترويجي
+        text = (message.caption or message.text or "")
+        if text:
+            text_lower = text.lower()
+            has_channel = any(w in text_lower for w in _CHANNEL_SIGNALS)
+            has_promo = any(w in text_lower for w in _PROMO_SIGNALS)
+            has_hint = _has_forward_hint(text)
+            if has_channel or has_promo or has_hint:
+                logger.warning(
+                    f"🎯 KB-DELETE | channel={has_channel} "
+                    f"promo={has_promo} hint={has_hint}")
+                return True
+
+    # 4) كشف نصي متعدد الإشارات
     if allow_text_detection:
         is_likely, count, signals = _is_likely_channel_forward(message)
         if is_likely:
             logger.info(
-                f"🎯 TEXT-DETECT | signals={signals} "
-                f"count={count}")
+                f"🎯 TEXT-DETECT | signals={signals} count={count}")
             return True
 
-    # 4) protected_fallback — يشترط has_protected_content
-    #    (يُترك كطبقة إضافية للتوافق)
+    # 5) protected_fallback
     if allow_protected_fallback:
         if getattr(message, 'has_protected_content', False):
             caption = (message.caption or message.text or "")
             if _has_forward_hint(caption):
                 return True
-        # 🆕 v7.10.3: بدون has_protected_content — يشترط عبارة + إشارة إضافية
         else:
             caption = (message.caption or message.text or "")
             if _has_forward_hint(caption):
-                # نتحقق من إشارة إضافية واحدة على الأقل
                 _, signals = _count_forward_signals(message, caption)
                 if len(signals) >= 2:
                     return True
@@ -739,9 +752,11 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
     hint = _has_forward_hint(caption) if caption else False
     auto_fwd = getattr(message, 'is_automatic_forward', False)
     
-    # 🆕 v7.10.3: معلومات الكشف الذكي
     signal_count, signals = _count_forward_signals(message, caption)
     is_likely, _, _ = _is_likely_channel_forward(message)
+    
+    # 🆕 v7.10.4: معلومات الأزرار
+    kb_suspicious, kb_urls, kb_total = _has_suspicious_inline_keyboard(message)
     
     return {
         "is_forwarded": any_present,
@@ -751,6 +766,9 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
         "text_detect": is_likely,
         "signal_count": signal_count,
         "signals": signals,
+        "kb_suspicious": kb_suspicious,
+        "kb_urls": kb_urls,
+        "kb_total": kb_total,
         "fields": fields,
         "has_message_origin_module": _HAS_MESSAGE_ORIGIN,
     }
@@ -854,7 +872,17 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
 
     caption = (message.caption or message.text or "")
 
-    # 🆕 v7.10.3: كشف نصي متعدد الإشارات
+    # 🆕 v7.10.4: كشف الأزرار المشبوهة أولاً
+    suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(message)
+    if suspicious and url_cnt >= 3:
+        return {
+            'type': 'kb_bot', 'id': None,
+            'name': f'🤖 بوت (أزرار Inline ×{url_cnt})',
+            'date': None, 'signature': None, 'message_id': None,
+            'signals': f"inline_urls={url_cnt}/{total_cnt}",
+        }
+
+    # كشف نصي متعدد الإشارات
     is_likely, count, signals = _is_likely_channel_forward(message)
     if is_likely:
         return {
@@ -891,25 +919,16 @@ async def _notify_admin_about_forward(context, admin_id: int,
             'protected': '🛡️ محتوى محمي',
             'protected_any': '🛡️ forward من قناة محمية',
             'text_channel': '📡 قناة (كشف نصي)',
+            'kb_bot': '🤖 بوت (أزرار Inline)',
         }
         label = type_labels.get(info.get('type', ''),
                                 f"❔ {info.get('type')}")
         lines = ["↩️ <b>رسالة معاد توجيهها</b>", ""]
         lines.append(f"📌 النوع: {label}")
-        if info.get('id'):
-            lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
         if info.get('name'):
             lines.append(f"📛 الاسم: {escape(str(info['name']))}")
-        if info.get('signature'):
-            lines.append(f"✍️ التوقيع: {escape(str(info['signature']))}")
-        if info.get('message_id'):
-            lines.append(
-                f"🔢 رقم الرسالة: <code>{info['message_id']}</code>"
-            )
         if info.get('signals'):
             lines.append(f"🔍 الإشارات: <code>{info['signals']}</code>")
-        if info.get('date'):
-            lines.append(f"📅 التاريخ: <code>{info['date']}</code>")
         await safe_send(context.bot, admin_id, "\n".join(lines),
                         parse_mode='HTML')
     except Exception as e:
@@ -1501,9 +1520,7 @@ class MessageHandlers:
             await safe_send(
                 context.bot, user_id,
                 await _trans('invalid_channel_ref', lang,
-                    "❌ <b>قيمة غير صالحة</b>\n\n"
-                    "أرسل معرّفاً رقمياً أو @username أو رابطاً، "
-                    "أو <code>none</code> للإزالة."),
+                    "❌ <b>قيمة غير صالحة</b>"),
                 parse_mode='HTML')
             return True
 
@@ -1810,10 +1827,17 @@ class MessageHandlers:
         message = update.effective_message
         msg_id = getattr(message, 'message_id', None)
 
+        # 🆕 v7.10.4: لا نتجاهل auto-forward إذا كان فيه أزرار Inline
         if getattr(message, 'is_automatic_forward', False):
-            logger.debug(
-                f"⏭️ AUTO-FORWARD-SKIP | chat={chat_id} msg={msg_id}")
-            return
+            has_kb = getattr(message, 'reply_markup', None) is not None
+            if not has_kb:
+                logger.debug(
+                    f"⏭️ AUTO-FORWARD-SKIP (بدون أزرار) | "
+                    f"chat={chat_id} msg={msg_id}")
+                return
+            logger.warning(
+                f"🎯 AUTO-FORWARD مع أزرار — سنعالجها | "
+                f"chat={chat_id} msg={msg_id}")
 
         is_anonymous = False
         if update.effective_user:
@@ -1821,9 +1845,6 @@ class MessageHandlers:
         elif message.sender_chat is not None:
             user_id = message.sender_chat.id
             is_anonymous = True
-            logger.warning(
-                f"👻 ANONYMOUS | chat={chat_id} msg={msg_id} | "
-                f"sender_chat={message.sender_chat.id}")
         else:
             return
 
@@ -1853,6 +1874,9 @@ class MessageHandlers:
         _text_detect = _det.get('text_detect', False)
         _signal_count = _det.get('signal_count', 0)
         _signals = _det.get('signals', [])
+        _kb_suspicious = _det.get('kb_suspicious', False)
+        _kb_urls = _det.get('kb_urls', 0)
+        _kb_total = _det.get('kb_total', 0)
 
         _is_protected_forward = (
             _protected_fb and _is_protected and _has_hint
@@ -1866,7 +1890,7 @@ class MessageHandlers:
 
         _fwd_active = (
             _is_fwd or _is_protected_forward or _is_protected_any_fwd
-            or _text_detect
+            or _text_detect or _kb_suspicious
         ) and _df_bool
         _log_level = logging.WARNING if _fwd_active else logging.INFO
 
@@ -1884,31 +1908,13 @@ class MessageHandlers:
             f"text_detect={_text_detect} | "
             f"signal_count={_signal_count} | "
             f"signals={_signals} | "
+            f"kb_suspicious={_kb_suspicious} | "
+            f"kb_urls={_kb_urls}/{_kb_total} | "
             f"delete_forwarded={_df_raw!r} | "
             f"protected_fb={_protected_fb} | "
             f"protected_any={_protected_any} | "
-            f"is_forwarded={_is_fwd} | "
-            f"protected_forward={_is_protected_forward} | "
-            f"protected_any_forward={_is_protected_any_fwd}"
+            f"is_forwarded={_is_fwd}"
         )
-
-        for _fname, _finfo in _det.get('fields', {}).items():
-            logger.log(
-                _log_level,
-                f"   ↳ {_fname}: present={_finfo['present']} "
-                f"type={_finfo['type']} "
-                f"val={_finfo['repr_short']}")
-
-        if (_is_fwd or _is_protected_forward or _is_protected_any_fwd
-                or _text_detect):
-            _info = extract_forward_info(message)
-            if _info:
-                logger.log(
-                    _log_level,
-                    f"   ✅ forward_info: type={_info.get('type')} "
-                    f"id={_info.get('id')} "
-                    f"name={_info.get('name')!r} "
-                    f"signals={_info.get('signals')}")
 
         if settings.get('delete_service'):
             if message.new_chat_members or message.left_chat_member:
@@ -1916,16 +1922,17 @@ class MessageHandlers:
                     context.bot, chat_id, message.message_id)
                 return
 
-        # 🆕 v7.10.3: تمرير allow_text_detection عند تفعيل protected_fb
         if settings.get('delete_forwarded'):
             effective_forwarded = is_forwarded(
                 message,
                 allow_protected_fallback=_protected_fb,
                 allow_protected_any=_protected_any,
-                allow_text_detection=_protected_fb)  # ← مفتاح الحل
+                allow_text_detection=_protected_fb)
             if effective_forwarded:
                 tag = ""
-                if _text_detect and not _is_fwd and not _is_protected_forward:
+                if _kb_suspicious:
+                    tag = f" [KB-BOT:{_kb_urls}/{_kb_total}]"
+                elif _text_detect and not _is_fwd:
                     tag = f" [TEXT-DETECT:{_signal_count}]"
                 elif _is_protected_any_fwd:
                     tag = " [PROTECTED-ANY]"
@@ -2061,11 +2068,9 @@ class MessageHandlers:
             pass
 
         delete_ok = False
-        _msg_id_to_delete = None
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
-                _msg_id_to_delete = msg_obj.message_id
                 delete_ok = await _safe_delete_message(
                     context.bot, chat_id, msg_obj.message_id)
         except Exception as e:
@@ -4176,6 +4181,7 @@ __all__ = [
     "_get_dev_log_channel_cached",
     "_is_likely_channel_forward",
     "_count_forward_signals",
+    "_has_suspicious_inline_keyboard",
     "_is_valid_channel_ref",
     "FEATURE_LOG_DELETIONS",
     "FEATURE_LOG_PENALTIES",
