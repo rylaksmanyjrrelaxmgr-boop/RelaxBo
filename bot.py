@@ -2,13 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.0)
+🌿 Relax Manager – البوت الرئيسي (v5.6.1)
 ================================================================================
+🆕 v5.6.1 (POLLING-MODE FIX + CLEANUP):
+    ✅ F1: إصلاح حرج — استبدال await app.run_polling() بـ
+           app.updater.start_polling() + app.start() + _shutdown_event.wait()
+           السبب: run_polling() تنادي asyncio.run() داخلياً، وهذا ينهار
+           عند استدعائها من داخل حلقة asyncio قائمة.
+    ✅ F2: نقل تهيئة _shutdown_event و signal handlers إلى ما قبل الفروع،
+           ليعمل الإغلاق اللطيف في وضعي Webhook و Polling على حد سواء.
+    ✅ F3: contest_cleanup يستقبل app كوسيط بدل الاعتماد على app_global
+           (هشاشة أمام إعادة الهيكلة).
+    ✅ F4: _MEMBERSHIP_IMPORT_ERROR or "unknown" لتفادي طباعة "None".
+    ✅ F5: _validate_invoice_for_payment يتحقق من invoice['number'].
+    ✅ F6: حذف PATHS غير المستخدم + تنظيف imports.
+
 🆕 v5.6.0 (SHUTDOWN + TASK MANAGER + INTEGRATION):
     ✅ M1: _spawn_notify_dev_log — تتبّع الاستثناءات + تنظيف ذكي
     ✅ M2: كل المهام الدائمة داخل run_task_with_retry (موحّد)
     ✅ M3: register_shutdown_handlers(handlers_message) — تنظيف log/delete tasks
-    ✅ M4: import aiohttp في المستوى الأعلى (بدل داخلي متكرر)
+    ✅ M4: import aiohttp في المستوى الأعلى
     ✅ M5: run_task_with_retry — تأخير وقائي عند خروج مفاجئ
     ✅ M6: تسلسل إغلاق واضح (app → group_log → notify → bg → handlers_message)
     ✅ M7: SIGTERM handler لـ polling mode أيضاً
@@ -16,46 +29,16 @@
     ✅ M9: إحصاء مهام دقيق + log تفصيلي عند البدء
     ✅ M10: cleanup_removed_channels_periodically — بارامترات بدل f-string
     ✅ M11: حماية من task crash-looping (backoff تصاعدي)
-    ✅ M12: تحسينات أداء صغيرة (تجنّب إعادة قراءة env)
+    ✅ M12: تحسينات أداء صغيرة
 
-🆕 v5.5.23 (POOL-MONITOR-V2):
-    ✅ PM-1: pool_health_monitor v2 — إصلاح WARNING كاذب على idle_tx
-              - idle_tx يحتاج 2 دورات متتالية قبل التحذير
-              - util<80% لا يسبب WARNING أبداً
-              - grace period 90s بعد بدء التطبيق
-              - استعلام تفصيلي عند idle_tx>=3 مع cooldown 10 دقائق
-              - streak ظاهر في الرسالة لتشخيص أفضل
-    ✅ PM-2: إضافة helper _dump_idle_tx_details
-
-🆕 v5.5.22 (SOFT-DELETE-INTEGRATION):
-    ✅ SD-1: handlers_channels_delete (تأكيد حذف القنوات)
-    ✅ SD-2: cleanup_removed_channels_periodically (كل 24 ساعة)
-    ✅ SD-3: تسجيل معالج تأكيد حذف القناة
-    ✅ SD-4: 19 مهمة خلفية
-    ✅ SD-5: رسائل تشخيصية
-
+🆕 v5.5.23 (POOL-MONITOR-V2)
+🆕 v5.5.22 (SOFT-DELETE-INTEGRATION)
 🆕 v5.5.21 (ADMIN_LOGS-AUTO-CLEANUP)
 🆕 v5.5.20 (MEMBERSHIP UPGRADE)
 🆕 v5.5.19 (MEMBERSHIP INTEGRATION)
 🆕 v5.5.18 (CRITICAL FIXES)
 🆕 v5.5.17 (REVIEW FIXES)
 🆕 v5.5.16 (GRACEFUL SHUTDOWN + SAFETY)
-🆕 v5.5.15 (BUG FIXES — aiohttp leak + HTML escape)
-🆕 v5.5.14 (REMOVE DUPLICATE INDEX CREATION)
-🆕 v5.5.13 (REMOVE DUPLICATE POOL MONITOR)
-🆕 v5.5.12 (POOL DATA DUAL FALLBACK)
-🆕 v5.5.11 (PERFORMANCE INDEXES + FIXES)
-🆕 v5.5.10 (POOL HEALTH MONITOR — NO FALSE ALARMS)
-🆕 v5.5.9 (AUTO POOL HEALTH MONITOR)
-🆕 v5.5.8 (DEV LOG — SUBSCRIPTION PAYMENT)
-🆕 v5.5.7 (DEV LOG NOTIFICATIONS)
-🆕 v5.5.6 (AUTO-DECLARE-CONTEST-WINNERS)
-🆕 v5.5.5 (CONTEST-CLEANUP-COMMENT-FIX)
-🆕 v5.5.4 (CONTEST-AUTO-CLEANUP)
-🆕 v5.5.3 (GIFT-CODE-FLOW-FIX)
-🆕 v5.5.2 (STATS-COMMAND-FIX)
-🆕 v5.5.1 (COLLECT-ADMIN-FIX)
-🆕 v5.5.0 (COMMAND SCOPING)
 ================================================================================
 """
 
@@ -85,7 +68,7 @@ from telegram.ext import (
     PreCheckoutQueryHandler
 )
 
-from config import CONFIG, PATHS  # noqa: F401  (PATHS للتوافق الخارجي)
+from config import CONFIG
 
 from database import DB, initialize_db, TimeUtils
 
@@ -300,16 +283,14 @@ _PM_ALERT_COOLDOWN_SEC = 600.0
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ M1: متتبّع مهام الإشعارات
+# متتبّع مهام الإشعارات
 # ═══════════════════════════════════════════════════════════════════
 
 _NOTIFY_TASKS: Set[asyncio.Task] = set()
 
 
 def _spawn_notify_dev_log(context, text: str) -> None:
-    """
-    ✅ M1: تشغيل _notify_dev_log في الخلفية + تتبّع الاستثناءات.
-    """
+    """تشغيل _notify_dev_log في الخلفية + تتبّع الاستثناءات."""
     try:
         task = asyncio.create_task(_notify_dev_log(context, text))
         _NOTIFY_TASKS.add(task)
@@ -428,7 +409,7 @@ if _MEMBERSHIP_AVAILABLE:
 else:
     logger.warning(
         "⚠️ register_membership_handlers غير متاح: %s",
-        _MEMBERSHIP_IMPORT_ERROR,
+        _MEMBERSHIP_IMPORT_ERROR or "unknown",
     )
 
 if _ADMIN_LOGS_CLEANUP_AVAILABLE:
@@ -450,7 +431,7 @@ else:
     logger.warning(
         "⚠️ handlers_channels_delete غير متاح: %s — "
         "سيتم استخدام الحذف الفوري (بدون تأكيد)",
-        _CH_DELETE_IMPORT_ERROR,
+        _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
 
@@ -471,7 +452,7 @@ _GROUP_LOG_INSTANCE = None
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Bot command lists (v5.5.0)
+# Bot command lists
 # ═══════════════════════════════════════════════════════════════════
 
 PUBLIC_COMMANDS = [
@@ -529,7 +510,7 @@ GROUP_COMMANDS = [
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Admin IDs collection (v5.5.1)
+# Admin IDs collection
 # ═══════════════════════════════════════════════════════════════════
 
 async def _collect_admin_ids() -> List[int]:
@@ -743,7 +724,7 @@ def _verify_db_config() -> bool:
         logger.info("✅ DB: %s — إعداد صحيح", db_type.upper())
         return True
     except Exception as e:
-        logger.warning("⚠️ فشل فحص DB: %s", e)
+        logger.warning("⚠️ فشل فحص DB: %s", e, exc_info=True)
         return True
 
 
@@ -768,7 +749,7 @@ def _verify_membership_handler() -> bool:
     if not _MEMBERSHIP_AVAILABLE:
         logger.warning(
             "⚠️ MembershipHandler غير متاح: %s",
-            _MEMBERSHIP_IMPORT_ERROR,
+            _MEMBERSHIP_IMPORT_ERROR or "unknown",
         )
         return False
     if not callable(register_membership_handlers):
@@ -902,9 +883,7 @@ async def cleanup_admin_logs_periodically() -> None:
 
 
 async def cleanup_removed_channels_periodically() -> None:
-    """
-    ✅ M10: بارامترات آمنة بدل f-string في SQL.
-    """
+    """يحذف نهائياً القنوات المُزالة بعد فترة السماح."""
     GRACE_DAYS = _REMOVED_CHANNELS_GRACE_DAYS
 
     try:
@@ -931,7 +910,6 @@ async def cleanup_removed_channels_periodically() -> None:
             else:
                 db_type = getattr(DB, "DB_TYPE", "sqlite")
 
-                # ✅ M10: معاملات بدل inlining
                 if db_type == "postgres":
                     sql = (
                         "DELETE FROM user_channels "
@@ -1010,6 +988,7 @@ async def _validate_invoice_for_payment(user_id: int, payload: str):
         not invoice
         or invoice.get('user_id') != user_id
         or invoice.get('status') != 'pending'
+        or not invoice.get('number')   # ✅ F5
     ):
         logger.warning(
             "❌ Invoice invalid or not pending for user %s", user_id
@@ -1311,7 +1290,14 @@ async def _dump_idle_tx_details() -> None:
 async def pool_health_monitor() -> None:
     """
     يراقب Pool + الاتصالات كل 5 دقائق.
-    راجع v5.5.23 في الوثيقة أعلاه.
+
+    قواعد التصنيف:
+      • idle_tx >= 3 في أي دورة → ERROR + تفاصيل
+      • util >= 95%             → ERROR
+      • lock_waits >= 1         → WARNING
+      • waiting >= 3            → WARNING
+      • util >= 80%             → WARNING
+      • idle_tx >= 1 لدورتين    → WARNING
     """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
@@ -1554,7 +1540,7 @@ def _resolve_port() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Webhook runner watcher (v5.5.18)
+# Webhook runner watcher
 # ═══════════════════════════════════════════════════════════════════
 
 async def _watch_runner(
@@ -1576,8 +1562,7 @@ async def _watch_runner(
         if site is None:
             logger.warning(
                 "⚠️ _watch_runner: لم أتمكّن من الوصول إلى TCP site "
-                "— مراقبة انهيار Webhook معطّلة. "
-                "تحقق من القيمة المُرجَعة من setup_webhook()."
+                "— مراقبة انهيار Webhook معطّلة."
             )
             return
 
@@ -1647,12 +1632,12 @@ async def _watch_runner(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ✅ M5: run_task_with_retry — نسخة محسّنة
+# run_task_with_retry
 # ═══════════════════════════════════════════════════════════════════
 
 async def run_task_with_retry(task_func, *args, task_name=""):
     """
-    ✅ M5: يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي.
+    يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي.
     - عند خروج مفاجئ (بدون استثناء) → تأخير وقائي 5s.
     - عند استثناء → backoff من 5s إلى 60s.
     """
@@ -1660,7 +1645,6 @@ async def run_task_with_retry(task_func, *args, task_name=""):
     while True:
         try:
             await task_func(*args)
-            # المهمة عادة دائمة (infinite loop). لو عادت → تأخير وقائي.
             if consecutive_failures == 0:
                 logger.warning(
                     "⚠️ المهمة %s عادت بدون استثناء — إعادة بعد 5s",
@@ -1701,8 +1685,11 @@ async def cleanup_locks():
             await asyncio.sleep(60)
 
 
-async def contest_cleanup():
-    """يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة)."""
+async def contest_cleanup(app: Application):
+    """
+    ✅ F3: يستقبل app بدل استخدام app_global.
+    يُعلن الفائزين تلقائياً للمسابقات المنتهية (كل ساعة).
+    """
     try:
         await asyncio.sleep(300)
     except asyncio.CancelledError:
@@ -1729,7 +1716,7 @@ async def contest_cleanup():
                             f"لقد فزت في مسابقة <b>{title}</b>!\n\n"
                             f"<i>سيتم التواصل معك قريبًا لاستلام الجائزة.</i>"
                         )
-                        await app_global.bot.send_message(
+                        await app.bot.send_message(
                             chat_id=winner_id,
                             text=msg,
                             parse_mode="HTML",
@@ -1758,17 +1745,11 @@ async def contest_cleanup():
             raise
 
 
-# ✅ حل مشكلة global bot في contest_cleanup بدون تغيير التوقيع
-app_global: Optional[Application] = None
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
 async def main():
-    global app_global
-
     t_start = time.monotonic()
 
     try:
@@ -1849,7 +1830,6 @@ async def main():
     t_app = time.monotonic()
     app = Application.builder().token(bot_token).build()
     app.bot_data['start_time'] = time.monotonic()
-    app_global = app
     await app.initialize()
     logger.info(
         "⏱️ تم تهيئة التطبيق في %.2f ثانية",
@@ -2032,7 +2012,7 @@ async def main():
         logger.warning(
             "⚠️ handlers_channels_delete غير متاح — "
             "سيتم استخدام الحذف الفوري (بدون تأكيد): %s",
-            _CH_DELETE_IMPORT_ERROR,
+            _CH_DELETE_IMPORT_ERROR or "unknown",
         )
 
     if _GROUP_LOG_AVAILABLE:
@@ -2096,11 +2076,11 @@ async def main():
         logger.warning(
             "⚠️ MembershipHandler غير متاح — "
             "لن تُرسل تقارير إضافة البوت: %s",
-            _MEMBERSHIP_IMPORT_ERROR,
+            _MEMBERSHIP_IMPORT_ERROR or "unknown",
         )
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ M2: المهام الخلفية — كلها موحّدة عبر run_task_with_retry
+    # المهام الخلفية — كلها موحّدة عبر run_task_with_retry
     # ═════════════════════════════════════════════════════════════
     tasks: List[asyncio.Task] = []
 
@@ -2119,7 +2099,7 @@ async def main():
         ("cleanup_locks", cleanup_locks, ()),
         ("periodic_cleanup", GroupRateLimiterManager.periodic_cleanup_task, ()),
         ("monitor_pool_alert", BackgroundTasks.monitor_pool_alert, (app.bot,)),
-        ("contest_cleanup", contest_cleanup, ()),
+        ("contest_cleanup", contest_cleanup, (app,)),
         ("pool_health_monitor", pool_health_monitor, ()),
         ("admin_logs_cleanup", cleanup_admin_logs_periodically, ()),
         ("removed_channels_cleanup",
@@ -2169,14 +2149,12 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ M7: SIGTERM handler — يعمل في الوضعين
+    # ✅ F1/F2: _shutdown_event + signal handlers قبل الفرعين
     # ═════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
     def _on_shutdown_signal(sig_name: str):
-        logger.info(
-            "🛑 تلقّيت %s — بدء الإغلاق اللطيف", sig_name
-        )
+        logger.info("🛑 تلقّيت %s — بدء الإغلاق اللطيف", sig_name)
         _shutdown_event.set()
 
     try:
@@ -2190,19 +2168,19 @@ async def main():
                 logger.debug("✅ handler لـ %s مسجّل", _sig.name)
             except (NotImplementedError, RuntimeError, ValueError) as _e:
                 logger.debug(
-                    "add_signal_handler(%s) غير مدعوم: %s",
-                    _sig.name, _e,
+                    "add_signal_handler(%s) غير مدعوم: %s", _sig.name, _e
                 )
     except Exception as _e:
         logger.debug("Signal setup: %s", _e)
 
     # ═════════════════════════════════════════════════════════════
-    # بدء التشغيل
+    # بدء التشغيل — Webhook أو Polling
     # ═════════════════════════════════════════════════════════════
     app_shutdown_done = False
 
     try:
         if hostname:
+            # ══════════ WEBHOOK MODE ══════════
             webhook_url = f"https://{hostname}/{bot_token}"
             logger.info("🔗 Webhook: %s", _safe_url(webhook_url))
 
@@ -2254,24 +2232,52 @@ async def main():
                     raise
                 except Exception as _e:
                     logger.debug("runner.cleanup (webhook): %s", _e)
+
         else:
+            # ══════════ POLLING MODE ══════════
+            # ✅ F1: استخدام API غير متزامن بدل run_polling()
             logger.info("⚠️ وضع Polling (لا يوجد hostname)")
+
             runner = await setup_webhook(app, port)
+
             try:
-                await app.run_polling(
+                await app.updater.start_polling(
                     drop_pending_updates=True,
                     allowed_updates=ALLOWED_UPDATES,
                 )
-                app_shutdown_done = True
+                await app.start()
+                logger.info("✅ Polling started — في انتظار الإشارات")
+
+                await _shutdown_event.wait()
+                logger.info("📴 تم استلام إشارة الإغلاق — إنهاء الخدمات...")
+
             finally:
                 try:
+                    await app.updater.stop()
+                    logger.info("✅ updater: تم الإيقاف")
+                except Exception as _e:
+                    logger.debug("updater.stop: %s", _e)
+
+                try:
+                    await app.stop()
+                    logger.info("✅ app: تم الإيقاف")
+                except Exception as _e:
+                    logger.debug("app.stop: %s", _e)
+
+                app_shutdown_done = True
+
+                try:
                     await runner.cleanup()
+                    logger.info(
+                        "✅ aiohttp runner: تم الإغلاق النظيف (polling)"
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as _e:
                     logger.debug("runner.cleanup (polling): %s", _e)
+
     finally:
-        # ═══ ✅ M6: تسلسل إغلاق واضح ═══
+        # ═══ تسلسل إغلاق واضح ═══
 
         # 1) group_log
         try:
@@ -2318,7 +2324,7 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks: %s", _e)
 
-        # 5) app shutdown
+        # 5) app shutdown (فقط في webhook mode، لأن polling أوقفناه بالفعل)
         if not app_shutdown_done:
             try:
                 await app.shutdown()
