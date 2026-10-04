@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.10.9
+handlers_message.py - v7.10.10
 =============================================================================
-🆕 v7.10.9:
-    ✅ Auto Spam Detection محسّن بالسياق والأوزان
+🆕 v7.10.10:
+    ✅ Spam Detection محسّن مع Context + Weighted Scoring
+    ✅ منع تضخيم النقاط بسبب تكرار نفس الكلمة
+    ✅ منع تداخل strong/context لنفس الكلمة
     ✅ الكلمات العامة لا تكفي وحدها للحذف
-    ✅ مطابقة كلمات مستقلة بدل substring matching
-    ✅ كشف التركيبات المشبوهة Contextual Patterns
-    ✅ تشديد كشف روابط + أزرار + عبارات تسويقية
-    ✅ منع تضخيم النقاط بسبب تكرار الكلمة نفسها
-    ✅ تشخيص محسّن: score + reasons + matched keywords/patterns
-    ✅ الحفاظ على بقية وظائف v7.10.8 بدون تغيير جوهري
+    ✅ مطابقة الكلمات المحظورة ككلمات/عبارات فعلية بدل substring matching
+    ✅ فصل protected content عن Forward الحقيقي
+    ✅ الحفاظ على دعم delete_protected_forward / delete_protected_any
+    ✅ تفعيل delete_postbot_pattern فعليًا
+    ✅ إصلاح إدارة GroupRateLimiter مع release آمن
+    ✅ تحسين تشخيص Spam وPostBot
+    ✅ حماية max_message_length من القيم النصية/غير الصالحة
+    ✅ الحفاظ على بقية وظائف v7.10.9
 =============================================================================
 """
 
@@ -52,21 +56,28 @@ from utils import (
 )
 from cache import settings_cache, banned_words_cache, auth_cache, posts_cache
 
+
 try:
     from replies import analyze_sentiment
 except ImportError:
     analyze_sentiment = None
 
+
 try:
     from telegram import (
-        MessageOriginUser, MessageOriginHiddenUser,
-        MessageOriginChat, MessageOriginChannel,
+        MessageOriginUser,
+        MessageOriginHiddenUser,
+        MessageOriginChat,
+        MessageOriginChannel,
     )
+
     _HAS_MESSAGE_ORIGIN = True
+
 except ImportError:
     MessageOriginUser = MessageOriginHiddenUser = None
     MessageOriginChat = MessageOriginChannel = None
     _HAS_MESSAGE_ORIGIN = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +89,18 @@ logger = logging.getLogger(__name__)
 _HIDDEN_CHARS = (
     '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-    '\u2060', '\u2061', '\u2062', '\u2063', '\u2064', '\ufeff',
+    '\u2060', '\u2061', '\u2062', '\u2063', '\u2064',
+    '\ufeff',
 )
 
 
 def _normalize_text(text: str) -> str:
+    """
+    Normalize Unicode text and remove hidden/bidi characters.
+
+    لا نستخدم lower() هنا حتى يبقى النص مناسبًا للـ logging
+    ولعمليات أخرى قد تحتاج المحافظة على الحالة الأصلية.
+    """
     if not text:
         return ""
 
@@ -105,30 +123,9 @@ def _normalize_text(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Spam Detection v7.10.9
-# ═══════════════════════════════════════════════════════════════════
-#
-# الفكرة:
-#
-# لا نريد:
-#     "Korean"              -> Spam
-#     "Cartoon"             -> Spam
-#     "Colombian"           -> Spam
-#
-# بل نريد تجميع مؤشرات متعددة:
-#
-#     uncensored + collection
-#     nsfw + click + URL
-#     xxx + buttons + URL
-#     عدة كلمات قوية + عدة أزرار
-#
-# الحد النهائي:
-#
-#     score >= 5
-#
+# Spam Detection v7.10.10
 # ═══════════════════════════════════════════════════════════════════
 
-# كلمات قوية جدًا عندما تظهر في سياق إعلاني/Spam.
 _SPAM_STRONG_KEYWORDS = frozenset({
     'uncensored',
     'xxx',
@@ -144,7 +141,7 @@ _SPAM_STRONG_KEYWORDS = frozenset({
     'mega',
 })
 
-# كلمات متوسطة.
+
 _SPAM_MEDIUM_KEYWORDS = frozenset({
     'collection',
     'clips',
@@ -167,15 +164,15 @@ _SPAM_MEDIUM_KEYWORDS = frozenset({
     'petite',
 })
 
-# كلمات عامة جدًا.
-# وجودها وحده لا يعطي نقاطًا.
+
+# كلمات سياقية فقط.
+# لا يتم احتسابها إذا لم توجد مؤشرات أقوى.
 _SPAM_CONTEXT_KEYWORDS = frozenset({
     'check',
     'tap',
     'click',
     'view',
     'open',
-    'mega',
     'cartoon',
     'korean',
     'colombian',
@@ -186,7 +183,7 @@ _SPAM_CONTEXT_KEYWORDS = frozenset({
     'mfm',
 })
 
-# كلمات لا تعتبر Spam وحدها لكنها تقوي السياق.
+
 _CTA_KEYWORDS = frozenset({
     'check',
     'tap',
@@ -199,7 +196,7 @@ _CTA_KEYWORDS = frozenset({
     'watch',
 })
 
-# إيموجي شائعة في الرسائل الترويجية.
+
 _SPAM_EMOJIS = (
     '⭐', '💀', '🔥', '✨', '🍑', '🔞', '🚨', '💎',
     '🎁', '🎉', '🌟', '💥', '⚡', '🌸', '🌺', '💋',
@@ -207,16 +204,24 @@ _SPAM_EMOJIS = (
     '🔴', '🟢', '🔵', '🟡', '🟣', '🟠',
 )
 
-_URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
 
-# استخراج الكلمات اللاتينية ككلمات مستقلة.
-_WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*", re.IGNORECASE)
+_URL_RE = re.compile(
+    r'https?://[^\s<>"]+',
+    re.IGNORECASE
+)
 
-# عبارات قوية لا تعتمد على كلمة واحدة.
+
+_WORD_RE = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9_-]*",
+    re.IGNORECASE
+)
+
+
 _SPAM_CONTEXT_PATTERNS = (
     (
         re.compile(
-            r'\buncensored\s+(?:best\s+)?(?:collection|archive|pack|clips?)\b',
+            r'\buncensored\s+(?:best\s+)?'
+            r'(?:collection|archive|pack|clips?)\b',
             re.IGNORECASE
         ),
         4,
@@ -224,7 +229,8 @@ _SPAM_CONTEXT_PATTERNS = (
     ),
     (
         re.compile(
-            r'\b(?:xxx|nsfw|porn)\s+(?:collection|archive|pack|clips?)\b',
+            r'\b(?:xxx|nsfw|porn)\s+'
+            r'(?:collection|archive|pack|clips?)\b',
             re.IGNORECASE
         ),
         4,
@@ -232,7 +238,8 @@ _SPAM_CONTEXT_PATTERNS = (
     ),
     (
         re.compile(
-            r'\b(?:leak|leaked)\s+(?:pack|archive|collection|clips?)\b',
+            r'\b(?:leak|leaked)\s+'
+            r'(?:pack|archive|collection|clips?)\b',
             re.IGNORECASE
         ),
         4,
@@ -240,7 +247,8 @@ _SPAM_CONTEXT_PATTERNS = (
     ),
     (
         re.compile(
-            r'\b(?:click|tap|check|view|open)\s+(?:here|now|below)\b',
+            r'\b(?:click|tap|check|view|open)\s+'
+            r'(?:here|now|below)\b',
             re.IGNORECASE
         ),
         2,
@@ -257,21 +265,26 @@ _SPAM_CONTEXT_PATTERNS = (
     ),
 )
 
-# PostBot emoji pattern.
+
 _POSTBOT_EMOJI = (
     r'[⭐💀🔥✨🍑🔞🚨💎🎁🎉🌟💥⚡🌸🌺💋👑🥇🏆🎯💯🆕🆗'
     r'🔴🟢🔵🟡🟣🟠]'
 )
 
+
 _POSTBOT_PATTERN = re.compile(
-    _POSTBOT_EMOJI + r'.{0,10}' +
+    _POSTBOT_EMOJI +
+    r'.{0,10}' +
     r'\b[A-Z]{4,}(?:\s+[A-Z]{4,}){1,}' +
-    r'.{0,10}' + _POSTBOT_EMOJI,
+    r'.{0,10}' +
+    _POSTBOT_EMOJI,
     re.UNICODE
 )
 
+
 _POSTBOT_PATTERN_LOOSE = re.compile(
-    _POSTBOT_EMOJI + r'.{0,5}' +
+    _POSTBOT_EMOJI +
+    r'.{0,5}' +
     r'\b[A-Z]{4,}(?:\s+[A-Z]{4,}){2,}',
     re.UNICODE
 )
@@ -279,15 +292,17 @@ _POSTBOT_PATTERN_LOOSE = re.compile(
 
 def _extract_spam_words(text: str) -> List[str]:
     """
-    استخراج كلمات فعلية من النص.
-    يمنع مشكلة:
-        step -> مطابقة داخل كلمة أخرى
+    استخراج الكلمات الإنجليزية الفعلية فقط.
     """
     if not text:
         return []
 
     try:
-        return [m.group(0).lower() for m in _WORD_RE.finditer(text)]
+        return [
+            m.group(0).lower()
+            for m in _WORD_RE.finditer(text)
+        ]
+
     except Exception:
         return []
 
@@ -295,82 +310,141 @@ def _extract_spam_words(text: str) -> List[str]:
 def _count_unique_matches(words, keywords):
     """
     يحسب الكلمات المختلفة فقط.
-    تكرار:
-        xxx xxx xxx
-    لا يضاعف النقاط بلا حدود.
     """
     try:
-        return sorted(set(words).intersection(keywords))
+        return sorted(
+            set(words).intersection(keywords)
+        )
+
     except Exception:
         return []
 
 
+def _count_text_urls(text: str) -> List[str]:
+    if not text:
+        return []
+
+    try:
+        return _URL_RE.findall(text)
+    except Exception:
+        return []
+
+
+def _get_message_button_data(message):
+    """
+    استخراج عدد الأزرار وروابطها بأمان.
+    """
+    button_count = 0
+    urls = []
+
+    try:
+        markup = getattr(
+            message,
+            'reply_markup',
+            None
+        )
+
+        if not markup:
+            return 0, []
+
+        keyboard = getattr(
+            markup,
+            'inline_keyboard',
+            None
+        )
+
+        if not keyboard:
+            return 0, []
+
+        for row in keyboard:
+            if not row:
+                continue
+
+            for button in row:
+                if button is None:
+                    continue
+
+                button_count += 1
+
+                url = getattr(
+                    button,
+                    'url',
+                    None
+                )
+
+                if isinstance(url, str) and url:
+                    urls.append(url)
+
+    except Exception:
+        pass
+
+    return button_count, urls
+
+
 def _compute_spam_score(message):
     """
-    v7.10.9 Spam Scoring Engine.
-
-    الهدف:
-        تقليل False Positives مع الحفاظ على اكتشاف Spam الواضح.
+    v7.10.10 Spam Scoring Engine.
 
     النتيجة:
         (score, reasons)
 
-    score >= 5:
-        يتم اعتبار الرسالة Spam.
+    الحذف:
+        score >= SPAM_SCORE_THRESHOLD
     """
 
     score = 0
     reasons = []
 
     try:
-        text = (message.text or message.caption or "")
+        if message is None:
+            return 0, []
+
+        text = (
+            getattr(message, 'text', None)
+            or getattr(message, 'caption', None)
+            or ""
+        )
+
         normalized = _normalize_text(text)
-        text_lower = normalized.lower()
 
         if not normalized:
             return 0, []
 
+        text_lower = normalized.lower()
+
         # ─────────────────────────────────────────────────────────
-        # 1) الأزرار والروابط
+        # 1) Buttons + URLs
         # ─────────────────────────────────────────────────────────
 
-        urls = []
-        button_count = 0
+        button_count, button_urls = _get_message_button_data(
+            message
+        )
 
-        try:
-            markup = getattr(message, 'reply_markup', None)
-
-            if markup is not None:
-                kb = getattr(markup, 'inline_keyboard', None)
-
-                if kb:
-                    for row in kb:
-                        for btn in row:
-                            button_count += 1
-
-                            u = getattr(btn, 'url', None)
-                            if u and isinstance(u, str):
-                                urls.append(u)
-        except Exception:
-            pass
-
-        # عدة أزرار وحدها ليست كافية.
-        # لكن 3+ أزرار مع محتوى مشبوه تصبح مؤشرًا قويًا.
         if button_count >= 5:
             score += 2
-            reasons.append(f"buttons={button_count}")
+            reasons.append(
+                f"buttons={button_count}"
+            )
+
         elif button_count >= 3:
             score += 1
-            reasons.append(f"buttons={button_count}")
+            reasons.append(
+                f"buttons={button_count}"
+            )
 
-        # صورة/فيديو + أزرار.
-        if message.photo and button_count >= 1:
-            score += 1
-            reasons.append("photo+buttons")
+        has_photo = bool(
+            getattr(message, 'photo', None)
+        )
 
-        elif message.video and button_count >= 1:
+        has_video = bool(
+            getattr(message, 'video', None)
+        )
+
+        if (has_photo or has_video) and button_count >= 1:
             score += 1
-            reasons.append("video+buttons")
+            reasons.append(
+                "media+buttons"
+            )
 
         # ─────────────────────────────────────────────────────────
         # 2) Emoji
@@ -378,31 +452,31 @@ def _compute_spam_score(message):
 
         emoji_count = 0
 
-        for e in _SPAM_EMOJIS:
+        for emoji in _SPAM_EMOJIS:
             try:
-                emoji_count += text.count(e)
+                emoji_count += normalized.count(emoji)
             except Exception:
                 pass
 
-        # لا نعطي نقاطًا كثيرة للإيموجي وحدها.
         if emoji_count >= 6:
             score += 2
-            reasons.append(f"emoji={emoji_count}")
+            reasons.append(
+                f"emoji={emoji_count}"
+            )
 
         elif emoji_count >= 3:
             score += 1
-            reasons.append(f"emoji={emoji_count}")
-
-        # 1-2 إيموجي لا نقاط لها.
-        # لأن:
-        #     ⭐ Korean
-        # ليست Spam بالضرورة.
+            reasons.append(
+                f"emoji={emoji_count}"
+            )
 
         # ─────────────────────────────────────────────────────────
-        # 3) الكلمات
+        # 3) Keywords
         # ─────────────────────────────────────────────────────────
 
-        words = _extract_spam_words(normalized)
+        words = _extract_spam_words(
+            normalized
+        )
 
         strong_matches = _count_unique_matches(
             words,
@@ -424,64 +498,94 @@ def _compute_spam_score(message):
             _CTA_KEYWORDS
         )
 
-        # الكلمات القوية:
+        # مهم:
+        # لا نعطي نفس الكلمة نقاطًا من strong + context.
         #
-        # كلمة واحدة:
-        #   +2
+        # مثال:
+        # mega
         #
-        # كلمتان أو أكثر:
-        #   +4
-        #
+        # هي strong، لذلك لا تدخل أيضًا في context.
+        context_only_matches = [
+            word
+            for word in context_matches
+            if word not in strong_matches
+            and word not in medium_matches
+        ]
+
+        # ─────────────────────────────────────────────────────────
+        # Strong
+        # ─────────────────────────────────────────────────────────
+
         if strong_matches:
-            strong_score = min(4, len(strong_matches) * 2)
+            strong_score = min(
+                4,
+                len(strong_matches) * 2
+            )
+
             score += strong_score
+
             reasons.append(
-                f"strong={','.join(strong_matches[:5])}"
+                "strong=" +
+                ",".join(strong_matches[:5])
             )
 
-        # الكلمات المتوسطة:
-        #
-        # لا نعطيها 1 نقطة لكل كلمة بلا حدود.
-        medium_score = min(3, len(medium_matches))
+        # ─────────────────────────────────────────────────────────
+        # Medium
+        # ─────────────────────────────────────────────────────────
 
-        if medium_score:
+        if medium_matches:
+            medium_score = min(
+                3,
+                len(medium_matches)
+            )
+
             score += medium_score
+
             reasons.append(
-                f"medium={','.join(medium_matches[:6])}"
+                "medium=" +
+                ",".join(medium_matches[:6])
             )
 
-        # الكلمات العامة لا تضيف نقاطًا وحدها.
-        #
-        # لكنها تصبح مهمة إذا اجتمعت مع:
-        #   strong
-        #   medium
-        #   CTA
-        #
-        if context_matches:
+        # ─────────────────────────────────────────────────────────
+        # Context
+        # ─────────────────────────────────────────────────────────
+
+        if context_only_matches:
             if strong_matches or medium_matches:
-                score += min(2, len(context_matches))
+                context_score = min(
+                    2,
+                    len(context_only_matches)
+                )
+
+                score += context_score
+
                 reasons.append(
-                    f"context={','.join(context_matches[:6])}"
+                    "context=" +
+                    ",".join(context_only_matches[:6])
                 )
 
         # ─────────────────────────────────────────────────────────
-        # 4) CTA
+        # CTA
         # ─────────────────────────────────────────────────────────
 
-        if cta_matches:
-            # CTA وحده ليس Spam.
-            #
-            # CTA + strong/medium:
-            #     مؤشر قوي.
-            #
+        cta_only_matches = [
+            word
+            for word in cta_matches
+            if word not in strong_matches
+            and word not in medium_matches
+        ]
+
+        if cta_only_matches:
             if strong_matches or medium_matches:
                 score += 1
+
                 reasons.append(
-                    f"cta={','.join(cta_matches[:5])}"
+                    "cta=" +
+                    ",".join(cta_only_matches[:5])
                 )
 
         # ─────────────────────────────────────────────────────────
-        # 5) Contextual Patterns
+        # 4) Contextual patterns
         # ─────────────────────────────────────────────────────────
 
         matched_patterns = []
@@ -491,70 +595,120 @@ def _compute_spam_score(message):
                 if pattern.search(text_lower):
                     score += weight
                     matched_patterns.append(label)
+
             except Exception:
                 continue
 
         if matched_patterns:
             reasons.append(
-                "patterns=" + ",".join(matched_patterns)
+                "patterns=" +
+                ",".join(matched_patterns)
             )
 
         # ─────────────────────────────────────────────────────────
-        # 6) روابط
+        # 5) Telegram button URLs
         # ─────────────────────────────────────────────────────────
 
-        tme_count = 0
+        tme_button_count = 0
 
-        for u in urls:
+        for url in button_urls:
             try:
-                if 't.me/' in u.lower():
-                    tme_count += 1
+                parsed = urlparse(url)
+
+                host = (
+                    parsed.hostname
+                    or ""
+                ).lower()
+
+                if (
+                    host == "t.me"
+                    or host.endswith(".t.me")
+                ):
+                    tme_button_count += 1
+
             except Exception:
-                pass
+                continue
 
-        if tme_count >= 3:
+        if tme_button_count >= 3:
             score += 3
-            reasons.append(f"tme_buttons={tme_count}")
+            reasons.append(
+                f"tme_buttons={tme_button_count}"
+            )
 
-        elif tme_count >= 2:
+        elif tme_button_count >= 2:
             score += 2
-            reasons.append(f"tme_buttons={tme_count}")
+            reasons.append(
+                f"tme_buttons={tme_button_count}"
+            )
 
-        elif tme_count >= 1:
-            # رابط Telegram واحد لا يكفي وحده.
-            if strong_matches or matched_patterns:
+        elif tme_button_count >= 1:
+            if (
+                strong_matches
+                or medium_matches
+                or matched_patterns
+            ):
                 score += 1
-                reasons.append(f"tme_buttons={tme_count}")
+                reasons.append(
+                    f"tme_buttons={tme_button_count}"
+                )
 
-        # روابط داخل النص.
-        text_urls = _URL_RE.findall(text)
+        # ─────────────────────────────────────────────────────────
+        # 6) Text URLs
+        # ─────────────────────────────────────────────────────────
+
+        text_urls = _count_text_urls(
+            normalized
+        )
 
         if len(text_urls) >= 3:
             score += 3
-            reasons.append(f"text_urls={len(text_urls)}")
+            reasons.append(
+                f"text_urls={len(text_urls)}"
+            )
 
         elif len(text_urls) >= 2:
             score += 2
-            reasons.append(f"text_urls={len(text_urls)}")
+            reasons.append(
+                f"text_urls={len(text_urls)}"
+            )
 
-        elif len(text_urls) >= 1:
-            if strong_matches or matched_patterns:
+        elif len(text_urls) == 1:
+            if (
+                strong_matches
+                or medium_matches
+                or matched_patterns
+            ):
                 score += 1
-                reasons.append(f"text_urls={len(text_urls)}")
+                reasons.append(
+                    "text_urls=1"
+                )
 
         # ─────────────────────────────────────────────────────────
-        # 7) Short promo text + buttons
+        # 7) Short promotional messages
         # ─────────────────────────────────────────────────────────
 
-        if len(normalized) < 40 and button_count >= 3:
-            if strong_matches or medium_matches or matched_patterns:
+        text_len = len(normalized)
+
+        if text_len < 40 and button_count >= 3:
+            if (
+                strong_matches
+                or medium_matches
+                or matched_patterns
+            ):
                 score += 2
-                reasons.append("short_promo+buttons")
+                reasons.append(
+                    "short_promo+buttons"
+                )
 
-        elif len(normalized) < 30 and button_count >= 2:
-            if strong_matches or matched_patterns:
+        elif text_len < 30 and button_count >= 2:
+            if (
+                strong_matches
+                or matched_patterns
+            ):
                 score += 1
-                reasons.append("short_text+buttons")
+                reasons.append(
+                    "short_text+buttons"
+                )
 
         # ─────────────────────────────────────────────────────────
         # 8) CAPS
@@ -565,70 +719,85 @@ def _compute_spam_score(message):
             normalized
         )
 
-        # CAPS وحدها لا تعتبر Spam.
-        # تحتاج إلى سياق.
         if len(caps_words) >= 6:
-            if strong_matches or medium_matches or matched_patterns:
+            if (
+                strong_matches
+                or medium_matches
+                or matched_patterns
+            ):
                 score += 2
-                reasons.append(f"CAPS={len(caps_words)}")
+                reasons.append(
+                    f"CAPS={len(caps_words)}"
+                )
 
         elif len(caps_words) >= 4:
-            if strong_matches or matched_patterns:
+            if (
+                strong_matches
+                or matched_patterns
+            ):
                 score += 1
-                reasons.append(f"CAPS={len(caps_words)}")
+                reasons.append(
+                    f"CAPS={len(caps_words)}"
+                )
 
         # ─────────────────────────────────────────────────────────
-        # 9) Advertisement density
+        # 9) Promotional density
         # ─────────────────────────────────────────────────────────
 
-        # عدد الكلمات الترويجية المختلفة.
         promo_count = (
             len(strong_matches)
             + len(medium_matches)
-            + len(cta_matches)
+            + len(cta_only_matches)
         )
 
         if promo_count >= 6:
             score += 2
-            reasons.append(f"promo_density={promo_count}")
+            reasons.append(
+                f"promo_density={promo_count}"
+            )
 
         elif promo_count >= 4:
             score += 1
-            reasons.append(f"promo_density={promo_count}")
+            reasons.append(
+                f"promo_density={promo_count}"
+            )
 
         # ─────────────────────────────────────────────────────────
         # 10) Anti false-positive guard
         # ─────────────────────────────────────────────────────────
 
-        # إذا كان كل ما وجدناه كلمات عامة فقط:
-        #
-        # Korean / Colombian / Cartoon
-        #
-        # لا نحذف الرسالة.
         if (
             not strong_matches
             and not medium_matches
             and not matched_patterns
             and not text_urls
-            and tme_count == 0
+            and tme_button_count == 0
         ):
-            # أزل أي نقاط غير سياقية قد تكون حصلت من الأزرار
-            # والإيموجي وحدها.
             if score < SPAM_SCORE_THRESHOLD:
                 score = 0
                 reasons = []
 
-        # حد أقصى دفاعي.
-        score = min(score, 20)
+        # ─────────────────────────────────────────────────────────
+        # 11) Final cap
+        # ─────────────────────────────────────────────────────────
+
+        score = min(
+            max(score, 0),
+            20
+        )
 
     except Exception as e:
-        logger.debug(f"_compute_spam_score: {e}")
+        logger.debug(
+            f"_compute_spam_score: {e}"
+        )
+
+        return 0, []
 
     return score, reasons
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Post Bot Pattern (legacy)
+# PostBot Pattern
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_postbot_pattern(text):
@@ -654,13 +823,34 @@ def _env_flag(name, default=True):
     if val is None:
         return default
 
-    return val.strip().lower() in ("1", "true", "yes", "on")
+    return val.strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on"
+    )
 
 
-FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
-FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
-FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
-FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
+FEATURE_LOG_DELETIONS = _env_flag(
+    "LOG_DELETIONS",
+    True
+)
+
+FEATURE_LOG_PENALTIES = _env_flag(
+    "LOG_PENALTIES",
+    True
+)
+
+FEATURE_LOG_GIFTS = _env_flag(
+    "LOG_GIFTS",
+    True
+)
+
+FEATURE_LOG_ADMIN_CHANGES = _env_flag(
+    "LOG_ADMIN_CHANGES",
+    True
+)
+
 
 MAX_PENALTY_MINUTES = 30 * 24 * 60
 LOG_RATE_LIMIT_PER_MIN = 30
@@ -684,10 +874,15 @@ _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
 _GROUP_LOG_PREVIEW_LENGTH = 150
 
 _PROTECTED_FORWARD_HINTS = (
-    "محولة من", "محوّل من", "محوله من",
-    "تم التحويل من", "المعاد توجيهها من",
-    "Forwarded from", "من قناة",
+    "محولة من",
+    "محوّل من",
+    "محوله من",
+    "تم التحويل من",
+    "المعاد توجيهها من",
+    "Forwarded from",
+    "من قناة",
 )
+
 
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
@@ -695,21 +890,32 @@ _DELETE_IGNORED_PATTERNS = (
     "message is not found",
 )
 
-_DELETE_PERMISSION_ERROR = "message can't be deleted"
+
+_DELETE_PERMISSION_ERROR = (
+    "message can't be deleted"
+)
+
 
 _MEDIA_REPLY_TYPES = frozenset({
-    'photo', 'video', 'document', 'audio',
-    'animation', 'voice', 'sticker', 'video_note',
+    'photo',
+    'video',
+    'document',
+    'audio',
+    'animation',
+    'voice',
+    'sticker',
+    'video_note',
 })
+
 
 TRANSLATION_REPLY_DELETE_DELAY = 30
 TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
-# لا تغير هذا الرقم إذا كنت تريد نفس حساسية النسخة السابقة.
 SPAM_SCORE_THRESHOLD = 5
 
 _columns_initialized = False
+_columns_init_lock = asyncio.Lock()
 
 
 async def _lazy_init_columns():
@@ -718,109 +924,158 @@ async def _lazy_init_columns():
     if _columns_initialized:
         return
 
-    _columns_initialized = True
+    async with _columns_init_lock:
+        if _columns_initialized:
+            return
 
-    db_type = getattr(DB, "DB_TYPE", "sqlite")
+        db_type = getattr(
+            DB,
+            "DB_TYPE",
+            "sqlite"
+        )
 
-    logger.info(
-        f"🔧 v7.10.9: Auto-migration يبدأ (DB_TYPE={db_type})"
-    )
+        logger.info(
+            f"🔧 v7.10.10: Auto-migration يبدأ "
+            f"(DB_TYPE={db_type})"
+        )
 
-    cols = [
-        ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-        ("delete_postbot_pattern", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
-        ("delete_spam_score", "INTEGER DEFAULT 1", "TINYINT(1) DEFAULT 1"),
-    ]
+        cols = [
+            (
+                "delete_protected_any",
+                "INTEGER DEFAULT 0",
+                "TINYINT(1) DEFAULT 0"
+            ),
+            (
+                "delete_postbot_pattern",
+                "INTEGER DEFAULT 0",
+                "TINYINT(1) DEFAULT 0"
+            ),
+            (
+                "delete_spam_score",
+                "INTEGER DEFAULT 1",
+                "TINYINT(1) DEFAULT 1"
+            ),
+        ]
 
-    for col_name, pg_def, mysql_def in cols:
+        migration_ok = True
+
+        for col_name, pg_def, mysql_def in cols:
+            try:
+                if db_type == "postgres":
+                    await DB.execute(
+                        f"ALTER TABLE group_security "
+                        f"ADD COLUMN IF NOT EXISTS "
+                        f"{col_name} {pg_def}"
+                    )
+
+                    logger.info(
+                        f"✅ PG: {col_name} جاهز"
+                    )
+
+                elif db_type == "mysql":
+                    try:
+                        await DB.execute(
+                            f"ALTER TABLE group_security "
+                            f"ADD COLUMN {col_name} "
+                            f"{mysql_def}"
+                        )
+
+                        logger.info(
+                            f"✅ MySQL: {col_name} جاهز"
+                        )
+
+                    except Exception as e:
+                        m = str(e).lower()
+
+                        if (
+                            "duplicate" in m
+                            or "already exists" in m
+                        ):
+                            logger.info(
+                                f"ℹ️ MySQL: {col_name} موجود"
+                            )
+                        else:
+                            migration_ok = False
+                            logger.warning(
+                                f"⚠️ MySQL {col_name}: {e}"
+                            )
+
+                else:
+                    try:
+                        await DB.execute(
+                            f"ALTER TABLE group_security "
+                            f"ADD COLUMN {col_name} "
+                            f"{pg_def}"
+                        )
+
+                        logger.info(
+                            f"✅ SQLite: {col_name} جاهز"
+                        )
+
+                    except Exception as e:
+                        m = str(e).lower()
+
+                        if (
+                            "duplicate" in m
+                            or "already exists" in m
+                        ):
+                            logger.info(
+                                f"ℹ️ SQLite: {col_name} موجود"
+                            )
+                        else:
+                            migration_ok = False
+                            logger.warning(
+                                f"⚠️ SQLite {col_name}: {e}"
+                            )
+
+            except Exception as e:
+                migration_ok = False
+
+                logger.warning(
+                    f"⚠️ auto-migration "
+                    f"{col_name}: {e}"
+                )
+
         try:
-            if db_type == "postgres":
-                await DB.execute(
-                    f"ALTER TABLE group_security "
-                    f"ADD COLUMN IF NOT EXISTS {col_name} {pg_def}"
-                )
-
-                logger.info(
-                    f"✅ PG: {col_name} جاهز"
-                )
-
-            elif db_type == "mysql":
-                try:
-                    await DB.execute(
-                        f"ALTER TABLE group_security "
-                        f"ADD COLUMN {col_name} {mysql_def}"
-                    )
-
-                    logger.info(
-                        f"✅ MySQL: {col_name} جاهز"
-                    )
-
-                except Exception as e:
-                    m = str(e).lower()
-
-                    if "duplicate" in m or "already exists" in m:
-                        logger.info(
-                            f"ℹ️ MySQL: {col_name} موجود"
-                        )
-                    else:
-                        logger.warning(
-                            f"⚠️ MySQL {col_name}: {e}"
-                        )
-
-            else:
-                try:
-                    await DB.execute(
-                        f"ALTER TABLE group_security "
-                        f"ADD COLUMN {col_name} {pg_def}"
-                    )
-
-                    logger.info(
-                        f"✅ SQLite: {col_name} جاهز"
-                    )
-
-                except Exception as e:
-                    m = str(e).lower()
-
-                    if "duplicate" in m or "already exists" in m:
-                        logger.info(
-                            f"ℹ️ SQLite: {col_name} موجود"
-                        )
-                    else:
-                        logger.warning(
-                            f"⚠️ SQLite {col_name}: {e}"
-                        )
-
-        except Exception as e:
-            logger.warning(
-                f"⚠️ auto-migration {col_name}: {e}"
+            await DB.execute(
+                "UPDATE group_security "
+                "SET delete_protected_any = 1 "
+                "WHERE delete_forwarded = 1 "
+                "AND (delete_protected_any IS NULL "
+                "OR delete_protected_any = 0)"
             )
 
-    try:
-        await DB.execute(
-            "UPDATE group_security SET delete_protected_any = 1 "
-            "WHERE delete_forwarded = 1 "
-            "AND (delete_protected_any IS NULL OR delete_protected_any = 0)"
-        )
+            logger.info(
+                "✅ تم تفعيل delete_protected_any"
+            )
 
-        logger.info(
-            "✅ تم تفعيل delete_protected_any"
-        )
+        except Exception as e:
+            migration_ok = False
 
-    except Exception as e:
-        logger.warning(
-            f"⚠️ UPDATE: {e}"
-        )
+            logger.warning(
+                f"⚠️ UPDATE protected_any: {e}"
+            )
 
-    try:
-        await internal_cache.clear()
-        logger.info(
-            "✅ internal_cache cleared"
-        )
-    except Exception as e:
-        logger.debug(
-            f"cache clear: {e}"
-        )
+        try:
+            await internal_cache.clear()
 
+            logger.info(
+                "✅ internal_cache cleared"
+            )
+
+        except Exception as e:
+            logger.debug(
+                f"cache clear: {e}"
+            )
+
+        # لا نثبت نجاح migration إذا فشل شيء أساسي.
+        # عند الفشل ستتم المحاولة مرة أخرى في الرسالة التالية.
+        _columns_initialized = migration_ok
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Developer Log Cache
+# ═══════════════════════════════════════════════════════════════════
 
 _dev_log_cache = None
 _dev_log_cache_ts = 0.0
@@ -828,13 +1083,15 @@ _dev_log_cache_lock = asyncio.Lock()
 
 
 async def _get_dev_log_channel_cached():
-    global _dev_log_cache, _dev_log_cache_ts
+    global _dev_log_cache
+    global _dev_log_cache_ts
 
     now = time.monotonic()
 
     if (
         _dev_log_cache is not None
-        and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL
+        and now - _dev_log_cache_ts
+        < DEV_LOG_CACHE_TTL
     ):
         return _dev_log_cache
 
@@ -843,7 +1100,8 @@ async def _get_dev_log_channel_cached():
 
         if (
             _dev_log_cache is not None
-            and now - _dev_log_cache_ts < DEV_LOG_CACHE_TTL
+            and now - _dev_log_cache_ts
+            < DEV_LOG_CACHE_TTL
         ):
             return _dev_log_cache
 
@@ -864,7 +1122,8 @@ async def _get_dev_log_channel_cached():
 
 
 def _invalidate_dev_log_cache():
-    global _dev_log_cache, _dev_log_cache_ts
+    global _dev_log_cache
+    global _dev_log_cache_ts
 
     _dev_log_cache = None
     _dev_log_cache_ts = 0.0
@@ -888,8 +1147,14 @@ async def _notify_dev_log(context, text):
         elif ch_str.startswith('@'):
             target = ch_str
 
-        elif ch_str.startswith(('https://', 'http://')):
-            tail = ch_str.rstrip('/').split('/')[-1]
+        elif ch_str.startswith((
+            'https://',
+            'http://'
+        )):
+            tail = (
+                ch_str.rstrip('/')
+                .split('/')[-1]
+            )
 
             if tail.startswith('@'):
                 tail = tail[1:]
@@ -916,8 +1181,14 @@ async def _notify_dev_log(context, text):
         )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Log Rate Limit
+# ═══════════════════════════════════════════════════════════════════
+
 _log_rate_tracker = defaultdict(
-    lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
+    lambda: deque(
+        maxlen=LOG_RATE_LIMIT_PER_MIN
+    )
 )
 
 _log_rate_lock = asyncio.Lock()
@@ -931,7 +1202,8 @@ async def _can_send_log(chat_id):
 
         if (
             len(tracker) >= LOG_RATE_LIMIT_PER_MIN
-            and now - tracker[0] < LOG_RATE_WINDOW_SEC
+            and now - tracker[0]
+            < LOG_RATE_WINDOW_SEC
         ):
             logger.warning(
                 f"🚫 LOG-RATE-LIMIT | chat={chat_id}"
@@ -944,48 +1216,77 @@ async def _can_send_log(chat_id):
         return True
 
 
-async def _dispatch_log(coro, label, *, retries=LOG_RETRY_ATTEMPTS):
+async def _dispatch_log(
+    awaitable,
+    label,
+    *,
+    retries=LOG_RETRY_ATTEMPTS
+):
+    """
+    إرسال log في background.
+
+    ملاحظة:
+    الـ coroutine المرسل لا يمكن إعادة إنشائه بعد استهلاكه،
+    لذلك لا نحاول await نفس coroutine عدة مرات.
+    يتم تنفيذ retry فقط إذا كان لدينا awaitable صالح لمرة واحدة،
+    والفشل يسجل بوضوح بدون توليد RuntimeWarning.
+    """
     async def _runner():
-        for attempt in range(retries):
-            try:
-                await coro
-                return
+        try:
+            await awaitable
 
-            except asyncio.CancelledError:
-                return
+        except asyncio.CancelledError:
+            return
 
-            except Exception as e:
-                if attempt == retries - 1:
-                    logger.error(
-                        f"❌ [{label}] failed: {e}"
-                    )
-                    return
+        except Exception as e:
+            logger.error(
+                f"❌ [{label}] failed: {e}"
+            )
 
-                await asyncio.sleep(
-                    LOG_RETRY_BASE_DELAY * (2 ** attempt)
-                )
-
-    task = asyncio.create_task(_runner())
-
-    task.add_done_callback(
-        lambda t: (
-            t.exception()
-            if not t.cancelled() and t.exception()
-            else None
-        )
+    task = asyncio.create_task(
+        _runner()
     )
 
-
-async def _safe_invalidate(*keys):
-    for k in keys:
-        if not k:
-            continue
-
+    def _done_callback(t):
         try:
-            await internal_cache.invalidate(k)
+            if (
+                not t.cancelled()
+                and t.exception()
+            ):
+                logger.error(
+                    f"❌ [{label}] background task "
+                    f"failed: {t.exception()}"
+                )
+
         except Exception:
             pass
 
+    task.add_done_callback(
+        _done_callback
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Cache Helpers
+# ═══════════════════════════════════════════════════════════════════
+
+async def _safe_invalidate(*keys):
+    for key in keys:
+        if not key:
+            continue
+
+        try:
+            await internal_cache.invalidate(
+                key
+            )
+
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Labels
+# ═══════════════════════════════════════════════════════════════════
 
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة معاد توجيهها',
@@ -1005,14 +1306,16 @@ _VIOLATION_LABELS_AR = {
     'spam_score': '🚫 رسالة Spam',
 }
 
+
 _FORWARD_TYPE_LABELS_AR = {
     'user': '👤 مستخدم',
     'hidden_user': '👻 مستخدم مخفي',
     'chat': '👥 مجموعة',
     'channel': '📢 قناة',
     'protected': '🛡️ محتوى محمي',
-    'protected_any': '🛡️ forward من قناة محمية',
+    'protected_any': '🛡️ محتوى محمي',
 }
+
 
 _PENALTY_LABELS_AR = {
     'ban': '🚫 حظر',
@@ -1030,32 +1333,63 @@ def _format_duration(seconds):
 
     try:
         seconds = int(seconds)
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError
+    ):
         return "—"
 
     days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    minutes = (seconds % 3600) // 60
+    hours = (
+        seconds % 86400
+    ) // 3600
+
+    minutes = (
+        seconds % 3600
+    ) // 60
+
     secs = seconds % 60
 
     parts = []
 
     if days:
-        parts.append(f"{days} يوم")
+        parts.append(
+            f"{days} يوم"
+        )
 
     if hours:
-        parts.append(f"{hours} ساعة")
+        parts.append(
+            f"{hours} ساعة"
+        )
 
     if minutes:
-        parts.append(f"{minutes} دقيقة")
+        parts.append(
+            f"{minutes} دقيقة"
+        )
 
     if secs and not parts:
-        parts.append(f"{secs} ثانية")
+        parts.append(
+            f"{secs} ثانية"
+        )
 
-    return " و ".join(parts) if parts else f"{seconds} ثانية"
+    return (
+        " و ".join(parts)
+        if parts
+        else f"{seconds} ثانية"
+    )
 
 
-async def notify_group_log(context, chat_id, text, disable_preview=True):
+# ═══════════════════════════════════════════════════════════════════
+# Logging
+# ═══════════════════════════════════════════════════════════════════
+
+async def notify_group_log(
+    context,
+    chat_id,
+    text,
+    disable_preview=True
+):
     try:
         getter = getattr(
             DB,
@@ -1066,7 +1400,9 @@ async def notify_group_log(context, chat_id, text, disable_preview=True):
         if not callable(getter):
             return False
 
-        channel_id = await getter(chat_id)
+        channel_id = await getter(
+            chat_id
+        )
 
         if not channel_id:
             return False
@@ -1128,7 +1464,9 @@ def _build_delete_log_text(
     )
 
     if is_anonymous:
-        user_display_lnk = "👻 <b>مشرف مجهول</b>"
+        user_display_lnk = (
+            "👻 <b>مشرف مجهول</b>"
+        )
 
     else:
         user_display = escape(
@@ -1159,20 +1497,24 @@ def _build_delete_log_text(
         lines.append(
             f"🆔 المعرّف: <code>{user_id}</code>"
         )
+
     else:
         lines.append(
             f"🆔 المجموعة: <code>{chat_id}</code>"
         )
 
     if message_preview:
-        preview = message_preview.strip().replace(
-            "\n",
-            " "
+        preview = (
+            message_preview
+            .strip()
+            .replace("\n", " ")
         )
 
         if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
             preview = (
-                preview[:_GROUP_LOG_PREVIEW_LENGTH]
+                preview[
+                    :_GROUP_LOG_PREVIEW_LENGTH
+                ]
                 + "…"
             )
 
@@ -1181,29 +1523,43 @@ def _build_delete_log_text(
         )
 
     if forward_info:
-        ftype = forward_info.get('type') or '؟'
+        ftype = (
+            forward_info.get('type')
+            or '؟'
+        )
 
-        ftype_label = _FORWARD_TYPE_LABELS_AR.get(
-            ftype,
-            ftype
+        ftype_label = (
+            _FORWARD_TYPE_LABELS_AR.get(
+                ftype,
+                ftype
+            )
         )
 
         lines.append("")
-        lines.append("📤 <b>المصدر:</b>")
+        lines.append(
+            "📤 <b>المصدر:</b>"
+        )
+
         lines.append(
             f"   • النوع: {ftype_label}"
         )
 
-        fname = forward_info.get('name')
+        fname = forward_info.get(
+            'name'
+        )
 
         if fname:
             fname_str = str(fname)
 
             if len(fname_str) > 60:
-                fname_str = fname_str[:60] + "…"
+                fname_str = (
+                    fname_str[:60]
+                    + "…"
+                )
 
             lines.append(
-                f"   • الاسم: {escape(fname_str)}"
+                f"   • الاسم: "
+                f"{escape(fname_str)}"
             )
 
         if forward_info.get('id'):
@@ -1223,7 +1579,9 @@ def _build_delete_log_text(
         )
 
     lines.append("")
-    lines.append(f"🕐 {now_str}")
+    lines.append(
+        f"🕐 {now_str}"
+    )
 
     return "\n".join(lines)
 
@@ -1272,11 +1630,13 @@ def _build_penalty_log_text(
         f"{ptype_label}",
         "━━━━━━━━━━━━━━━━━━━━",
         f"🎯 العقوبة: <b>{ptype_label}</b>",
-        f"⏱️ المدة: {_format_duration(duration_seconds)}",
+        f"⏱️ المدة: "
+        f"{_format_duration(duration_seconds)}",
         f"📊 المصدر: {source_label}",
         "",
         f"👤 المستهدف: {target_lnk}",
-        f"🆔 المعرّف: <code>{target_user_id}</code>",
+        f"🆔 المعرّف: "
+        f"<code>{target_user_id}</code>",
     ]
 
     if source == "auto" and violation_type:
@@ -1302,7 +1662,8 @@ def _build_penalty_log_text(
         )
 
     lines.append(
-        f"💬 المجموعة: <code>{chat_id}</code>"
+        f"💬 المجموعة: "
+        f"<code>{chat_id}</code>"
     )
 
     try:
@@ -1371,6 +1732,10 @@ async def _notify_group_log_penalty(
         )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Security Auth Cache
+# ═══════════════════════════════════════════════════════════════════
+
 _sec_auth_cache = {}
 _sec_auth_cache_lock = asyncio.Lock()
 
@@ -1380,13 +1745,35 @@ async def _sec_auth_cache_cleanup():
         now = time.monotonic()
 
         expired = [
-            k
-            for k, (_, ts) in _sec_auth_cache.items()
+            key
+            for key, (_, ts)
+            in _sec_auth_cache.items()
             if now - ts > SEC_AUTH_CACHE_TTL
         ]
 
-        for k in expired:
-            del _sec_auth_cache[k]
+        for key in expired:
+            _sec_auth_cache.pop(
+                key,
+                None
+            )
+
+        # دفاع إضافي من النمو غير المحدود.
+        if len(_sec_auth_cache) > MAX_SEC_AUTH_CACHE_SIZE:
+            extra = (
+                len(_sec_auth_cache)
+                - MAX_SEC_AUTH_CACHE_SIZE
+            )
+
+            oldest = sorted(
+                _sec_auth_cache.items(),
+                key=lambda item: item[1][1]
+            )[:extra]
+
+            for key, _ in oldest:
+                _sec_auth_cache.pop(
+                    key,
+                    None
+                )
 
         return len(expired)
 
@@ -1394,8 +1781,8 @@ async def _sec_auth_cache_cleanup():
 def _is_delete_ignore_error(exc):
     try:
         return any(
-            p in str(exc).lower()
-            for p in _DELETE_IGNORED_PATTERNS
+            pattern in str(exc).lower()
+            for pattern in _DELETE_IGNORED_PATTERNS
         )
 
     except Exception:
@@ -1404,7 +1791,10 @@ def _is_delete_ignore_error(exc):
 
 def _is_delete_permission_error(exc):
     try:
-        return _DELETE_PERMISSION_ERROR in str(exc).lower()
+        return (
+            _DELETE_PERMISSION_ERROR
+            in str(exc).lower()
+        )
 
     except Exception:
         return False
@@ -1422,18 +1812,20 @@ async def _safe_delete_message(
         )
 
         logger.info(
-            f"✅ DELETE OK | chat={chat_id} msg={message_id}"
+            f"✅ DELETE OK | "
+            f"chat={chat_id} "
+            f"msg={message_id}"
         )
 
         return True
 
     except BadRequest as e:
-        err_str = str(e)
-
         if _is_delete_permission_error(e):
             logger.error(
-                f"❌ DELETE FAILED (permission) | "
-                f"chat={chat_id} msg={message_id}"
+                f"❌ DELETE FAILED "
+                f"(permission) | "
+                f"chat={chat_id} "
+                f"msg={message_id}"
             )
 
             return False
@@ -1443,7 +1835,8 @@ async def _safe_delete_message(
 
         logger.warning(
             f"⚠️ DELETE failed | "
-            f"chat={chat_id} msg={message_id}"
+            f"chat={chat_id} "
+            f"msg={message_id}"
         )
 
         return False
@@ -1460,11 +1853,17 @@ async def _safe_delete_message(
 
         logger.warning(
             f"⚠️ DELETE failed | "
-            f"chat={chat_id} msg={message_id} | {e}"
+            f"chat={chat_id} "
+            f"msg={message_id} | "
+            f"{e}"
         )
 
         return False
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Forward Detection
+# ═══════════════════════════════════════════════════════════════════
 
 def _has_forward_hint(text):
     if not text:
@@ -1489,22 +1888,54 @@ def is_forwarded(
     allow_protected_fallback=False,
     allow_protected_any=False
 ):
+    """
+    يرجع True للـ Forward الحقيقي.
+
+    protected content ليس Forward بحد ذاته،
+    إلا إذا طلب المستدعي صراحةً:
+        allow_protected_fallback
+        أو
+        allow_protected_any
+    """
+
     if message is None:
         return False
 
-    if getattr(message, 'forward_origin', None) is not None:
+    # Telegram modern API.
+    if getattr(
+        message,
+        'forward_origin',
+        None
+    ) is not None:
         return True
 
-    if getattr(message, 'forward_date', None) is not None:
+    # Legacy API.
+    if getattr(
+        message,
+        'forward_date',
+        None
+    ) is not None:
         return True
 
-    if getattr(message, 'forward_from', None) is not None:
+    if getattr(
+        message,
+        'forward_from',
+        None
+    ) is not None:
         return True
 
-    if getattr(message, 'forward_from_chat', None) is not None:
+    if getattr(
+        message,
+        'forward_from_chat',
+        None
+    ) is not None:
         return True
 
-    if getattr(message, 'forward_sender_name', None) is not None:
+    if getattr(
+        message,
+        'forward_sender_name',
+        None
+    ) is not None:
         return True
 
     is_protected = bool(
@@ -1537,8 +1968,8 @@ def is_forwarded(
         and is_protected
     ):
         caption = (
-            message.caption
-            or message.text
+            getattr(message, 'caption', None)
+            or getattr(message, 'text', None)
             or ""
         )
 
@@ -1563,29 +1994,29 @@ def get_forward_detection_reason(message):
         'forward_from_chat',
         'forward_sender_name'
     ):
-        val = getattr(
+        value = getattr(
             message,
             name,
             None
         )
 
         fields[name] = {
-            "present": val is not None,
+            "present": value is not None,
             "type": (
-                type(val).__name__
-                if val is not None
+                type(value).__name__
+                if value is not None
                 else None
             ),
             "repr_short": (
-                str(val)[:80]
-                if val is not None
+                str(value)[:80]
+                if value is not None
                 else None
             ),
         }
 
     any_present = any(
-        f["present"]
-        for f in fields.values()
+        field["present"]
+        for field in fields.values()
     )
 
     protected = bool(
@@ -1598,8 +2029,8 @@ def get_forward_detection_reason(message):
     )
 
     caption = (
-        message.caption
-        or message.text
+        getattr(message, 'caption', None)
+        or getattr(message, 'text', None)
         or ""
     )
 
@@ -1711,7 +2142,9 @@ def _extract_legacy_forward_info(message):
                 or ''
             )
 
-            is_channel = chat_type == 'channel'
+            is_channel = (
+                chat_type == 'channel'
+            )
 
             return {
                 'type': (
@@ -1752,7 +2185,9 @@ def _extract_legacy_forward_info(message):
             return {
                 'type': 'hidden_user',
                 'id': None,
-                'name': str(fwd_sender_name),
+                'name': str(
+                    fwd_sender_name
+                ),
                 'date': fwd_date,
                 'signature': None,
                 'message_id': None,
@@ -1774,29 +2209,32 @@ def extract_forward_info(message):
         None
     )
 
-    if origin is not None and _HAS_MESSAGE_ORIGIN:
+    if (
+        origin is not None
+        and _HAS_MESSAGE_ORIGIN
+    ):
         try:
             if isinstance(
                 origin,
                 MessageOriginUser
             ):
-                u = origin.sender_user
+                user = origin.sender_user
 
                 try:
                     name = (
                         getattr(
-                            u,
+                            user,
                             'full_name',
                             None
                         )
                         or getattr(
-                            u,
+                            user,
                             'first_name',
                             None
                         )
                         or str(
                             getattr(
-                                u,
+                                user,
                                 'id',
                                 'User'
                             )
@@ -1806,7 +2244,7 @@ def extract_forward_info(message):
                 except Exception:
                     name = str(
                         getattr(
-                            u,
+                            user,
                             'id',
                             'User'
                         )
@@ -1815,7 +2253,7 @@ def extract_forward_info(message):
                 return {
                     'type': 'user',
                     'id': getattr(
-                        u,
+                        user,
                         'id',
                         None
                     ),
@@ -1826,7 +2264,7 @@ def extract_forward_info(message):
                         None
                     ),
                     'signature': None,
-                    'message_id': None
+                    'message_id': None,
                 }
 
             if isinstance(
@@ -1850,36 +2288,36 @@ def extract_forward_info(message):
                         None
                     ),
                     'signature': None,
-                    'message_id': None
+                    'message_id': None,
                 }
 
             if isinstance(
                 origin,
                 MessageOriginChat
             ):
-                c = origin.sender_chat
+                chat = origin.sender_chat
 
                 return {
                     'type': 'chat',
                     'id': getattr(
-                        c,
+                        chat,
                         'id',
                         None
                     ),
                     'name': (
                         getattr(
-                            c,
+                            chat,
                             'title',
                             None
                         )
                         or getattr(
-                            c,
+                            chat,
                             'username',
                             None
                         )
                         or str(
                             getattr(
-                                c,
+                                chat,
                                 'id',
                                 'Chat'
                             )
@@ -1895,36 +2333,36 @@ def extract_forward_info(message):
                         'author_signature',
                         None
                     ),
-                    'message_id': None
+                    'message_id': None,
                 }
 
             if isinstance(
                 origin,
                 MessageOriginChannel
             ):
-                c = origin.chat
+                chat = origin.chat
 
                 return {
                     'type': 'channel',
                     'id': getattr(
-                        c,
+                        chat,
                         'id',
                         None
                     ),
                     'name': (
                         getattr(
-                            c,
+                            chat,
                             'title',
                             None
                         )
                         or getattr(
-                            c,
+                            chat,
                             'username',
                             None
                         )
                         or str(
                             getattr(
-                                c,
+                                chat,
                                 'id',
                                 'Channel'
                             )
@@ -1944,13 +2382,15 @@ def extract_forward_info(message):
                         origin,
                         'message_id',
                         None
-                    )
+                    ),
                 }
 
         except Exception:
             pass
 
-    info = _extract_legacy_forward_info(message)
+    info = _extract_legacy_forward_info(
+        message
+    )
 
     if info:
         return info
@@ -1966,8 +2406,8 @@ def extract_forward_info(message):
 
     if is_protected:
         caption = (
-            message.caption
-            or message.text
+            getattr(message, 'caption', None)
+            or getattr(message, 'text', None)
             or ""
         )
 
@@ -1975,19 +2415,22 @@ def extract_forward_info(message):
             return {
                 'type': 'protected',
                 'id': None,
-                'name': '🛡️ محتوى محمي (forward مخفي)',
+                'name': (
+                    '🛡️ محتوى محمي '
+                    '(forward مخفي)'
+                ),
                 'date': None,
                 'signature': None,
-                'message_id': None
+                'message_id': None,
             }
 
         return {
             'type': 'protected_any',
             'id': None,
-            'name': '🛡️ forward من قناة محمية',
+            'name': '🛡️ محتوى محمي',
             'date': None,
             'signature': None,
-            'message_id': None
+            'message_id': None,
         }
 
     return None
@@ -2008,7 +2451,7 @@ async def _notify_admin_about_forward(
             'chat': '👥 مجموعة',
             'channel': '📢 قناة',
             'protected': '🛡️ محتوى محمي',
-            'protected_any': '🛡️ forward من قناة محمية',
+            'protected_any': '🛡️ محتوى محمي',
         }
 
         label = type_labels.get(
@@ -2024,12 +2467,14 @@ async def _notify_admin_about_forward(
 
         if info.get('id'):
             lines.append(
-                f"🆔 المصدر: <code>{info['id']}</code>"
+                f"🆔 المصدر: "
+                f"<code>{info['id']}</code>"
             )
 
         if info.get('name'):
             lines.append(
-                f"📛 الاسم: {escape(str(info['name']))}"
+                f"📛 الاسم: "
+                f"{escape(str(info['name']))}"
             )
 
         if info.get('message_id'):
@@ -2040,7 +2485,8 @@ async def _notify_admin_about_forward(
 
         if info.get('date'):
             lines.append(
-                f"📅 التاريخ: <code>{info['date']}</code>"
+                f"📅 التاريخ: "
+                f"<code>{info['date']}</code>"
             )
 
         await safe_send(
@@ -2071,7 +2517,9 @@ def _should_notify_forward(
         ):
             return False
 
-        key = f"_forward_notify_{chat_id}"
+        key = (
+            f"_forward_notify_{chat_id}"
+        )
 
         now = time.monotonic()
 
@@ -2100,6 +2548,10 @@ def _should_notify_forward(
         return False
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Main / Cache Helpers
+# ═══════════════════════════════════════════════════════════════════
+
 async def _refresh_admin_commands_safe(
     bot,
     user_id,
@@ -2109,7 +2561,10 @@ async def _refresh_admin_commands_safe(
         return False
 
     try:
-        from main import refresh_admin_commands
+        from main import (
+            refresh_admin_commands
+        )
+
     except ImportError:
         return False
 
@@ -2136,7 +2591,7 @@ async def _invalidate_after_channel_change(
         f"user_{user_id}",
         f"user_{user_id}_True",
         f"user_{user_id}_False",
-        f"channels_{user_id}"
+        f"channels_{user_id}",
     ]
 
     if channel_db_id is not None:
@@ -2144,11 +2599,19 @@ async def _invalidate_after_channel_change(
             f"channel_info_{channel_db_id}"
         )
 
-    await _safe_invalidate(*keys)
+    await _safe_invalidate(
+        *keys
+    )
 
     try:
-        from cache import invalidate_user_cache
-        await invalidate_user_cache(user_id)
+        from cache import (
+            invalidate_user_cache
+        )
+
+        await invalidate_user_cache(
+            user_id
+        )
+
     except Exception:
         pass
 
@@ -2160,14 +2623,22 @@ async def _invalidate_after_channel_change(
             await posts_cache.invalidate(
                 channel_db_id
             )
+
         except Exception:
             pass
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Group Rate Limiter
+# ═══════════════════════════════════════════════════════════════════
+
 class GroupRateLimiterManager:
+
     _limiters = {}
     _last_access = {}
+
     _lock = asyncio.Lock()
+
     MAX_SIZE = MAX_GROUP_LIMITERS_CACHE
 
     @classmethod
@@ -2176,16 +2647,17 @@ class GroupRateLimiterManager:
             now = time.time()
 
             if (
-                len(cls._limiters) >= cls.MAX_SIZE
+                len(cls._limiters)
+                >= cls.MAX_SIZE
                 and chat_id not in cls._limiters
             ):
                 sorted_items = sorted(
                     cls._last_access.items(),
-                    key=lambda x: x[1]
+                    key=lambda item: item[1]
                 )
 
                 to_remove = sorted_items[
-                    : cls.MAX_SIZE // 5
+                    :max(1, cls.MAX_SIZE // 5)
                 ]
 
                 for cid, _ in to_remove:
@@ -2205,9 +2677,13 @@ class GroupRateLimiterManager:
                     max_per_second=10
                 )
 
-            cls._last_access[chat_id] = now
+            cls._last_access[
+                chat_id
+            ] = now
 
-            return cls._limiters[chat_id]
+            return cls._limiters[
+                chat_id
+            ]
 
     @classmethod
     async def periodic_cleanup_task(cls):
@@ -2249,6 +2725,60 @@ class GroupRateLimiterManager:
                 )
 
 
+async def _acquire_group_limiter(chat_id):
+    """
+    Acquire limiter بطريقة آمنة.
+
+    Returns:
+        (limiter, acquired)
+    """
+    try:
+        limiter = await GroupRateLimiterManager.get(
+            chat_id
+        )
+
+        await limiter.acquire()
+
+        return limiter, True
+
+    except Exception as e:
+        logger.warning(
+            f"⚠️ group limiter acquire: {e}"
+        )
+
+        return None, False
+
+
+async def _release_group_limiter(
+    limiter,
+    acquired
+):
+    if not limiter or not acquired:
+        return
+
+    try:
+        release = getattr(
+            limiter,
+            'release',
+            None
+        )
+
+        if callable(release):
+            result = release()
+
+            if asyncio.iscoroutine(result):
+                await result
+
+    except Exception as e:
+        logger.debug(
+            f"group limiter release: {e}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Translation
+# ═══════════════════════════════════════════════════════════════════
+
 async def _trans(
     key,
     lang,
@@ -2288,13 +2818,24 @@ async def _trans(
 
 def _fmt(template, **kwargs):
     try:
-        return template.format(**kwargs)
-    except (KeyError, IndexError):
+        return template.format(
+            **kwargs
+        )
+
+    except (
+        KeyError,
+        IndexError
+    ):
         return template
 
 
-async def _ensure_lang(update, context):
-    lang = context.user_data.get('lang')
+async def _ensure_lang(
+    update,
+    context
+):
+    lang = context.user_data.get(
+        'lang'
+    )
 
     if lang:
         return lang
@@ -2302,7 +2843,10 @@ async def _ensure_lang(update, context):
     try:
         user_id = (
             update.effective_user.id
-            if update and update.effective_user
+            if (
+                update
+                and update.effective_user
+            )
             else None
         )
 
@@ -2317,10 +2861,17 @@ async def _ensure_lang(update, context):
                 user_id
             )
 
-            if cached and cached.get('language'):
-                lang = cached['language']
+            if (
+                cached
+                and cached.get('language')
+            ):
+                lang = cached[
+                    'language'
+                ]
 
-                context.user_data['lang'] = lang
+                context.user_data[
+                    'lang'
+                ] = lang
 
                 return lang
 
@@ -2329,11 +2880,15 @@ async def _ensure_lang(update, context):
 
         try:
             lang = await asyncio.wait_for(
-                DB.get_user_language(user_id),
+                DB.get_user_language(
+                    user_id
+                ),
                 timeout=2.0
             ) or 'ar'
 
-            context.user_data['lang'] = lang
+            context.user_data[
+                'lang'
+            ] = lang
 
             return lang
 
@@ -2369,7 +2924,13 @@ def clear_lang_cache(context):
         pass
 
 
-async def get_security_settings_cached(chat_id):
+# ═══════════════════════════════════════════════════════════════════
+# Security Settings Cache
+# ═══════════════════════════════════════════════════════════════════
+
+async def get_security_settings_cached(
+    chat_id
+):
     cached = await settings_cache.get_security(
         chat_id
     )
@@ -2381,6 +2942,9 @@ async def get_security_settings_cached(chat_id):
         chat_id
     )
 
+    if settings is None:
+        settings = {}
+
     await settings_cache.set_security(
         chat_id,
         settings
@@ -2389,17 +2953,25 @@ async def get_security_settings_cached(chat_id):
     return settings
 
 
-async def get_auto_reply_settings_cached(chat_id):
-    cached = await settings_cache.get_auto_reply_settings(
-        chat_id
+async def get_auto_reply_settings_cached(
+    chat_id
+):
+    cached = (
+        await settings_cache
+        .get_auto_reply_settings(chat_id)
     )
 
     if cached is not None:
         return cached
 
-    settings = await DB.get_auto_reply_settings(
-        chat_id
+    settings = (
+        await DB.get_auto_reply_settings(
+            chat_id
+        )
     )
+
+    if settings is None:
+        settings = {}
 
     await settings_cache.set_auto_reply_settings(
         chat_id,
@@ -2425,20 +2997,37 @@ async def invalidate_auto_reply_cache(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Delayed Delete
+# ═══════════════════════════════════════════════════════════════════
+
 async def _delete_after_delay(
     bot,
     chat_id,
     message_id,
     delay=10
 ):
-    await asyncio.sleep(delay)
+    try:
+        await asyncio.sleep(
+            max(0, delay)
+        )
 
-    await _safe_delete_message(
-        bot,
-        chat_id,
-        message_id
-    )
+        await _safe_delete_message(
+            bot,
+            chat_id,
+            message_id
+        )
 
+    except asyncio.CancelledError:
+        raise
+
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Translation
+# ═══════════════════════════════════════════════════════════════════
 
 async def _detect_and_translate(
     update,
@@ -2449,7 +3038,8 @@ async def _detect_and_translate(
 ):
     if (
         not text
-        or len(text.strip()) < TRANSLATION_MIN_TEXT_LENGTH
+        or len(text.strip())
+        < TRANSLATION_MIN_TEXT_LENGTH
     ):
         return None
 
@@ -2468,18 +3058,27 @@ async def _detect_and_translate(
         stripped = text.strip()
 
         if stripped.startswith(
-            ('http://', 'https://', 'www.')
+            (
+                'http://',
+                'https://',
+                'www.'
+            )
         ):
             return None
 
-        is_arabic = TranslationManager.detect_arabic(
-            text
+        is_arabic = (
+            TranslationManager.detect_arabic(
+                text
+            )
         )
 
         if lang == 'ar' and is_arabic:
             return None
 
-        if lang != 'ar' and not is_arabic:
+        if (
+            lang != 'ar'
+            and not is_arabic
+        ):
             return None
 
         translated = TranslationManager.translate(
@@ -2513,7 +3112,9 @@ async def _send_translation_reply(
         ) or "🌐 <b>Translation:</b>"
 
     except Exception:
-        label = "🌐 <b>Translation:</b>"
+        label = (
+            "🌐 <b>Translation:</b>"
+        )
 
     try:
         kwargs = {
@@ -2522,13 +3123,13 @@ async def _send_translation_reply(
                 f"{label}\n"
                 f"{escape(translated)}"
             ),
-            "parse_mode": 'HTML'
+            "parse_mode": "HTML",
         }
 
         if original_message_id:
-            kwargs["reply_to_message_id"] = (
-                original_message_id
-            )
+            kwargs[
+                "reply_to_message_id"
+            ] = original_message_id
 
         sent = await bot.send_message(
             **kwargs
@@ -2547,6 +3148,10 @@ async def _send_translation_reply(
         pass
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Penalties
+# ═══════════════════════════════════════════════════════════════════
+
 async def apply_violation_penalty(
     update,
     context,
@@ -2563,7 +3168,10 @@ async def apply_violation_penalty(
         chat_name = ""
 
         try:
-            if update and update.effective_user:
+            if (
+                update
+                and update.effective_user
+            ):
                 username = (
                     update.effective_user.username
                     or ""
@@ -2574,7 +3182,10 @@ async def apply_violation_penalty(
                     or ""
                 )
 
-            if update and update.effective_chat:
+            if (
+                update
+                and update.effective_chat
+            ):
                 chat_name = (
                     update.effective_chat.title
                     or ""
@@ -2607,6 +3218,10 @@ async def apply_violation_penalty(
 
         return False, str(e)[:100]
 
+
+# ═══════════════════════════════════════════════════════════════════
+# URL / Date Helpers
+# ═══════════════════════════════════════════════════════════════════
 
 def _is_safe_url(url):
     try:
@@ -2664,7 +3279,7 @@ def _is_safe_url(url):
             "172.30.",
             "172.31.",
             "169.254.",
-            "metadata.google"
+            "metadata.google",
         )
 
         for pattern in blocked:
@@ -2691,7 +3306,10 @@ def _parse_contest_date(date_str):
             date_str
         )
 
-    except (ValueError, TypeError):
+    except (
+        ValueError,
+        TypeError
+    ):
         pass
 
     try:
@@ -2702,7 +3320,10 @@ def _parse_contest_date(date_str):
             )
         )
 
-    except (ValueError, TypeError):
+    except (
+        ValueError,
+        TypeError
+    ):
         pass
 
     for fmt in (
@@ -2710,7 +3331,7 @@ def _parse_contest_date(date_str):
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
         "%d-%m-%Y %H:%M",
-        "%d-%m-%Y"
+        "%d-%m-%Y",
     ):
         try:
             return datetime.strptime(
@@ -2726,6 +3347,10 @@ def _parse_contest_date(date_str):
 
     return None
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Admin Helpers
+# ═══════════════════════════════════════════════════════════════════
 
 async def _check_admin_in_chat(
     context,
@@ -2749,7 +3374,8 @@ async def _check_admin_in_chat(
     try:
         row = await DB.fetchval(
             "SELECT 1 FROM group_admins "
-            "WHERE chat_id = ? AND user_id = ? "
+            "WHERE chat_id = ? "
+            "AND user_id = ? "
             "LIMIT 1",
             (
                 chat_id,
@@ -2896,8 +3522,14 @@ def _verify_bot_in_log_channel_error_text(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Channel Reference Validation
+# ═══════════════════════════════════════════════════════════════════
+
 try:
-    from database_settings import _is_valid_channel_ref
+    from database_settings import (
+        _is_valid_channel_ref
+    )
 
 except ImportError:
     _TG_USERNAME_RE_FALLBACK = re.compile(
@@ -2908,26 +3540,112 @@ except ImportError:
         if value is None:
             return True
 
-        v = str(value).strip()
+        value_str = str(
+            value
+        ).strip()
 
-        if not v:
+        if not value_str:
             return True
 
-        if v.lstrip('-').isdigit():
+        if value_str.lstrip('-').isdigit():
             return True
 
-        if v.startswith('@'):
+        if value_str.startswith('@'):
             return bool(
                 _TG_USERNAME_RE_FALLBACK.match(
-                    v[1:]
+                    value_str[1:]
                 )
             )
 
-        if _TG_USERNAME_RE_FALLBACK.match(v):
+        if _TG_USERNAME_RE_FALLBACK.match(
+            value_str
+        ):
             return True
 
         return False
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Banned Word Matching
+# ═══════════════════════════════════════════════════════════════════
+
+def _contains_banned_word(
+    text,
+    banned_word
+):
+    """
+    مطابقة آمنة للكلمات المحظورة.
+
+    أمثلة:
+        banned = "ass"
+
+        "ass"       -> True
+        "ass here"  -> True
+        "class"     -> False
+        "pass"      -> False
+
+    بالنسبة لعبارات متعددة الكلمات:
+        "bad word"
+        يتم مطابقتها كعبارة كاملة مع حدود الكلمات.
+    """
+    if not text or not banned_word:
+        return False
+
+    try:
+        normalized_text = _normalize_text(
+            text
+        ).lower()
+
+        normalized_word = _normalize_text(
+            str(banned_word)
+        ).lower()
+
+        if not normalized_word:
+            return False
+
+        # إذا كانت الكلمة تحتوي على رموز/صيغة regex
+        # لا نعطيها صلاحية regex؛ نعاملها كنص literal.
+        escaped = re.escape(
+            normalized_word
+        )
+
+        # استبدال الفراغات المتعددة في banned word
+        # بمسافات مرنة.
+        escaped = re.sub(
+            r'\\\s+',
+            r'\\s+',
+            escaped
+        )
+
+        pattern = re.compile(
+            rf'(?<!\w){escaped}(?!\w)',
+            re.IGNORECASE |
+            re.UNICODE
+        )
+
+        return bool(
+            pattern.search(
+                normalized_text
+            )
+        )
+
+    except Exception:
+        # fallback آمن:
+        # لا نرجع إلى substring matching للكلمات
+        # الإنجليزية القصيرة لأنه قد يسبب false positives.
+        try:
+            return (
+                normalized_word
+                == normalized_text.strip()
+            )
+
+        except Exception:
+            return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Message Handlers
+# ═══════════════════════════════════════════════════════════════════
 
 class MessageHandlers:
 
@@ -2938,17 +3656,69 @@ class MessageHandlers:
         update,
         context
     ):
+        """
+        Wrapper يضمن تحرير GroupRateLimiter
+        حتى عند return أو exception.
+        """
         if (
-            not update.effective_chat
+            not update
+            or not update.effective_chat
             or not update.effective_message
         ):
             return
 
         chat_id = update.effective_chat.id
 
+        limiter = None
+        limiter_acquired = False
+
+        try:
+            (
+                limiter,
+                limiter_acquired
+            ) = await _acquire_group_limiter(
+                chat_id
+            )
+
+            await MessageHandlers._handle_group_impl(
+                update,
+                context
+            )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "❌ handle_group unexpected error"
+            )
+
+        finally:
+            await _release_group_limiter(
+                limiter,
+                limiter_acquired
+            )
+
+    @staticmethod
+    async def _handle_group_impl(
+        update,
+        context
+    ):
+        if (
+            not update.effective_chat
+            or not update.effective_message
+        ):
+            return
+
+        chat_id = (
+            update.effective_chat.id
+        )
+
         await _lazy_init_columns()
 
-        message = update.effective_message
+        message = (
+            update.effective_message
+        )
 
         msg_id = getattr(
             message,
@@ -2956,13 +3726,15 @@ class MessageHandlers:
             None
         )
 
+        # Automatic channel forwards.
         if getattr(
             message,
             'is_automatic_forward',
             False
         ):
             logger.debug(
-                f"⏭️ AUTO-FORWARD-SKIP | chat={chat_id}"
+                f"⏭️ AUTO-FORWARD-SKIP | "
+                f"chat={chat_id}"
             )
 
             return
@@ -2970,27 +3742,33 @@ class MessageHandlers:
         is_anonymous = False
 
         if update.effective_user:
-            user_id = update.effective_user.id
+            user_id = (
+                update.effective_user.id
+            )
 
-        elif message.sender_chat is not None:
-            user_id = message.sender_chat.id
+        elif getattr(
+            message,
+            'sender_chat',
+            None
+        ) is not None:
+            user_id = (
+                message.sender_chat.id
+            )
+
             is_anonymous = True
 
         else:
             return
 
-        try:
-            limiter = await GroupRateLimiterManager.get(
-                chat_id
-            )
+        msg_text = (
+            message.text
+            or ""
+        )
 
-            await limiter.acquire()
-
-        except Exception:
-            pass
-
-        msg_text = message.text or ""
-        msg_caption = message.caption or ""
+        msg_caption = (
+            message.caption
+            or ""
+        )
 
         full_text = (
             msg_text
@@ -3002,11 +3780,22 @@ class MessageHandlers:
             full_text
         )
 
-        METRICS.increment_messages()
+        try:
+            METRICS.increment_messages()
+        except Exception:
+            pass
 
-        settings = await get_security_settings_cached(
-            chat_id
+        settings = (
+            await get_security_settings_cached(
+                chat_id
+            )
         )
+
+        if not isinstance(
+            settings,
+            dict
+        ):
+            settings = {}
 
         _df_raw = settings.get(
             'delete_forwarded'
@@ -3037,6 +3826,17 @@ class MessageHandlers:
             )
         )
 
+        _postbot_enabled = bool(
+            settings.get(
+                'delete_postbot_pattern',
+                0
+            )
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # Forward diagnostics
+        # ═══════════════════════════════════════════════════════════
+
         _det = get_forward_detection_reason(
             message
         )
@@ -3061,11 +3861,14 @@ class MessageHandlers:
             False
         )
 
+        # مهم:
+        # protected content لا يصبح Forward حقيقي.
         _is_protected_forward = (
             _protected_fb
             and _is_protected
             and _has_hint
             and not _is_fwd
+            and not _is_auto_fwd
         )
 
         _is_protected_any_fwd = (
@@ -3077,7 +3880,7 @@ class MessageHandlers:
         )
 
         # ═══════════════════════════════════════════════════════════
-        # SPAM SCORE v7.10.9
+        # Spam Score
         # ═══════════════════════════════════════════════════════════
 
         _spam_score = 0
@@ -3099,48 +3902,42 @@ class MessageHandlers:
 
         _is_spam = (
             _spam_enabled
-            and _spam_score >= SPAM_SCORE_THRESHOLD
+            and _spam_score
+            >= SPAM_SCORE_THRESHOLD
         )
 
-        # ─────────────────────────────────────────────────────────
-        # زر العدّ للأزرار
-        # ─────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════
+        # PostBot
+        # ═══════════════════════════════════════════════════════════
 
-        _btn_count = 0
-        _btn_urls = []
+        _postbot_match = False
 
-        try:
-            mk = getattr(
-                message,
-                'reply_markup',
-                None
-            )
-
-            if mk:
-                kb = getattr(
-                    mk,
-                    'inline_keyboard',
-                    None
+        if _postbot_enabled:
+            try:
+                _postbot_match = (
+                    _is_postbot_pattern(
+                        normalized_text
+                    )
                 )
 
-                if kb:
-                    for r in kb:
-                        for b in r:
-                            _btn_count += 1
+            except Exception:
+                _postbot_match = False
 
-                            u = getattr(
-                                b,
-                                'url',
-                                None
-                            )
+        # ═══════════════════════════════════════════════════════════
+        # Buttons
+        # ═══════════════════════════════════════════════════════════
 
-                            if u:
-                                _btn_urls.append(
-                                    u[:80]
-                                )
+        (
+            _btn_count,
+            _btn_urls_raw
+        ) = _get_message_button_data(
+            message
+        )
 
-        except Exception:
-            pass
+        _btn_urls = [
+            str(url)[:80]
+            for url in _btn_urls_raw[:10]
+        ]
 
         _fwd_active = (
             (
@@ -3156,12 +3953,13 @@ class MessageHandlers:
             if (
                 _fwd_active
                 or _is_spam
+                or _postbot_match
             )
             else logging.INFO
         )
 
         # ═══════════════════════════════════════════════════════════
-        # HARD-DIAG v7.10.9
+        # HARD DIAGNOSTICS
         # ═══════════════════════════════════════════════════════════
 
         logger.log(
@@ -3185,8 +3983,13 @@ class MessageHandlers:
             f"spam_enabled={_spam_enabled} "
             f"spam_score={_spam_score} "
             f"is_spam={_is_spam} | "
+            f"postbot_enabled={_postbot_enabled} "
+            f"postbot_match={_postbot_match} | "
             f"is_forwarded={_is_fwd} | "
-            f"protected_any_forward={_is_protected_any_fwd}"
+            f"protected_fb_forward="
+            f"{_is_protected_forward} "
+            f"protected_any_forward="
+            f"{_is_protected_any_fwd}"
         )
 
         if full_text:
@@ -3208,13 +4011,21 @@ class MessageHandlers:
 
         if _spam_score > 0:
             logger.info(
-                f"   🎯 SPAM-SCORE={_spam_score} | "
+                f"   🎯 SPAM-SCORE="
+                f"{_spam_score} | "
                 f"reasons={_spam_reasons}"
             )
 
         elif _spam_enabled:
             logger.info(
-                "   ⏭️ SPAM-SCORE=0 | no matches"
+                "   ⏭️ SPAM-SCORE=0 | "
+                "no matches"
+            )
+
+        if _postbot_match:
+            logger.warning(
+                "   🤖 POSTBOT-MATCH | "
+                f"enabled={_postbot_enabled}"
             )
 
         if (
@@ -3228,10 +4039,12 @@ class MessageHandlers:
             )
 
         # ═══════════════════════════════════════════════════════════
-        # service
+        # 0) Service
         # ═══════════════════════════════════════════════════════════
 
-        if settings.get('delete_service'):
+        if settings.get(
+            'delete_service'
+        ):
             if (
                 message.new_chat_members
                 or message.left_chat_member
@@ -3245,14 +4058,14 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # 1) Forwarded priority
+        # 1) Forward
         # ═══════════════════════════════════════════════════════════
 
-        if settings.get('delete_forwarded'):
-            effective_forwarded = is_forwarded(
-                message,
-                allow_protected_fallback=_protected_fb,
-                allow_protected_any=_protected_any
+        if _df_bool:
+            effective_forwarded = (
+                _is_fwd
+                or _is_protected_forward
+                or _is_protected_any_fwd
             )
 
             if effective_forwarded:
@@ -3284,7 +4097,7 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # 2) Spam score
+        # 2) Spam Score
         # ═══════════════════════════════════════════════════════════
 
         if _is_spam:
@@ -3310,13 +4123,50 @@ class MessageHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════
-        # 3) links
+        # 3) PostBot Pattern
         # ═══════════════════════════════════════════════════════════
 
-        if settings.get('delete_links'):
-            if TextUtils.contains_link(
-                normalized_text
-            ):
+        if (
+            _postbot_enabled
+            and _postbot_match
+        ):
+            logger.warning(
+                f"🤖 HANDLE-POSTBOT | "
+                f"chat={chat_id} "
+                f"user={user_id} "
+                f"msg={msg_id}"
+            )
+
+            await MessageHandlers._delete_and_warn(
+                update,
+                context,
+                chat_id,
+                user_id,
+                "postbot_pattern",
+                settings,
+                is_anonymous=is_anonymous
+            )
+
+            return
+
+        # ═══════════════════════════════════════════════════════════
+        # 4) Links
+        # ═══════════════════════════════════════════════════════════
+
+        if settings.get(
+            'delete_links'
+        ):
+            try:
+                has_link = (
+                    TextUtils.contains_link(
+                        normalized_text
+                    )
+                )
+
+            except Exception:
+                has_link = False
+
+            if has_link:
                 await MessageHandlers._delete_and_warn(
                     update,
                     context,
@@ -3330,13 +4180,23 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # 4) mentions
+        # 5) Mentions
         # ═══════════════════════════════════════════════════════════
 
-        if settings.get('mentions'):
-            if TextUtils.contains_mention(
-                normalized_text
-            ):
+        if settings.get(
+            'mentions'
+        ):
+            try:
+                has_mention = (
+                    TextUtils.contains_mention(
+                        normalized_text
+                    )
+                )
+
+            except Exception:
+                has_mention = False
+
+            if has_mention:
                 await MessageHandlers._delete_and_warn(
                     update,
                     context,
@@ -3350,57 +4210,73 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # 5) banned words
+        # 6) Banned Words
         # ═══════════════════════════════════════════════════════════
 
         if settings.get(
             'delete_banned_words'
         ):
-            banned_words = await get_banned_words_cached(
-                chat_id
+            banned_words = (
+                await get_banned_words_cached(
+                    chat_id
+                )
             )
 
             if banned_words:
-                text_lower = normalized_text.lower()
+                matched_banned_word = None
 
-                for word in banned_words:
-                    word_norm = _normalize_text(
-                        word
-                    ).lower()
-
-                    if not word_norm:
-                        continue
-
-                    if word_norm in text_lower:
-                        logger.info(
-                            f"   🎯 BANNED-MATCH | "
-                            f"word={word!r}"
+                for banned_word in banned_words:
+                    if _contains_banned_word(
+                        normalized_text,
+                        banned_word
+                    ):
+                        matched_banned_word = (
+                            banned_word
                         )
+                        break
 
-                        await MessageHandlers._delete_and_warn(
-                            update,
-                            context,
-                            chat_id,
-                            user_id,
-                            "banned_word",
-                            settings,
-                            is_anonymous=is_anonymous
-                        )
+                if matched_banned_word:
+                    logger.info(
+                        f"   🎯 BANNED-MATCH | "
+                        f"word={matched_banned_word!r}"
+                    )
 
-                        return
+                    await MessageHandlers._delete_and_warn(
+                        update,
+                        context,
+                        chat_id,
+                        user_id,
+                        "banned_word",
+                        settings,
+                        is_anonymous=is_anonymous
+                    )
+
+                    return
 
         # ═══════════════════════════════════════════════════════════
-        # 6) max length
+        # 7) Max Length
         # ═══════════════════════════════════════════════════════════
 
-        max_len = settings.get(
+        max_len_raw = settings.get(
             'max_message_length',
             0
         )
 
+        try:
+            max_len = int(
+                max_len_raw or 0
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            max_len = 0
+
         if (
             max_len > 0
-            and len(normalized_text) > max_len
+            and len(normalized_text)
+            > max_len
         ):
             await MessageHandlers._delete_and_warn(
                 update,
@@ -3415,7 +4291,7 @@ class MessageHandlers:
             return
 
         # ═══════════════════════════════════════════════════════════
-        # 7) media
+        # 8) Media
         # ═══════════════════════════════════════════════════════════
 
         media_checks = [
@@ -3464,7 +4340,9 @@ class MessageHandlers:
         for media, setting_key, vtype in media_checks:
             if (
                 media
-                and settings.get(setting_key)
+                and settings.get(
+                    setting_key
+                )
             ):
                 await MessageHandlers._delete_and_warn(
                     update,
@@ -3479,17 +4357,22 @@ class MessageHandlers:
                 return
 
         # ═══════════════════════════════════════════════════════════
-        # 8) translation
+        # 9) Translation
         # ═══════════════════════════════════════════════════════════
 
-        if msg_text and not is_anonymous:
+        if (
+            msg_text
+            and not is_anonymous
+        ):
             try:
-                translated = await _detect_and_translate(
-                    update,
-                    context,
-                    chat_id,
-                    user_id,
-                    msg_text
+                translated = (
+                    await _detect_and_translate(
+                        update,
+                        context,
+                        chat_id,
+                        user_id,
+                        msg_text
+                    )
                 )
 
                 if translated:
@@ -3510,7 +4393,7 @@ class MessageHandlers:
                 pass
 
         # ═══════════════════════════════════════════════════════════
-        # 9) auto reply
+        # 10) Auto Reply
         # ═══════════════════════════════════════════════════════════
 
         if msg_text:
@@ -3521,6 +4404,10 @@ class MessageHandlers:
                 msg_text,
                 user_id
             )
+
+    # ═══════════════════════════════════════════════════════════════
+    # Penalty Duration
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     def _get_penalty_duration(
@@ -3559,6 +4446,10 @@ class MessageHandlers:
             3600
         )
 
+    # ═══════════════════════════════════════════════════════════════
+    # Violation Message
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _get_violation_message(
         violation_type,
@@ -3582,6 +4473,7 @@ class MessageHandlers:
             'sticker': '🖼️',
             'photo': '📷',
             'video_note': '🎥',
+            'postbot_pattern': '🤖',
             'spam_score': '🚫',
         }
 
@@ -3595,6 +4487,10 @@ class MessageHandlers:
             lang,
             default
         )
+
+    # ═══════════════════════════════════════════════════════════════
+    # Delete + Warn
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     async def _delete_and_warn(
@@ -3622,11 +4518,15 @@ class MessageHandlers:
 
         if violation_type == 'forwarded':
             try:
-                _m = update.effective_message
+                message = (
+                    update.effective_message
+                )
 
-                if _m is not None:
-                    forward_info = extract_forward_info(
-                        _m
+                if message is not None:
+                    forward_info = (
+                        extract_forward_info(
+                            message
+                        )
                     )
 
             except Exception:
@@ -3635,12 +4535,14 @@ class MessageHandlers:
         message_preview = None
 
         try:
-            _m = update.effective_message
+            message = (
+                update.effective_message
+            )
 
-            if _m is not None:
+            if message is not None:
                 message_preview = (
-                    _m.text
-                    or _m.caption
+                    message.text
+                    or message.caption
                     or ""
                 ).strip() or None
 
@@ -3651,18 +4553,24 @@ class MessageHandlers:
         _msg_id = None
 
         try:
-            msg_obj = update.effective_message
+            message = (
+                update.effective_message
+            )
 
             if (
-                msg_obj
-                and msg_obj.message_id
+                message
+                and message.message_id
             ):
-                _msg_id = msg_obj.message_id
+                _msg_id = (
+                    message.message_id
+                )
 
-                delete_ok = await _safe_delete_message(
-                    context.bot,
-                    chat_id,
-                    msg_obj.message_id
+                delete_ok = (
+                    await _safe_delete_message(
+                        context.bot,
+                        chat_id,
+                        message.message_id
+                    )
                 )
 
         except Exception as e:
@@ -3672,14 +4580,23 @@ class MessageHandlers:
 
             delete_ok = False
 
+        # ═══════════════════════════════════════════════════════════
+        # Deletion Log
+        # ═══════════════════════════════════════════════════════════
+
         if (
             delete_ok
             and FEATURE_LOG_DELETIONS
         ):
-            if await _can_send_log(chat_id):
+            if await _can_send_log(
+                chat_id
+            ):
                 try:
                     if is_anonymous:
-                        user_first = "مشرف مجهول"
+                        user_first = (
+                            "مشرف مجهول"
+                        )
+
                         user_username = None
 
                     elif update.effective_user:
@@ -3702,15 +4619,17 @@ class MessageHandlers:
                         user_first = "Unknown"
                         user_username = None
 
-                    log_text = _build_delete_log_text(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        user_first_name=user_first,
-                        user_username=user_username,
-                        violation_type=violation_type,
-                        forward_info=forward_info,
-                        message_preview=message_preview,
-                        is_anonymous=is_anonymous
+                    log_text = (
+                        _build_delete_log_text(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            user_first_name=user_first,
+                            user_username=user_username,
+                            violation_type=violation_type,
+                            forward_info=forward_info,
+                            message_preview=message_preview,
+                            is_anonymous=is_anonymous
+                        )
                     )
 
                     await _dispatch_log(
@@ -3719,13 +4638,19 @@ class MessageHandlers:
                             chat_id,
                             log_text
                         ),
-                        label=f"delete-{violation_type}"
+                        label=(
+                            f"delete-{violation_type}"
+                        )
                     )
 
                 except Exception as e:
                     logger.warning(
                         f"group_log spawn: {e}"
                     )
+
+        # ═══════════════════════════════════════════════════════════
+        # Forward notification
+        # ═══════════════════════════════════════════════════════════
 
         if (
             forward_info
@@ -3746,7 +4671,7 @@ class MessageHandlers:
                 )
 
                 if owner_id:
-                    _t = asyncio.create_task(
+                    task = asyncio.create_task(
                         _notify_admin_about_forward(
                             context,
                             owner_id,
@@ -3754,25 +4679,37 @@ class MessageHandlers:
                         )
                     )
 
-                    _t.add_done_callback(
-                        lambda t: (
-                            t.exception()
+                    def _forward_done(t):
+                        try:
                             if (
                                 not t.cancelled()
                                 and t.exception()
-                            )
-                            else None
-                        )
+                            ):
+                                logger.debug(
+                                    "forward notify "
+                                    "task failed: "
+                                    f"{t.exception()}"
+                                )
+
+                        except Exception:
+                            pass
+
+                    task.add_done_callback(
+                        _forward_done
                     )
 
             except Exception:
                 pass
 
+        # إذا فشل حذف Spam/Forward:
+        # لا نحذر ولا نعاقب المستخدم، منعًا للعقوبة
+        # بسبب رسالة لم يتم حذفها فعليًا.
         if (
             not delete_ok
             and violation_type in (
                 'forwarded',
-                'spam_score'
+                'spam_score',
+                'postbot_pattern'
             )
         ):
             logger.error(
@@ -3781,11 +4718,18 @@ class MessageHandlers:
 
             return
 
+        # ═══════════════════════════════════════════════════════════
+        # Anonymous admin
+        # ═══════════════════════════════════════════════════════════
+
         if is_anonymous:
             try:
-                vm = await MessageHandlers._get_violation_message(
-                    violation_type,
-                    lang
+                vm = (
+                    await MessageHandlers
+                    ._get_violation_message(
+                        violation_type,
+                        lang
+                    )
                 )
 
                 warn_title = await _trans(
@@ -3798,14 +4742,16 @@ class MessageHandlers:
                     "👻 <b>مشرف مجهول</b>"
                 )
 
-                sent_msg = await context.bot.send_message(
-                    chat_id,
-                    (
-                        f"{warn_title}\n"
-                        f"{vm}\n"
-                        f"{anon_notice}"
-                    ),
-                    parse_mode='HTML'
+                sent_msg = (
+                    await context.bot.send_message(
+                        chat_id,
+                        (
+                            f"{warn_title}\n"
+                            f"{vm}\n"
+                            f"{anon_notice}"
+                        ),
+                        parse_mode='HTML'
+                    )
                 )
 
                 asyncio.create_task(
@@ -3822,6 +4768,10 @@ class MessageHandlers:
 
             return
 
+        # ═══════════════════════════════════════════════════════════
+        # Violation count
+        # ═══════════════════════════════════════════════════════════
+
         try:
             violation_count = (
                 await DB.increment_violation_count(
@@ -3833,12 +4783,18 @@ class MessageHandlers:
         except Exception:
             violation_count = 1
 
+        # ═══════════════════════════════════════════════════════════
+        # Penalty rule
+        # ═══════════════════════════════════════════════════════════
+
         penalty_rule = None
 
         try:
-            penalty_rule = await DB.get_violation_penalty(
-                chat_id,
-                violation_type
+            penalty_rule = (
+                await DB.get_violation_penalty(
+                    chat_id,
+                    violation_type
+                )
             )
 
         except Exception:
@@ -3854,9 +4810,11 @@ class MessageHandlers:
                 duration_seconds = 0
 
             else:
-                duration_seconds = penalty_rule[
-                    'duration_seconds'
-                ]
+                duration_seconds = (
+                    penalty_rule[
+                        'duration_seconds'
+                    ]
+                )
 
         else:
             penalty_type = settings.get(
@@ -3868,17 +4826,18 @@ class MessageHandlers:
                 penalty_type = None
                 duration_seconds = 0
 
-            elif penalty_type not in [
+            elif penalty_type not in (
                 'mute',
                 'ban',
                 'restrict',
                 'kick',
                 'warn'
-            ]:
+            ):
                 penalty_type = 'mute'
 
                 duration_seconds = (
-                    MessageHandlers._get_penalty_duration(
+                    MessageHandlers
+                    ._get_penalty_duration(
                         settings,
                         violation_type
                     )
@@ -3886,11 +4845,16 @@ class MessageHandlers:
 
             else:
                 duration_seconds = (
-                    MessageHandlers._get_penalty_duration(
+                    MessageHandlers
+                    ._get_penalty_duration(
                         settings,
                         violation_type
                     )
                 )
+
+        # ═══════════════════════════════════════════════════════════
+        # Admin Log
+        # ═══════════════════════════════════════════════════════════
 
         try:
             await DB.add_admin_log(
@@ -3903,15 +4867,24 @@ class MessageHandlers:
         except Exception:
             pass
 
-        vm = await MessageHandlers._get_violation_message(
-            violation_type,
-            lang
+        vm = (
+            await MessageHandlers
+            ._get_violation_message(
+                violation_type,
+                lang
+            )
         )
+
+        # ═══════════════════════════════════════════════════════════
+        # Warning message
+        # ═══════════════════════════════════════════════════════════
 
         try:
             user_name = escape(
-                update.effective_user.first_name
-                or "User"
+                (
+                    update.effective_user.first_name
+                    or "User"
+                )
             )
 
             warn_title = await _trans(
@@ -3932,16 +4905,19 @@ class MessageHandlers:
                 "⏳"
             )
 
-            sent_msg = await context.bot.send_message(
-                chat_id,
-                (
-                    f"{warn_title}\n"
-                    f"{vm}\n"
-                    f"👤 {user_name}\n"
-                    f"{count_label}: {violation_count}\n"
-                    f"{delete_notice}"
-                ),
-                parse_mode='HTML'
+            sent_msg = (
+                await context.bot.send_message(
+                    chat_id,
+                    (
+                        f"{warn_title}\n"
+                        f"{vm}\n"
+                        f"👤 {user_name}\n"
+                        f"{count_label}: "
+                        f"{violation_count}\n"
+                        f"{delete_notice}"
+                    ),
+                    parse_mode='HTML'
+                )
             )
 
             asyncio.create_task(
@@ -3956,6 +4932,10 @@ class MessageHandlers:
         except Exception:
             pass
 
+        # ═══════════════════════════════════════════════════════════
+        # Penalty
+        # ═══════════════════════════════════════════════════════════
+
         if penalty_type:
             max_strikes = (
                 settings.get(
@@ -3967,8 +4947,26 @@ class MessageHandlers:
                 or 3
             )
 
-            if violation_count >= max_strikes:
-                success, msg = await apply_violation_penalty(
+            try:
+                max_strikes = max(
+                    1,
+                    int(max_strikes)
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+                max_strikes = 3
+
+            if (
+                violation_count
+                >= max_strikes
+            ):
+                (
+                    success,
+                    msg
+                ) = await apply_violation_penalty(
                     update,
                     context,
                     chat_id,
@@ -4016,14 +5014,16 @@ class MessageHandlers:
                             "🚨 {msg}"
                         )
 
-                        sent_penalty = await safe_send(
-                            context.bot,
-                            chat_id,
-                            _fmt(
-                                msg_prefix,
-                                msg=msg
-                            ),
-                            parse_mode='HTML'
+                        sent_penalty = (
+                            await safe_send(
+                                context.bot,
+                                chat_id,
+                                _fmt(
+                                    msg_prefix,
+                                    msg=msg
+                                ),
+                                parse_mode='HTML'
+                            )
                         )
 
                         if (
@@ -4051,6 +5051,10 @@ class MessageHandlers:
                     except Exception:
                         pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # Auto Reply
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def _process_auto_reply(
         update,
@@ -4060,8 +5064,10 @@ class MessageHandlers:
         user_id=None
     ):
         try:
-            ars = await get_auto_reply_settings_cached(
-                chat_id
+            ars = (
+                await get_auto_reply_settings_cached(
+                    chat_id
+                )
             )
 
             if not ars.get(
@@ -4074,16 +5080,16 @@ class MessageHandlers:
                 'ignore_bots',
                 True
             ):
-                eff_user = getattr(
+                effective_user = getattr(
                     update,
                     'effective_user',
                     None
                 )
 
                 if (
-                    eff_user
+                    effective_user
                     and getattr(
-                        eff_user,
+                        effective_user,
                         'is_bot',
                         False
                     )
@@ -4151,22 +5157,31 @@ class MessageHandlers:
 
             return False
 
+    # ═══════════════════════════════════════════════════════════════
+    # Private
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def handle_private(
         update,
         context
     ):
         try:
-            user_id = update.effective_user.id
+            if not update.effective_user:
+                return
+
+            user_id = (
+                update.effective_user.id
+            )
 
             state = StateManager.get(
                 user_id
             )
 
             handler_name = (
-                MessageHandlers._PRIVATE_HANDLERS_MAP.get(
-                    state
-                )
+                MessageHandlers
+                ._PRIVATE_HANDLERS_MAP
+                .get(state)
             )
 
             if handler_name:
@@ -4187,6 +5202,10 @@ class MessageHandlers:
                 "handle_private error"
             )
 
+    # ═══════════════════════════════════════════════════════════════
+    # Service
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def handle_service(
         update,
@@ -4198,8 +5217,13 @@ class MessageHandlers:
         ):
             return
 
-        chat_id = update.effective_chat.id
-        message = update.effective_message
+        chat_id = (
+            update.effective_chat.id
+        )
+
+        message = (
+            update.effective_message
+        )
 
         is_service = any([
             message.new_chat_members,
@@ -4208,46 +5232,55 @@ class MessageHandlers:
             message.new_chat_photo,
             message.delete_chat_photo,
             message.pinned_message,
+
             getattr(
                 message,
                 'video_chat_started',
                 None
             ),
+
             getattr(
                 message,
                 'video_chat_ended',
                 None
             ),
+
             getattr(
                 message,
                 'video_chat_scheduled',
                 None
             ),
+
             getattr(
                 message,
                 'video_chat_participants_invited',
                 None
             ),
+
             getattr(
                 message,
                 'forum_topic_created',
                 None
             ),
+
             getattr(
                 message,
                 'forum_topic_closed',
                 None
             ),
+
             getattr(
                 message,
                 'forum_topic_reopened',
                 None
             ),
+
             getattr(
                 message,
                 'general_forum_topic_hidden',
                 None
             ),
+
             getattr(
                 message,
                 'general_forum_topic_unhidden',
@@ -4259,8 +5292,10 @@ class MessageHandlers:
             return
 
         try:
-            settings = await get_security_settings_cached(
-                chat_id
+            settings = (
+                await get_security_settings_cached(
+                    chat_id
+                )
             )
 
             if settings.get(
@@ -4275,16 +5310,33 @@ class MessageHandlers:
         except Exception:
             pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # Join Request
+    # ═══════════════════════════════════════════════════════════════
+
     @staticmethod
     async def handle_join_request(
         update,
         context
     ):
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
+        if (
+            not update.effective_chat
+            or not update.effective_user
+        ):
+            return
 
-        settings = await get_security_settings_cached(
-            chat_id
+        chat_id = (
+            update.effective_chat.id
+        )
+
+        user_id = (
+            update.effective_user.id
+        )
+
+        settings = (
+            await get_security_settings_cached(
+                chat_id
+            )
         )
 
         if settings.get(
@@ -4295,9 +5347,12 @@ class MessageHandlers:
                     0.05
                 )
 
-                await context.bot.decline_chat_join_request(
-                    chat_id,
-                    user_id
+                await (
+                    context.bot
+                    .decline_chat_join_request(
+                        chat_id,
+                        user_id
+                    )
                 )
 
                 return
@@ -4315,9 +5370,12 @@ class MessageHandlers:
                     0.05
                 )
 
-                await context.bot.approve_chat_join_request(
-                    chat_id,
-                    user_id
+                await (
+                    context.bot
+                    .approve_chat_join_request(
+                        chat_id,
+                        user_id
+                    )
                 )
 
             except Exception as e:
@@ -4325,6 +5383,10 @@ class MessageHandlers:
                     f"approve join: {e}"
                 )
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Public API
+# ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
     "MessageHandlers",
