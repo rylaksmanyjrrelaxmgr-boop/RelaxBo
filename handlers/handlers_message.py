@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v7.10.3 - Auto-migration + Delete All Channel Forwards)
+handlers_message.py - معالجات الرسائل (v7.10.4 - Fix has_protected None)
 =============================================================================
-🆕 v7.10.3 (AUTO-MIGRATION):
-    ✅ _lazy_init_protected_any(): تُشغَّل مرة واحدة عند أول رسالة
-       - تُضيف عمود delete_protected_any إن لم يكن موجوداً
-       - تُفعّل delete_protected_any=1 لكل مجموعة عندها delete_forwarded=1
-       - تدعم PostgreSQL/MySQL/SQLite
-       - لا تحتاج SQL يدوي!
+🆕 v7.10.4 (FIX None-PROTECTED):
+    ✅ CRITICAL FIX: has_protected_content قد تُرجع None وليس False
+       - كان: if getattr(message, 'has_protected_content', False): → None
+       - صار: bool(getattr(message, 'has_protected_content', False) or False)
+       - الأثر: الآن يحذف الرسائل من القنوات المحمية (Post Bot وغيرها)
 
+الموروث من v7.10.3:
+    ✅ Auto-migration لـ delete_protected_any
 الموروث من v7.10.2:
     ✅ delete_protected_any: حذف كل forward من قنوات محمية
 الموروث من v7.10.1:
@@ -137,18 +138,13 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🆕 v7.10.3: Auto-migration
+# v7.10.3: Auto-migration
 # ═══════════════════════════════════════════════════════════════════
 
 _protected_any_initialized = False
 
 
 async def _lazy_init_protected_any():
-    """
-    v7.10.3: تُشغَّل مرة واحدة عند أول رسالة.
-      1) تُضيف عمود delete_protected_any إن لم يكن موجوداً
-      2) تُفعّل delete_protected_any=1 لكل مجموعة عندها delete_forwarded=1
-    """
     global _protected_any_initialized
     if _protected_any_initialized:
         return
@@ -157,7 +153,6 @@ async def _lazy_init_protected_any():
     db_type = getattr(DB, "DB_TYPE", "sqlite")
     logger.info(f"🔧 v7.10.3: Auto-migration يبدأ (DB_TYPE={db_type})")
 
-    # ─── 1) أضف العمود ───
     try:
         if db_type == "postgres":
             try:
@@ -184,7 +179,6 @@ async def _lazy_init_protected_any():
                 else:
                     logger.warning(f"⚠️ ALTER MySQL: {e}")
         else:
-            # SQLite
             try:
                 await DB.execute(
                     "ALTER TABLE group_security "
@@ -200,7 +194,6 @@ async def _lazy_init_protected_any():
     except Exception as e:
         logger.warning(f"⚠️ auto-migration (column) خطأ عام: {e}")
 
-    # ─── 2) فعّل delete_protected_any لكل مجموعة عندها delete_forwarded=1 ───
     try:
         await DB.execute(
             "UPDATE group_security "
@@ -216,7 +209,6 @@ async def _lazy_init_protected_any():
     except Exception as e:
         logger.warning(f"⚠️ UPDATE delete_protected_any: {e}")
 
-    # ─── 3) امسح الكاش ───
     try:
         await internal_cache.clear()
         logger.info("✅ internal_cache cleared")
@@ -655,9 +647,16 @@ def _has_forward_hint(text: str) -> bool:
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.10.4: is_forwarded مع bool() صريح
+# ═══════════════════════════════════════════════════════════════════
+
 def is_forwarded(message, *,
                  allow_protected_fallback: bool = False,
                  allow_protected_any: bool = False) -> bool:
+    """
+    v7.10.4: fixed has_protected_content=None issue
+    """
     if message is None:
         return False
 
@@ -672,19 +671,30 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
+    # ⚠️ v7.10.4: bool() صريح — لأن None != False
+    is_protected = bool(
+        getattr(message, 'has_protected_content', False) or False
+    )
+    is_auto = bool(
+        getattr(message, 'is_automatic_forward', False) or False
+    )
+
     if allow_protected_any:
-        if getattr(message, 'has_protected_content', False):
-            if not getattr(message, 'is_automatic_forward', False):
-                return True
+        if is_protected and not is_auto:
+            return True
 
     if allow_protected_fallback:
-        if getattr(message, 'has_protected_content', False):
+        if is_protected:
             caption = (message.caption or message.text or "")
             if _has_forward_hint(caption):
                 return True
 
     return False
 
+
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.10.4: get_forward_detection_reason مع bool() صريح
+# ═══════════════════════════════════════════════════════════════════
 
 def get_forward_detection_reason(message) -> Dict[str, Any]:
     if message is None:
@@ -699,10 +709,17 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
             "repr_short": (str(val)[:80] if val is not None else None),
         }
     any_present = any(f["present"] for f in fields.values())
-    protected = getattr(message, 'has_protected_content', False)
+
+    # ⚠️ v7.10.4: bool() صريح
+    protected = bool(
+        getattr(message, 'has_protected_content', False) or False
+    )
     caption = (message.caption or message.text or "")
     hint = _has_forward_hint(caption) if protected else False
-    auto_fwd = getattr(message, 'is_automatic_forward', False)
+    auto_fwd = bool(
+        getattr(message, 'is_automatic_forward', False) or False
+    )
+
     return {
         "is_forwarded": any_present,
         "is_protected": protected,
@@ -809,7 +826,11 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
     if info:
         return info
 
-    if getattr(message, 'has_protected_content', False):
+    # ⚠️ v7.10.4: bool() صريح
+    is_protected = bool(
+        getattr(message, 'has_protected_content', False) or False
+    )
+    if is_protected:
         caption = (message.caption or message.text or "")
         if _has_forward_hint(caption):
             return {
@@ -1744,6 +1765,9 @@ class MessageHandlers:
                             await _trans('execution_failed', lang, "❌"))
         StateManager.clear(user_id)
 
+    # ═════════════════════════════════════════════════════════════
+    # 🎯 handle_group (v7.10.4)
+    # ═════════════════════════════════════════════════════════════
     @staticmethod
     async def handle_group(update, context):
         if not update.effective_chat or not update.effective_message:
@@ -1751,7 +1775,6 @@ class MessageHandlers:
 
         chat_id = update.effective_chat.id
 
-        # 🆕 v7.10.3: Auto-migration (تعمل مرة واحدة فقط)
         await _lazy_init_protected_any()
 
         message = update.effective_message
@@ -1789,8 +1812,13 @@ class MessageHandlers:
 
         _df_raw = settings.get('delete_forwarded')
         _df_bool = bool(_df_raw)
-        _protected_fb = bool(settings.get('delete_protected_forward'))
-        _protected_any = bool(settings.get('delete_protected_any'))
+        # ⚠️ v7.10.4: bool() صريح
+        _protected_fb = bool(
+            settings.get('delete_protected_forward') or False
+        )
+        _protected_any = bool(
+            settings.get('delete_protected_any') or False
+        )
 
         _det = get_forward_detection_reason(message)
         _is_fwd = _det.get('is_forwarded', False)
