@@ -2,23 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v8.0.2 - BOT-FORWARD-FIX)
+handlers_message.py - معالجات الرسائل (v8.0.3 - EXCLUDE-ADMIN-BOTS)
 =====================================================================
-🆕 v8.0.2 — إصلاح جوهري:
-    ✅ FIX-FWD-3: كشف التحويل من البوتات (News Post Bot وغيرها)
-        - كان البوت لا يحذف الرسائل المحوّلة من بوتات القنوات
-        - السبب: from_user = المستخدم الذي حوّل (ليس البوت)
-        - الحل: فحص forward_origin.sender_user.is_bot
-        - يشمل: MessageOriginUser / MessageOriginHiddenUser /
-                MessageOriginChannel / MessageOriginChat
+🆕 v8.0.3 — إضافة استثناء البوتات المشرفين:
+    ✅ EXCLUDE-ADMIN-BOTS: البوتات التي عيّنها المشرفون كمشرفين
+        لا تُحذف رسائلها. يستثني أيضاً البوتات الرسمية لتيليجرام.
+    ✅ Cache 5 دقائق لتقليل API calls
+    ✅ كشف من 3 مصادر: from_user / forward_origin / sender_chat
 
-🆕 v8.0.1 — إصلاحات تراكمية:
-    ✅ matched_word يُسجَّل في DELETE-WARN
-    ✅ WAIT_CONTEST_DURATION مُضاف
-    ✅ _delete_and_warn يستقبل matched_word
-    ✅ حماية إضافية في handle_group
-
-v8.0.0 — كشف شامل لكل أنواع الرسائل
+🆕 v8.0.2 — كشف التحويل من البوتات
+🆕 v8.0.1 — تسجيل matched_word + WAIT_CONTEST_DURATION
+🆕 v8.0.0 — كشف شامل
 =====================================================================
 """
 
@@ -33,7 +27,7 @@ import tempfile
 import ipaddress
 from pathlib import Path
 from html import escape
-from typing import Optional, Dict, Any, List, Tuple, Coroutine
+from typing import Optional, Dict, Any, List, Tuple, Set, Coroutine
 from datetime import datetime
 from urllib.parse import urlparse
 from collections import defaultdict, deque
@@ -165,6 +159,56 @@ PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
 # ═══════════════════════════════════════════════════════════════
+# ✅ EXCLUDE-ADMIN-BOTS: كشف البوتات المشرفين
+# ═══════════════════════════════════════════════════════════════
+
+_OFFICIAL_BOT_WHITELIST: Set[int] = frozenset({
+    1087968824,   # GroupAnonymousBot (مشرف مجهول)
+    136817688,    # ChannelBot (قناة رسمية)
+})
+
+_bot_admins_cache: Dict[int, Tuple[float, Set[int]]] = {}
+_BOT_ADMINS_CACHE_TTL = 300.0
+
+
+async def _get_admin_bot_ids(bot, chat_id: int) -> Set[int]:
+    """
+    جلب IDs البوتات المشرفين في المجموعة (cache 5 دقائق).
+    """
+    now = time.monotonic()
+    cached = _bot_admins_cache.get(chat_id)
+    if cached and now - cached[0] < _BOT_ADMINS_CACHE_TTL:
+        return cached[1]
+
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        bot_ids: Set[int] = set()
+        for a in admins:
+            try:
+                u = getattr(a, 'user', None)
+                if u is None:
+                    continue
+                if getattr(u, 'is_bot', False):
+                    bot_ids.add(int(u.id))
+            except Exception:
+                continue
+        _bot_admins_cache[chat_id] = (now, bot_ids)
+        logger.debug(
+            f"🔍 Admin bots in {chat_id}: {len(bot_ids)} ({bot_ids})")
+        return bot_ids
+    except Exception as e:
+        logger.debug(f"_get_admin_bot_ids({chat_id}): {e}")
+        return cached[1] if cached else set()
+
+
+def _invalidate_bot_admins_cache(chat_id: int = None) -> None:
+    if chat_id is None:
+        _bot_admins_cache.clear()
+    else:
+        _bot_admins_cache.pop(chat_id, None)
+
+
+# ═══════════════════════════════════════════════════════════════
 # Dev Log + Rate Limiter
 # ═══════════════════════════════════════════════════════════════
 
@@ -248,10 +292,8 @@ async def _can_send_log(chat_id: int) -> bool:
         return True
 
 
-async def _dispatch_log(
-    coro: Coroutine, label: str,
-    *, retries: int = LOG_RETRY_ATTEMPTS,
-) -> None:
+async def _dispatch_log(coro, label: str,
+                         *, retries: int = LOG_RETRY_ATTEMPTS) -> None:
     async def _runner():
         for attempt in range(retries):
             try:
@@ -594,7 +636,7 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ✅ FIX-FWD-3: كشف التحويل من البوتات (مُدرج في is_forwarded)
+# Forward detection
 # ═══════════════════════════════════════════════════════════════
 
 def is_forwarded(message, *,
@@ -609,13 +651,10 @@ def is_forwarded(message, *,
     if message is None:
         return False
 
-    # ═════════════════════════════════════════════════════════════
-    # ✅ FIX-FWD-3: كشف فوروارد البوتات (أولوية عالية)
-    # ═════════════════════════════════════════════════════════════
+    # ✅ FIX-FWD-3: كشف فوروارد البوتات
     try:
         fwd_origin = getattr(message, 'forward_origin', None)
         if fwd_origin is not None:
-            # 1) MessageOriginUser مع sender_user.is_bot = True
             sender_user = getattr(fwd_origin, 'sender_user', None)
             if sender_user is not None and getattr(
                     sender_user, 'is_bot', False):
@@ -624,13 +663,9 @@ def is_forwarded(message, *,
                     f"bot_id={getattr(sender_user, 'id', '?')} "
                     f"name={getattr(sender_user, 'first_name', '?')}")
                 return True
-
-            # 2) MessageOriginHiddenUser
             if getattr(fwd_origin, 'sender_user_name', None):
                 logger.info("🎯 FWD-FROM-HIDDEN-DETECT")
                 return True
-
-            # 3) MessageOriginChannel
             origin_chat = getattr(fwd_origin, 'chat', None)
             if origin_chat is not None:
                 if getattr(origin_chat, 'type', '') == 'channel':
@@ -641,7 +676,6 @@ def is_forwarded(message, *,
     except Exception as e:
         logger.debug(f"FWD-FROM-BOT check: {e}")
 
-    # 1) Forward حقيقي
     if getattr(message, 'forward_origin', None) is not None:
         return True
     if getattr(message, 'forward_date', None) is not None:
@@ -653,7 +687,6 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
-    # 2) sender_chat
     if allow_sender_chat:
         sender_chat = getattr(message, 'sender_chat', None)
         if sender_chat is not None:
@@ -664,14 +697,12 @@ def is_forwarded(message, *,
                     f"id={sender_chat.id}")
                 return True
 
-    # 3) via_bot
     if allow_via_bot:
         via_bot = getattr(message, 'via_bot', None)
         if via_bot is not None:
             logger.info(f"🎯 VIA-BOT-DETECT | bot_id={via_bot.id}")
             return True
 
-    # 4) from_user.is_bot
     if allow_bot_sender:
         from_user = getattr(message, 'from_user', None)
         if from_user and getattr(from_user, 'is_bot', False):
@@ -680,13 +711,11 @@ def is_forwarded(message, *,
                 f"name={getattr(from_user, 'first_name', '?')}")
             return True
 
-    # 5) محتوى محمي
     if allow_protected_any:
         if getattr(message, 'has_protected_content', False):
             if not getattr(message, 'is_automatic_forward', False):
                 return True
 
-    # 6) كشف Inline Keyboard
     if allow_kb_detection:
         suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(
             message)
@@ -710,14 +739,12 @@ def is_forwarded(message, *,
                         f"promo={has_promo} hint={has_hint}")
                     return True
 
-    # 7) auto_forward مزيّف
     if allow_auto_channel:
         if getattr(message, 'is_automatic_forward', False):
             if getattr(message, 'reply_markup', None) is not None:
                 logger.warning("🎯 AUTO-CHANNEL-FAKE | has_kb + auto_fwd")
                 return True
 
-    # 8) كشف نصي متعدد الإشارات
     if allow_text_detection:
         is_likely, count, signals = _is_likely_channel_forward(message)
         if is_likely:
@@ -725,7 +752,6 @@ def is_forwarded(message, *,
                 f"🎯 TEXT-DETECT | signals={signals} count={count}")
             return True
 
-    # 9) protected_fallback
     if allow_protected_fallback:
         if getattr(message, 'has_protected_content', False):
             caption = (message.caption or message.text or "")
@@ -769,7 +795,6 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
     via_bot = getattr(message, 'via_bot', None)
     from_user = getattr(message, 'from_user', None)
 
-    # ✅ FIX-FWD-3: كشف نوع forward_origin
     fwd_origin = getattr(message, 'forward_origin', None)
     fwd_is_bot = False
     fwd_is_hidden = False
@@ -866,7 +891,6 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                             or str(getattr(u, 'id', 'User')))
                 except Exception:
                     name = str(getattr(u, 'id', 'User'))
-                # ✅ FIX-FWD-3: لو المرسل بوت → صنّفه كـ forward_bot
                 is_bot = bool(getattr(u, 'is_bot', False))
                 return {
                     'type': 'forward_bot' if is_bot else 'user',
@@ -1109,10 +1133,8 @@ def _build_penalty_log_text(
     return "\n".join(lines)
 
 
-async def notify_group_log(
-    context, chat_id: int, text: str,
-    disable_preview: bool = True,
-) -> bool:
+async def notify_group_log(context, chat_id: int, text: str,
+                            disable_preview: bool = True) -> bool:
     try:
         getter = getattr(DB, 'get_group_log_channel', None)
         if not callable(getter):
@@ -1549,6 +1571,7 @@ class GroupRateLimiterManager:
                         cls._limiters.pop(cid, None)
                         cls._last_access.pop(cid, None)
                 await _sec_auth_cache_cleanup()
+                _invalidate_bot_admins_cache()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2026,7 +2049,7 @@ class MessageHandlers:
         StateManager.clear(user_id)
 
     # ═══════════════════════════════════════════════════════════
-    # handle_group — المعالج الرئيسي
+    # handle_group — المعالج الرئيسي (مع EXCLUDE-ADMIN-BOTS)
     # ═══════════════════════════════════════════════════════════
 
     @staticmethod
@@ -2089,6 +2112,68 @@ class MessageHandlers:
         msg_caption = message.caption or ""
         full_text = (msg_text + " " + msg_caption).strip()
 
+        # ═══════════════════════════════════════════════════════
+        # ✅ EXCLUDE-ADMIN-BOTS: فحص البوت المرسل
+        # ═══════════════════════════════════════════════════════
+        _sender_bot_id: Optional[int] = None
+
+        try:
+            if (message.from_user is not None
+                    and getattr(message.from_user, 'is_bot', False)):
+                _sender_bot_id = int(message.from_user.id)
+        except Exception:
+            pass
+
+        if _sender_bot_id is None:
+            try:
+                _fwd_org = getattr(message, 'forward_origin', None)
+                if _fwd_org is not None:
+                    _su = getattr(_fwd_org, 'sender_user', None)
+                    if (_su is not None
+                            and getattr(_su, 'is_bot', False)):
+                        _sender_bot_id = int(_su.id)
+            except Exception:
+                pass
+
+        if _sender_bot_id is None:
+            try:
+                _sc = getattr(message, 'sender_chat', None)
+                if _sc is not None:
+                    _sc_id = getattr(_sc, 'id', None)
+                    if _sc_id in _OFFICIAL_BOT_WHITELIST:
+                        _sender_bot_id = int(_sc_id)
+            except Exception:
+                pass
+
+        if _sender_bot_id is not None:
+            if _sender_bot_id in _OFFICIAL_BOT_WHITELIST:
+                logger.info(
+                    f"⏭️ SKIP-OFFICIAL-BOT | bot_id={_sender_bot_id} "
+                    f"chat={chat_id}")
+                if msg_text:
+                    await MessageHandlers._process_auto_reply(
+                        update, context, chat_id, msg_text, user_id)
+                return
+
+            try:
+                _admin_bot_ids = await _get_admin_bot_ids(
+                    context.bot, chat_id)
+                if _sender_bot_id in _admin_bot_ids:
+                    logger.info(
+                        f"⏭️ SKIP-BOT-ADMIN | bot_id={_sender_bot_id} "
+                        f"is admin in chat={chat_id} — لن يُحذف")
+                    if msg_text:
+                        await MessageHandlers._process_auto_reply(
+                            update, context, chat_id, msg_text, user_id)
+                    return
+                else:
+                    logger.info(
+                        f"🎯 BOT-NOT-ADMIN | bot_id={_sender_bot_id} "
+                        f"chat={chat_id} — سيُحذف")
+            except Exception as e:
+                logger.debug(f"bot admin check failed: {e}")
+        # ═══════════════════════════════════════════════════════
+
         METRICS.increment_messages()
         settings = await get_security_settings_cached(chat_id)
 
@@ -2111,7 +2196,6 @@ class MessageHandlers:
         _sender_chat_type = _det.get('sender_chat_type', None)
         _has_via_bot = _det.get('has_via_bot', False)
         _from_is_bot = _det.get('from_is_bot', False)
-        # ✅ FIX-FWD-3: الحقول الجديدة
         _fwd_is_bot = _det.get('fwd_is_bot', False)
         _fwd_is_hidden = _det.get('fwd_is_hidden', False)
         _fwd_is_channel = _det.get('fwd_is_channel', False)
@@ -4464,6 +4548,10 @@ __all__ = [
     "_is_service_message",
     "_raw_diag",
     "_is_valid_channel_ref",
+    "_get_admin_bot_ids",
+    "_invalidate_bot_admins_cache",
+    "_OFFICIAL_BOT_WHITELIST",
+    "_bot_admins_cache",
     "FEATURE_LOG_DELETIONS",
     "FEATURE_LOG_PENALTIES",
     "FEATURE_LOG_GIFTS",
