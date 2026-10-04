@@ -2,17 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-handlers_message.py - معالجات الرسائل (v8.0.3 - EXCLUDE-ADMIN-BOTS)
-=====================================================================
-🆕 v8.0.3 — إضافة استثناء البوتات المشرفين:
-    ✅ EXCLUDE-ADMIN-BOTS: البوتات التي عيّنها المشرفون كمشرفين
-        لا تُحذف رسائلها. يستثني أيضاً البوتات الرسمية لتيليجرام.
-    ✅ Cache 5 دقائق لتقليل API calls
-    ✅ كشف من 3 مصادر: from_user / forward_origin / sender_chat
+handlers_message.py - معالجات الرسائل (v7.10.3 - Auto-migration + Delete All Channel Forwards)
+=============================================================================
+🆕 v7.10.3 (AUTO-MIGRATION):
+    ✅ _lazy_init_protected_any(): تُشغَّل مرة واحدة عند أول رسالة
+       - تُضيف عمود delete_protected_any إن لم يكن موجوداً
+       - تُفعّل delete_protected_any=1 لكل مجموعة عندها delete_forwarded=1
+       - تدعم PostgreSQL/MySQL/SQLite
+       - لا تحتاج SQL يدوي!
 
-🆕 v8.0.2 — كشف التحويل من البوتات
-🆕 v8.0.1 — تسجيل matched_word + WAIT_CONTEST_DURATION
-🆕 v8.0.0 — كشف شامل
+الموروث من v7.10.2:
+    ✅ delete_protected_any: حذف كل forward من قنوات محمية
+الموروث من v7.10.1:
+    ✅ HARD-DIAG + protected_fallback
+الموروث من v7.10.0:
+    ✅ Feature Flags + Rate Limiting + Retry + Cache
+الموروث من v7.9.30 → v7.9.26:
+    ✅ إشعارات كاملة + anonymous + auto-forward skip
 =====================================================================
 """
 
@@ -27,7 +33,7 @@ import tempfile
 import ipaddress
 from pathlib import Path
 from html import escape
-from typing import Optional, Dict, Any, List, Tuple, Set, Coroutine
+from typing import Optional, Dict, Any, List, Tuple, Coroutine
 from datetime import datetime
 from urllib.parse import urlparse
 from collections import defaultdict, deque
@@ -73,10 +79,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Feature Flags
-# ═══════════════════════════════════════════════════════════════
-
 def _env_flag(name: str, default: bool = True) -> bool:
     val = os.getenv(name)
     if val is None:
@@ -88,12 +90,6 @@ FEATURE_LOG_DELETIONS = _env_flag("LOG_DELETIONS", True)
 FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
 FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
 FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
-FEATURE_RAW_DIAG = _env_flag("RAW_DIAG", True)
-
-
-# ═══════════════════════════════════════════════════════════════
-# ثوابت
-# ═══════════════════════════════════════════════════════════════
 
 MAX_PENALTY_MINUTES = 30 * 24 * 60
 LOG_RATE_LIMIT_PER_MIN = 30
@@ -123,24 +119,6 @@ _PROTECTED_FORWARD_HINTS = (
     "Forwarded from", "من قناة",
 )
 
-_CHANNEL_SIGNALS = (
-    'channel', 'قناة', 'bot', 'بوت',
-    'news', 'أخبار', 'اعلان', 'إعلان', 'تحديث',
-)
-
-_PROMO_SIGNALS = (
-    'view', 'open', 'join', 'subscribe', 'click', 'watch', 'download',
-    'اشترك', 'انضم', 'رابط', 'تحميل', 'شاهد', 'اضغط', 'افتح',
-    'leak', 'viral', 'pack', 'premium', 'exclusive',
-)
-
-_CHANNEL_EMOJIS = (
-    '📢', '🔔', '📣', '🔥', '💎', '🎁', '⭐', '✅', '💥', '🎬',
-    '▶️', '🔴', '🟢', '🔵',
-)
-
-_FORWARD_DETECTION_MIN_SIGNALS = 2
-
 _DELETE_IGNORED_PATTERNS = (
     "message to delete not found",
     "message identifier is not specified",
@@ -158,59 +136,104 @@ TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 
-# ═══════════════════════════════════════════════════════════════
-# ✅ EXCLUDE-ADMIN-BOTS: كشف البوتات المشرفين
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# 🆕 v7.10.3: Auto-migration
+# ═══════════════════════════════════════════════════════════════════
 
-_OFFICIAL_BOT_WHITELIST: Set[int] = frozenset({
-    1087968824,   # GroupAnonymousBot (مشرف مجهول)
-    136817688,    # ChannelBot (قناة رسمية)
-})
-
-_bot_admins_cache: Dict[int, Tuple[float, Set[int]]] = {}
-_BOT_ADMINS_CACHE_TTL = 300.0
+_protected_any_initialized = False
 
 
-async def _get_admin_bot_ids(bot, chat_id: int) -> Set[int]:
+async def _lazy_init_protected_any():
     """
-    جلب IDs البوتات المشرفين في المجموعة (cache 5 دقائق).
+    v7.10.3: تُشغَّل مرة واحدة عند أول رسالة.
+      1) تُضيف عمود delete_protected_any إن لم يكن موجوداً
+      2) تُفعّل delete_protected_any=1 لكل مجموعة عندها delete_forwarded=1
     """
-    now = time.monotonic()
-    cached = _bot_admins_cache.get(chat_id)
-    if cached and now - cached[0] < _BOT_ADMINS_CACHE_TTL:
-        return cached[1]
+    global _protected_any_initialized
+    if _protected_any_initialized:
+        return
+    _protected_any_initialized = True
+
+    db_type = getattr(DB, "DB_TYPE", "sqlite")
+    logger.info(f"🔧 v7.10.3: Auto-migration يبدأ (DB_TYPE={db_type})")
+
+    # ─── 1) أضف العمود ───
+    try:
+        if db_type == "postgres":
+            try:
+                await DB.execute(
+                    "ALTER TABLE group_security "
+                    "ADD COLUMN IF NOT EXISTS "
+                    "delete_protected_any INTEGER DEFAULT 0"
+                )
+                logger.info("✅ PostgreSQL: عمود delete_protected_any جاهز")
+            except Exception as e:
+                logger.warning(f"⚠️ ALTER PG: {e}")
+
+        elif db_type == "mysql":
+            try:
+                await DB.execute(
+                    "ALTER TABLE group_security "
+                    "ADD COLUMN delete_protected_any TINYINT(1) DEFAULT 0"
+                )
+                logger.info("✅ MySQL: عمود delete_protected_any جاهز")
+            except Exception as e:
+                msg = str(e).lower()
+                if "duplicate" in msg or "already exists" in msg:
+                    logger.info("ℹ️ MySQL: العمود موجود مسبقاً")
+                else:
+                    logger.warning(f"⚠️ ALTER MySQL: {e}")
+        else:
+            # SQLite
+            try:
+                await DB.execute(
+                    "ALTER TABLE group_security "
+                    "ADD COLUMN delete_protected_any INTEGER DEFAULT 0"
+                )
+                logger.info("✅ SQLite: عمود delete_protected_any جاهز")
+            except Exception as e:
+                msg = str(e).lower()
+                if "duplicate" in msg or "already exists" in msg:
+                    logger.info("ℹ️ SQLite: العمود موجود مسبقاً")
+                else:
+                    logger.warning(f"⚠️ ALTER SQLite: {e}")
+    except Exception as e:
+        logger.warning(f"⚠️ auto-migration (column) خطأ عام: {e}")
+
+    # ─── 2) فعّل delete_protected_any لكل مجموعة عندها delete_forwarded=1 ───
+    try:
+        await DB.execute(
+            "UPDATE group_security "
+            "SET delete_protected_any = 1 "
+            "WHERE delete_forwarded = 1 "
+            "  AND (delete_protected_any IS NULL "
+            "       OR delete_protected_any = 0)"
+        )
+        logger.info(
+            "✅ v7.10.3: تم تفعيل delete_protected_any لكل "
+            "المجموعات التي عندها delete_forwarded=1"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ UPDATE delete_protected_any: {e}")
+
+    # ─── 3) امسح الكاش ───
+    try:
+        await internal_cache.clear()
+        logger.info("✅ internal_cache cleared")
+    except Exception as e:
+        logger.debug(f"cache clear: {e}")
 
     try:
-        admins = await bot.get_chat_administrators(chat_id)
-        bot_ids: Set[int] = set()
-        for a in admins:
-            try:
-                u = getattr(a, 'user', None)
-                if u is None:
-                    continue
-                if getattr(u, 'is_bot', False):
-                    bot_ids.add(int(u.id))
-            except Exception:
-                continue
-        _bot_admins_cache[chat_id] = (now, bot_ids)
-        logger.debug(
-            f"🔍 Admin bots in {chat_id}: {len(bot_ids)} ({bot_ids})")
-        return bot_ids
+        if hasattr(settings_cache, 'clear'):
+            await settings_cache.clear()
+            logger.info("✅ settings_cache cleared")
     except Exception as e:
-        logger.debug(f"_get_admin_bot_ids({chat_id}): {e}")
-        return cached[1] if cached else set()
+        logger.debug(f"settings_cache clear: {e}")
 
 
-def _invalidate_bot_admins_cache(chat_id: int = None) -> None:
-    if chat_id is None:
-        _bot_admins_cache.clear()
-    else:
-        _bot_admins_cache.pop(chat_id, None)
-
-
-# ═══════════════════════════════════════════════════════════════
-# Dev Log + Rate Limiter
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# Cache قناة سجل المطور
+# ═══════════════════════════════════════════════════════════════════
 
 _dev_log_cache: Optional[Any] = None
 _dev_log_cache_ts: float = 0.0
@@ -270,7 +293,6 @@ async def _notify_dev_log(context, text: str) -> None:
     except Exception as e:
         logger.warning(f"🔔 _notify_dev_log FAILED: {e}", exc_info=True)
 
-
 _log_rate_tracker: Dict[int, deque] = defaultdict(
     lambda: deque(maxlen=LOG_RATE_LIMIT_PER_MIN)
 )
@@ -292,8 +314,10 @@ async def _can_send_log(chat_id: int) -> bool:
         return True
 
 
-async def _dispatch_log(coro, label: str,
-                         *, retries: int = LOG_RETRY_ATTEMPTS) -> None:
+async def _dispatch_log(
+    coro: Coroutine, label: str,
+    *, retries: int = LOG_RETRY_ATTEMPTS,
+) -> None:
     async def _runner():
         for attempt in range(retries):
             try:
@@ -330,11 +354,6 @@ async def _safe_invalidate(*keys: str) -> None:
         except Exception as e:
             logger.debug(f"_safe_invalidate({k}): {e}")
 
-
-# ═══════════════════════════════════════════════════════════════
-# Labels
-# ═══════════════════════════════════════════════════════════════
-
 _VIOLATION_LABELS_AR = {
     'forwarded': '↩️ رسالة معاد توجيهها',
     'link': '🔗 رابط', 'mention': '📢 منشن',
@@ -349,15 +368,6 @@ _FORWARD_TYPE_LABELS_AR = {
     'chat': '👥 مجموعة', 'channel': '📢 قناة',
     'protected': '🛡️ محتوى محمي',
     'protected_any': '🛡️ forward من قناة محمية',
-    'text_channel': '📡 قناة (كشف نصي)',
-    'kb_bot': '🤖 بوت (أزرار Inline)',
-    'sender_chat': '📡 قناة (Sender Chat)',
-    'via_bot': '🤖 عبر بوت',
-    'bot_sender': '🤖 بوت مرسل',
-    'auto_channel': '📡 قناة مرتبطة (Auto)',
-    'forward_bot': '🤖 محوّلة من بوت',
-    'forward_hidden': '👻 محوّلة من مستخدم مخفي',
-    'forward_channel': '📡 محوّلة من قناة',
 }
 
 _PENALTY_LABELS_AR = {
@@ -389,202 +399,202 @@ def _format_duration(seconds: int) -> str:
     return " و ".join(parts) if parts else f"{seconds} ثانية"
 
 
-# ═══════════════════════════════════════════════════════════════
-# دوال الكشف الأساسية
-# ═══════════════════════════════════════════════════════════════
-
-def _has_forward_hint(text: str) -> bool:
-    if not text:
+async def notify_group_log(
+    context, chat_id: int, text: str,
+    disable_preview: bool = True,
+) -> bool:
+    try:
+        getter = getattr(DB, 'get_group_log_channel', None)
+        if not callable(getter):
+            return False
+        channel_id = await getter(chat_id)
+        if not channel_id:
+            return False
+        if isinstance(channel_id, str) and channel_id.lstrip('-').isdigit():
+            channel_id = int(channel_id)
+        await context.bot.send_message(
+            chat_id=channel_id, text=text,
+            parse_mode='HTML',
+            disable_web_page_preview=disable_preview,
+        )
+        return True
+    except BadRequest as e:
+        err = str(e).lower()
+        if "chat not found" in err:
+            logger.error(f"❌ group_log: قناة غير موجودة | {chat_id}")
+        elif "not enough rights" in err or "bot is not a member" in err:
+            logger.error(f"❌ group_log: البوت ليس عضواً | {chat_id}")
+        else:
+            logger.warning(f"⚠️ group_log BadRequest: {e}")
         return False
-    tail = text[-200:] if len(text) > 200 else text
-    for hint in _PROTECTED_FORWARD_HINTS:
-        if hint in tail:
-            return True
-    return False
-
-
-def _has_suspicious_inline_keyboard(message) -> Tuple[bool, int, int]:
-    try:
-        rm = getattr(message, 'reply_markup', None)
-        if rm is None:
-            return False, 0, 0
-        kb = getattr(rm, 'inline_keyboard', None)
-        if not kb:
-            return False, 0, 0
-        url_count = 0
-        total = 0
-        for row in kb:
-            for btn in row:
-                total += 1
-                if getattr(btn, 'url', None):
-                    url_count += 1
-        if total == 0:
-            return False, 0, 0
-        if url_count >= 3:
-            return True, url_count, total
-        ratio = url_count / total
-        if url_count >= 2 and ratio >= 0.5:
-            return True, url_count, total
-        return False, url_count, total
     except Exception as e:
-        logger.debug(f"_has_suspicious_inline_keyboard: {e}")
-        return False, 0, 0
+        logger.error(f"❌ group_log FAILED: {e}", exc_info=True)
+        return False
 
 
-def _count_forward_signals(message, text: str) -> Tuple[int, List[str]]:
-    if not text:
-        return 0, []
-    signals: List[str] = []
-    text_lower = text.lower()
-    if _has_forward_hint(text):
-        signals.append("hint")
-    if any(w in text_lower for w in _CHANNEL_SIGNALS):
-        signals.append("channel_word")
-    if any(w in text_lower for w in _PROMO_SIGNALS):
-        signals.append("promo_word")
-    if any(e in text for e in _CHANNEL_EMOJIS):
-        signals.append("channel_emoji")
+def _build_delete_log_text(
+    chat_id: int, user_id: int,
+    user_first_name: str, user_username: Optional[str],
+    violation_type: str,
+    forward_info: Optional[Dict[str, Any]] = None,
+    message_preview: Optional[str] = None,
+    is_anonymous: bool = False,
+) -> str:
+    label = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
+    if is_anonymous:
+        user_display_lnk = "👻 <b>مشرف مجهول</b>"
+    else:
+        user_display = escape(user_first_name or 'User')
+        if user_username:
+            user_display_lnk = (
+                f"<a href='tg://user?id={user_id}'>{user_display}</a> "
+                f"(@{escape(user_username)})"
+            )
+        else:
+            user_display_lnk = (
+                f"<a href='tg://user?id={user_id}'>{user_display}</a>"
+            )
+    lines = [
+        "🗑️ <b>حذف رسالة</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📌 النوع: {label}",
+        f"👤 المستخدم: {user_display_lnk}",
+    ]
+    if not is_anonymous:
+        lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
+    else:
+        lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
+    if message_preview:
+        preview = message_preview.strip().replace("\n", " ")
+        if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
+            preview = preview[:_GROUP_LOG_PREVIEW_LENGTH] + "…"
+        lines.append(f"💬 النص: <i>{escape(preview)}</i>")
+    if forward_info:
+        ftype = forward_info.get('type') or '؟'
+        ftype_label = _FORWARD_TYPE_LABELS_AR.get(ftype, ftype)
+        lines.append("")
+        lines.append("📤 <b>المصدر:</b>")
+        lines.append(f"   • النوع: {ftype_label}")
+        fname = forward_info.get('name')
+        if fname:
+            fname_str = str(fname)
+            if len(fname_str) > 60:
+                fname_str = fname_str[:60] + "…"
+            lines.append(f"   • الاسم: {escape(fname_str)}")
+        fid = forward_info.get('id')
+        if fid:
+            lines.append(f"   • المعرّف: <code>{fid}</code>")
+        if forward_info.get('signature'):
+            lines.append(
+                f"   • التوقيع: {escape(str(forward_info['signature']))}"
+            )
+        if forward_info.get('message_id'):
+            lines.append(
+                f"   • رقم الرسالة الأصلية: "
+                f"<code>{forward_info['message_id']}</code>"
+            )
     try:
-        if message.reply_markup is not None:
-            signals.append("inline_keyboard")
+        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        pass
-    if len(text) > 400:
-        signals.append("long_text")
+        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    lines.append("")
+    lines.append(f"🕐 {now_str}")
+    return "\n".join(lines)
+
+
+def _build_penalty_log_text(
+    chat_id: int, target_user_id: int,
+    target_first_name: str, target_username: Optional[str],
+    penalty_type: str, duration_seconds: int,
+    source: str = "auto",
+    violation_type: Optional[str] = None,
+    moderator_id: Optional[int] = None,
+    moderator_name: Optional[str] = None,
+) -> str:
+    ptype_label = _PENALTY_LABELS_AR.get(penalty_type, penalty_type)
+    target_display = escape(target_first_name or 'User')
+    if target_username:
+        target_lnk = (
+            f"<a href='tg://user?id={target_user_id}'>{target_display}</a> "
+            f"(@{escape(target_username)})"
+        )
+    else:
+        target_lnk = (
+            f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
+        )
+    source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
+    lines = [
+        f"{ptype_label}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 العقوبة: <b>{ptype_label}</b>",
+        f"⏱️ المدة: {_format_duration(duration_seconds)}",
+        f"📊 المصدر: {source_label}",
+        "",
+        f"👤 المستهدف: {target_lnk}",
+        f"🆔 المعرّف: <code>{target_user_id}</code>",
+    ]
+    if source == "auto" and violation_type:
+        vlabel = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
+        lines.append(f"⚠️ المخالفة: {vlabel}")
+    if source == "manual" and moderator_id:
+        mod_display = escape(moderator_name or "Admin")
+        mod_lnk = f"<a href='tg://user?id={moderator_id}'>{mod_display}</a>"
+        lines.append("")
+        lines.append(f"👮 المشرف: {mod_lnk}")
+        lines.append(f"🆔 معرّف المشرف: <code>{moderator_id}</code>")
+    lines.append(f"💬 المجموعة: <code>{chat_id}</code>")
     try:
-        if getattr(message, 'via_bot', None) is not None:
-            signals.append("via_bot")
+        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        pass
-    return len(signals), signals
+        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    lines.append("")
+    lines.append(f"🕐 {now_str}")
+    return "\n".join(lines)
 
 
-def _is_likely_channel_forward(
-    message,
-    min_signals: int = _FORWARD_DETECTION_MIN_SIGNALS,
-) -> Tuple[bool, int, List[str]]:
-    if message is None:
-        return False, 0, []
-    text = (message.caption or message.text or "")
-    count, signals = _count_forward_signals(message, text)
-    has_primary = ("hint" in signals or "inline_keyboard" in signals
-                   or "via_bot" in signals)
-    if not has_primary:
-        return False, count, signals
-    return count >= min_signals, count, signals
-
-
-def _is_service_message(message) -> bool:
-    return bool(
-        getattr(message, 'new_chat_members', None) or
-        getattr(message, 'left_chat_member', None) or
-        getattr(message, 'new_chat_title', None) or
-        getattr(message, 'new_chat_photo', None) or
-        getattr(message, 'delete_chat_photo', None) or
-        getattr(message, 'pinned_message', None) or
-        getattr(message, 'video_chat_started', None) or
-        getattr(message, 'video_chat_ended', None) or
-        getattr(message, 'video_chat_scheduled', None) or
-        getattr(message, 'video_chat_participants_invited', None) or
-        getattr(message, 'forum_topic_created', None) or
-        getattr(message, 'forum_topic_closed', None) or
-        getattr(message, 'forum_topic_reopened', None) or
-        getattr(message, 'general_forum_topic_hidden', None) or
-        getattr(message, 'general_forum_topic_unhidden', None)
-    )
-
-
-def _raw_diag(message, chat_id: int, user_id: int) -> None:
-    if not FEATURE_RAW_DIAG:
+async def _notify_group_log_penalty(
+    context, chat_id: int, target_user_id: int,
+    target_first_name: str, target_username: Optional[str],
+    penalty_type: str, duration_seconds: int,
+    source: str = "auto",
+    violation_type: Optional[str] = None,
+    moderator_id: Optional[int] = None,
+    moderator_name: Optional[str] = None,
+) -> None:
+    if not FEATURE_LOG_PENALTIES:
         return
-    if message is None:
+    if not await _can_send_log(chat_id):
         return
     try:
-        msg_id = getattr(message, 'message_id', '?')
-        from_user = getattr(message, 'from_user', None)
-        sender_chat = getattr(message, 'sender_chat', None)
-        via_bot = getattr(message, 'via_bot', None)
-        fwd_origin = getattr(message, 'forward_origin', None)
-        fwd_from = getattr(message, 'forward_from', None)
-        fwd_from_chat = getattr(message, 'forward_from_chat', None)
-        is_auto_fwd = bool(getattr(message, 'is_automatic_forward', False))
-        has_protected = bool(getattr(message, 'has_protected_content', False))
-        reply_markup = getattr(message, 'reply_markup', None)
-        text = getattr(message, 'text', None) or ""
-        caption = getattr(message, 'caption', None) or ""
-        full_text = (text + " " + caption).strip()
-        text_preview = full_text[:100].replace("\n", " ")
-
-        kb_info = "none"
-        kb_urls = 0
-        kb_total = 0
-        if reply_markup is not None:
-            kb = getattr(reply_markup, 'inline_keyboard', None)
-            if kb:
-                for row in kb:
-                    for btn in row:
-                        kb_total += 1
-                        if getattr(btn, 'url', None):
-                            kb_urls += 1
-                kb_info = f"inline({kb_urls}/{kb_total})"
-            else:
-                kb_info = type(reply_markup).__name__
-
-        from_str = "None"
-        if from_user is not None:
-            try:
-                from_str = (
-                    f"id={getattr(from_user, 'id', '?')} "
-                    f"is_bot={getattr(from_user, 'is_bot', False)}")
-            except Exception:
-                from_str = "error"
-
-        sender_str = "None"
-        if sender_chat is not None:
-            try:
-                sender_str = (
-                    f"id={getattr(sender_chat, 'id', '?')} "
-                    f"type={getattr(sender_chat, 'type', '?')}")
-            except Exception:
-                sender_str = "error"
-
-        via_str = "None"
-        if via_bot is not None:
-            try:
-                via_str = f"id={getattr(via_bot, 'id', '?')}"
-            except Exception:
-                via_str = "error"
-
-        fwd_origin_type = "None"
-        if fwd_origin is not None:
-            try:
-                fwd_origin_type = type(fwd_origin).__name__
-                sender_user = getattr(fwd_origin, 'sender_user', None)
-                if sender_user is not None:
-                    fwd_origin_type += (
-                        f"(bot={getattr(sender_user, 'is_bot', False)})"
-                    )
-            except Exception:
-                fwd_origin_type = "error"
-
-        logger.warning(
-            f"🔬 RAW-DIAG | msg={msg_id} chat={chat_id} user={user_id} | "
-            f"from={from_str} | sender_chat={sender_str} | "
-            f"via_bot={via_str} | "
-            f"fwd_origin={fwd_origin_type} | "
-            f"fwd_from={'present' if fwd_from else 'None'} | "
-            f"fwd_from_chat={'present' if fwd_from_chat else 'None'} | "
-            f"auto_fwd={is_auto_fwd} | protected={has_protected} | "
-            f"kb={kb_info} | text_len={len(text)} | "
-            f"preview={text_preview!r}"
+        text = _build_penalty_log_text(
+            chat_id=chat_id, target_user_id=target_user_id,
+            target_first_name=target_first_name,
+            target_username=target_username,
+            penalty_type=penalty_type,
+            duration_seconds=duration_seconds,
+            source=source, violation_type=violation_type,
+            moderator_id=moderator_id, moderator_name=moderator_name,
+        )
+        await _dispatch_log(
+            notify_group_log(context, chat_id, text),
+            label=f"penalty-{penalty_type}",
         )
     except Exception as e:
-        logger.error(f"RAW-DIAG failed: {e}", exc_info=True)
+        logger.warning(f"⚠️ _notify_group_log_penalty: {e}")
+
+_sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
+_sec_auth_cache_lock = asyncio.Lock()
 
 
-# ═══════════════════════════════════════════════════════════════
-# Delete safety
-# ═══════════════════════════════════════════════════════════════
+async def _sec_auth_cache_cleanup() -> int:
+    async with _sec_auth_cache_lock:
+        now = time.monotonic()
+        expired = [k for k, (_, ts) in _sec_auth_cache.items()
+                   if now - ts > SEC_AUTH_CACHE_TTL]
+        for k in expired:
+            del _sec_auth_cache[k]
+        return len(expired)
+
 
 def _is_delete_ignore_error(exc: Exception) -> bool:
     try:
@@ -635,46 +645,21 @@ async def _safe_delete_message(bot, chat_id: int, message_id: int) -> bool:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════
-# Forward detection
-# ═══════════════════════════════════════════════════════════════
+def _has_forward_hint(text: str) -> bool:
+    if not text:
+        return False
+    tail = text[-200:] if len(text) > 200 else text
+    for hint in _PROTECTED_FORWARD_HINTS:
+        if hint in tail:
+            return True
+    return False
+
 
 def is_forwarded(message, *,
                  allow_protected_fallback: bool = False,
-                 allow_protected_any: bool = False,
-                 allow_text_detection: bool = False,
-                 allow_sender_chat: bool = True,
-                 allow_via_bot: bool = True,
-                 allow_bot_sender: bool = True,
-                 allow_kb_detection: bool = True,
-                 allow_auto_channel: bool = True) -> bool:
+                 allow_protected_any: bool = False) -> bool:
     if message is None:
         return False
-
-    # ✅ FIX-FWD-3: كشف فوروارد البوتات
-    try:
-        fwd_origin = getattr(message, 'forward_origin', None)
-        if fwd_origin is not None:
-            sender_user = getattr(fwd_origin, 'sender_user', None)
-            if sender_user is not None and getattr(
-                    sender_user, 'is_bot', False):
-                logger.info(
-                    f"🎯 FWD-FROM-BOT-DETECT | "
-                    f"bot_id={getattr(sender_user, 'id', '?')} "
-                    f"name={getattr(sender_user, 'first_name', '?')}")
-                return True
-            if getattr(fwd_origin, 'sender_user_name', None):
-                logger.info("🎯 FWD-FROM-HIDDEN-DETECT")
-                return True
-            origin_chat = getattr(fwd_origin, 'chat', None)
-            if origin_chat is not None:
-                if getattr(origin_chat, 'type', '') == 'channel':
-                    logger.info(
-                        f"🎯 FWD-FROM-CHANNEL-DETECT | "
-                        f"chat_id={getattr(origin_chat, 'id', '?')}")
-                    return True
-    except Exception as e:
-        logger.debug(f"FWD-FROM-BOT check: {e}")
 
     if getattr(message, 'forward_origin', None) is not None:
         return True
@@ -687,82 +672,16 @@ def is_forwarded(message, *,
     if getattr(message, 'forward_sender_name', None) is not None:
         return True
 
-    if allow_sender_chat:
-        sender_chat = getattr(message, 'sender_chat', None)
-        if sender_chat is not None:
-            sender_type = getattr(sender_chat, 'type', '')
-            if sender_type in ('channel', 'group', 'supergroup'):
-                logger.info(
-                    f"🎯 SENDER-CHAT-DETECT | type={sender_type} "
-                    f"id={sender_chat.id}")
-                return True
-
-    if allow_via_bot:
-        via_bot = getattr(message, 'via_bot', None)
-        if via_bot is not None:
-            logger.info(f"🎯 VIA-BOT-DETECT | bot_id={via_bot.id}")
-            return True
-
-    if allow_bot_sender:
-        from_user = getattr(message, 'from_user', None)
-        if from_user and getattr(from_user, 'is_bot', False):
-            logger.info(
-                f"🎯 BOT-SENDER-DETECT | bot_id={from_user.id} "
-                f"name={getattr(from_user, 'first_name', '?')}")
-            return True
-
     if allow_protected_any:
         if getattr(message, 'has_protected_content', False):
             if not getattr(message, 'is_automatic_forward', False):
                 return True
-
-    if allow_kb_detection:
-        suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(
-            message)
-        if suspicious:
-            logger.warning(
-                f"🎯 KB-SUSPICIOUS | urls={url_cnt}/{total_cnt}")
-            if url_cnt >= 3:
-                logger.warning("🎯 KB-FORCE-DELETE (urls>=3)")
-                return True
-            text = (message.caption or message.text or "")
-            if text:
-                text_lower = text.lower()
-                has_channel = any(
-                    w in text_lower for w in _CHANNEL_SIGNALS)
-                has_promo = any(
-                    w in text_lower for w in _PROMO_SIGNALS)
-                has_hint = _has_forward_hint(text)
-                if has_channel or has_promo or has_hint:
-                    logger.warning(
-                        f"🎯 KB-DELETE | channel={has_channel} "
-                        f"promo={has_promo} hint={has_hint}")
-                    return True
-
-    if allow_auto_channel:
-        if getattr(message, 'is_automatic_forward', False):
-            if getattr(message, 'reply_markup', None) is not None:
-                logger.warning("🎯 AUTO-CHANNEL-FAKE | has_kb + auto_fwd")
-                return True
-
-    if allow_text_detection:
-        is_likely, count, signals = _is_likely_channel_forward(message)
-        if is_likely:
-            logger.info(
-                f"🎯 TEXT-DETECT | signals={signals} count={count}")
-            return True
 
     if allow_protected_fallback:
         if getattr(message, 'has_protected_content', False):
             caption = (message.caption or message.text or "")
             if _has_forward_hint(caption):
                 return True
-        else:
-            caption = (message.caption or message.text or "")
-            if _has_forward_hint(caption):
-                _, signals = _count_forward_signals(message, caption)
-                if len(signals) >= 2:
-                    return True
 
     return False
 
@@ -782,55 +701,13 @@ def get_forward_detection_reason(message) -> Dict[str, Any]:
     any_present = any(f["present"] for f in fields.values())
     protected = getattr(message, 'has_protected_content', False)
     caption = (message.caption or message.text or "")
-    hint = _has_forward_hint(caption) if caption else False
+    hint = _has_forward_hint(caption) if protected else False
     auto_fwd = getattr(message, 'is_automatic_forward', False)
-
-    signal_count, signals = _count_forward_signals(message, caption)
-    is_likely, _, _ = _is_likely_channel_forward(message)
-
-    kb_suspicious, kb_urls, kb_total = _has_suspicious_inline_keyboard(
-        message)
-
-    sender_chat = getattr(message, 'sender_chat', None)
-    via_bot = getattr(message, 'via_bot', None)
-    from_user = getattr(message, 'from_user', None)
-
-    fwd_origin = getattr(message, 'forward_origin', None)
-    fwd_is_bot = False
-    fwd_is_hidden = False
-    fwd_is_channel = False
-    if fwd_origin is not None:
-        sender_user = getattr(fwd_origin, 'sender_user', None)
-        if sender_user is not None and getattr(sender_user, 'is_bot', False):
-            fwd_is_bot = True
-        if getattr(fwd_origin, 'sender_user_name', None):
-            fwd_is_hidden = True
-        origin_chat = getattr(fwd_origin, 'chat', None)
-        if origin_chat is not None and getattr(origin_chat, 'type', '') == 'channel':
-            fwd_is_channel = True
-
     return {
         "is_forwarded": any_present,
         "is_protected": protected,
         "has_hint": hint,
         "has_automatic_forward": auto_fwd,
-        "text_detect": is_likely,
-        "signal_count": signal_count,
-        "signals": signals,
-        "kb_suspicious": kb_suspicious,
-        "kb_urls": kb_urls,
-        "kb_total": kb_total,
-        "has_sender_chat": sender_chat is not None,
-        "sender_chat_type": (getattr(sender_chat, 'type', None)
-                             if sender_chat else None),
-        "has_via_bot": via_bot is not None,
-        "via_bot_id": (getattr(via_bot, 'id', None)
-                       if via_bot else None),
-        "from_is_bot": bool(
-            from_user and getattr(from_user, 'is_bot', False)),
-        "fwd_is_bot": fwd_is_bot,
-        "fwd_is_hidden": fwd_is_hidden,
-        "fwd_is_channel": fwd_is_channel,
         "fields": fields,
         "has_message_origin_module": _HAS_MESSAGE_ORIGIN,
     }
@@ -891,16 +768,14 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
                             or str(getattr(u, 'id', 'User')))
                 except Exception:
                     name = str(getattr(u, 'id', 'User'))
-                is_bot = bool(getattr(u, 'is_bot', False))
                 return {
-                    'type': 'forward_bot' if is_bot else 'user',
-                    'id': getattr(u, 'id', None),
+                    'type': 'user', 'id': getattr(u, 'id', None),
                     'name': name, 'date': getattr(origin, 'date', None),
                     'signature': None, 'message_id': None,
                 }
             if isinstance(origin, MessageOriginHiddenUser):
                 return {
-                    'type': 'forward_hidden', 'id': None,
+                    'type': 'hidden_user', 'id': None,
                     'name': (getattr(origin, 'sender_user_name', None)
                              or 'Hidden'),
                     'date': getattr(origin, 'date', None),
@@ -920,7 +795,7 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
             if isinstance(origin, MessageOriginChannel):
                 c = origin.chat
                 return {
-                    'type': 'forward_channel', 'id': getattr(c, 'id', None),
+                    'type': 'channel', 'id': getattr(c, 'id', None),
                     'name': (getattr(c, 'title', None)
                              or getattr(c, 'username', None)
                              or str(getattr(c, 'id', 'Channel'))),
@@ -934,67 +809,8 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
     if info:
         return info
 
-    caption = (message.caption or message.text or "")
-
-    sender_chat = getattr(message, 'sender_chat', None)
-    if sender_chat is not None:
-        sender_type = getattr(sender_chat, 'type', '')
-        if sender_type in ('channel', 'group', 'supergroup'):
-            return {
-                'type': 'sender_chat',
-                'id': getattr(sender_chat, 'id', None),
-                'name': (getattr(sender_chat, 'title', None)
-                         or getattr(sender_chat, 'username', None)
-                         or str(getattr(sender_chat, 'id', 'Chat'))),
-                'date': None, 'signature': None, 'message_id': None,
-                'signals': f"sender_type={sender_type}",
-            }
-
-    via_bot = getattr(message, 'via_bot', None)
-    if via_bot is not None:
-        return {
-            'type': 'via_bot', 'id': getattr(via_bot, 'id', None),
-            'name': (getattr(via_bot, 'first_name', None)
-                     or str(getattr(via_bot, 'id', 'Bot'))),
-            'date': None, 'signature': None, 'message_id': None,
-        }
-
-    from_user = getattr(message, 'from_user', None)
-    if from_user and getattr(from_user, 'is_bot', False):
-        return {
-            'type': 'bot_sender', 'id': getattr(from_user, 'id', None),
-            'name': (getattr(from_user, 'first_name', None)
-                     or str(getattr(from_user, 'id', 'Bot'))),
-            'date': None, 'signature': None, 'message_id': None,
-        }
-
-    suspicious, url_cnt, total_cnt = _has_suspicious_inline_keyboard(message)
-    if suspicious and url_cnt >= 3:
-        return {
-            'type': 'kb_bot', 'id': None,
-            'name': f'🤖 بوت (أزرار Inline ×{url_cnt})',
-            'date': None, 'signature': None, 'message_id': None,
-            'signals': f"inline_urls={url_cnt}/{total_cnt}",
-        }
-
-    if getattr(message, 'is_automatic_forward', False):
-        if getattr(message, 'reply_markup', None) is not None:
-            return {
-                'type': 'auto_channel', 'id': None,
-                'name': '📡 قناة مرتبطة (Auto+KB)',
-                'date': None, 'signature': None, 'message_id': None,
-            }
-
-    is_likely, count, signals = _is_likely_channel_forward(message)
-    if is_likely:
-        return {
-            'type': 'text_channel', 'id': None,
-            'name': f'📡 قناة (كشف نصي - {count} إشارة)',
-            'date': None, 'signature': None, 'message_id': None,
-            'signals': ", ".join(signals),
-        }
-
     if getattr(message, 'has_protected_content', False):
+        caption = (message.caption or message.text or "")
         if _has_forward_hint(caption):
             return {
                 'type': 'protected', 'id': None,
@@ -1010,212 +826,143 @@ def extract_forward_info(message) -> Optional[Dict[str, Any]]:
     return None
 
 
-# ═══════════════════════════════════════════════════════════════
-# Log builders
-# ═══════════════════════════════════════════════════════════════
-
-def _build_delete_log_text(
-    chat_id: int, user_id: int,
-    user_first_name: str, user_username: Optional[str],
-    violation_type: str,
-    forward_info: Optional[Dict[str, Any]] = None,
-    message_preview: Optional[str] = None,
-    is_anonymous: bool = False,
-    matched_word: Optional[str] = None,
-) -> str:
-    label = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
-    if is_anonymous:
-        user_display_lnk = "👻 <b>مشرف مجهول</b>"
-    else:
-        user_display = escape(user_first_name or 'User')
-        if user_username:
-            user_display_lnk = (
-                f"<a href='tg://user?id={user_id}'>{user_display}</a> "
-                f"(@{escape(user_username)})"
-            )
-        else:
-            user_display_lnk = (
-                f"<a href='tg://user?id={user_id}'>{user_display}</a>"
-            )
-    lines = [
-        "🗑️ <b>حذف رسالة</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"📌 النوع: {label}",
-        f"👤 المستخدم: {user_display_lnk}",
-    ]
-    if not is_anonymous:
-        lines.append(f"🆔 المعرّف: <code>{user_id}</code>")
-    else:
-        lines.append(f"🆔 المجموعة: <code>{chat_id}</code>")
-
-    if matched_word:
-        mw = str(matched_word)
-        if len(mw) > 60:
-            mw = mw[:60] + "…"
-        lines.append(f"🎯 الكلمة المطابقة: <code>{escape(mw)}</code>")
-
-    if message_preview:
-        preview = message_preview.strip().replace("\n", " ")
-        if len(preview) > _GROUP_LOG_PREVIEW_LENGTH:
-            preview = preview[:_GROUP_LOG_PREVIEW_LENGTH] + "…"
-        lines.append(f"💬 النص: <i>{escape(preview)}</i>")
-    if forward_info:
-        ftype = forward_info.get('type') or '؟'
-        ftype_label = _FORWARD_TYPE_LABELS_AR.get(ftype, ftype)
-        lines.append("")
-        lines.append("📤 <b>المصدر:</b>")
-        lines.append(f"   • النوع: {ftype_label}")
-        fname = forward_info.get('name')
-        if fname:
-            fname_str = str(fname)
-            if len(fname_str) > 60:
-                fname_str = fname_str[:60] + "…"
-            lines.append(f"   • الاسم: {escape(fname_str)}")
-        signals = forward_info.get('signals')
-        if signals:
-            lines.append(f"   • الإشارات: <code>{signals}</code>")
-    try:
-        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    lines.append("")
-    lines.append(f"🕐 {now_str}")
-    return "\n".join(lines)
-
-
-def _build_penalty_log_text(
-    chat_id: int, target_user_id: int,
-    target_first_name: str, target_username: Optional[str],
-    penalty_type: str, duration_seconds: int,
-    source: str = "auto",
-    violation_type: Optional[str] = None,
-    moderator_id: Optional[int] = None,
-    moderator_name: Optional[str] = None,
-) -> str:
-    ptype_label = _PENALTY_LABELS_AR.get(penalty_type, penalty_type)
-    target_display = escape(target_first_name or 'User')
-    if target_username:
-        target_lnk = (
-            f"<a href='tg://user?id={target_user_id}'>{target_display}</a> "
-            f"(@{escape(target_username)})"
-        )
-    else:
-        target_lnk = (
-            f"<a href='tg://user?id={target_user_id}'>{target_display}</a>"
-        )
-    source_label = "🤖 تلقائي" if source == "auto" else "👮 يدوي"
-    lines = [
-        f"{ptype_label}",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"🎯 العقوبة: <b>{ptype_label}</b>",
-        f"⏱️ المدة: {_format_duration(duration_seconds)}",
-        f"📊 المصدر: {source_label}",
-        "",
-        f"👤 المستهدف: {target_lnk}",
-        f"🆔 المعرّف: <code>{target_user_id}</code>",
-    ]
-    if source == "auto" and violation_type:
-        vlabel = _VIOLATION_LABELS_AR.get(violation_type, violation_type)
-        lines.append(f"⚠️ المخالفة: {vlabel}")
-    if source == "manual" and moderator_id:
-        mod_display = escape(moderator_name or "Admin")
-        mod_lnk = f"<a href='tg://user?id={moderator_id}'>{mod_display}</a>"
-        lines.append("")
-        lines.append(f"👮 المشرف: {mod_lnk}")
-        lines.append(f"🆔 معرّف المشرف: <code>{moderator_id}</code>")
-    lines.append(f"💬 المجموعة: <code>{chat_id}</code>")
-    try:
-        now_str = TimeUtils.mecca_now().strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    lines.append("")
-    lines.append(f"🕐 {now_str}")
-    return "\n".join(lines)
-
-
-async def notify_group_log(context, chat_id: int, text: str,
-                            disable_preview: bool = True) -> bool:
-    try:
-        getter = getattr(DB, 'get_group_log_channel', None)
-        if not callable(getter):
-            return False
-        channel_id = await getter(chat_id)
-        if not channel_id:
-            return False
-        if isinstance(channel_id, str) and channel_id.lstrip('-').isdigit():
-            channel_id = int(channel_id)
-        await context.bot.send_message(
-            chat_id=channel_id, text=text,
-            parse_mode='HTML',
-            disable_web_page_preview=disable_preview,
-        )
-        return True
-    except BadRequest as e:
-        err = str(e).lower()
-        if "chat not found" in err:
-            logger.error(f"❌ group_log: قناة غير موجودة | {chat_id}")
-        elif "not enough rights" in err or "bot is not a member" in err:
-            logger.error(f"❌ group_log: البوت ليس عضواً | {chat_id}")
-        else:
-            logger.warning(f"⚠️ group_log BadRequest: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"❌ group_log FAILED: {e}", exc_info=True)
-        return False
-
-
-async def _notify_group_log_penalty(
-    context, chat_id: int, target_user_id: int,
-    target_first_name: str, target_username: Optional[str],
-    penalty_type: str, duration_seconds: int,
-    source: str = "auto",
-    violation_type: Optional[str] = None,
-    moderator_id: Optional[int] = None,
-    moderator_name: Optional[str] = None,
-) -> None:
-    if not FEATURE_LOG_PENALTIES:
-        return
-    if not await _can_send_log(chat_id):
+async def _notify_admin_about_forward(context, admin_id: int,
+                                       info: Dict[str, Any]) -> None:
+    if not info or not admin_id:
         return
     try:
-        text = _build_penalty_log_text(
-            chat_id=chat_id, target_user_id=target_user_id,
-            target_first_name=target_first_name,
-            target_username=target_username,
-            penalty_type=penalty_type,
-            duration_seconds=duration_seconds,
-            source=source, violation_type=violation_type,
-            moderator_id=moderator_id, moderator_name=moderator_name,
-        )
-        await _dispatch_log(
-            notify_group_log(context, chat_id, text),
-            label=f"penalty-{penalty_type}",
-        )
+        type_labels = {
+            'user': '👤 مستخدم', 'hidden_user': '👻 مستخدم مخفي',
+            'chat': '👥 مجموعة', 'channel': '📢 قناة',
+            'protected': '🛡️ محتوى محمي',
+            'protected_any': '🛡️ forward من قناة محمية',
+        }
+        label = type_labels.get(info.get('type', ''),
+                                f"❔ {info.get('type')}")
+        lines = ["↩️ <b>رسالة معاد توجيهها</b>", ""]
+        lines.append(f"📌 النوع: {label}")
+        if info.get('id'):
+            lines.append(f"🆔 المصدر: <code>{info['id']}</code>")
+        if info.get('name'):
+            lines.append(f"📛 الاسم: {escape(str(info['name']))}")
+        if info.get('signature'):
+            lines.append(f"✍️ التوقيع: {escape(str(info['signature']))}")
+        if info.get('message_id'):
+            lines.append(
+                f"🔢 رقم الرسالة: <code>{info['message_id']}</code>"
+            )
+        if info.get('date'):
+            lines.append(f"📅 التاريخ: <code>{info['date']}</code>")
+        await safe_send(context.bot, admin_id, "\n".join(lines),
+                        parse_mode='HTML')
     except Exception as e:
-        logger.warning(f"⚠️ _notify_group_log_penalty: {e}")
+        logger.debug(f"_notify_admin_about_forward: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Sec Auth Cache
-# ═══════════════════════════════════════════════════════════════
-
-_sec_auth_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
-_sec_auth_cache_lock = asyncio.Lock()
-
-
-async def _sec_auth_cache_cleanup() -> int:
-    async with _sec_auth_cache_lock:
+def _should_notify_forward(context, chat_id: int) -> bool:
+    try:
+        bot_data = getattr(context, 'bot_data', None)
+        if not isinstance(bot_data, dict):
+            return False
+        key = f"_forward_notify_{chat_id}"
         now = time.monotonic()
-        expired = [k for k, (_, ts) in _sec_auth_cache.items()
-                   if now - ts > SEC_AUTH_CACHE_TTL]
-        for k in expired:
-            del _sec_auth_cache[k]
-        return len(expired)
+        last = bot_data.get(key, 0.0)
+        if not isinstance(last, (int, float)):
+            last = 0.0
+        if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
+            return False
+        bot_data[key] = now
+        return True
+    except Exception:
+        return False
 
 
-# ═══════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════
+async def _refresh_admin_commands_safe(bot, user_id: int,
+                                        is_admin: bool) -> bool:
+    if not user_id:
+        return False
+    try:
+        from main import refresh_admin_commands
+    except ImportError as e:
+        logger.debug(f"refresh_admin_commands import: {e}")
+        return False
+    try:
+        return bool(await refresh_admin_commands(bot, user_id, is_admin))
+    except Exception as e:
+        logger.warning(f"⚠️ refresh_admin_commands: {e}")
+        return False
+
+
+async def _invalidate_after_channel_change(
+    user_id: int, channel_db_id: Optional[int] = None,
+    invalidate_posts: bool = True,
+) -> None:
+    keys = [
+        f"start_data_{user_id}", f"user_{user_id}",
+        f"user_{user_id}_True", f"user_{user_id}_False",
+        f"channels_{user_id}",
+    ]
+    if channel_db_id is not None:
+        keys.append(f"channel_info_{channel_db_id}")
+    await _safe_invalidate(*keys)
+    try:
+        from cache import invalidate_user_cache
+        await invalidate_user_cache(user_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(f"invalidate_user_cache: {e}")
+    if invalidate_posts and channel_db_id is not None:
+        try:
+            await posts_cache.invalidate(channel_db_id)
+        except Exception as e:
+            logger.debug(f"posts_cache invalidate: {e}")
+
+
+class GroupRateLimiterManager:
+    _limiters: Dict[int, RateLimiter] = {}
+    _last_access: Dict[int, float] = {}
+    _lock = asyncio.Lock()
+    MAX_SIZE = MAX_GROUP_LIMITERS_CACHE
+
+    @classmethod
+    async def get(cls, chat_id: int) -> RateLimiter:
+        async with cls._lock:
+            now = time.time()
+            if (len(cls._limiters) >= cls.MAX_SIZE
+                    and chat_id not in cls._limiters):
+                sorted_items = sorted(cls._last_access.items(),
+                                      key=lambda x: x[1])
+                to_remove = sorted_items[: cls.MAX_SIZE // 5]
+                for cid, _ in to_remove:
+                    cls._limiters.pop(cid, None)
+                    cls._last_access.pop(cid, None)
+            if chat_id not in cls._limiters:
+                cls._limiters[chat_id] = RateLimiter(
+                    max_concurrent=5, max_per_second=10)
+            cls._last_access[chat_id] = now
+            return cls._limiters[chat_id]
+
+    @classmethod
+    async def periodic_cleanup_task(cls):
+        while True:
+            try:
+                await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
+                now = time.time()
+                async with cls._lock:
+                    to_remove = [
+                        cid for cid, ts in cls._last_access.items()
+                        if now - ts > 7200
+                    ]
+                    for cid in to_remove:
+                        cls._limiters.pop(cid, None)
+                        cls._last_access.pop(cid, None)
+                await _sec_auth_cache_cleanup()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"❌ periodic_cleanup: {e}")
+
 
 async def _trans(key: str, lang: str, default: str = "") -> str:
     if not key:
@@ -1528,60 +1275,6 @@ def _verify_bot_in_log_channel_error_text(reason: str, lang: str) -> str:
     return mapping.get(reason, "❌ تعذّر التحقق من قناة السجل.")
 
 
-# ═══════════════════════════════════════════════════════════════
-# GroupRateLimiterManager
-# ═══════════════════════════════════════════════════════════════
-
-class GroupRateLimiterManager:
-    _limiters: Dict[int, RateLimiter] = {}
-    _last_access: Dict[int, float] = {}
-    _lock = asyncio.Lock()
-    MAX_SIZE = MAX_GROUP_LIMITERS_CACHE
-
-    @classmethod
-    async def get(cls, chat_id: int) -> RateLimiter:
-        async with cls._lock:
-            now = time.time()
-            if (len(cls._limiters) >= cls.MAX_SIZE
-                    and chat_id not in cls._limiters):
-                sorted_items = sorted(cls._last_access.items(),
-                                      key=lambda x: x[1])
-                to_remove = sorted_items[: cls.MAX_SIZE // 5]
-                for cid, _ in to_remove:
-                    cls._limiters.pop(cid, None)
-                    cls._last_access.pop(cid, None)
-            if chat_id not in cls._limiters:
-                cls._limiters[chat_id] = RateLimiter(
-                    max_concurrent=5, max_per_second=10)
-            cls._last_access[chat_id] = now
-            return cls._limiters[chat_id]
-
-    @classmethod
-    async def periodic_cleanup_task(cls):
-        while True:
-            try:
-                await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
-                now = time.time()
-                async with cls._lock:
-                    to_remove = [
-                        cid for cid, ts in cls._last_access.items()
-                        if now - ts > 7200
-                    ]
-                    for cid in to_remove:
-                        cls._limiters.pop(cid, None)
-                        cls._last_access.pop(cid, None)
-                await _sec_auth_cache_cleanup()
-                _invalidate_bot_admins_cache()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"❌ periodic_cleanup: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# MessageHandlers
-# ═══════════════════════════════════════════════════════════════
-
 class MessageHandlers:
 
     _PRIVATE_HANDLERS_MAP: Dict[UserState, str] = {
@@ -1644,6 +1337,7 @@ class MessageHandlers:
         UserState.WAIT_BAN_USER_ID: "_handle_ban_user_input",
         UserState.WAIT_UNBAN_USER_ID: "_handle_unban_user_input",
         UserState.WAIT_PENALTY_DEFAULT_DURATION: "_handle_penalty_default_duration",
+        UserState.WAIT_CONTEST_WINNER: "_handle_contest_winner",
         UserState.WAIT_PENALTY_MUTE_DURATION: "_handle_penalty_mute_duration",
         UserState.WAIT_PENALTY_BAN_DURATION: "_handle_penalty_ban_duration",
         UserState.WAIT_PENALTY_RESTRICT_DURATION: "_handle_penalty_restrict_duration",
@@ -1750,7 +1444,9 @@ class MessageHandlers:
             await safe_send(
                 context.bot, user_id,
                 await _trans('invalid_channel_ref', lang,
-                    "❌ <b>قيمة غير صالحة</b>"),
+                    "❌ <b>قيمة غير صالحة</b>\n\n"
+                    "أرسل معرّفاً رقمياً أو @username أو رابطاً، "
+                    "أو <code>none</code> للإزالة."),
                 parse_mode='HTML')
             return True
 
@@ -2048,43 +1744,25 @@ class MessageHandlers:
                             await _trans('execution_failed', lang, "❌"))
         StateManager.clear(user_id)
 
-    # ═══════════════════════════════════════════════════════════
-    # handle_group — المعالج الرئيسي (مع EXCLUDE-ADMIN-BOTS)
-    # ═══════════════════════════════════════════════════════════
-
     @staticmethod
     async def handle_group(update, context):
-        try:
-            _chat = update.effective_chat if update else None
-            _msg = update.effective_message if update else None
-            _user = update.effective_user if update else None
-            if _chat and _msg:
-                _raw_diag(_msg, _chat.id, _user.id if _user else 0)
-        except Exception as _diag_e:
-            logger.error(f"RAW-DIAG wrapper failed: {_diag_e}")
-
         if not update.effective_chat or not update.effective_message:
-            logger.warning("🚫 handle_group EXIT: no chat/msg")
             return
 
         chat_id = update.effective_chat.id
+
+        # 🆕 v7.10.3: Auto-migration (تعمل مرة واحدة فقط)
+        await _lazy_init_protected_any()
+
         message = update.effective_message
         msg_id = getattr(message, 'message_id', None)
 
         if getattr(message, 'is_automatic_forward', False):
-            has_kb = getattr(message, 'reply_markup', None) is not None
-            if not has_kb:
-                logger.info(
-                    f"⏭️ AUTO-FORWARD-SKIP (نظيف) | "
-                    f"chat={chat_id} msg={msg_id}")
-                return
-            logger.warning(
-                f"🎯 AUTO-FORWARD-FAKE (مع أزرار) | "
-                f"chat={chat_id} msg={msg_id}")
+            logger.debug(
+                f"⏭️ AUTO-FORWARD-SKIP | chat={chat_id} msg={msg_id}")
+            return
 
         is_anonymous = False
-        user_id = None
-
         if update.effective_user:
             user_id = update.effective_user.id
         elif message.sender_chat is not None:
@@ -2092,15 +1770,9 @@ class MessageHandlers:
             is_anonymous = True
             logger.warning(
                 f"👻 ANONYMOUS | chat={chat_id} msg={msg_id} | "
-                f"sender_chat={message.sender_chat.id} "
-                f"type={getattr(message.sender_chat, 'type', '?')}")
-        elif message.from_user is not None:
-            user_id = message.from_user.id
+                f"sender_chat={message.sender_chat.id}")
         else:
-            logger.warning(
-                f"🚫 handle_group EXIT: no user/sender_chat | "
-                f"chat={chat_id} msg={msg_id}")
-            user_id = 0
+            return
 
         try:
             limiter = await GroupRateLimiterManager.get(chat_id)
@@ -2111,68 +1783,6 @@ class MessageHandlers:
         msg_text = message.text or ""
         msg_caption = message.caption or ""
         full_text = (msg_text + " " + msg_caption).strip()
-
-        # ═══════════════════════════════════════════════════════
-        # ✅ EXCLUDE-ADMIN-BOTS: فحص البوت المرسل
-        # ═══════════════════════════════════════════════════════
-        _sender_bot_id: Optional[int] = None
-
-        try:
-            if (message.from_user is not None
-                    and getattr(message.from_user, 'is_bot', False)):
-                _sender_bot_id = int(message.from_user.id)
-        except Exception:
-            pass
-
-        if _sender_bot_id is None:
-            try:
-                _fwd_org = getattr(message, 'forward_origin', None)
-                if _fwd_org is not None:
-                    _su = getattr(_fwd_org, 'sender_user', None)
-                    if (_su is not None
-                            and getattr(_su, 'is_bot', False)):
-                        _sender_bot_id = int(_su.id)
-            except Exception:
-                pass
-
-        if _sender_bot_id is None:
-            try:
-                _sc = getattr(message, 'sender_chat', None)
-                if _sc is not None:
-                    _sc_id = getattr(_sc, 'id', None)
-                    if _sc_id in _OFFICIAL_BOT_WHITELIST:
-                        _sender_bot_id = int(_sc_id)
-            except Exception:
-                pass
-
-        if _sender_bot_id is not None:
-            if _sender_bot_id in _OFFICIAL_BOT_WHITELIST:
-                logger.info(
-                    f"⏭️ SKIP-OFFICIAL-BOT | bot_id={_sender_bot_id} "
-                    f"chat={chat_id}")
-                if msg_text:
-                    await MessageHandlers._process_auto_reply(
-                        update, context, chat_id, msg_text, user_id)
-                return
-
-            try:
-                _admin_bot_ids = await _get_admin_bot_ids(
-                    context.bot, chat_id)
-                if _sender_bot_id in _admin_bot_ids:
-                    logger.info(
-                        f"⏭️ SKIP-BOT-ADMIN | bot_id={_sender_bot_id} "
-                        f"is admin in chat={chat_id} — لن يُحذف")
-                    if msg_text:
-                        await MessageHandlers._process_auto_reply(
-                            update, context, chat_id, msg_text, user_id)
-                    return
-                else:
-                    logger.info(
-                        f"🎯 BOT-NOT-ADMIN | bot_id={_sender_bot_id} "
-                        f"chat={chat_id} — سيُحذف")
-            except Exception as e:
-                logger.debug(f"bot admin check failed: {e}")
-        # ═══════════════════════════════════════════════════════
 
         METRICS.increment_messages()
         settings = await get_security_settings_cached(chat_id)
@@ -2187,18 +1797,6 @@ class MessageHandlers:
         _is_protected = _det.get('is_protected', False)
         _has_hint = _det.get('has_hint', False)
         _is_auto_fwd = _det.get('has_automatic_forward', False)
-        _text_detect = _det.get('text_detect', False)
-        _signal_count = _det.get('signal_count', 0)
-        _kb_suspicious = _det.get('kb_suspicious', False)
-        _kb_urls = _det.get('kb_urls', 0)
-        _kb_total = _det.get('kb_total', 0)
-        _has_sender_chat = _det.get('has_sender_chat', False)
-        _sender_chat_type = _det.get('sender_chat_type', None)
-        _has_via_bot = _det.get('has_via_bot', False)
-        _from_is_bot = _det.get('from_is_bot', False)
-        _fwd_is_bot = _det.get('fwd_is_bot', False)
-        _fwd_is_hidden = _det.get('fwd_is_hidden', False)
-        _fwd_is_channel = _det.get('fwd_is_channel', False)
 
         _is_protected_forward = (
             _protected_fb and _is_protected and _has_hint
@@ -2212,9 +1810,6 @@ class MessageHandlers:
 
         _fwd_active = (
             _is_fwd or _is_protected_forward or _is_protected_any_fwd
-            or _text_detect or _kb_suspicious
-            or _has_sender_chat or _has_via_bot or _from_is_bot
-            or _fwd_is_bot or _fwd_is_hidden or _fwd_is_channel
         ) and _df_bool
         _log_level = logging.WARNING if _fwd_active else logging.INFO
 
@@ -2222,53 +1817,51 @@ class MessageHandlers:
             _log_level,
             f"🚨 HARD-DIAG | chat={chat_id} user={user_id} msg={msg_id} "
             f"{'[ANON]' if is_anonymous else ''} | "
+            f"type={type(message).__name__} | "
+            f"has_photo={bool(message.photo)} | "
+            f"has_video={bool(message.video)} | "
+            f"has_caption={bool(message.caption)} | "
             f"has_protected={_is_protected} | "
             f"has_hint={_has_hint} | "
             f"is_auto_fwd={_is_auto_fwd} | "
-            f"text_detect={_text_detect} | "
-            f"kb_suspicious={_kb_suspicious} | "
-            f"kb_urls={_kb_urls}/{_kb_total} | "
-            f"has_sender_chat={_has_sender_chat} | "
-            f"sender_chat_type={_sender_chat_type} | "
-            f"has_via_bot={_has_via_bot} | "
-            f"from_is_bot={_from_is_bot} | "
-            f"fwd_is_bot={_fwd_is_bot} | "
-            f"fwd_is_hidden={_fwd_is_hidden} | "
-            f"fwd_is_channel={_fwd_is_channel} | "
             f"delete_forwarded={_df_raw!r} | "
-            f"is_forwarded={_is_fwd}"
+            f"protected_fb={_protected_fb} | "
+            f"protected_any={_protected_any} | "
+            f"is_forwarded={_is_fwd} | "
+            f"protected_forward={_is_protected_forward} | "
+            f"protected_any_forward={_is_protected_any_fwd}"
         )
+
+        for _fname, _finfo in _det.get('fields', {}).items():
+            logger.log(
+                _log_level,
+                f"   ↳ {_fname}: present={_finfo['present']} "
+                f"type={_finfo['type']} "
+                f"val={_finfo['repr_short']}")
+
+        if _is_fwd or _is_protected_forward or _is_protected_any_fwd:
+            _info = extract_forward_info(message)
+            if _info:
+                logger.log(
+                    _log_level,
+                    f"   ✅ forward_info: type={_info.get('type')} "
+                    f"id={_info.get('id')} "
+                    f"name={_info.get('name')!r}")
+
+        if settings.get('delete_service'):
+            if message.new_chat_members or message.left_chat_member:
+                await _safe_delete_message(
+                    context.bot, chat_id, message.message_id)
+                return
 
         if settings.get('delete_forwarded'):
             effective_forwarded = is_forwarded(
                 message,
                 allow_protected_fallback=_protected_fb,
-                allow_protected_any=_protected_any,
-                allow_text_detection=True,
-                allow_sender_chat=True,
-                allow_via_bot=True,
-                allow_bot_sender=True,
-                allow_kb_detection=True,
-                allow_auto_channel=True)
+                allow_protected_any=_protected_any)
             if effective_forwarded:
                 tag = ""
-                if _fwd_is_bot:
-                    tag = " [FWD-FROM-BOT]"
-                elif _fwd_is_hidden:
-                    tag = " [FWD-FROM-HIDDEN]"
-                elif _fwd_is_channel:
-                    tag = " [FWD-FROM-CHANNEL]"
-                elif _has_sender_chat:
-                    tag = f" [SENDER-CHAT:{_sender_chat_type}]"
-                elif _has_via_bot:
-                    tag = " [VIA-BOT]"
-                elif _from_is_bot:
-                    tag = " [BOT-SENDER]"
-                elif _kb_suspicious:
-                    tag = f" [KB-BOT:{_kb_urls}/{_kb_total}]"
-                elif _text_detect and not _is_fwd:
-                    tag = f" [TEXT-DETECT:{_signal_count}]"
-                elif _is_protected_any_fwd:
+                if _is_protected_any_fwd:
                     tag = " [PROTECTED-ANY]"
                 elif _is_protected_forward:
                     tag = " [PROTECTED-FB]"
@@ -2299,20 +1892,13 @@ class MessageHandlers:
             banned_words = await get_banned_words_cached(chat_id)
             if banned_words:
                 text_lower = full_text.lower()
-                matched_word = None
                 for word in banned_words:
-                    if not word:
-                        continue
                     if word in text_lower:
-                        matched_word = word
-                        break
-                if matched_word:
-                    await MessageHandlers._delete_and_warn(
-                        update, context, chat_id, user_id,
-                        "banned_word", settings,
-                        is_anonymous=is_anonymous,
-                        matched_word=matched_word)
-                    return
+                        await MessageHandlers._delete_and_warn(
+                            update, context, chat_id, user_id,
+                            "banned_word", settings,
+                            is_anonymous=is_anonymous)
+                        return
 
         max_len = settings.get('max_message_length', 0)
         if max_len > 0 and len(full_text) > max_len:
@@ -2380,14 +1966,12 @@ class MessageHandlers:
     @staticmethod
     async def _delete_and_warn(update, context, chat_id, user_id,
                                 violation_type, settings,
-                                is_anonymous: bool = False,
-                                matched_word: Optional[str] = None):
-        log_extra = f" | matched={matched_word!r}" if matched_word else ""
+                                is_anonymous: bool = False):
         logger.warning(
             f"🔧 DELETE-WARN | start | "
             f"chat={chat_id} user={user_id} "
             f"{'[ANON]' if is_anonymous else ''} | "
-            f"violation={violation_type}{log_extra}")
+            f"violation={violation_type}")
 
         lang = await _ensure_lang(update, context)
 
@@ -2411,9 +1995,11 @@ class MessageHandlers:
             pass
 
         delete_ok = False
+        _msg_id_to_delete = None
         try:
             msg_obj = update.effective_message
             if msg_obj and msg_obj.message_id:
+                _msg_id_to_delete = msg_obj.message_id
                 delete_ok = await _safe_delete_message(
                     context.bot, chat_id, msg_obj.message_id)
         except Exception as e:
@@ -2442,13 +2028,27 @@ class MessageHandlers:
                         violation_type=violation_type,
                         forward_info=forward_info,
                         message_preview=message_preview,
-                        is_anonymous=is_anonymous,
-                        matched_word=matched_word)
+                        is_anonymous=is_anonymous)
                     await _dispatch_log(
                         notify_group_log(context, chat_id, log_text),
                         label=f"delete-{violation_type}")
                 except Exception as e:
                     logger.warning(f"group_log spawn: {e}")
+
+        if (forward_info and not is_anonymous
+                and _should_notify_forward(context, chat_id)):
+            try:
+                owner_id = int(getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0)
+                if owner_id:
+                    _t = asyncio.create_task(
+                        _notify_admin_about_forward(
+                            context, owner_id, forward_info))
+                    _t.add_done_callback(
+                        lambda t: (t.exception()
+                                   if not t.cancelled() and t.exception()
+                                   else None))
+            except Exception as e:
+                logger.debug(f"forward notify: {e}")
 
         if not delete_ok and violation_type == 'forwarded':
             logger.error(f"⏭️ توقف — الحذف فشل")
@@ -2649,10 +2249,6 @@ class MessageHandlers:
         except Exception as e:
             logger.error(f"❌ auto_reply: {e}")
             return False
-
-    # ═══════════════════════════════════════════════════════════
-    # Private handlers (بقية الدوال)
-    # ═══════════════════════════════════════════════════════════
 
     @staticmethod
     async def _handle_channel_input(update, context):
@@ -3183,22 +2779,6 @@ class MessageHandlers:
             await safe_send(context.bot, user_id,
                             await _trans('error_occurred', lang, "❌"))
         StateManager.clear(user_id)
-
-    @staticmethod
-    async def _refresh_admin_commands_safe(bot, user_id: int,
-                                            is_admin: bool) -> bool:
-        if not user_id:
-            return False
-        try:
-            from main import refresh_admin_commands
-        except ImportError as e:
-            logger.debug(f"refresh_admin_commands import: {e}")
-            return False
-        try:
-            return bool(await refresh_admin_commands(bot, user_id, is_admin))
-        except Exception as e:
-            logger.warning(f"⚠️ refresh_admin_commands: {e}")
-            return False
 
     @staticmethod
     async def _handle_keyword_input(update, context):
@@ -4430,7 +4010,21 @@ class MessageHandlers:
             return
         chat_id = update.effective_chat.id
         message = update.effective_message
-        if not _is_service_message(message):
+        is_service = any([
+            message.new_chat_members, message.left_chat_member,
+            message.new_chat_title, message.new_chat_photo,
+            message.delete_chat_photo, message.pinned_message,
+            getattr(message, 'video_chat_started', None),
+            getattr(message, 'video_chat_ended', None),
+            getattr(message, 'video_chat_scheduled', None),
+            getattr(message, 'video_chat_participants_invited', None),
+            getattr(message, 'forum_topic_created', None),
+            getattr(message, 'forum_topic_closed', None),
+            getattr(message, 'forum_topic_reopened', None),
+            getattr(message, 'general_forum_topic_hidden', None),
+            getattr(message, 'general_forum_topic_unhidden', None),
+        ])
+        if not is_service:
             return
         try:
             settings = await get_security_settings_cached(chat_id)
@@ -4467,54 +4061,6 @@ class MessageHandlers:
                     logger.warning(f"approve join: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Helpers at end
-# ═══════════════════════════════════════════════════════════════
-
-def _is_valid_channel_ref(text: str) -> bool:
-    if not text:
-        return False
-    text = text.strip()
-    if not text:
-        return False
-    if text.lstrip('-').isdigit():
-        return True
-    if text.startswith('@') and len(text) > 1:
-        return True
-    if text.startswith(('https://t.me/', 'http://t.me/',
-                         'https://telegram.me/', 'https://telegram.dog/')):
-        return True
-    if text.startswith('t.me/'):
-        return True
-    return False
-
-
-async def _invalidate_after_channel_change(
-    user_id: int, channel_db_id: Optional[int] = None,
-    invalidate_posts: bool = True,
-) -> None:
-    keys = [
-        f"start_data_{user_id}", f"user_{user_id}",
-        f"user_{user_id}_True", f"user_{user_id}_False",
-        f"channels_{user_id}",
-    ]
-    if channel_db_id is not None:
-        keys.append(f"channel_info_{channel_db_id}")
-    await _safe_invalidate(*keys)
-    try:
-        from cache import invalidate_user_cache
-        await invalidate_user_cache(user_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.debug(f"invalidate_user_cache: {e}")
-    if invalidate_posts and channel_db_id is not None:
-        try:
-            await posts_cache.invalidate(channel_db_id)
-        except Exception as e:
-            logger.debug(f"posts_cache invalidate: {e}")
-
-
 __all__ = [
     "MessageHandlers",
     "GroupRateLimiterManager",
@@ -4532,6 +4078,8 @@ __all__ = [
     "extract_forward_info",
     "get_forward_detection_reason",
     "_extract_legacy_forward_info",
+    "_notify_admin_about_forward",
+    "_should_notify_forward",
     "notify_group_log",
     "_build_delete_log_text",
     "_build_penalty_log_text",
@@ -4542,19 +4090,9 @@ __all__ = [
     "_has_forward_hint",
     "_invalidate_dev_log_cache",
     "_get_dev_log_channel_cached",
-    "_is_likely_channel_forward",
-    "_count_forward_signals",
-    "_has_suspicious_inline_keyboard",
-    "_is_service_message",
-    "_raw_diag",
-    "_is_valid_channel_ref",
-    "_get_admin_bot_ids",
-    "_invalidate_bot_admins_cache",
-    "_OFFICIAL_BOT_WHITELIST",
-    "_bot_admins_cache",
     "FEATURE_LOG_DELETIONS",
     "FEATURE_LOG_PENALTIES",
     "FEATURE_LOG_GIFTS",
     "FEATURE_LOG_ADMIN_CHANGES",
-    "FEATURE_RAW_DIAG",
+    "_lazy_init_protected_any",
 ]
