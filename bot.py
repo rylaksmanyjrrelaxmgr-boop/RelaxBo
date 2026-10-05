@@ -2,32 +2,47 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.1)
+🌿 Relax Manager – البوت الرئيسي (v5.6.2)
 ================================================================================
+🆕 v5.6.2 (POLLING-MODE CORRECTNESS + SHUTDOWN ORDER):
+    🔴 F1-fix: تصحيح جوهري لـ Polling Mode —
+           الإصدار السابق v5.6.1 استخدم:
+               await app.updater.start_polling(...)
+               await app.start()
+           وهذا يؤدي إلى RuntimeError لأن app.start() تنادي
+           updater.start_polling() مرة ثانية داخلياً.
+           الحل: نضبط app._running=True يدوياً + نُنفّذ post_init
+           hooks بأنفسنا (نُحاكي app.start() بدقة مع تمرير
+           allowed_updates/drop_pending_updates).
+
+    🔴 F2-fix: app_shutdown_done — لا نضبطه في polling mode،
+           حتى يتولّى الـfinally الخارجي استدعاء app.shutdown()
+           الذي يستدعي post_shutdown (بما فيها original_post_shutdown
+           و handlers_message shutdown).
+
+    🟠 F7: _verify_db_config يستخدم CONFIG.DATABASE_URL بدل
+           os.getenv المباشر (توحيد المصدر).
+
+    🟡 F8: إضافة تسجيل تشخيصي أوضح في polling mode.
+
 🆕 v5.6.1 (POLLING-MODE FIX + CLEANUP):
-    ✅ F1: إصلاح حرج — استبدال await app.run_polling() بـ
-           app.updater.start_polling() + app.start() + _shutdown_event.wait()
-           السبب: run_polling() تنادي asyncio.run() داخلياً، وهذا ينهار
-           عند استدعائها من داخل حلقة asyncio قائمة.
-    ✅ F2: نقل تهيئة _shutdown_event و signal handlers إلى ما قبل الفروع،
-           ليعمل الإغلاق اللطيف في وضعي Webhook و Polling على حد سواء.
-    ✅ F3: contest_cleanup يستقبل app كوسيط بدل الاعتماد على app_global
-           (هشاشة أمام إعادة الهيكلة).
-    ✅ F4: _MEMBERSHIP_IMPORT_ERROR or "unknown" لتفادي طباعة "None".
+    ✅ F2: نقل تهيئة _shutdown_event و signal handlers إلى ما قبل الفروع.
+    ✅ F3: contest_cleanup يستقبل app كوسيط.
+    ✅ F4: _MEMBERSHIP_IMPORT_ERROR or "unknown".
     ✅ F5: _validate_invoice_for_payment يتحقق من invoice['number'].
     ✅ F6: حذف PATHS غير المستخدم + تنظيف imports.
 
 🆕 v5.6.0 (SHUTDOWN + TASK MANAGER + INTEGRATION):
     ✅ M1: _spawn_notify_dev_log — تتبّع الاستثناءات + تنظيف ذكي
     ✅ M2: كل المهام الدائمة داخل run_task_with_retry (موحّد)
-    ✅ M3: register_shutdown_handlers(handlers_message) — تنظيف log/delete tasks
+    ✅ M3: register_shutdown_handlers(handlers_message)
     ✅ M4: import aiohttp في المستوى الأعلى
     ✅ M5: run_task_with_retry — تأخير وقائي عند خروج مفاجئ
-    ✅ M6: تسلسل إغلاق واضح (app → group_log → notify → bg → handlers_message)
+    ✅ M6: تسلسل إغلاق واضح
     ✅ M7: SIGTERM handler لـ polling mode أيضاً
     ✅ M8: تسجيل shutdown handlers قبل app.initialize()
     ✅ M9: إحصاء مهام دقيق + log تفصيلي عند البدء
-    ✅ M10: cleanup_removed_channels_periodically — بارامترات بدل f-string
+    ✅ M10: cleanup_removed_channels_periodically — بارامترات
     ✅ M11: حماية من task crash-looping (backoff تصاعدي)
     ✅ M12: تحسينات أداء صغيرة
 
@@ -695,9 +710,12 @@ def _verify_command_handlers() -> bool:
 
 
 def _verify_db_config() -> bool:
+    """
+    ✅ F7: يستخدم CONFIG.DATABASE_URL بدل os.getenv المباشر.
+    """
     try:
         db_type = getattr(DB, "DB_TYPE", "unknown")
-        db_url = os.getenv("DATABASE_URL", "").strip()
+        db_url = getattr(CONFIG, "DATABASE_URL", "") or ""
 
         if not db_url:
             if db_type != "sqlite":
@@ -1746,6 +1764,77 @@ async def contest_cleanup(app: Application):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Polling mode helpers (F1-fix)
+# ═══════════════════════════════════════════════════════════════════
+
+async def _start_polling_mode(app: Application) -> None:
+    """
+    ✅ F1-fix: يُحاكي app.start() بدقة مع تمرير allowed_updates/
+    drop_pending_updates — بدون استدعاء app.start() (الذي كان
+    يفشل لأن Updater.start_polling() تُنادَى مرتين).
+
+    خطوات المُحاكاة:
+      1. app._running = True
+      2. await app.updater.start_polling(allowed_updates=..., ...)
+      3. تنفيذ post_init hooks يدوياً
+    """
+    if app.updater is None:
+        raise RuntimeError(
+            "Polling mode يتطلب updater — تأكد أن Application.builder() "
+            "لم يستدعِ .updater(None)."
+        )
+
+    if getattr(app, "_running", False):
+        raise RuntimeError("Application is already running!")
+
+    # 1. اضبط العلم يدوياً
+    app._running = True
+
+    # 2. ابدأ polling مع الوسائط المطلوبة
+    try:
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=ALLOWED_UPDATES,
+        )
+    except Exception:
+        # في حال فشل start_polling، أعد العلم
+        app._running = False
+        raise
+
+    # 3. نفّذ post_init hooks (كما تفعل app.start())
+    for hook in getattr(app, "post_init", []) or []:
+        try:
+            await hook(app)
+        except Exception as _e:
+            logger.warning("post_init hook failed: %s", _e)
+
+
+async def _stop_polling_mode(app: Application) -> None:
+    """
+    ✅ F1-fix: يُحاكي app.stop() بدقة:
+      1. تنفيذ post_stop hooks يدوياً
+      2. await app.updater.stop()
+      3. app._running = False
+    """
+    if not getattr(app, "_running", False):
+        return
+
+    for hook in getattr(app, "post_stop", []) or []:
+        try:
+            await hook(app)
+        except Exception as _e:
+            logger.warning("post_stop hook failed: %s", _e)
+
+    if app.updater is not None:
+        try:
+            await app.updater.stop()
+        except Exception as _e:
+            logger.debug("updater.stop: %s", _e)
+
+    app._running = False
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
@@ -2149,7 +2238,7 @@ async def main():
     )
 
     # ═════════════════════════════════════════════════════════════
-    # ✅ F1/F2: _shutdown_event + signal handlers قبل الفرعين
+    # ✅ F2: _shutdown_event + signal handlers قبل الفرعين
     # ═════════════════════════════════════════════════════════════
     _shutdown_event = asyncio.Event()
 
@@ -2176,6 +2265,10 @@ async def main():
     # ═════════════════════════════════════════════════════════════
     # بدء التشغيل — Webhook أو Polling
     # ═════════════════════════════════════════════════════════════
+    # ✅ F2-fix: لا نضبط app_shutdown_done إلا في Webhook
+    # (في Polling نتركه False ليستدعي الـfinally الخارجي app.shutdown()
+    #  ويُفعِّل post_shutdown hooks — بما فيها original_post_shutdown
+    #  و handlers_message shutdown).
     app_shutdown_done = False
 
     try:
@@ -2189,6 +2282,9 @@ async def main():
                 url=webhook_url,
                 drop_pending_updates=True,
                 allowed_updates=ALLOWED_UPDATES,
+                secret_token=(
+                    getattr(CONFIG, "WEBHOOK_SECRET", "") or None
+                ),
             )
             logger.info("✅ Webhook تم التعيين")
 
@@ -2235,36 +2331,36 @@ async def main():
 
         else:
             # ══════════ POLLING MODE ══════════
-            # ✅ F1: استخدام API غير متزامن بدل run_polling()
-            logger.info("⚠️ وضع Polling (لا يوجد hostname)")
+            # ✅ F1-fix: نستخدم start_polling() + محاكاة app.start()
+            # بدل app.start() نفسه (الذي يُنادي start_polling() مرة ثانية).
+            logger.info(
+                "⚠️ وضع Polling (لا يوجد hostname) — "
+                "باستخدام start_polling() + محاكاة app.start()"
+            )
 
             runner = await setup_webhook(app, port)
 
             try:
-                await app.updater.start_polling(
-                    drop_pending_updates=True,
-                    allowed_updates=ALLOWED_UPDATES,
+                await _start_polling_mode(app)
+                logger.info(
+                    "✅ Polling started — في انتظار الإشارات"
                 )
-                await app.start()
-                logger.info("✅ Polling started — في انتظار الإشارات")
 
                 await _shutdown_event.wait()
-                logger.info("📴 تم استلام إشارة الإغلاق — إنهاء الخدمات...")
+                logger.info(
+                    "📴 تم استلام إشارة الإغلاق — إنهاء الخدمات..."
+                )
 
             finally:
+                # ✅ F1-fix: نُحاكي app.stop() يدوياً (post_stop + updater.stop)
                 try:
-                    await app.updater.stop()
-                    logger.info("✅ updater: تم الإيقاف")
+                    await _stop_polling_mode(app)
+                    logger.info("✅ polling mode: تم الإيقاف")
                 except Exception as _e:
-                    logger.debug("updater.stop: %s", _e)
+                    logger.debug("_stop_polling_mode: %s", _e)
 
-                try:
-                    await app.stop()
-                    logger.info("✅ app: تم الإيقاف")
-                except Exception as _e:
-                    logger.debug("app.stop: %s", _e)
-
-                app_shutdown_done = True
+                # ✅ F2-fix: لا نضبط app_shutdown_done = True
+                # ليتولّى الـfinally الخارجي app.shutdown() (post_shutdown)
 
                 try:
                     await runner.cleanup()
@@ -2315,6 +2411,7 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # 4) handlers_message: log dispatcher + delayed delete
+        #    (استدعاء احتياطي في حال فشل app.shutdown — idempotent)
         try:
             await _shutdown_log_dispatcher(timeout=5.0)
         except Exception as _e:
@@ -2324,10 +2421,13 @@ async def main():
         except Exception as _e:
             logger.debug("shutdown_delete_tasks: %s", _e)
 
-        # 5) app shutdown (فقط في webhook mode، لأن polling أوقفناه بالفعل)
+        # 5) app shutdown — فقط إن لم يُنفَّذ بعد (webhook mode)
+        #    ✅ F2-fix: في polling mode، app_shutdown_done=False،
+        #    فنستدعي app.shutdown() هنا لتفعيل post_shutdown hooks.
         if not app_shutdown_done:
             try:
                 await app.shutdown()
+                logger.info("✅ app.shutdown() اكتمل")
             except asyncio.CancelledError:
                 raise
             except Exception as _e:
