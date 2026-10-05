@@ -4,25 +4,29 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.4.1 — FLEXIBLE-AUTOVACUUM-TUNING + PARAMETER-BINDING HOTFIX
+v6.4.2 — FLEXIBLE-AUTOVACUUM-TUNING + PARAMETER-BINDING HOTFIX + minor polish
 
-التحسينات على v6.4.0:
+التحسينات على v6.4.1:
+    ✅ توحيد مصفوفات القيم المقبولة (ACCEPTED_*_SCALE_FACTORS)
+    ✅ تحسين _split_for_telegram — هامش ديناميكي آمن
+    ✅ عرض n_mod_since_analyze في التفاصيل
+    ✅ تحقق MySQL أفضل عند غياب الصلاحيات
+    ✅ _get_pg_settings: تحقق من القيم الفارغة
+    ✅ استخدام _safe_params في كل مكان (بدون استثناء)
+    ✅ تنظيف حقول غير مستخدمة (dead_unsupported → ملاحظات واضحة)
+
+التحسينات الموروثة من v6.4.1:
     ✅ EXPECTED_*_SCALE_FACTOR أصبحت قوائم مقبولة (flexible)
-       - السبب: database.py يضبط 0.02/0.01 بينما الإعداد الافتراضي
-                في بعض الإصدارات 0.05/0.02 — كلاهما "مضبوط"
-       - النتيجة: لم تعد الجداول الثقيلة تُعرض 🟡 بسبب اختلاف القيم
-       - القيم المقبولة:
-            autovacuum_vacuum_scale_factor ∈ {0.02, 0.05}
-            autovacuum_analyze_scale_factor ∈ {0.01, 0.02}
+    ✅ القيم المقبولة:
+         autovacuum_vacuum_scale_factor ∈ {0.02, 0.05, 0}
+         autovacuum_analyze_scale_factor ∈ {0.01, 0.02, 0}
 
 التحسينات الموروثة من v6.4.0:
-    🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً
+    🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً عبر _safe_params
        - المشكلة: DB.fetchall("...> $1...", LONG_TX_WARN_SECONDS)
                   كان يُمرِّر int (وليس tuple) → TypeError
-                  عند *p في Database._fetchall_with_conn
-       - الأثر: long transactions و idle-in-transaction لم تُرصد أبداً
-       - الحل: (_safe_params(LONG_TX_WARN_SECONDS))
-       - إضافة helper _safe_params في هذا الملف أيضاً (defense in depth)
+       - الأثر: long transactions لم تُرصد أبداً
+       - الحل: _safe_params(LONG_TX_WARN_SECONDS)
 
     🆕 fallback ثانٍ حقيقي لـ _get_indexes:
        - المسار الأول: pg_indexes (المُفضَّل)
@@ -37,9 +41,7 @@ v6.4.1 — FLEXIBLE-AUTOVACUUM-TUNING + PARAMETER-BINDING HOTFIX
 
     🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح في التقرير
 
-    🆕 فحص تناسق MAINTENANCE_TABLES vs HEAVY_TABLES_FOR_AUTOVACUUM
-
-المبادئ (محفوظة من v6.0.0):
+المبادئ (محفوظة):
     ✅ لا نخلط بين "الدليل" و"الاحتمال".
     ✅ backend_xmin وحده لا يُعتبر إثباتاً للحجب.
     ✅ لا نفترض أن VACUUM سيعيد المساحة لنظام الملفات.
@@ -68,7 +70,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.4.1"
+VERSION = "6.4.2"
 
 
 # =============================================================================
@@ -103,17 +105,12 @@ ANALYZE_MOD_WARN_PCT = 10.0
 ANALYZE_MOD_CRIT_PCT = 20.0
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v6.4.1: قيم autovacuum المقبولة (flexible)
+# v6.4.2: قيم autovacuum المقبولة (flexible)
 # ═════════════════════════════════════════════════════════════════════
 # أي مجموعة من (vacuum_factor, analyze_factor) ضمن الشروط التالية
 # تُعتبر "مضبوطة":
-#   vacuum_factor ∈ ACCEPTED_VACUUM_FACTORS
-#   analyze_factor ∈ ACCEPTED_ANALYZE_FACTORS
-#
-# القيم المرجعية:
-#   - database.py::_tune_heavy_tables_autovacuum → 0.02 / 0.01
-#   - database_tables.py::_tune_autovacuum_postgres (يدوي) → 0.05 / 0.02
-#   - PostgreSQL defaults → 0.20 / 0.10 (غير مقبول)
+#   vacuum_factor ∈ ACCEPTED_VACUUM_SCALE_FACTORS
+#   analyze_factor ∈ ACCEPTED_ANALYZE_SCALE_FACTORS
 # ═════════════════════════════════════════════════════════════════════
 
 ACCEPTED_VACUUM_SCALE_FACTORS: Set[str] = {
@@ -383,7 +380,7 @@ def _parse_interval_seconds(value: Any) -> Optional[int]:
 
 
 # =============================================================================
-# PARAMETER SAFETY (v6.4.0)
+# PARAMETER SAFETY
 # =============================================================================
 
 def _safe_params(*args: Any) -> tuple:
@@ -519,7 +516,6 @@ def _normalize_factor(value: Any) -> Optional[str]:
         return None
     try:
         number = float(str(value).strip())
-        # صفر صريح
         if number == 0:
             return "0"
         return f"{number:.6f}".rstrip("0").rstrip(".")
@@ -562,6 +558,10 @@ async def _get_dead_tuples_postgres() -> List[Dict[str, Any]]:
 
 
 async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
+    """
+    🆕 v6.4.2: MySQL لا يستخدم dead_tuples بنفس نموذج PG.
+    نُعيد بيانات DATA_FREE كإشارة تقريبية.
+    """
     from database import DB
     try:
         rows = await DB.fetchall("""
@@ -581,16 +581,21 @@ async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
                 "table_name": row.get("table_name"),
                 "live_tup": _safe_int(row.get("live_tup")),
                 "dead_tup": 0,
-                "dead_unsupported": True,
                 "data_free_bytes": _safe_int(row.get("data_free_bytes")),
                 "data_bytes": _safe_int(row.get("data_bytes")),
                 "index_bytes": _safe_int(row.get("index_bytes")),
-                "inserts": 0, "updates": 0, "deletes": 0,
+                "inserts": 0,
+                "updates": 0,
+                "deletes": 0,
                 "mod_since_analyze": 0,
-                "last_vacuum": None, "last_autovacuum": None,
-                "last_analyze": None, "last_autoanalyze": None,
-                "vacuum_count": 0, "autovacuum_count": 0,
-                "analyze_count": 0, "autoanalyze_count": 0,
+                "last_vacuum": None,
+                "last_autovacuum": None,
+                "last_analyze": None,
+                "last_autoanalyze": None,
+                "vacuum_count": 0,
+                "autovacuum_count": 0,
+                "analyze_count": 0,
+                "autoanalyze_count": 0,
             })
         return result
     except Exception as exc:
@@ -626,13 +631,18 @@ async def _get_dead_tuples_sqlite() -> List[Dict[str, Any]]:
                 "table_name": name,
                 "live_tup": count,
                 "dead_tup": 0,
-                "dead_unsupported": True,
-                "inserts": 0, "updates": 0, "deletes": 0,
+                "inserts": 0,
+                "updates": 0,
+                "deletes": 0,
                 "mod_since_analyze": 0,
-                "last_vacuum": None, "last_autovacuum": None,
-                "last_analyze": None, "last_autoanalyze": None,
-                "vacuum_count": 0, "autovacuum_count": 0,
-                "analyze_count": 0, "autoanalyze_count": 0,
+                "last_vacuum": None,
+                "last_autovacuum": None,
+                "last_analyze": None,
+                "last_autoanalyze": None,
+                "vacuum_count": 0,
+                "autovacuum_count": 0,
+                "analyze_count": 0,
+                "autoanalyze_count": 0,
             })
         return result
     except Exception as exc:
@@ -793,12 +803,12 @@ async def _get_schema_info() -> Dict[str, Any]:
 
 
 # =============================================================================
-# 🆕 v6.4.1: PER-TABLE AUTOVACUUM مع flexible tuning
+# PER-TABLE AUTOVACUUM (flexible tuning)
 # =============================================================================
 
 def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
     """
-    🆕 v6.4.1: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
+    v6.4.2: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
     ضمن المجموعة المقبولة (وليس مطابقة لقيمة واحدة فقط).
     """
     vacuum_raw = reloptions.get("autovacuum_vacuum_scale_factor")
@@ -821,7 +831,7 @@ def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     """
-    🆕 v6.4.1: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
+    v6.4.2: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
 
     reason:
       - "ok"            : موجود ومُحمَّل
@@ -944,11 +954,7 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     """
-    🔴 v6.4.0 FIX-CRITICAL:
-    كان DB.fetchall(q, LONG_TX_WARN_SECONDS) يُمرِّر int لا tuple
-    → TypeError يُبتلع في except → long_tx لا تُرصد أبداً.
-
-    الحل: _safe_params() لكل استدعاء.
+    v6.4.2: جميع الاستدعاءات تستخدم _safe_params لتفادي TypeError.
     """
     from database import DB, USE_POSTGRES
 
@@ -1288,6 +1294,9 @@ async def _get_indexes(
 # =============================================================================
 
 async def _get_pg_settings() -> Dict[str, Any]:
+    """
+    v6.4.2: نتجاهل القيم None أو الفارغة (بعكس السابق).
+    """
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -1313,10 +1322,11 @@ async def _get_pg_settings() -> Dict[str, Any]:
     settings: Dict[str, Any] = {}
     for key in keys:
         try:
-            settings[key] = await DB.fetchval(f"SHOW {key}")
+            value = await DB.fetchval(f"SHOW {key}")
+            if value is not None and str(value).strip():
+                settings[key] = value
         except Exception as exc:
             logger.debug("SHOW %s failed: %s", key, exc)
-            settings[key] = None
     return settings
 
 
@@ -1390,9 +1400,8 @@ def _check_project_heavy_tables() -> Optional[str]:
 
 def _check_maintenance_consistency() -> Optional[str]:
     """
-    🆕 v6.4.0: MAINTENANCE_TABLES في database_tables.py تُحدد
-    الجداول التي يستهدفها VACUUM (ANALYZE, SKIP_LOCKED) الدوري.
-    إذا كان جدول حرج (users مثلاً) مفقوداً منها → لن يُنظَّف دورياً.
+    MAINTENANCE_TABLES في database_tables.py تُحدد الجداول التي
+    يستهدفها VACUUM (ANALYZE, SKIP_LOCKED) الدوري.
     """
     try:
         from database_tables import MAINTENANCE_TABLES
@@ -2132,7 +2141,7 @@ def _split_for_telegram(
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
     """
-    قطع آمن لـ HTML.
+    v6.4.2: قطع آمن لـ HTML مع هامش ديناميكي.
 
     - يتتبع الوسوم المفتوحة في كل جزء
     - يُغلقها في نهاية الجزء
@@ -2146,10 +2155,18 @@ def _split_for_telegram(
 
     parts: List[str] = []
     remaining = text
-    # نترك هامشاً للوسوم المضافة
-    safe_limit = max(1, limit - 200)
+
+    # هامش أساسي + هامش ديناميكي حسب عدد الوسوم المفتوحة
+    base_margin = 300
 
     while len(remaining) > limit:
+        open_tags_count = len(_get_open_html_tags(remaining[:1000]))
+        dynamic_margin = base_margin + (open_tags_count * 30)
+        safe_limit = max(1, limit - dynamic_margin)
+        if safe_limit >= len(remaining):
+            parts.append(remaining)
+            break
+
         cut = remaining.rfind("\n", 0, safe_limit)
         if cut < safe_limit // 2:
             cut = safe_limit
@@ -2354,13 +2371,15 @@ async def _build_diagnose_lines() -> List[str]:
             emoji = _dead_emoji(dead, live)
             last_av = _fmt_dt(row.get("last_autovacuum"))
             last_an = _fmt_dt(row.get("last_autoanalyze"))
+            mod_since = _safe_int(row.get("mod_since_analyze"))
             lines.append(
                 f"{emoji} <code>{_escape_html(name):<18}</code> "
                 f"live={live:>7,} dead={dead:>7,} ({pct:.1f}%)"
             )
             lines.append(
                 f"     🧹 AV: <code>{last_av}</code> | "
-                f"📊 AN: <code>{last_an}</code>"
+                f"📊 AN: <code>{last_an}</code> | "
+                f"🔄 mod={mod_since:,}"
             )
             shown += 1
             if shown >= 12:
