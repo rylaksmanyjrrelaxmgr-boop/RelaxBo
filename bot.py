@@ -4,28 +4,28 @@
 """
 🌿 Relax Manager – البوت الرئيسي (v5.6.4)
 ================================================================================
-🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION):
-    🔴 FIX: pool_health_monitor — استبدال `return` بـ `raise` (3 مواضع)
-       - المشكلة: عند SIGTERM، `return` يحوّل CancelledError إلى
-         خروج نظيف → `run_task_with_retry` يعتبره "انهيار صامت"
-         → يعيد جدولة المهمة (تحذير: "عادت بدون استثناء — إعادة 5s").
-       - الأثر: مهمة إضافية تُشغَّل أثناء الإغلاق، ضوضاء في السجلات،
-         تأخير بسيط في الإغلاق.
-       - الإصلاح: `raise` يُمرِّر الإلغاء لأعلى بشكل صحيح.
-       - المواضع المُصلَحة:
-         1. pool_health_monitor — قبل البدء (initial sleep)
-         2. pool_health_monitor — فرع SQLite (لا PG)
-         3. pool_health_monitor — النوم النهائي (300s)
-       - + إصلاح مرافق في cache.py v7.6.4 (cache_cleanup_task).
+🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION — الإصلاح الحرج):
+    🔴 FIX-1: pool_health_monitor — مسار "قبل البدء"
+              `return` → `raise` عند CancelledError
+              (كان يُسبِّب: "⚠️ المهمة pool_health_monitor عادت
+               بدون استثناء — إعادة بعد 5s")
 
-🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS + POST-INIT-FIX):
-    🔴 F1: تسجيل MessageHandlers.handle_edited — يُفعِّل Fix #A4
+    🔴 FIX-2: pool_health_monitor — فرع SQLite (DB غير Postgres)
+              `return` → `raise` عند CancelledError
+
+    🔴 FIX-3: pool_health_monitor — حلقة النوم الرئيسية (300s)
+              `return` → `raise` عند CancelledError
+
+    ✅ الأثر: إغلاق نظيف تماماً بدون تحذيرات spurious في السجلات.
+
+🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS):
+    🔴 F1: تسجيل MessageHandlers.handle_edited (Fix #A4)
     🔴 F2: تسجيل أوامر db_maintenance_commands
-    🔴 F3: _start_polling_mode / _stop_polling_mode — post_init/post_stop
+    🔴 F3: _start/_stop_polling_mode — post_init/post_stop hooks
     🟠 F4: timeout عند إلغاء المهام الخلفية (10s)
     🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now()
     🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS
-    🟡 F7: فحص وجود handle_edited في CommandHandlers._verify
+    🟡 F7: فحص handle_edited في CommandHandlers._verify
 
 🆕 v5.6.2 (POLLING-MODE CORRECTNESS + SHUTDOWN ORDER):
     🔴 F1-fix: تصحيح جوهري لـ Polling Mode
@@ -1332,9 +1332,9 @@ async def pool_health_monitor() -> None:
     """
     يراقب Pool + الاتصالات كل 5 دقائق.
 
-    ✅ v5.6.4 FIX: جميع مسارات CancelledError تستخدم `raise`
-       بدل `return` — يُمرِّر الإلغاء بشكل صحيح إلى
-       `run_task_with_retry` (يمنع إعادة جدولة أثناء الإغلاق).
+    ✅ v5.6.4: جميع مسارات CancelledError تستخدم `raise` بدل `return`
+       — يُمرِّر الإلغاء بشكل صحيح إلى `run_task_with_retry`
+       (يمنع تحذير "عادت بدون استثناء — إعادة بعد 5s").
     """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
@@ -1344,7 +1344,7 @@ async def pool_health_monitor() -> None:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
         logger.info("🛑 pool_health_monitor أُلغيت (قبل البدء)")
-        # ✅ v5.6.4: raise بدل return
+        # ✅ v5.6.4 FIX-1: raise بدل return
         raise
 
     while True:
@@ -1355,7 +1355,7 @@ async def pool_health_monitor() -> None:
                     await asyncio.sleep(1800)
                 except asyncio.CancelledError:
                     logger.info("🛑 pool_health_monitor أُلغيت")
-                    # ✅ v5.6.4: raise بدل return
+                    # ✅ v5.6.4 FIX-2: raise بدل return
                     raise
                 continue
 
@@ -1509,7 +1509,7 @@ async def pool_health_monitor() -> None:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
             logger.info("🛑 pool_health_monitor أُلغيت")
-            # ✅ v5.6.4: raise بدل return
+            # ✅ v5.6.4 FIX-3: raise بدل return
             raise
 
 
@@ -1680,6 +1680,7 @@ async def run_task_with_retry(task_func, *args, task_name=""):
     يعيد تشغيل المهمة عند الانهيار مع backoff تصاعدي.
     - عند خروج مفاجئ (بدون استثناء) → تأخير وقائي 5s.
     - عند استثناء → backoff من 5s إلى 60s.
+    - عند CancelledError → raise (إغلاق نظيف).
     """
     consecutive_failures = 0
     while True:
@@ -1980,7 +1981,6 @@ async def main():
         time.monotonic() - t_app,
     )
 
-    # ✅ M3/M8: تسجيل shutdown handlers لـ handlers_message
     try:
         _register_message_shutdown(app)
         logger.info(
