@@ -1,38 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database.py - قاعدة البيانات المتكاملة (v7.7.51 — REVIEW-FIXES)
+database.py - قاعدة البيانات المتكاملة (v7.7.52 — REVIEW-FIXES-2)
 ================================================================================
-🆕 v7.7.51 (REVIEW-FIXES — DEEP AUDIT):
+🆕 v7.7.52 (REVIEW-FIXES-2 — DEEP AUDIT):
   🔴 FIX-CRITICAL:
-    ✅ get_dev_log_channel: استبدال الاستعلام الخام بـ _sql_get_setting_value()
-       السبب: `WHERE key='...'` — كلمة `key` محجوزة في MySQL → syntax error
-       → يُبتلع بصمت → قناة سجل المطور معطّلة على MySQL.
-    ✅ _sql_get_setting_value: إضافة اقتباس PG identifiers ("key"/"value")
-       دفاعاً ضد مستقبل PG وحالات search_path غير القياسية.
+    ✅ mark_published_and_advance: إزالة subquery خام
+       `WHERE key = 'min_publish_interval'` (كلمة `key` محجوزة في MySQL)
+       → فصل الاستعلام + استخدام _sql_get_setting_value().
+       الأثر السابق: الاستثناء يُبتلع بصمت → ROLLBACK كامل للمعاملة →
+       UPDATE posts SET published=1 يُلغى → المنشور يُعاد نشره كل دورة.
 
   🟡 FIX-MEDIUM:
-    ✅ _execute_with_retry: نقل import AsyncMySQLError إلى مستوى الوحدة
-       (_ASYNC_MYSQL_ERROR) بدل إعادة الاستيراد في كل استدعاء.
-    ✅ executemany: فحص نوع دفاعي على params_list والعنصر الأول
-       (رسائل TypeError واضحة بدل أخطاء غامضة داخل _adapt_params).
-    ✅ _create_secondary_indexes: كشف فهارس PG المعطوبة (indisvalid=false)
-       وحذفها قبل الإنشاء — كان الفهرس المعطوب يبقى للأبد.
-    ✅ add_penalty (SQLite branch): استخدام _execute_with_logging
-       بدل conn.execute المباشر — يُسجّل الاستعلام في slow-query log
-       ويُطبِّق _convert_placeholders + _adapt_params.
+    ✅ _sql_get_setting_value: إضافة LIMIT 1 (دفاع في العمق).
+    ✅ _executemany_with_conn (PG fallback): regex أدق.
 
-  🟢 DOC:
-    ✅ _normalize_params: توثيق سلوك dict-as-scalar.
+🆕 v7.7.51 (REVIEW-FIXES):
+  🔴 FIX-CRITICAL:
+    ✅ get_dev_log_channel: استبدال الاستعلام الخام بـ _sql_get_setting_value()
+    ✅ _sql_get_setting_value: اقتباس PG identifiers
 
-🆕 v7.7.50 (PARAM-NORMALIZATION — DEFENSE IN DEPTH):
-  ✅ FIX-CRITICAL: تطبيع المعاملات في الدوال العامة
-       - المشكلة: تمرير scalar (مثل int) إلى fetchall/fetchone/fetchval/
-                  execute يُسبِّب TypeError قبل أي شيء:
-                  "argument after * must be an iterable"
-       - الإصلاح: دالة _normalize_params() تُطبَّق في أول سطر من
-                  execute/fetchone/fetchall/fetchval
+  🟡 FIX-MEDIUM:
+    ✅ _execute_with_retry: نقل import AsyncMySQLError إلى _ASYNC_MYSQL_ERROR
+    ✅ executemany: فحص نوع دفاعي
+    ✅ _create_secondary_indexes: كشف فهارس PG المعطوبة
+    ✅ add_penalty (SQLite branch): _execute_with_logging
 
+🆕 v7.7.50 (PARAM-NORMALIZATION)
 🆕 v7.7.49 (VACUUM-OUTSIDE-TX-FIX — CRITICAL)
 🆕 v7.7.48 (PG-NO-MV-FALLBACK-FIX)
 🆕 v7.7.47 (DEV-LOG-CHANNEL)
@@ -40,14 +34,6 @@ database.py - قاعدة البيانات المتكاملة (v7.7.51 — REVIEW
 🆕 v7.7.45 (MIGRATIONS-EXTRACT)
 🆕 v7.7.44 (CACHES-EXTRACT)
 🆕 v7.7.43 (REFACTOR-MIXIN)
-🆕 v7.7.42 (AUDIT-FIX)
-🆕 v7.7.41 (POOL-LIFETIME-FIX)
-🆕 v7.7.40 (BATCH-PUBLISH)
-🆕 v7.7.39 (SMALL-TABLES-AUTOVACUUM)
-🆕 v7.7.38 (STRICTER-AUTOVACUUM)
-🆕 v7.7.37 (USERS-AUTOVACUUM)
-🆕 v7.7.36 (PG-SERVER-SETTINGS-FIX)
-🆕 v7.7.35 (FAST-COMMIT)
 ================================================================================
 """
 
@@ -62,6 +48,10 @@ database.py - قاعدة البيانات المتكاملة (v7.7.51 — REVIEW
 # [6] Magic numbers: كل رقم سحري → constant مُسمّى أعلى الملف.
 # [7] LIKE audit: grep -rn "LIKE" database_*.py | grep -v "ESCAPE '!'"
 # [8] CancelledError: catch BaseException عند الإلغاء — ليس Exception.
+# [9] Iteration safety: `for x in dict.keys()/items()` + `pop/del`
+#     داخل الحلقة = RuntimeError. استخدم `list(...)` snapshot.
+# [10] Reserved SQL words: `key`, `value`, `order`, `group`, `user`
+#     تُحاط بـ backticks/اقتباس دائماً عبر _sql_get_setting_value().
 # =====================================================================
 
 import os
@@ -121,9 +111,6 @@ USE_MYSQL = (DB_TYPE == "mysql")
 # =====================================================================
 # 0.0.1) ✅ v7.7.51: AsyncMySQLError على مستوى الوحدة
 # =====================================================================
-# السبب: كان يُعاد استيراده في كل استدعاء لـ _execute_with_retry
-# (لكل execute/fetchone/fetchall/fetchval عندما MySQL). إعادة الربط
-# مكلفة نسبياً وضجيج بصري. الآن يُستورد مرة واحدة.
 
 _ASYNC_MYSQL_ERROR = None
 if USE_MYSQL:
@@ -248,7 +235,6 @@ except ImportError as e:
 
 # =====================================================================
 # 🆕 v7.7.43: RefactorMixin — استيراد بحماية
-# 🆕 v7.7.48: إضافة CHANNELS_TO_PUBLISH_SQL_PG_NO_MV
 # =====================================================================
 
 try:
@@ -260,7 +246,6 @@ try:
         EXPIRED_PENALTIES_BATCH as _R_EXPIRED_PENALTIES_BATCH,
         PENALTY_ARCHIVE_RETENTION_DAYS as _R_PENALTY_ARCHIVE_RETENTION_DAYS,
         CHANNELS_TO_PUBLISH_SQL_PG as _R_CHANNELS_TO_PUBLISH_SQL_PG,
-        # ✅ v7.7.48: fallback حقيقي بدون MV (يُستخدم قبل bootstrap)
         CHANNELS_TO_PUBLISH_SQL_PG_NO_MV as _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV,
         CHANNELS_TO_PUBLISH_SQL_MYSQL as _R_CHANNELS_TO_PUBLISH_SQL_MYSQL,
         CHANNELS_TO_PUBLISH_SQL_SQLITE as _R_CHANNELS_TO_PUBLISH_SQL_SQLITE,
@@ -280,7 +265,7 @@ except ImportError as _re:
     _R_EXPIRED_PENALTIES_BATCH = None
     _R_PENALTY_ARCHIVE_RETENTION_DAYS = None
     _R_CHANNELS_TO_PUBLISH_SQL_PG = None
-    _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV = None   # ✅ v7.7.48
+    _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV = None
     _R_CHANNELS_TO_PUBLISH_SQL_MYSQL = None
     _R_CHANNELS_TO_PUBLISH_SQL_SQLITE = None
     REFACTOR_MIXIN_AVAILABLE = False
@@ -692,6 +677,7 @@ async def _create_pool_with_retry(
 
 def _sql_get_setting_value() -> str:
     """
+    ✅ v7.7.52: إضافة LIMIT 1 (دفاع في العمق).
     ✅ v7.7.51: إضافة اقتباس PG identifiers دفاعاً ضد:
       - ترقية PG تجعل `key`/`value` محجوزتين
       - search_path غير قياسي (نادر لكن ممكن)
@@ -699,10 +685,10 @@ def _sql_get_setting_value() -> str:
     SQLite: بدون اقتباس (مطابق للسلوك الأصلي).
     """
     if USE_MYSQL:
-        return "SELECT `value` FROM settings WHERE `key` = ?"
+        return "SELECT `value` FROM settings WHERE `key` = ? LIMIT 1"
     if USE_POSTGRES:
-        return 'SELECT "value" FROM settings WHERE "key" = ?'
-    return "SELECT value FROM settings WHERE key = ?"
+        return 'SELECT "value" FROM settings WHERE "key" = ? LIMIT 1'
+    return "SELECT value FROM settings WHERE key = ? LIMIT 1"
 
 # =====================================================================
 # 🆕 v7.7.50: PARAMETER NORMALIZATION
@@ -720,21 +706,12 @@ def _normalize_params(params: Any) -> tuple:
         set / frozenset   → tuple(items)
         tuple             → كما هو
 
-    السبب: جميع دوال execute/fetchone/fetchall/fetchval تستخدم
-    *p داخلياً. تمرير scalar مباشرة يُسبِّب:
-        TypeError: argument after * must be an iterable
+    ⚠️ v7.7.51: dict يُعامل كـ scalar (param واحد).
 
-    الأثر العملي سابقاً: db_diagnostics v6.3.0 كان يُمرِّر
-    LONG_TX_WARN_SECONDS (int) → الاستثناء يُبتلع في except
-    → long_tx/idle_tx لم تُرصد أبداً.
-
-    ملاحظة: db_diagnostics v6.4.x يُطبِّع من جانبه أيضاً
-    عبر _safe_params — هذه الطبقة الثانية للدفاع.
-
-    ⚠️ v7.7.51: dict يُعامل كـ scalar (param واحد) — وليس كـ
-    مجموعة params. هذا مقصود لأنه يُستخدم أحياناً لتمرير
-    JSON/JSONB إلى PostgreSQL. لتقديم dict-as-multiple-params،
-    استخدم `tuple(d.items())` صراحةً أو مرِّر list من الأزواج.
+    أمثلة:
+        execute("SELECT $1::jsonb", {"a": 1})   # dict كـ param واحد
+        execute("SELECT ?, ?", [1, 2])          # list → (1, 2)
+        execute("UPDATE t SET x=? WHERE y=?", 5)  # scalar → (5,)
     """
     if params is None:
         return ()
@@ -742,7 +719,6 @@ def _normalize_params(params: Any) -> tuple:
         return params
     if isinstance(params, (list, set, frozenset)):
         return tuple(params)
-    # scalar (int / str / float / bool / datetime / bytes / dict / ...)
     return (params,)
 
 # =====================================================================
@@ -2024,6 +2000,8 @@ class Database(
             self._mv_available = False
 
             self._group_security_columns_cache: Optional[set] = None
+            # ✅ v7.4.11: قفل لكاش أعمدة group_security
+            self._gsc_columns_lock = asyncio.Lock()
 
             self._singleton_init_done = True
         except Exception:
@@ -2098,15 +2076,12 @@ class Database(
             return 0
 
     # ═══════════════════════════════════════════════════════════════
-    # ✅ v7.7.47 + v7.7.51: قناة سجل المطور (منفصلة عن العامة)
+    # ✅ v7.7.47 + v7.7.51: قناة سجل المطور
     # ═══════════════════════════════════════════════════════════════
 
     async def get_dev_log_channel(self) -> str:
         """
         ✅ v7.7.51: استخدام _sql_get_setting_value() بدل الاستعلام الخام.
-        السبب: `WHERE key='dev_log_channel'` — `key` كلمة محجوزة في
-        MySQL → syntax error → الاستثناء يُبتلع بصمت → قناة سجل
-        المطور معطّلة تماماً على MySQL.
         """
         try:
             if hasattr(self, 'get_setting'):
@@ -2117,9 +2092,8 @@ class Database(
             logger.debug(f"get_setting(dev_log_channel): {e}")
 
         try:
-            # ✅ v7.7.51: يستخدم helper الذي يوفّر backticks/اقتباس
             row = await self.fetchone(
-                _sql_get_setting_value() + " LIMIT 1",
+                _sql_get_setting_value(),
                 ("dev_log_channel",),
             )
             if row:
@@ -3318,8 +3292,6 @@ class Database(
     async def _execute_with_retry(
         self, query: str, params, executor, max_retries=3
     ):
-        # ✅ v7.7.51: استخدام المتغير العام بدلاً من إعادة الاستيراد
-        # في كل استدعاء (كان import داخل try/except في كل مرة).
         AsyncMySQLError = _ASYNC_MYSQL_ERROR
 
         last_exception = None
@@ -3466,6 +3438,11 @@ class Database(
                     raise
                 logger.warning(f"⚠️ executemany فشل: {e}")
                 total = 0
+                # ✅ v7.7.52: regex أدق — يمنع التقاط أرقام من VALUES(...)
+                rowcount_re = re.compile(
+                    r"\b(INSERT|UPDATE|DELETE)\s+\d+\s+(\d+)\s*$",
+                    re.IGNORECASE,
+                )
                 for params in params_list:
                     try:
                         result = await self._execute_with_logging(
@@ -3473,12 +3450,8 @@ class Database(
                             lambda q2, p2: conn.execute(q2, *p2),
                             skip_explain=True,
                         )
-                        m = re.search(
-                            r"\b(?:INSERT|UPDATE|DELETE)\b.*?\s(\d+)\s*$",
-                            result or "",
-                            re.IGNORECASE | re.DOTALL,
-                        )
-                        total += int(m.group(1)) if m else 1
+                        m = rowcount_re.search(result or "")
+                        total += int(m.group(2)) if m else 1
                     except Exception:
                         continue
                 return total
@@ -3637,7 +3610,6 @@ class Database(
                     pass
 
     async def execute(self, query: str, params: tuple = ()) -> int:
-        # ✅ v7.7.50: تطبيع المعاملات
         params = _normalize_params(params)
 
         async def _exec(q, p):
@@ -3653,7 +3625,6 @@ class Database(
             raise
 
     async def fetchone(self, query: str, params: tuple = ()):
-        # ✅ v7.7.50: تطبيع المعاملات
         params = _normalize_params(params)
 
         async def _exec(q, p):
@@ -3669,7 +3640,6 @@ class Database(
             raise
 
     async def fetchall(self, query: str, params: tuple = ()):
-        # ✅ v7.7.50: تطبيع المعاملات
         params = _normalize_params(params)
 
         async def _exec(q, p):
@@ -3687,7 +3657,6 @@ class Database(
     async def fetchval(
         self, query: str, params: tuple = (), default=None
     ):
-        # ✅ v7.7.50: تطبيع المعاملات
         params = _normalize_params(params)
 
         async def _exec(q, p):
@@ -3709,8 +3678,6 @@ class Database(
     ) -> int:
         """
         ✅ v7.7.51: فحص نوع دفاعي.
-        يمنع TypeError غامض داخل _adapt_params عند تمرير
-        scalar tuple بدل list-of-tuples.
         """
         if not params_list:
             return 0
@@ -4124,10 +4091,7 @@ class Database(
 
     async def _create_secondary_indexes(self, indexes):
         """
-        ✅ v7.7.51: كشف فهارس PG المعطوبة (indisvalid=false / indisready=false)
-        وحذفها قبل إعادة الإنشاء. كان CREATE INDEX CONCURRENTLY الفاشل
-        يُترك كـ "invalid index" بنفس الاسم → كل محاولة لاحقة تفشل
-        بـ "already exists" → تُصنّف skipped → معطوب للأبد.
+        ✅ v7.7.51: كشف فهارس PG المعطوبة (indisvalid=false).
         """
         if not indexes:
             return
@@ -4157,7 +4121,6 @@ class Database(
                             skipped += 1
                             continue
 
-                        # ✅ v7.7.51: كشف فهرس معطوب بنفس الاسم
                         try:
                             invalid = await conn.fetchval(
                                 "SELECT NOT (i.indisvalid "
@@ -4818,10 +4781,7 @@ class Database(
 
     def _get_secondary_indexes(self) -> List[Tuple[str, str, str]]:
         """
-        ✅ v7.7.48: إزالة فهرسين deprecated كانا يُحذفان من
-                    database_tables.py ثم يُعاد إنشاؤهما هنا:
-          - idx_user_penalties_active_end
-          - idx_posts_channel_created
+        ✅ v7.7.48: إزالة فهرسين deprecated.
         """
         return [
             (
@@ -5182,12 +5142,6 @@ class Database(
                             f"⚠️ الفهارس المؤجلة: {e}"
                         )
 
-                # ✅ v7.7.49: VACUUM + ANALYZE خارج transaction
-                #    السبب: PostgreSQL لا يسمح بـ VACUUM داخل
-                #    transaction block — كان يُلغِي الـ tx بالكامل
-                #    ويُسبِّب فشل كل العمليات اللاحقة.
-                #    self.connection() يُعطي conn في autocommit mode
-                #    → VACUUM يعمل بنجاح.
                 if USE_POSTGRES:
                     try:
                         from database_tables import (
@@ -6267,6 +6221,11 @@ class Database(
     async def mark_published_and_advance(
         self, channel_db_id: int, post_id: int
     ) -> bool:
+        """
+        ✅ v7.7.52 FIX-CRITICAL: إزالة subquery خام `WHERE key = '...'`
+        الذي كان يُسبِّب syntax error على MySQL → يُبتلع → ROLLBACK كامل
+        للمعاملة → المنشور لا يُعلَّم → يُعاد نشره كل دورة.
+        """
         if post_id is None or channel_db_id is None:
             return False
 
@@ -6297,17 +6256,29 @@ class Database(
                     channel_db_id, now,
                 )
 
+                # ✅ v7.7.52: فصل الاستعلام — لا subquery خام
                 row = await self._fetchone_with_conn(
                     conn,
                     "SELECT schedule_type, interval_minutes, "
-                    "interval_hours, interval_days, "
-                    "COALESCE(("
-                    "    SELECT value FROM settings "
-                    "    WHERE key = 'min_publish_interval'"
-                    "), ?) AS gi "
+                    "interval_hours, interval_days "
                     "FROM schedule WHERE channel_db_id = ?",
-                    str(DEFAULT_PUBLISH_INTERVAL_MINUTES),
                     channel_db_id,
+                )
+                if row is None:
+                    row = {}
+
+                try:
+                    gi_raw = await self._fetchval_with_conn(
+                        conn,
+                        _sql_get_setting_value(),
+                        "min_publish_interval",
+                    )
+                except Exception:
+                    gi_raw = None
+
+                row["gi"] = (
+                    gi_raw if gi_raw
+                    else str(DEFAULT_PUBLISH_INTERVAL_MINUTES)
                 )
 
                 interval_sec = self._compute_publish_interval(row)
@@ -6479,28 +6450,13 @@ class Database(
             logger.error(f"❌ update_last_publish: {e}")
             return False
 
-    # ═════════════════════════════════════════════════════════════════
-    # ✅ v7.7.48: get_channels_to_publish — إصلاح race condition
-    # ═════════════════════════════════════════════════════════════════
     async def get_channels_to_publish(
         self, limit: int = 20
     ) -> List[Dict]:
-        """
-        جلب القنوات الجاهزة للنشر.
-
-        ✅ v7.7.48: إصلاح خطير —
-          - قبل bootstrap: _mv_available=False
-          - كان الكود يسقط إلى فرع else (SQLite) ويُرسل استعلام
-            SQLite بـ CTEs إلى PostgreSQL → 4.5s
-          - الإصلاح: فرع PostgreSQL مُستقل يستخدم
-            CHANNELS_TO_PUBLISH_SQL_PG_NO_MV عند غياب MV.
-        """
         now = TimeUtils.utc_now()
         owner_id = getattr(CONFIG, "PRIMARY_OWNER_ID", 0) or 0
 
-        # ═══ PostgreSQL ═══
         if USE_POSTGRES:
-            # جدولة refresh الـ MV في الخلفية (لا يحجب)
             if self._mv_available:
                 now_mono = time.monotonic()
                 if (now_mono - self._mv_last_refresh_mono
@@ -6510,7 +6466,6 @@ class Database(
                     except Exception as e:
                         logger.debug(f"MV refresh spawn: {e}")
 
-            # Fast path: MV جاهز → استعلام محسّن يستخدمه
             if self._mv_available:
                 if _R_CHANNELS_TO_PUBLISH_SQL_PG is not None:
                     query = _R_CHANNELS_TO_PUBLISH_SQL_PG
@@ -6520,7 +6475,6 @@ class Database(
                     query, (owner_id, now, limit)
                 )
 
-            # ✅ FIX v7.7.48: fallback حقيقي بدون MV — لا نسقط إلى SQLite
             if _R_CHANNELS_TO_PUBLISH_SQL_PG_NO_MV is not None:
                 logger.debug(
                     "ℹ️ PG: MV غير جاهز — استخدام PG_NO_MV fallback"
@@ -6530,7 +6484,6 @@ class Database(
                     (now, owner_id, now, limit),
                 )
 
-            # آخر حل: _get_pg_query_fallback (يحتاج MV — سيفشل إن لم يوجد)
             logger.warning(
                 "⚠️ PG: PG_NO_MV غير متاح — استخدام "
                 "_get_pg_query_fallback (يفترض MV موجود)"
@@ -6540,7 +6493,6 @@ class Database(
                 (owner_id, now, limit),
             )
 
-        # ═══ MySQL ═══
         elif USE_MYSQL:
             now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             if _R_CHANNELS_TO_PUBLISH_SQL_MYSQL is not None:
@@ -6552,7 +6504,6 @@ class Database(
                 (now_str, owner_id, now_str, limit),
             )
 
-        # ═══ SQLite ═══
         else:
             if _R_CHANNELS_TO_PUBLISH_SQL_SQLITE is not None:
                 query = _R_CHANNELS_TO_PUBLISH_SQL_SQLITE
@@ -6673,11 +6624,7 @@ class Database(
         auto_register: bool = True,
     ) -> Optional[int]:
         """
-        ✅ v7.7.51: فرع SQLite يستخدم _execute_with_logging بدل
-        conn.execute المباشر. كان يتجاوز:
-          - slow-query logging
-          - _convert_placeholders (no-op على SQLite لكن توحيد)
-          - _adapt_params (لا ضرر لكن توحيد)
+        ✅ v7.7.51: فرع SQLite يستخدم _execute_with_logging.
         """
         if penalty_type not in self.VALID_PENALTY_TYPES:
             return None
@@ -6759,9 +6706,6 @@ class Database(
                         finally:
                             await cursor.close()
                     else:
-                        # ✅ v7.7.51: عبر _execute_with_logging
-                        # (نحتاج cursor.lastrowid → لذا نمرر lambda
-                        #  يُعيد cursor مباشرة بدلاً من rowcount)
                         q_ins = _convert_placeholders(
                             "INSERT INTO user_penalties "
                             "(user_id, chat_id, penalty_type, "
@@ -7098,7 +7042,7 @@ __all__ = [
     "_clone_start_data", "_create_pool_with_retry",
     "_FactoryFailed",
     "_sql_get_setting_value",
-    "_normalize_params",   # ✅ v7.7.50
+    "_normalize_params",
     "_find_values_end", "_insert_before_returning",
     "_replace_excluded_with_values",
     "_get_unique_columns", "_find_best_conflict_target",
@@ -7113,5 +7057,5 @@ __all__ = [
     "_validate_column_def",
     "_ALLOWED_COLUMN_TYPES",
     "_ALLOWED_COL_KEYWORDS",
-    "_ASYNC_MYSQL_ERROR",   # ✅ v7.7.51
+    "_ASYNC_MYSQL_ERROR",
 ]
