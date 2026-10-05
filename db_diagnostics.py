@@ -4,54 +4,35 @@
 """
 db_diagnostics.py — PostgreSQL/MySQL/SQLite Database Diagnostics
 ================================================================================
-v6.4.2 — FLEXIBLE-AUTOVACUUM-TUNING + PARAMETER-BINDING HOTFIX + minor polish
+v6.5.0 — MAINTENANCE + QUICK DIAG + WEEKLY REPORT
 
-التحسينات على v6.4.1:
+التحسينات على v6.4.2:
+    🆕 diagnose_db_quick      : تقرير صحي مختصر (4 أسطر)
+    🆕 preview_maintenance    : معاينة الصيانة (بدون تعديل)
+    🆕 run_maintenance        : تنفيذ DELETE + VACUUM بأمان
+    🆕 format_maintenance_*   : تنسيق للعرض في تيليجرام
+
+التحسينات الموروثة من v6.4.2:
     ✅ توحيد مصفوفات القيم المقبولة (ACCEPTED_*_SCALE_FACTORS)
     ✅ تحسين _split_for_telegram — هامش ديناميكي آمن
     ✅ عرض n_mod_since_analyze في التفاصيل
-    ✅ تحقق MySQL أفضل عند غياب الصلاحيات
     ✅ _get_pg_settings: تحقق من القيم الفارغة
-    ✅ استخدام _safe_params في كل مكان (بدون استثناء)
-    ✅ تنظيف حقول غير مستخدمة (dead_unsupported → ملاحظات واضحة)
-
-التحسينات الموروثة من v6.4.1:
-    ✅ EXPECTED_*_SCALE_FACTOR أصبحت قوائم مقبولة (flexible)
-    ✅ القيم المقبولة:
-         autovacuum_vacuum_scale_factor ∈ {0.02, 0.05, 0}
-         autovacuum_analyze_scale_factor ∈ {0.01, 0.02, 0}
+    ✅ استخدام _safe_params في كل مكان
 
 التحسينات الموروثة من v6.4.0:
     🔴 FIX-CRITICAL: تمرير المعاملات كـ tuple دائماً عبر _safe_params
-       - المشكلة: DB.fetchall("...> $1...", LONG_TX_WARN_SECONDS)
-                  كان يُمرِّر int (وليس tuple) → TypeError
-       - الأثر: long transactions لم تُرصد أبداً
-       - الحل: _safe_params(LONG_TX_WARN_SECONDS)
-
-    🆕 fallback ثانٍ حقيقي لـ _get_indexes:
-       - المسار الأول: pg_indexes (المُفضَّل)
-       - المسار الثاني: pg_class + pg_index (fallback فعلي)
-
-    🆕 _get_per_table_autovacuum: سبب واضح بدلاً من "غير مرئي"
-       - reason: not_found | not_in_schema | query_failed | ok
-
-    🆕 _split_for_telegram آمن لـ HTML:
-       - تتبع الوسوم المفتوحة وإغلاقها/إعادة فتحها عند القطع
-       - يمنع BadRequest: can't parse entities
-
-    🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح في التقرير
-
-المبادئ (محفوظة):
-    ✅ لا نخلط بين "الدليل" و"الاحتمال".
-    ✅ backend_xmin وحده لا يُعتبر إثباتاً للحجب.
-    ✅ لا نفترض أن VACUUM سيعيد المساحة لنظام الملفات.
-    ✅ لا ننفذ pg_terminate_backend() تلقائياً.
-    ✅ SQL identifiers تُقتبس بأمان.
-    ✅ PostgreSQL / MySQL / SQLite لها تحليلات مختلفة.
-    ✅ جميع عمليات التشخيص read-only.
+    🆕 fallback ثانٍ لـ _get_indexes
+    🆕 _get_per_table_autovacuum مع reason واضح
+    🆕 _split_for_telegram آمن لـ HTML
+    🆕 MySQL: dead_tup غير مدعوم → تنبيه واضح
 
 الاستخدام:
-    from db_diagnostics import diagnose_db, diagnose_db_split, vacuum_analyze_tables
+    from db_diagnostics import (
+        diagnose_db, diagnose_db_split, diagnose_db_quick,
+        preview_maintenance, run_maintenance,
+        format_maintenance_preview, format_maintenance_result,
+        vacuum_analyze_tables,
+    )
 ================================================================================
 """
 
@@ -59,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -70,7 +52,7 @@ logger = logging.getLogger(__name__)
 # VERSION
 # =============================================================================
 
-VERSION = "6.4.2"
+VERSION = "6.5.0"
 
 
 # =============================================================================
@@ -105,31 +87,26 @@ ANALYZE_MOD_WARN_PCT = 10.0
 ANALYZE_MOD_CRIT_PCT = 20.0
 
 # ═════════════════════════════════════════════════════════════════════
-# v6.4.2: قيم autovacuum المقبولة (flexible)
-# ═════════════════════════════════════════════════════════════════════
-# أي مجموعة من (vacuum_factor, analyze_factor) ضمن الشروط التالية
-# تُعتبر "مضبوطة":
-#   vacuum_factor ∈ ACCEPTED_VACUUM_SCALE_FACTORS
-#   analyze_factor ∈ ACCEPTED_ANALYZE_SCALE_FACTORS
+# v6.5.0: قيم autovacuum المقبولة (flexible)
 # ═════════════════════════════════════════════════════════════════════
 
 ACCEPTED_VACUUM_SCALE_FACTORS: Set[str] = {
     "0.02",   # database.py (v7.7.x — heavy tables)
     "0.05",   # database_tables.py (manual helper)
-    "0",      # aggressive (scale=0 مع threshold صغير)
+    "0",      # aggressive
 }
 
 ACCEPTED_ANALYZE_SCALE_FACTORS: Set[str] = {
     "0.01",   # database.py (v7.7.x — heavy tables)
     "0.02",   # database_tables.py (manual helper)
-    "0",      # aggressive (scale=0)
+    "0",      # aggressive
 }
 
 # للعرض فقط
 EXPECTED_VACUUM_SCALE_FACTOR = "0.02"
 EXPECTED_ANALYZE_SCALE_FACTOR = "0.01"
 
-# للتوافق الخلفي مع أي كود خارجي يستورد الأسماء القديمة
+# للتوافق الخلفي
 EXPECTED_VACUUM_SCALE_FACTORS = ACCEPTED_VACUUM_SCALE_FACTORS
 EXPECTED_ANALYZE_SCALE_FACTORS = ACCEPTED_ANALYZE_SCALE_FACTORS
 
@@ -142,6 +119,12 @@ REPORT_MAX_CHARS = 3800
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 REQUIRED_HEAVY_TABLE_USERS = "users"
+
+# 🆕 v6.5.0
+MAINTENANCE_MAX_DELETE_PER_TABLE = 100_000
+MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS = 30
+MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS = 90
+MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS = 90
 
 
 # =============================================================================
@@ -558,10 +541,6 @@ async def _get_dead_tuples_postgres() -> List[Dict[str, Any]]:
 
 
 async def _get_dead_tuples_mysql() -> List[Dict[str, Any]]:
-    """
-    🆕 v6.4.2: MySQL لا يستخدم dead_tuples بنفس نموذج PG.
-    نُعيد بيانات DATA_FREE كإشارة تقريبية.
-    """
     from database import DB
     try:
         rows = await DB.fetchall("""
@@ -803,13 +782,13 @@ async def _get_schema_info() -> Dict[str, Any]:
 
 
 # =============================================================================
-# PER-TABLE AUTOVACUUM (flexible tuning)
+# PER-TABLE AUTOVACUUM
 # =============================================================================
 
 def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
     """
-    v6.4.2: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
-    ضمن المجموعة المقبولة (وليس مطابقة لقيمة واحدة فقط).
+    v6.5.0: يعتبر الجدول مضبوطاً إذا كانت قيم scale_factor
+    ضمن المجموعة المقبولة.
     """
     vacuum_raw = reloptions.get("autovacuum_vacuum_scale_factor")
     analyze_raw = reloptions.get("autovacuum_analyze_scale_factor")
@@ -831,7 +810,7 @@ def _is_tuned_reloptions(reloptions: Dict[str, str]) -> bool:
 
 async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
     """
-    v6.4.2: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
+    v6.5.0: منطق tuned مرن — يقبل 0.02/0.01 و 0.05/0.02 و 0/0.
 
     reason:
       - "ok"            : موجود ومُحمَّل
@@ -856,7 +835,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 
     in_clause, params = _build_pg_in_clause(heavy, 1)
 
-    # ── المسار الأول: pg_class + current_schemas ──
     query = f"""
         SELECT c.relname AS table_name,
                c.reloptions,
@@ -876,7 +854,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
         primary_failed = True
         logger.warning("_get_per_table_autovacuum primary: %s", exc)
 
-    # ── fallback: بدون فلترة schema ──
     if not rows:
         try:
             fallback_query = f"""
@@ -921,7 +898,6 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
             "schema": row.get("schema_name"),
         }
 
-    # ── تشخيص الغائبين ──
     missing = [t for t in heavy if t not in found_names]
     if missing:
         try:
@@ -954,7 +930,7 @@ async def _get_per_table_autovacuum() -> Dict[str, Dict[str, Any]]:
 
 async def _get_autovacuum_blockers() -> List[Dict[str, Any]]:
     """
-    v6.4.2: جميع الاستدعاءات تستخدم _safe_params لتفادي TypeError.
+    v6.5.0: جميع الاستدعاءات تستخدم _safe_params لتفادي TypeError.
     """
     from database import DB, USE_POSTGRES
 
@@ -1176,16 +1152,12 @@ def _detect_xmin_blocker(
 
 
 # =============================================================================
-# 5. INDEXES (مع fallback)
+# 5. INDEXES
 # =============================================================================
 
 async def _get_indexes(
     tables: List[str],
 ) -> Dict[str, List[str]]:
-    """
-    المسار الأول: pg_indexes (المُفضَّل — يحتوي تعريف الفهرس)
-    المسار الثاني: pg_class + pg_index (fallback فعلي)
-    """
     from database import DB
 
     result: Dict[str, List[str]] = {table: [] for table in tables}
@@ -1195,7 +1167,6 @@ async def _get_indexes(
     if _is_postgres():
         in_clause, params = _build_pg_in_clause(tables, 1)
 
-        # ── المحاولة الأولى: pg_indexes ──
         try:
             query = f"""
                 SELECT tablename AS table_name,
@@ -1219,7 +1190,6 @@ async def _get_indexes(
         except Exception as exc:
             logger.warning("_get_indexes (pg_indexes): %s", exc)
 
-        # ── fallback: pg_class + pg_index ──
         try:
             query = f"""
                 SELECT c.relname AS table_name,
@@ -1269,7 +1239,6 @@ async def _get_indexes(
             logger.warning("_get_indexes mysql: %s", exc)
         return result
 
-    # SQLite
     try:
         rows = await DB.fetchall("""
             SELECT name AS index_name,
@@ -1294,9 +1263,6 @@ async def _get_indexes(
 # =============================================================================
 
 async def _get_pg_settings() -> Dict[str, Any]:
-    """
-    v6.4.2: نتجاهل القيم None أو الفارغة (بعكس السابق).
-    """
     from database import DB, USE_POSTGRES
 
     if not USE_POSTGRES:
@@ -1399,10 +1365,6 @@ def _check_project_heavy_tables() -> Optional[str]:
 
 
 def _check_maintenance_consistency() -> Optional[str]:
-    """
-    MAINTENANCE_TABLES في database_tables.py تُحدد الجداول التي
-    يستهدفها VACUUM (ANALYZE, SKIP_LOCKED) الدوري.
-    """
     try:
         from database_tables import MAINTENANCE_TABLES
         from database import HEAVY_TABLES_FOR_AUTOVACUUM
@@ -2107,10 +2069,6 @@ def _html_tag_name(full_open_tag: str) -> str:
 
 
 def _get_open_html_tags(text: str) -> List[str]:
-    """
-    يُرجع قائمة الوسوم المفتوحة (كنص فتح كامل)
-    بالترتيب. تُستخدم لإغلاقها قبل القطع وإعادة فتحها بعده.
-    """
     stack: List[str] = []
     for m in _HTML_TAG_RE.finditer(text):
         is_closing = bool(m.group(1))
@@ -2140,14 +2098,6 @@ def _split_for_telegram(
     text: str,
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> List[str]:
-    """
-    v6.4.2: قطع آمن لـ HTML مع هامش ديناميكي.
-
-    - يتتبع الوسوم المفتوحة في كل جزء
-    - يُغلقها في نهاية الجزء
-    - يعيد فتحها في بداية الجزء التالي
-    → يمنع BadRequest: can't parse entities من تيليجرام
-    """
     if not text:
         return [""]
     if len(text) <= limit:
@@ -2155,8 +2105,6 @@ def _split_for_telegram(
 
     parts: List[str] = []
     remaining = text
-
-    # هامش أساسي + هامش ديناميكي حسب عدد الوسوم المفتوحة
     base_margin = 300
 
     while len(remaining) > limit:
@@ -2581,6 +2529,513 @@ async def diagnose_db_split(
 
 
 # =============================================================================
+# 🆕 v6.5.0: QUICK DIAGNOSTIC
+# =============================================================================
+
+async def diagnose_db_quick() -> str:
+    """
+    🔬 تقرير صحي مختصر — 4 أسطر فقط.
+    """
+    from database import DB, USE_POSTGRES
+
+    lines: List[str] = []
+
+    try:
+        size_kb = await DB.get_db_size_kb()
+        size_display = _fmt_size_kb(size_kb)
+    except Exception:
+        size_display = "?"
+
+    if not USE_POSTGRES:
+        return (
+            f"🔬 <b>DB Quick</b> | {_escape_html(_db_type())}\n"
+            f"📏 الحجم: <b>{size_display}</b>"
+        )
+
+    try:
+        dead_rows = await _get_dead_tuples()
+        blockers = await _get_autovacuum_blockers()
+        pg_settings = await _get_pg_settings()
+        health = _calculate_pg_health(dead_rows, blockers, pg_settings)
+    except Exception as exc:
+        logger.warning(f"diagnose_db_quick: {exc}")
+        return (
+            f"🔬 <b>DB Quick</b> | {_escape_html(_db_type())}\n"
+            f"📏 الحجم: <b>{size_display}</b>\n"
+            f"⚠️ تعذر جلب الإحصائيات"
+        )
+
+    score = health['score']
+    if score >= 90:
+        score_emoji = "🟢"
+    elif score >= 70:
+        score_emoji = "🟡"
+    else:
+        score_emoji = "🔴"
+
+    dead = health['total_dead']
+    if dead < 500:
+        dead_emoji = "🟢"
+    elif dead < 5000:
+        dead_emoji = "🟡"
+    else:
+        dead_emoji = "🔴"
+
+    av_on = _autovacuum_enabled(pg_settings)
+    av_emoji = "🟢" if av_on else "🔴"
+
+    blockers_count = (
+        health['long_tx'] + health['idle_tx']
+    )
+    if blockers_count == 0:
+        blockers_emoji = "🟢"
+    else:
+        blockers_emoji = "🟠"
+
+    lines.append(
+        f"🔬 <b>DB Health:</b> {score_emoji} "
+        f"<b>{score}/100</b>"
+    )
+    lines.append(
+        f"💀 Dead: {dead_emoji} <b>{dead:,}</b> | "
+        f"📏 <b>{size_display}</b>"
+    )
+    lines.append(
+        f"🧹 AV: {av_emoji} | "
+        f"⚠️ Blockers: {blockers_emoji} <b>{blockers_count}</b>"
+    )
+
+    if score >= 90:
+        lines.append("✅ لا مشاكل — كل شيء يعمل")
+    elif score >= 70:
+        lines.append("⚠️ انتباه: راجع /db_diag")
+    else:
+        lines.append("🔴 يحتاج تدخلاً — شغّل /db_diag")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# 🆕 v6.5.0: PREVIEW MAINTENANCE
+# =============================================================================
+
+async def preview_maintenance(
+    admin_logs_days: int = MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS,
+    penalty_archive_days: int = MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS,
+    user_violations_days: int = MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS,
+) -> Dict[str, Any]:
+    """
+    🔍 معاينة عملية الصيانة — بدون أي تعديل.
+    """
+    from database import (
+        DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
+    )
+
+    result: Dict[str, Any] = {
+        'available': False,
+        'db_type': _db_type(),
+        'plan': [],
+        'vacuum_tables': [],
+        'warnings': [],
+        'error': None,
+    }
+
+    if not USE_POSTGRES:
+        result['error'] = (
+            "الصيانة التلقائية مدعومة فقط على PostgreSQL حالياً"
+        )
+        return result
+
+    result['available'] = True
+
+    # فحص VACUUM جارٍ
+    try:
+        blockers = await _get_autovacuum_blockers()
+        running = [
+            item for item in blockers
+            if item.get("type") == "running_vacuum"
+        ]
+        if running:
+            result['warnings'].append(
+                f"⚠️ يوجد VACUUM جارٍ على "
+                f"{running[0].get('table')} — سيتم تخطيه"
+            )
+    except Exception as exc:
+        logger.debug(f"preview_maintenance(blockers): {exc}")
+
+    # فحص الجداول المطلوبة
+    tables_exist: Set[str] = set()
+    try:
+        rows = await DB.fetchall("""
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = ANY(current_schemas(false))
+        """)
+        for r in rows or []:
+            name = r.get('tablename')
+            if name:
+                tables_exist.add(name)
+    except Exception as exc:
+        logger.warning(f"preview_maintenance(tables): {exc}")
+        result['error'] = f"تعذر جلب قائمة الجداول: {exc}"
+        return result
+
+    # بناء خطة الحذف
+    delete_plan = [
+        ('admin_logs', 'created_at', admin_logs_days),
+        ('penalty_archive', 'created_at', penalty_archive_days),
+        ('user_violations', 'created_at', user_violations_days),
+    ]
+
+    for table, ts_col, days in delete_plan:
+        if table not in tables_exist:
+            continue
+
+        safe_table = _quote_pg_identifier(table)
+        safe_col = _quote_pg_identifier(ts_col)
+
+        try:
+            count = await DB.fetchval(
+                f"SELECT COUNT(*) FROM {safe_table} "
+                f"WHERE {safe_col} < "
+                f"NOW() - INTERVAL '{days} days'",
+                default=0,
+            )
+            count = _safe_int(count)
+        except Exception as exc:
+            logger.debug(f"count {table}: {exc}")
+            count = -1
+
+        result['plan'].append({
+            'table': table,
+            'action': 'DELETE',
+            'column': ts_col,
+            'days': days,
+            'criteria': f"{ts_col} < NOW() - INTERVAL '{days} days'",
+            'count': count,
+        })
+
+    # VACUUM plan
+    result['vacuum_tables'] = [
+        t for t in (HEAVY_TABLES_FOR_AUTOVACUUM or [])
+        if t and t in tables_exist
+    ]
+
+    return result
+
+
+# =============================================================================
+# 🆕 v6.5.0: RUN MAINTENANCE
+# =============================================================================
+
+async def run_maintenance(
+    *,
+    admin_logs_days: int = MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS,
+    penalty_archive_days: int = MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS,
+    user_violations_days: int = MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS,
+    max_delete_per_table: int = MAINTENANCE_MAX_DELETE_PER_TABLE,
+    skip_delete: bool = False,
+    skip_vacuum: bool = False,
+) -> Dict[str, Any]:
+    """
+    🧹 تنفيذ الصيانة الكاملة (DELETE + VACUUM) بأمان.
+    """
+    from database import (
+        DB, USE_POSTGRES, HEAVY_TABLES_FOR_AUTOVACUUM,
+    )
+
+    t_start = _time.monotonic()
+
+    result: Dict[str, Any] = {
+        'success': False,
+        'duration_sec': 0.0,
+        'deletes': [],
+        'vacuum': [],
+        'errors': [],
+    }
+
+    if not USE_POSTGRES:
+        result['errors'].append(
+            "الصيانة مدعومة فقط على PostgreSQL حالياً"
+        )
+        return result
+
+    # ═══ 1) DELETE PHASE ═══
+    if not skip_delete:
+        delete_plan = [
+            ('admin_logs', 'created_at', admin_logs_days),
+            ('penalty_archive', 'created_at', penalty_archive_days),
+            ('user_violations', 'created_at', user_violations_days),
+        ]
+
+        for table, ts_col, days in delete_plan:
+            entry = {
+                'table': table,
+                'deleted': 0,
+                'skipped': False,
+                'error': None,
+            }
+
+            try:
+                count = _safe_int(await DB.fetchval(
+                    f"SELECT COUNT(*) FROM "
+                    f"{_quote_pg_identifier(table)} "
+                    f"WHERE {_quote_pg_identifier(ts_col)} < "
+                    f"NOW() - INTERVAL '{days} days'",
+                    default=0,
+                ))
+            except Exception as exc:
+                entry['error'] = f"count failed: {exc}"
+                result['deletes'].append(entry)
+                continue
+
+            if count > max_delete_per_table:
+                entry['skipped'] = True
+                entry['error'] = (
+                    f"تخطي: {count:,} > {max_delete_per_table:,} "
+                    f"(سقف أمان)"
+                )
+                result['deletes'].append(entry)
+                continue
+
+            if count == 0:
+                result['deletes'].append(entry)
+                continue
+
+            try:
+                async with DB.transaction() as conn:
+                    deleted = await DB._execute_with_conn(
+                        conn,
+                        f"DELETE FROM {_quote_pg_identifier(table)} "
+                        f"WHERE {_quote_pg_identifier(ts_col)} < "
+                        f"NOW() - INTERVAL '{days} days'",
+                    )
+                entry['deleted'] = _safe_int(deleted, count)
+            except Exception as exc:
+                entry['error'] = str(exc)[:200]
+                logger.warning(f"delete {table}: {exc}")
+
+            result['deletes'].append(entry)
+
+    # ═══ 2) VACUUM PHASE ═══
+    if not skip_vacuum:
+        running_tables: Set[str] = set()
+        try:
+            blockers = await _get_autovacuum_blockers()
+            for item in blockers:
+                if item.get("type") == "running_vacuum":
+                    t = item.get("table")
+                    if t:
+                        running_tables.add(t)
+        except Exception:
+            pass
+
+        for table in HEAVY_TABLES_FOR_AUTOVACUUM or []:
+            if not table:
+                continue
+
+            entry = {
+                'table': table,
+                'success': False,
+                'error': None,
+            }
+
+            if table in running_tables:
+                entry['error'] = "VACUUM جارٍ — تم تخطيه"
+                result['vacuum'].append(entry)
+                continue
+
+            try:
+                await DB.vacuum(table)
+                entry['success'] = True
+            except Exception as exc:
+                entry['error'] = str(exc)[:200]
+                logger.warning(f"vacuum {table}: {exc}")
+
+            result['vacuum'].append(entry)
+
+    result['duration_sec'] = round(_time.monotonic() - t_start, 2)
+
+    # تحديد النجاح
+    deletes_ok = all(
+        e['error'] is None or e.get('skipped')
+        for e in result['deletes']
+    )
+    vacuum_ok = all(
+        e['success'] for e in result['vacuum']
+    )
+    result['success'] = deletes_ok and vacuum_ok
+
+    return result
+
+
+# =============================================================================
+# 🆕 v6.5.0: MAINTENANCE FORMATTERS
+# =============================================================================
+
+def format_maintenance_preview(preview: Dict[str, Any]) -> str:
+    """🎨 تنسيق معاينة الصيانة."""
+    if not preview.get('available'):
+        return (
+            "⚠️ <b>الصيانة غير متاحة</b>\n"
+            f"<i>{_escape_html(preview.get('error') or '')}</i>"
+        )
+
+    lines: List[str] = []
+    lines.append("🧹 <b>معاينة الصيانة</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    plan = preview.get('plan', [])
+    if plan:
+        lines.append("🗑️ <b>الحذف المخطط:</b>")
+        total_to_delete = 0
+        for item in plan:
+            table = item['table']
+            count = item['count']
+            days = item['days']
+
+            if count < 0:
+                icon = "⚠️"
+                display = "فشل العدّ"
+            elif count == 0:
+                icon = "✅"
+                display = "لا شيء"
+            elif count < 1000:
+                icon = "🟢"
+                display = f"<b>{count:,}</b> صف"
+                total_to_delete += count
+            elif count < 10000:
+                icon = "🟡"
+                display = f"<b>{count:,}</b> صف"
+                total_to_delete += count
+            else:
+                icon = "🟠"
+                display = f"<b>{count:,}</b> صف"
+                total_to_delete += count
+
+            lines.append(
+                f"  {icon} <code>{_escape_html(table):<18}</code> "
+                f"(&gt;{days}d): {display}"
+            )
+        lines.append("")
+        lines.append(
+            f"📊 <b>الإجمالي:</b> "
+            f"<b>{total_to_delete:,}</b> صف سيُحذف"
+        )
+    else:
+        lines.append("ℹ️ لا شيء للحذف.")
+
+    vacuum_tables = preview.get('vacuum_tables', [])
+    if vacuum_tables:
+        lines.append("")
+        lines.append("🧹 <b>VACUUM سيعمل على:</b>")
+        for t in vacuum_tables:
+            lines.append(f"  • <code>{_escape_html(t)}</code>")
+
+    warnings = preview.get('warnings', [])
+    if warnings:
+        lines.append("")
+        for w in warnings:
+            lines.append(w)
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        "لتنفيذ الصيانة، أرسل:\n"
+        "<code>/db_maintenance confirm</code>"
+    )
+
+    return "\n".join(lines)
+
+
+def format_maintenance_result(result: Dict[str, Any]) -> str:
+    """🎨 تنسيق نتيجة الصيانة."""
+    lines: List[str] = []
+
+    if result.get('success'):
+        lines.append("✅ <b>اكتملت الصيانة بنجاح</b>")
+    else:
+        lines.append("⚠️ <b>اكتملت الصيانة (مع تحذيرات)</b>")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(
+        f"⏱️ <b>المدة:</b> {result.get('duration_sec', 0):.2f}s"
+    )
+
+    deletes = result.get('deletes', [])
+    if deletes:
+        lines.append("")
+        lines.append("🗑️ <b>الحذف:</b>")
+        total_deleted = 0
+        for entry in deletes:
+            table = entry['table']
+            deleted = entry['deleted']
+            error = entry.get('error')
+            skipped = entry.get('skipped')
+
+            if skipped:
+                icon = "⏭️"
+                display = f"<i>{_escape_html(error or 'تم تخطيه')}</i>"
+            elif error:
+                icon = "❌"
+                display = f"<i>{_escape_html(error)}</i>"
+            elif deleted == 0:
+                icon = "✅"
+                display = "لا شيء"
+            else:
+                icon = "🟢"
+                display = f"<b>{deleted:,}</b> صف"
+                total_deleted += deleted
+
+            lines.append(
+                f"  {icon} <code>{_escape_html(table):<18}</code> "
+                f"{display}"
+            )
+
+        if total_deleted > 0:
+            lines.append("")
+            lines.append(
+                f"📊 <b>إجمالي المحذوف:</b> "
+                f"<b>{total_deleted:,}</b> صف"
+            )
+
+    vacuum = result.get('vacuum', [])
+    if vacuum:
+        lines.append("")
+        lines.append("🧹 <b>VACUUM:</b>")
+        ok_count = 0
+        fail_count = 0
+        for entry in vacuum:
+            table = entry['table']
+            if entry['success']:
+                icon = "✅"
+                ok_count += 1
+            else:
+                icon = "❌"
+                fail_count += 1
+            err = entry.get('error') or ""
+            suffix = f" — <i>{_escape_html(err)}</i>" if err else ""
+            lines.append(
+                f"  {icon} <code>{_escape_html(table)}</code>{suffix}"
+            )
+        lines.append("")
+        lines.append(
+            f"📊 نجح: <b>{ok_count}</b> | فشل: <b>{fail_count}</b>"
+        )
+
+    errors = result.get('errors', [])
+    if errors:
+        lines.append("")
+        lines.append("🚨 <b>أخطاء عامة:</b>")
+        for err in errors[:5]:
+            lines.append(f"  • {_escape_html(err)}")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
 # VACUUM / OPTIMIZE
 # =============================================================================
 
@@ -2691,11 +3146,21 @@ async def vacuum_analyze_tables() -> str:
 
 __all__ = [
     "VERSION",
+    # Main diagnostics
     "diagnose_db",
     "diagnose_db_split",
+    "diagnose_db_quick",
+    # Maintenance
+    "preview_maintenance",
+    "run_maintenance",
+    "format_maintenance_preview",
+    "format_maintenance_result",
+    # Vacuum
     "vacuum_analyze_tables",
+    # Dataclasses
     "RootCause",
     "CauseItem",
+    # Internal helpers (للاختبار)
     "_analyze_root_causes",
     "_detect_xmin_blocker",
     "_detect_xmin_blockers",
@@ -2718,6 +3183,7 @@ __all__ = [
     "_ReportBuilder",
     "_is_significant_table",
     "_build_pg_in_clause",
+    # Constants
     "REPORT_MAX_CHARS",
     "TELEGRAM_MESSAGE_LIMIT",
     "MIN_TABLE_SIZE_FOR_ALERT",
@@ -2732,4 +3198,8 @@ __all__ = [
     "EXPECTED_ANALYZE_SCALE_FACTOR",
     "EXPECTED_VACUUM_SCALE_FACTORS",
     "EXPECTED_ANALYZE_SCALE_FACTORS",
+    "MAINTENANCE_MAX_DELETE_PER_TABLE",
+    "MAINTENANCE_DEFAULT_ADMIN_LOGS_DAYS",
+    "MAINTENANCE_DEFAULT_PENALTY_ARCHIVE_DAYS",
+    "MAINTENANCE_DEFAULT_USER_VIOLATIONS_DAYS",
 ]
