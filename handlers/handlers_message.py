@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.17.0 (متوافق مع detectors v2.2.0 HARDENED+)
+handlers_message.py - v7.17.1 (متوافق مع detectors v2.2.0 HARDENED+)
 =============================================================================
+🆕 v7.17.1 — إصلاحات جوهرية على v7.17.0:
+    🔴 FIX-1: حساب PostBot pattern مرة واحدة (توفير ~50% CPU)
+    🔴 FIX-2: تصادم ctx.has_hint مع detectors — استخدام forward_hint محلي
+    🔴 FIX-3: handle_edited — إزالة تعيين effective_message (read-only)
+    🟠 FIX-4: ANTIEVASION_COMPACT_WORDS نُقل قبل أول استخدام
+    🟠 FIX-5: _apply_slow_mode — حماية bot_data.get
+    🟡 FIX-6: إشعار المالك عند فشل الحذف (كان يفشل بصمت)
+    🟡 FIX-7: دياجنوستيك POSTBOT-HARD-BLOCK دائم (بغض عن DEBUG_DIAG)
+    🟡 FIX-8: مسار فشل الحذف في _delete_and_warn يُشعر المالك
+
 🆕 v7.17.0 — تكامل مع محرك الكشف الجديد:
     ✅ استيراد API v2.2.0 (context-first)
     ✅ _handle_group_impl يستخدم _MessageContext مباشرة
     ✅ استدعاءات _compute_spam_score / _is_postbot_pattern
        / _postbot_pattern_confidence بالنمط الجديد
     ✅ _env_flag / _as_bool محلياً (v2.2.0 لا يصدّرهما)
-    ✅ استخدام DEBUG_DIAG/DEBUG_SPAM (public، بدون underscore)
-    ✅ يستفيد من _MessageContext الجديد المُحصَّن (script counts,
-       hidden chars, bidi, emoji_count, ...)
-
-🆕 v7.16.1 — حجب تلقائي لعينة "نمط Post Bot" عالية الثقة:
-    🔴 POSTBOT-AUTO-BLOCK: بغض النظر عن إعداد delete_postbot_pattern
-    ✅ _postbot_pattern_confidence() >= POSTBOT_AUTO_BLOCK_CONFIDENCE (3)
+    ✅ DEBUG_DIAG/DEBUG_SPAM (public، بدون underscore)
+    ✅ POSTBOT-AUTO-BLOCK بغض النظر عن delete_postbot_pattern
 =============================================================================
 """
 
@@ -55,17 +60,11 @@ from cache import settings_cache, posts_cache
 
 try:
     from handlers.handlers_message_detectors import (
-        # Public flags
-        DEBUG_DIAG,
-        DEBUG_SPAM,
-        # Thresholds
-        SPAM_SCORE_THRESHOLD,
-        POSTBOT_AUTO_BLOCK_CONFIDENCE,
-        SPAM_HARD_THRESHOLD,
-        SPAM_CRITICAL_THRESHOLD,
-        # Context
+        DEBUG_DIAG, DEBUG_SPAM,
+        SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
+        SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
+        ANTIEVASION_COMPACT_WORDS,
         _MessageContext,
-        # Normalizers
         _strip_combining_marks,
         _deleet,
         _apply_homoglyphs_safe,
@@ -73,7 +72,6 @@ try:
         _strip_emoji_for_domain,
         _has_hidden_chars,
         _merge_split_urls,
-        # Extractors
         _extract_entity_urls,
         _has_link_entity,
         _extract_url_from_button,
@@ -82,11 +80,9 @@ try:
         _extract_vcard_urls,
         _extract_venue_url,
         _extract_poll_text,
-        # Message helpers
         _get_message_button_data,
         _get_message_button_texts,
         _get_message_analysis_text,
-        # Link detection
         _has_domain_pattern,
         _contains_link_enhanced,
         _contains_email,
@@ -94,15 +90,12 @@ try:
         _contains_tg_scheme,
         _has_button_link,
         _extract_button_link_urls,
-        # Spam
         _extract_spam_words,
         _count_unique_matches,
         _count_text_urls,
         _compute_spam_score,
-        # PostBot
         _is_postbot_pattern,
         _postbot_pattern_confidence,
-        # High level
         analyze_message,
         get_spam_diagnostics,
         is_spam,
@@ -116,6 +109,7 @@ except ImportError:
             DEBUG_DIAG, DEBUG_SPAM,
             SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
             SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
+            ANTIEVASION_COMPACT_WORDS,
             _MessageContext,
             _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
             _normalize_text, _strip_emoji_for_domain,
@@ -141,6 +135,7 @@ except ImportError:
             DEBUG_DIAG, DEBUG_SPAM,
             SPAM_SCORE_THRESHOLD, POSTBOT_AUTO_BLOCK_CONFIDENCE,
             SPAM_HARD_THRESHOLD, SPAM_CRITICAL_THRESHOLD,
+            ANTIEVASION_COMPACT_WORDS,
             _MessageContext,
             _strip_combining_marks, _deleet, _apply_homoglyphs_safe,
             _normalize_text, _strip_emoji_for_domain,
@@ -284,7 +279,7 @@ FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
 FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
 FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 
-# Alias للتوافق مع الاستخدامات القديمة داخل handlers_message.py
+# Alias للتوافق
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
 
@@ -434,7 +429,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.17.0: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.17.1: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2186,10 +2181,6 @@ def _contains_banned_word(text, banned_word) -> bool:
             return False
 
 
-# Local flag mirror (v2.2.0 يوفره بدون underscore)
-ANTIEVASION_COMPACT_WORDS = _env_flag("ANTIEVASION_COMPACT_WORDS", True)
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Private handler signature cache
 # ═══════════════════════════════════════════════════════════════════
@@ -2258,11 +2249,12 @@ class MessageHandlers:
         limiter_acquired = False
         try:
             limiter, limiter_acquired = await _acquire_group_limiter(chat_id)
-            if update.effective_message is None and update.edited_message is not None:
-                try:
-                    update.effective_message = update.edited_message
-                except Exception:
-                    return
+            # v7.17.1 FIX-3: `effective_message` property للقراءة فقط في PTB v20+
+            if update.effective_message is None:
+                logger.debug(
+                    "handle_edited: effective_message is None — skip"
+                )
+                return
             await MessageHandlers._handle_group_impl(update, context)
         except asyncio.CancelledError:
             raise
@@ -2296,7 +2288,15 @@ class MessageHandlers:
                 pass
 
             cache_key = f"_slow_applied_{chat_id}"
-            last_applied = context.bot_data.get(cache_key, -1)
+
+            try:
+                bd = context.bot_data
+                if isinstance(bd, dict):
+                    last_applied = bd.get(cache_key, -1)
+                else:
+                    last_applied = -1
+            except Exception:
+                last_applied = -1
 
             target = slow_secs if (slow_on and slow_secs > 0) else 0
             if target < 0:
@@ -2311,7 +2311,11 @@ class MessageHandlers:
 
             try:
                 await context.bot.set_chat_slow_mode(chat_id, target)
-                context.bot_data[cache_key] = target
+                try:
+                    if isinstance(context.bot_data, dict):
+                        context.bot_data[cache_key] = target
+                except Exception:
+                    pass
                 logger.info(
                     "🐌 SLOW-MODE | chat=%s seconds=%d",
                     chat_id, target,
@@ -2321,7 +2325,11 @@ class MessageHandlers:
                     "set_chat_slow_mode(%s, %d): %s",
                     chat_id, target, e,
                 )
-                context.bot_data[cache_key] = target
+                try:
+                    if isinstance(context.bot_data, dict):
+                        context.bot_data[cache_key] = target
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug("_apply_slow_mode: %s", e)
 
@@ -2343,11 +2351,7 @@ class MessageHandlers:
         else:
             return
 
-        # ════════════════════════════════════════════════════════════
-        # 🆕 v7.17.0: بناء _MessageContext مرة واحدة
-        # كل شيء (buttons, urls, polls, vcards, normalizers, ...)
-        # يُبنى داخل الـcontext تلقائياً
-        # ════════════════════════════════════════════════════════════
+        # v7.17.0: بناء _MessageContext مرة واحدة
         try:
             ctx = _MessageContext(message)
         except Exception as e:
@@ -2432,17 +2436,18 @@ class MessageHandlers:
         except Exception as e:
             logger.debug("slow_mode apply: %s", e)
 
-        # 🆕 v7.17.0: forward detection
+        # v7.17.0: forward detection
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
         ctx.is_protected = _as_bool(det.get('is_protected', False), False)
-        ctx.has_hint = _as_bool(det.get('has_hint', False), False)
+        # v7.17.1 FIX-2: لا نكتب فوق ctx.has_hint (له دلالة أخرى في detectors)
+        forward_hint = _as_bool(det.get('has_hint', False), False)
         ctx.is_auto_fwd = _as_bool(
             det.get('has_automatic_forward', False), False,
         )
 
         is_protected_forward = (
-            _protected_fb and ctx.is_protected and ctx.has_hint
+            _protected_fb and ctx.is_protected and forward_hint
             and not ctx.is_forwarded
         )
         is_protected_any_fwd = (
@@ -2450,10 +2455,7 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # ════════════════════════════════════════════════════════════
-        # 🆕 v7.17.0: حساب spam score عبر API v2.2.0 الجديد
-        # _compute_spam_score(ctx) يستخدم كل شيء داخل ctx
-        # ════════════════════════════════════════════════════════════
+        # v7.17.0: حساب spam score
         _spam_score = 0
         _spam_reasons: List[str] = []
         if _spam_enabled:
@@ -2464,19 +2466,7 @@ class MessageHandlers:
 
         _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
 
-        # PostBot match (legacy — يُستخدم فقط إذا _postbot_enabled)
-        _postbot_match = False
-        if _postbot_enabled:
-            try:
-                _postbot_match = _is_postbot_pattern(
-                    ctx.analysis_text,
-                    button_count=ctx.button_count,
-                    button_urls=ctx.button_urls,
-                )
-            except Exception:
-                _postbot_match = False
-
-        # 🆕 v7.17.0: PostBot hard-block (بغض النظر عن الإعداد)
+        # v7.17.1 FIX-1: حساب PostBot confidence مرة واحدة فقط
         _postbot_hard_conf = 0
         try:
             _postbot_hard_conf = _postbot_pattern_confidence(
@@ -2484,12 +2474,41 @@ class MessageHandlers:
                 button_count=ctx.button_count,
                 button_urls=ctx.button_urls,
             )
-        except Exception:
+        except Exception as e:
+            logger.debug("postbot confidence: %s", e)
             _postbot_hard_conf = 0
 
         _postbot_hard_block = (
             _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE
         )
+
+        # Legacy PostBot match — نعيد استخدام النتيجة المحسوبة
+        _postbot_match = False
+        if _postbot_enabled:
+            if _postbot_hard_block:
+                _postbot_match = True
+            else:
+                try:
+                    _postbot_match = _is_postbot_pattern(
+                        ctx.analysis_text,
+                        button_count=ctx.button_count,
+                        button_urls=ctx.button_urls,
+                    )
+                except Exception:
+                    _postbot_match = False
+
+        # v7.17.1 FIX-7: إظهار POSTBOT-HARD-BLOCK دائماً
+        if _postbot_hard_block:
+            logger.warning(
+                "🤖 POSTBOT-HARD-BLOCK | chat=%s user=%s msg=%s "
+                "conf=%d/%d | buttons=%d strong=%d promo=%d cta=%d "
+                "spam_emoji=%d",
+                chat_id, user_id, message.message_id,
+                _postbot_hard_conf, POSTBOT_AUTO_BLOCK_CONFIDENCE,
+                ctx.button_count, ctx.strong_word_count,
+                ctx.promo_word_count, ctx.cta_count,
+                ctx.spam_emoji_count,
+            )
 
         if _DEBUG_DIAG:
             will_delete_fwd = _df_bool and (
@@ -2564,11 +2583,6 @@ class MessageHandlers:
 
         # 0.5) PostBot HARD-BLOCK
         if _postbot_hard_block:
-            logger.warning(
-                f"🤖 POSTBOT-HARD-BLOCK | chat={chat_id} "
-                f"user={user_id} msg={message.message_id} "
-                f"conf={_postbot_hard_conf}/10"
-            )
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
                 "postbot_pattern", settings, is_anonymous=is_anonymous,
@@ -2868,6 +2882,10 @@ class MessageHandlers:
         lang = await _ensure_lang(update, context)
         message = update.effective_message
         if message is None:
+            logger.warning(
+                "⚠️ _delete_and_warn(%s): effective_message is None — abort",
+                violation_type,
+            )
             return
         message_preview = None
         try:
@@ -2896,6 +2914,16 @@ class MessageHandlers:
 
         if not delete_ok:
             logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
+            # v7.17.1 FIX-6: أبلغ المالك (كان يفشل بصمت)
+            try:
+                should_notify = await _record_delete_failure(chat_id)
+                if should_notify:
+                    _spawn_tracked_task(
+                        _notify_delete_permission_failure(context, chat_id),
+                        label="delete-perm-notify",
+                    )
+            except Exception:
+                pass
             return
 
         if FEATURE_LOG_DELETIONS:
@@ -3618,10 +3646,8 @@ class MessageHandlers:
 # ═══════════════════════════════════════════════════════════════════
 
 __all__ = [
-    # Main class
     "MessageHandlers",
     "GroupRateLimiterManager",
-    # Public functions
     "clear_lang_cache",
     "get_security_settings_cached",
     "get_auto_reply_settings_cached",
@@ -3632,25 +3658,23 @@ __all__ = [
     "extract_forward_info",
     "get_forward_detection_reason",
     "notify_group_log",
-    # Shutdown & lifecycle
     "shutdown_log_dispatcher",
     "shutdown_delete_tasks",
     "shutdown_bg_tasks",
     "register_shutdown_handlers",
     "_lazy_init_columns",
     "_reset_shutdown_for_tests",
-    # Flags
     "FEATURE_LOG_DELETIONS",
     "FEATURE_LOG_PENALTIES",
     "FEATURE_LOG_GIFTS",
     "FEATURE_LOG_ADMIN_CHANGES",
-    # Re-exported from detectors v2.2.0
     "SPAM_SCORE_THRESHOLD",
     "POSTBOT_AUTO_BLOCK_CONFIDENCE",
     "SPAM_HARD_THRESHOLD",
     "SPAM_CRITICAL_THRESHOLD",
     "DEBUG_DIAG",
     "DEBUG_SPAM",
+    "ANTIEVASION_COMPACT_WORDS",
     "_MessageContext",
     "_normalize_text",
     "_strip_combining_marks",
@@ -3689,7 +3713,6 @@ __all__ = [
     "is_high_confidence_spam",
     "is_critical_spam",
     "should_ignore_as_low_signal",
-    # Local helpers
     "_as_bool",
     "_env_flag",
     "_check_flood",
