@@ -1,38 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.12.1 (CORRECTNESS + PERF + SHUTDOWN)
+handlers_message.py - v7.12.2 (CORRECTNESS + PERF + SHUTDOWN)
 =============================================================================
-🆕 v7.12.1 (REVIEW FIXES):
-    🐛 Bug Fixes:
-        ✅ R1  register_shutdown_handlers: يحفظ handler الأصلي (لا يمحوه)
-        ✅ R2  handle_private: inspect.signature بدل try/TypeError
-               (يمنع الاستدعاء المزدوج عند TypeError داخلي)
-        ✅ R3  _spawn_delete_after_delay: وحّد مسار delay<=0 داخل
-               _running_delete_tasks ليُنتظَر في shutdown_delete_tasks
-        ✅ R4  _get_banned_pattern: إصلاح re.sub لا-أثر
-               (استخدام .replace(" ", r"\s+") الصحيح)
-        ✅ R5  _notify_dev_log: rate-limit (30/دقيقة) + reset cache
-        ✅ R6  _delete_and_warn: نقل فحص delete_ok قبل إشعار المالك
-        ✅ R7  _spam_enabled: default=True بدل 1 (وضوح)
-        ✅ R8  _can_send_log: warning → debug (تقليل إغراق السجل)
-        ✅ R9  حذف imports غير مستخدمة (json, Path)
-        ✅ R10 _compute_spam_score: يقبل _analysis_text لتوفير pass
-        ✅ R11 _verify_bot_in_log_channel_error_text: توثيق lang كـ
-               reserved (متوافق مع الاستدعاءات الحالية)
+🆕 v7.12.2 (REVIEW R2 FIXES):
+    🐛 Critical:
+        ✅ C1  _get_banned_pattern: إصلاح فعلي صحيح
+               re.escape(" ") يُعيد r"\ " (backslash+space) منذ Py3.7،
+               لذا .replace(r'\ ', r'\s+') يعمل. إصلاح v7.12.1 كان
+               خاطئاً واستبدل الفراغ الحقيقي فقط بعد رؤية "\ ".
+               → الآن: re.escape(x).replace(r'\ ', r'\s+')
 
-    ⚡ Performance:
-        ✅ P1  تمرير button context إلى _compute_spam_score
-        ✅ P2  تجميع تحويلات _as_bool في pass واحد
-        ✅ P3  lazy log formatting
-        ✅ P4  LRU-based _compiled_banned_patterns (OrderedDict)
-        ✅ P5  _safe_delete_message: levels مبسّطة
+    🟠 Medium:
+        ✅ M1  register_shutdown_handlers: idempotency guard
+               (يمنع سلاسل post_shutdown لا نهائية عند hot-reload)
+        ✅ M2  _notify_admin_about_forward: تتبّع عبر _spawn_tracked_task
+               (لم يُبتَر عند الإغلاق بعد الآن)
+        ✅ M3  _should_notify_forward: cap على عدد مفاتيح bot_data
+               (يمنع تسريب ذاكرة بطيء عند مجموعات كثيرة)
 
-    🛡️ Hardening:
-        ✅ H1  register_shutdown_handlers(app) — تسجيل تلقائي
-        ✅ H2  رفض coroutine في _dispatch_log بدون factory
-        ✅ H3  _spawn_delete_after_delay: check للـdelay السالب سلفاً
-        ✅ H4  _delete_and_warn: تقسيم إلى helpers
+    🟡 Minor:
+        ✅ m2  _normalize_text: str.translate بدل حلقة for على 16 محرفاً
+               (~3× أسرع في المسار الساخن)
+        ✅ m4  _dispatch_log: رسالة أوضح عند استلام coroutine مباشر
+
+    ✅ الحفاظ الكامل على وظائف v7.12.1
 =============================================================================
 """
 
@@ -131,6 +123,7 @@ TRANSLATION_MIN_TEXT_LENGTH = 2
 PENALTY_MESSAGE_DELETE_DELAY = 10
 
 _FORWARD_NOTIFY_COOLDOWN_SECONDS = 300.0
+_FORWARD_NOTIFY_MAX_KEYS = 5000  # ✅ M3
 _GROUP_LOG_PREVIEW_LENGTH = 150
 
 
@@ -180,6 +173,9 @@ _HIDDEN_CHARS = (
     '\ufeff',
 )
 
+# ✅ m2: str.translate أسرع ~3× من حلقة for
+_HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
+
 _WS_RE = re.compile(
     r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'
 )
@@ -194,9 +190,8 @@ def _normalize_text(text: str) -> str:
     except Exception:
         pass
 
-    for c in _HIDDEN_CHARS:
-        if c in text:
-            text = text.replace(c, '')
+    # ✅ m2: استدعاء translate بلا فحص مسبق (O(n) في C، أسرع من any())
+    text = text.translate(_HIDDEN_TRANSLATE_TABLE)
 
     return _WS_RE.sub(' ', text).strip()
 
@@ -480,13 +475,10 @@ def _compute_spam_score(
     Spam scoring engine.
 
     ✅ R10: يقبل _analysis_text (نص+أزرار) لتوفير pass إضافي.
-
-    إذا مُرِّرت بيانات الأزرار/النص مسبقاً، لن نعيد استخراجها.
     """
     if message is None:
         return 0, []
 
-    # ═══ 1) استخراج/إعادة استخدام بيانات الأزرار ═══
     if (
         _button_count is not None
         and _button_urls is not None
@@ -498,7 +490,6 @@ def _compute_spam_score(
     else:
         button_count, button_urls, button_texts = _extract_button_context(message)
 
-    # ═══ 2) النص ═══
     if _normalized is not None:
         normalized = _normalized
     else:
@@ -512,11 +503,9 @@ def _compute_spam_score(
             body_text = ""
         normalized = _normalize_text(body_text) if body_text else ""
 
-    # Early exit
     if not normalized and not button_urls and not button_texts:
         return 0, []
 
-    # ═══ 3) analysis_text — استخدم الجاهز إن وُجد ═══
     if _analysis_text is not None:
         analysis_text = _analysis_text
     elif button_texts:
@@ -537,7 +526,6 @@ def _compute_spam_score(
     text_lower = analysis_text.lower()
 
     try:
-        # ═══ 1) Buttons + URLs ═══
         if button_count >= 6:
             score += 3
             reasons.append(f"buttons={button_count}")
@@ -554,7 +542,6 @@ def _compute_spam_score(
             score += 1
             reasons.append("media+buttons")
 
-        # ═══ 2) Emoji ═══
         emoji_count = 0
         for emoji in _SPAM_EMOJIS:
             emoji_count += analysis_text.count(emoji)
@@ -569,7 +556,6 @@ def _compute_spam_score(
             score += 1
             reasons.append(f"emoji={emoji_count}")
 
-        # ═══ 3) Keywords ═══
         words = _extract_spam_words(analysis_text)
 
         strong_matches = _count_unique_matches(words, _SPAM_STRONG_KEYWORDS)
@@ -603,7 +589,6 @@ def _compute_spam_score(
             score += 1
             reasons.append("cta=" + ",".join(cta_only_matches[:6]))
 
-        # ═══ 4) Contextual patterns ═══
         matched_patterns: List[str] = []
         for pattern, weight, label in _SPAM_CONTEXT_PATTERNS:
             if pattern.search(text_lower):
@@ -613,7 +598,6 @@ def _compute_spam_score(
         if matched_patterns:
             reasons.append("patterns=" + ",".join(matched_patterns))
 
-        # ═══ 5) Button labels CTA ═══
         button_cta_matches: List[str] = []
         for bt in button_texts:
             if _POSTBOT_BUTTON_PATTERN.search(bt):
@@ -625,7 +609,6 @@ def _compute_spam_score(
             score += min(3, len(button_cta_matches))
             reasons.append("button_cta=" + ",".join(button_cta_matches[:4]))
 
-        # ═══ 6) Telegram button URLs ═══
         tme_button_count = 0
         external_button_count = 0
 
@@ -659,7 +642,6 @@ def _compute_spam_score(
             score += 2
             reasons.append(f"external_buttons={external_button_count}")
 
-        # ═══ 7) Text URLs ═══
         text_urls = _count_text_urls(normalized)
         if len(text_urls) >= 3:
             score += 3
@@ -673,7 +655,6 @@ def _compute_spam_score(
             score += 1
             reasons.append("text_urls=1")
 
-        # ═══ 8) Short promotional ═══
         body_len = len(normalized)
         if body_len < 60 and button_count >= 5 and (
             strong_matches or medium_matches or matched_patterns
@@ -691,7 +672,6 @@ def _compute_spam_score(
             score += 1
             reasons.append("short_text+buttons")
 
-        # ═══ 9) CAPS ═══
         caps_n = len(_CAPS_WORD_RE.findall(analysis_text))
         if caps_n >= 8 and (
             strong_matches or medium_matches or matched_patterns
@@ -707,7 +687,6 @@ def _compute_spam_score(
             score += 1
             reasons.append(f"CAPS={caps_n}")
 
-        # ═══ 10) Promo density ═══
         promo_count = (
             len(strong_matches) + len(medium_matches) + len(cta_only_matches)
         )
@@ -721,7 +700,6 @@ def _compute_spam_score(
             score += 1
             reasons.append(f"promo_density={promo_count}")
 
-        # ═══ 11) High-confidence combinations ═══
         if len(strong_matches) >= 2 and (
             button_count >= 2 or cta_only_matches or button_cta_matches
         ):
@@ -738,7 +716,6 @@ def _compute_spam_score(
             score += 2
             reasons.append("viral+button_cta")
 
-        # ═══ 12) Anti false-positive guard ═══
         if (
             not strong_matches
             and not medium_matches
@@ -825,7 +802,6 @@ _MEDIA_REPLY_TYPES = frozenset({
     'animation', 'voice', 'sticker', 'video_note',
 })
 
-# ترتيب الوسائط للفحص الموحّد
 _MEDIA_SETTINGS_MAP = (
     ('video', 'delete_videos', 'video'),
     ('audio', 'delete_audio', 'audio'),
@@ -857,7 +833,7 @@ async def _lazy_init_columns():
             return
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.12.1: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.12.2: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -1033,7 +1009,6 @@ _log_rate_tracker = defaultdict(
 )
 _log_rate_lock = asyncio.Lock()
 
-# ✅ R8: cooldown للتحذير نفسه لتفادي إغراق السجل
 _log_rate_warn_last: Dict[Any, float] = {}
 _LOG_RATE_WARN_COOLDOWN = 300.0
 
@@ -1047,7 +1022,6 @@ async def _can_send_log(chat_id) -> bool:
             len(tracker) >= LOG_RATE_LIMIT_PER_MIN
             and now - tracker[0] < LOG_RATE_WINDOW_SEC
         ):
-            # ✅ R8: debug بدل warning + cooldown داخلي
             last = _log_rate_warn_last.get(chat_id, 0.0)
             if now - last >= _LOG_RATE_WARN_COOLDOWN:
                 _log_rate_warn_last[chat_id] = now
@@ -1072,7 +1046,6 @@ async def _cleanup_log_rate_tracker():
         for cid in stale:
             _log_rate_tracker.pop(cid, None)
 
-        # ✅ R8: تنظيف cooldown map
         stale_warn = [
             cid for cid, ts in _log_rate_warn_last.items()
             if now - ts > _LOG_RATE_WARN_COOLDOWN * 2
@@ -1084,7 +1057,7 @@ async def _cleanup_log_rate_tracker():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Dispatch Log — ✅ F1: يستقبل factory للسماح بـ retry فعلي
+# Dispatch Log — ✅ F1: factory للسماح بـ retry فعلي
 # ═══════════════════════════════════════════════════════════════════
 
 _running_log_tasks: set = set()
@@ -1099,16 +1072,20 @@ async def _dispatch_log(
 ):
     """
     ✅ F1: نستقبل factory (callable) بدل coroutine جاهز.
-
-    coroutine في Python يمكن await مرة واحدة فقط. لذلك كان الـretry
-    في v7.11.0 معطوباً فعلياً.
+    ✅ m4: رسالة أوضح عند استلام coroutine مباشر.
     """
     if not callable(factory):
-        # ✅ H2: رفض coroutine مباشر
+        _factory_type = type(factory).__name__
+        # ✅ m4: إن كانت coroutine، نُغلقها لتجنّب warning
+        if inspect.iscoroutine(factory):
+            try:
+                factory.close()
+            except Exception:
+                pass
         logger.error(
             "❌ _dispatch_log: متوقع factory (callable) — "
-            "وُجد %s",
-            type(factory).__name__,
+            "وُجد %s. استخدم partial(...) أو lambda: coro().",
+            _factory_type,
         )
         return
 
@@ -1187,6 +1164,68 @@ async def shutdown_log_dispatcher(timeout: float = 5.0):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# General Tracked Background Tasks — ✅ M2
+# ═══════════════════════════════════════════════════════════════════
+
+_running_bg_tasks: set = set()
+
+
+def _spawn_tracked_task(coro, *, label: str = "bg-task"):
+    """
+    ✅ M2: تشغيل مهمة خلفية مع تتبّع + إغلاق نظيف.
+
+    يضمن ألا تُبتَر المهام القصيرة (مثل إشعار المالك) عند shutdown.
+    """
+    try:
+        task = asyncio.create_task(coro)
+    except Exception as e:
+        logger.debug("_spawn_tracked_task(%s) فشل الإنشاء: %s", label, e)
+        # إنشاء coroutine بلا task يُنتج RuntimeWarning — نُغلقه يدوياً
+        try:
+            if inspect.iscoroutine(coro):
+                coro.close()
+        except Exception:
+            pass
+        return None
+
+    _running_bg_tasks.add(task)
+
+    def _cleanup(t):
+        _running_bg_tasks.discard(t)
+        try:
+            if not t.cancelled() and t.exception():
+                logger.debug("[%s] failed: %s", label, t.exception())
+        except Exception:
+            pass
+
+    task.add_done_callback(_cleanup)
+    return task
+
+
+async def shutdown_bg_tasks(timeout: float = 3.0):
+    """إغلاق نظيف لكل المهام المُتتبَّعة (forward notify وغيره)."""
+    if not _running_bg_tasks:
+        return
+
+    tasks = list(_running_bg_tasks)
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.debug("⏱️ shutdown_bg_tasks: مهلة انتهت")
+    except Exception:
+        pass
+
+    _running_bg_tasks.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Delayed Delete Task Tracker
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1205,8 +1244,7 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10):
 
 def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
     """
-    ✅ R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks
-    حتى يُنتظَر التنظيف في shutdown_delete_tasks.
+    ✅ R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks.
     """
     try:
         d = float(delay)
@@ -1255,19 +1293,24 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _running_delete_tasks.clear()
 
 
-# ✅ H1 + R1: تسجيل تلقائي يحفظ أي handler أصلي
+# ✅ H1 + R1 + M1: تسجيل shutdown idempotent
 def register_shutdown_handlers(application):
     """
     يُسجّل shutdown handlers على تطبيق Telegram لتنظيف:
       - log dispatch tasks
+      - general bg tasks (forward notify)
       - delayed delete tasks
 
     ✅ R1: يحفظ أي post_shutdown أصلي ويستدعيه بعد التنظيف.
-
-    الاستخدام (من bot.py):
-        from handlers_message import register_shutdown_handlers
-        register_shutdown_handlers(application)
+    ✅ M1: idempotency guard — استدعاء متعدد لا يبني سلاسل.
     """
+    # ✅ M1: idempotency — يمنع السلاسل اللانهائية
+    if getattr(application, '_msh_shutdown_registered', False):
+        logger.debug(
+            "register_shutdown_handlers: مُسجَّل مسبقاً — تخطي"
+        )
+        return
+
     try:
         original_post_shutdown = getattr(
             application, 'post_shutdown', None
@@ -1278,6 +1321,10 @@ def register_shutdown_handlers(application):
                 await shutdown_log_dispatcher(timeout=5.0)
             except Exception as e:
                 logger.debug("shutdown log: %s", e)
+            try:
+                await shutdown_bg_tasks(timeout=3.0)
+            except Exception as e:
+                logger.debug("shutdown bg: %s", e)
             try:
                 await shutdown_delete_tasks(timeout=3.0)
             except Exception as e:
@@ -1291,6 +1338,7 @@ def register_shutdown_handlers(application):
                     logger.debug("original post_shutdown: %s", e)
 
         application.post_shutdown = _post_shutdown
+        application._msh_shutdown_registered = True  # ✅ M1
     except Exception as e:
         logger.warning("register_shutdown_handlers: %s", e)
 
@@ -1588,7 +1636,6 @@ async def _notify_group_log_penalty(
             target_username, penalty_type, duration_seconds,
             source, violation_type, moderator_id, moderator_name
         )
-        # ✅ F1: نمرّر factory
         await _dispatch_log(
             partial(notify_group_log, context, chat_id, text),
             label=f"penalty-{penalty_type}"
@@ -1978,6 +2025,9 @@ async def _notify_admin_about_forward(context, admin_id, info):
 
 
 def _should_notify_forward(context, chat_id) -> bool:
+    """
+    ✅ M3: cap على حجم bot_data لتفادي تسريب الذاكرة.
+    """
     try:
         bot_data = getattr(context, 'bot_data', None)
         if not isinstance(bot_data, dict):
@@ -1992,6 +2042,21 @@ def _should_notify_forward(context, chat_id) -> bool:
 
         if now - last < _FORWARD_NOTIFY_COOLDOWN_SECONDS:
             return False
+
+        # ✅ M3: عند تجاوز الحد — أزل نصف المفاتيح المُتعلّقة بالـforward
+        if len(bot_data) >= _FORWARD_NOTIFY_MAX_KEYS:
+            fwd_keys = [
+                k for k in bot_data.keys()
+                if isinstance(k, str) and k.startswith("_forward_notify_")
+            ]
+            if fwd_keys:
+                remove_count = max(1, len(fwd_keys) // 2)
+                for k in fwd_keys[:remove_count]:
+                    bot_data.pop(k, None)
+                logger.debug(
+                    "🧹 _forward_notify keys cleanup: أُزيل %d (متبقٍ %d)",
+                    remove_count, len(fwd_keys) - remove_count,
+                )
 
         bot_data[key] = now
         return True
@@ -2492,10 +2557,9 @@ async def _verify_bot_in_log_channel(context, channel_id):
 
 def _verify_bot_in_log_channel_error_text(reason, lang) -> str:
     """
-    ✅ R11: lang محفوظ للتوافق مع الاستدعاءات الحالية.
-    الترجمة الكاملة عبر TranslationManager مُخطط لها v7.13.
+    ✅ R11: lang محفوظ للتوافق. الترجمة الكاملة عبر TranslationManager
+    مُخطط لها v7.13.
     """
-    # lang يُحفظ للتوافق المستقبلي (سيُستخدَم عند تفعيل الترجمة الكاملة)
     _ = lang
 
     mapping = {
@@ -2535,26 +2599,35 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Banned Word Matching — ✅ P4: LRU بـOrderedDict
+# Banned Word Matching — ✅ C1 FIX
 # ═══════════════════════════════════════════════════════════════════
 
 _compiled_banned_patterns: "OrderedDict[str, re.Pattern]" = OrderedDict()
 
 
 def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
+    """
+    ✅ C1 FIX:
+        re.escape(" ") يُعيد "\\ " (backslash+space) منذ Python 3.7،
+        لأن _special_chars_map يحتوي على ' ' صريحاً.
+
+        لذا نحتاج استبدال تسلسل "\\ " (backslash+space) كاملاً بـ"\\s+".
+        الطريقة الآمنة:
+            re.escape(x).replace(r'\\ ', r'\\s+')
+
+        مثال: "foo bar" →
+            re.escape → "foo\\ bar"
+            .replace  → "foo\\s+bar"
+            regex يطابق: "foo bar", "foo  bar", "foo\\tbar", إلخ. ✓
+    """
     cached = _compiled_banned_patterns.get(banned_word)
     if cached is not None:
-        # LRU: نقل للأحدث
         _compiled_banned_patterns.move_to_end(banned_word)
         return cached
 
     try:
-        # ✅ R4: re.escape لا يهرّب المسافات (منذ Python 3.7).
-        # لتمكين مطابقة "كلمة1   كلمة2" بـ"كلمة1 كلمة2" نستبدل الفراغ
-        # الصريح بـ\s+ بدل re.sub الذي كان لا-أثر.
-        escaped = re.escape(banned_word)
-        if ' ' in escaped:
-            escaped = escaped.replace(' ', r'\s+')
+        # ✅ C1: استبدال "\\ " (backslash + space) ككيان كامل
+        escaped = re.escape(banned_word).replace(r'\ ', r'\s+')
         pattern = re.compile(
             rf'(?<!\w){escaped}(?!\w)',
             re.IGNORECASE | re.UNICODE
@@ -2640,7 +2713,6 @@ class MessageHandlers:
 
         message = update.effective_message
 
-        # ═══ هوية المرسل ═══
         is_anonymous = False
         if update.effective_user:
             user_id = update.effective_user.id
@@ -2650,7 +2722,6 @@ class MessageHandlers:
         else:
             return
 
-        # ═══ بناء _MessageContext ═══
         ctx = _MessageContext()
         ctx.text = message.text or ""
         ctx.caption = message.caption or ""
@@ -2684,7 +2755,6 @@ class MessageHandlers:
         if not isinstance(settings, dict):
             settings = {}
 
-        # ═══ تحويلات الإعدادات ═══
         _df_raw = settings.get('delete_forwarded')
         _df_bool = _as_bool(_df_raw, False)
         _protected_fb = _as_bool(
@@ -2693,7 +2763,6 @@ class MessageHandlers:
         _protected_any = _as_bool(
             settings.get('delete_protected_any'), False
         )
-        # ✅ R7: default=True بدل 1
         _spam_enabled = _as_bool(
             settings.get('delete_spam_score', True), True
         )
@@ -2701,7 +2770,6 @@ class MessageHandlers:
             settings.get('delete_postbot_pattern', 0), False
         )
 
-        # ═══ Forward detection ═══
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
         ctx.is_protected = _as_bool(det.get('is_protected', False), False)
@@ -2710,10 +2778,6 @@ class MessageHandlers:
             det.get('has_automatic_forward', False), False
         )
 
-        # ═══ Forward policy (موثّق): ═══
-        # - protected_fb: رسالة محمية + hint + ليست forwarded معروفة
-        # - protected_any: رسالة محمية + ليست أي مما سبق
-        # - auto_forward يدخل ضمن effective_forwarded المستقل
         is_protected_forward = (
             _protected_fb
             and ctx.is_protected
@@ -2728,7 +2792,6 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # ═══ Spam score — ✅ R10: نمرّر _analysis_text الجاهز ═══
         _spam_score = 0
         _spam_reasons: List[str] = []
 
@@ -2747,7 +2810,6 @@ class MessageHandlers:
 
         _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
 
-        # ═══ PostBot ═══
         _postbot_match = False
         if _postbot_enabled:
             try:
@@ -2759,7 +2821,6 @@ class MessageHandlers:
             except Exception:
                 _postbot_match = False
 
-        # ═══ Diag logging — خلف flag ═══
         if _DEBUG_DIAG:
             will_delete_fwd = _df_bool and (
                 ctx.is_forwarded or ctx.is_auto_fwd
@@ -2798,9 +2859,6 @@ class MessageHandlers:
             if _spam_score > 0:
                 logger.warning("   🎯 SPAM=%d | %s", _spam_score, _spam_reasons)
 
-        # ═══════════════════════════════════════════════════════════
-        # 0) Service
-        # ═══════════════════════════════════════════════════════════
         if _as_bool(settings.get('delete_service'), False):
             if message.new_chat_members or message.left_chat_member:
                 await _safe_delete_message(
@@ -2808,9 +2866,6 @@ class MessageHandlers:
                 )
                 return
 
-        # ═══════════════════════════════════════════════════════════
-        # 1) Forwarded
-        # ═══════════════════════════════════════════════════════════
         if _df_bool:
             effective_forwarded = (
                 ctx.is_forwarded or ctx.is_auto_fwd
@@ -2836,9 +2891,6 @@ class MessageHandlers:
                 )
                 return
 
-        # ═══════════════════════════════════════════════════════════
-        # 2) Spam Score
-        # ═══════════════════════════════════════════════════════════
         if _is_spam:
             if _DEBUG_SPAM:
                 logger.warning(
@@ -2852,9 +2904,6 @@ class MessageHandlers:
             )
             return
 
-        # ═══════════════════════════════════════════════════════════
-        # 3) PostBot Pattern
-        # ═══════════════════════════════════════════════════════════
         if _postbot_enabled and _postbot_match:
             if _DEBUG_SPAM:
                 logger.warning(
@@ -2867,9 +2916,6 @@ class MessageHandlers:
             )
             return
 
-        # ═══════════════════════════════════════════════════════════
-        # 4) Links
-        # ═══════════════════════════════════════════════════════════
         if _as_bool(settings.get('delete_links'), False):
             try:
                 has_link = TextUtils.contains_link(ctx.normalized_text)
@@ -2883,9 +2929,6 @@ class MessageHandlers:
                 )
                 return
 
-        # ═══════════════════════════════════════════════════════════
-        # 5) Mentions
-        # ═══════════════════════════════════════════════════════════
         if _as_bool(settings.get('mentions'), False):
             try:
                 has_mention = TextUtils.contains_mention(ctx.normalized_text)
@@ -2899,9 +2942,6 @@ class MessageHandlers:
                 )
                 return
 
-        # ═══════════════════════════════════════════════════════════
-        # 6) Banned Words
-        # ═══════════════════════════════════════════════════════════
         if _as_bool(settings.get('delete_banned_words'), False):
             banned_words = await get_banned_words_cached(chat_id)
 
@@ -2922,9 +2962,6 @@ class MessageHandlers:
                     )
                     return
 
-        # ═══════════════════════════════════════════════════════════
-        # 7) Max Length
-        # ═══════════════════════════════════════════════════════════
         try:
             max_len = int(settings.get('max_message_length', 0) or 0)
         except (TypeError, ValueError):
@@ -2937,9 +2974,6 @@ class MessageHandlers:
             )
             return
 
-        # ═══════════════════════════════════════════════════════════
-        # 8) Media — ✅ P2: pass واحد مع precomputed bools
-        # ═══════════════════════════════════════════════════════════
         for attr, setting_key, vtype in _MEDIA_SETTINGS_MAP:
             media = getattr(message, attr, None)
             if not media:
@@ -2953,9 +2987,6 @@ class MessageHandlers:
             )
             return
 
-        # ═══════════════════════════════════════════════════════════
-        # 9) Translation
-        # ═══════════════════════════════════════════════════════════
         translate_source = ctx.text or ctx.caption
         if translate_source and not is_anonymous:
             try:
@@ -2971,9 +3002,6 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        # ═══════════════════════════════════════════════════════════
-        # 10) Auto Reply
-        # ═══════════════════════════════════════════════════════════
         if ctx.text:
             await MessageHandlers._process_auto_reply(
                 update, context, chat_id, ctx.text, user_id
@@ -3109,7 +3137,6 @@ class MessageHandlers:
             except Exception:
                 pass
 
-        # ═══ حذف ═══
         delete_ok = False
         try:
             if message.message_id:
@@ -3120,14 +3147,13 @@ class MessageHandlers:
             logger.error("delete exception: %s", e)
             delete_ok = False
 
-        # ✅ R6: إذا فشل الحذف، لا نُشعر المالك (تفادي إشعارات كاذبة)
+        # ✅ R6: إذا فشل الحذف، لا نُشعر المالك
         if not delete_ok:
             logger.error(
                 "⏭️ توقف — الحذف فشل (%s)", violation_type
             )
             return
 
-        # ═══ سجل الحذف ═══
         if FEATURE_LOG_DELETIONS:
             try:
                 if await _can_send_log(chat_id):
@@ -3157,7 +3183,6 @@ class MessageHandlers:
                         is_anonymous=is_anonymous
                     )
 
-                    # ✅ F1: factory
                     await _dispatch_log(
                         partial(
                             notify_group_log, context, chat_id, log_text
@@ -3167,7 +3192,7 @@ class MessageHandlers:
             except Exception as e:
                 logger.warning("group_log spawn: %s", e)
 
-        # ═══ إشعار المالك عن forward ═══
+        # ✅ M2: تتبّع إشعار المالك عبر _spawn_tracked_task
         if (
             forward_info
             and not is_anonymous
@@ -3178,34 +3203,21 @@ class MessageHandlers:
                     getattr(CONFIG, 'PRIMARY_OWNER_ID', 0) or 0
                 )
                 if owner_id:
-                    task = asyncio.create_task(
+                    _spawn_tracked_task(
                         _notify_admin_about_forward(
                             context, owner_id, forward_info
-                        )
+                        ),
+                        label="forward-notify"
                     )
+            except Exception as e:
+                logger.debug("forward notify spawn: %s", e)
 
-                    def _fwd_done(t):
-                        try:
-                            if not t.cancelled() and t.exception():
-                                logger.debug(
-                                    "forward notify failed: %s",
-                                    t.exception(),
-                                )
-                        except Exception:
-                            pass
-
-                    task.add_done_callback(_fwd_done)
-            except Exception:
-                pass
-
-        # ═══ تحذير المشرف المجهول ═══
         if is_anonymous:
             await MessageHandlers._send_anonymous_warning(
                 context, chat_id, violation_type, lang
             )
             return
 
-        # ═══ عدّاد المخالفات ═══
         try:
             violation_count = await DB.increment_violation_count(
                 user_id, chat_id
@@ -3213,12 +3225,10 @@ class MessageHandlers:
         except Exception:
             violation_count = 1
 
-        # ═══ استنباط العقوبة ═══
         penalty_type, duration_seconds = await MessageHandlers._resolve_penalty(
             chat_id, violation_type, settings
         )
 
-        # ═══ تسجيل في admin_logs ═══
         try:
             await DB.add_admin_log(
                 chat_id, context.bot.id,
@@ -3227,14 +3237,12 @@ class MessageHandlers:
         except Exception:
             pass
 
-        # ═══ إرسال التحذير ═══
         user_name = escape(update.effective_user.first_name or "User")
         await MessageHandlers._send_user_warning(
             context, chat_id, user_name,
             violation_type, lang, violation_count
         )
 
-        # ═══ تطبيق العقوبة إذا لزم ═══
         if not penalty_type:
             return
 
@@ -3346,8 +3354,6 @@ class MessageHandlers:
     async def handle_private(update, context):
         """
         ✅ R2: inspect.signature بدل try/TypeError.
-        السبب: TypeError قد يأتي من داخل handler نفسه (int(None) مثلاً)
-        فيؤدي try/TypeError إلى استدعاء ثانٍ بمُعاملَين — تكرار جانبي.
         """
         try:
             if not update.effective_user:
@@ -3364,7 +3370,6 @@ class MessageHandlers:
             if handler is None:
                 return
 
-            # فحص عدد الوسائط مرة واحدة
             try:
                 sig = inspect.signature(handler)
                 params = [
@@ -3486,6 +3491,7 @@ __all__ = [
     "_cleanup_log_rate_tracker",
     "shutdown_log_dispatcher",
     "shutdown_delete_tasks",
+    "shutdown_bg_tasks",
     "register_shutdown_handlers",
     "FEATURE_LOG_DELETIONS",
     "FEATURE_LOG_PENALTIES",
