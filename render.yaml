@@ -2,9 +2,12 @@ services:
   - type: web
     name: relax-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get update -qq && apt-get install -y -qq tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng tesseract-ocr-fas tesseract-ocr-rus libzbar0 ffmpeg && pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
+      # ═══════════════════════════════════════════════════════
+      # Core
+      # ═══════════════════════════════════════════════════════
       - key: BOT_TOKEN
         sync: false
       - key: MAIN_ADMIN_ID
@@ -19,3 +22,53 @@ services:
         value: 10000
       - key: PYTHON_VERSION
         value: 3.11.0
+
+      # ═══════════════════════════════════════════════════════
+      # 🆕 v3.0.1 — Multi-Layer Detection (7 Layers)
+      # ═══════════════════════════════════════════════════════
+      - key: MULTILAYER_ENABLED
+        value: "1"
+      - key: TEXT_LAYER_ENABLED
+        value: "1"
+      - key: OCR_LAYER_ENABLED
+        value: "1"
+      - key: AUDIO_LAYER_ENABLED
+        value: "1"
+      - key: URL_LAYER_ENABLED
+        value: "1"
+      - key: METADATA_LAYER_ENABLED
+        value: "1"
+      - key: OBFUSCATION_LAYER_ENABLED
+        value: "1"
+      - key: BEHAVIORAL_LAYER_ENABLED
+        value: "1"
+
+      # ─── Layer 1: OCR ──────────────────────────────────
+      - key: OCR_LANGUAGES
+        value: ara+eng+fas+rus
+
+      # ─── Layer 2: Audio ────────────────────────────────
+      - key: AUDIO_USE_WHISPER
+        value: "0"
+
+      # ─── Layer 3: URL Enrichment ───────────────────────
+      - key: URL_ENRICH_ENABLED
+        value: "1"
+      - key: WHOIS_ENABLED
+        value: "1"
+      - key: URL_EXPAND_TIMEOUT
+        value: "5"
+      - key: URL_ENRICH_MAX_URLS
+        value: "5"
+      # ⚠️ أضف SAFE_BROWSING_API_KEY من Dashboard → Environment
+      #     إذا أردت تفعيل Google Safe Browsing
+      - key: SAFE_BROWSING_API_KEY
+        sync: false
+
+      # ─── Debug (عطّل في الإنتاج) ────────────────────────
+      - key: DEBUG_DIAG
+        value: "0"
+      - key: DEBUG_SPAM
+        value: "0"
+      - key: DIAG_INCOMING
+        value: "0"
