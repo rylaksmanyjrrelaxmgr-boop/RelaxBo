@@ -2,19 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-🌿 Relax Manager – البوت الرئيسي (v5.6.3)
+🌿 Relax Manager – البوت الرئيسي (v5.6.4)
 ================================================================================
+🆕 v5.6.4 (FIX-CANCELLED-PROPAGATION):
+    🔴 FIX: pool_health_monitor — استبدال `return` بـ `raise` (3 مواضع)
+       - المشكلة: عند SIGTERM، `return` يحوّل CancelledError إلى
+         خروج نظيف → `run_task_with_retry` يعتبره "انهيار صامت"
+         → يعيد جدولة المهمة (تحذير: "عادت بدون استثناء — إعادة 5s").
+       - الأثر: مهمة إضافية تُشغَّل أثناء الإغلاق، ضوضاء في السجلات،
+         تأخير بسيط في الإغلاق.
+       - الإصلاح: `raise` يُمرِّر الإلغاء لأعلى بشكل صحيح.
+       - المواضع المُصلَحة:
+         1. pool_health_monitor — قبل البدء (initial sleep)
+         2. pool_health_monitor — فرع SQLite (لا PG)
+         3. pool_health_monitor — النوم النهائي (300s)
+       - + إصلاح مرافق في cache.py v7.6.4 (cache_cleanup_task).
+
 🆕 v5.6.3 (EDITED-MESSAGE-HOOK + MAINTENANCE-COMMANDS + POST-INIT-FIX):
     🔴 F1: تسجيل MessageHandlers.handle_edited — يُفعِّل Fix #A4
-           (كان أي تعديل على رسالة يتجاوز كل فلاتر الحماية).
     🔴 F2: تسجيل أوامر db_maintenance_commands
-           (/db_diag_quick, /db_maintenance, /db_weekly).
-    🔴 F3: _start_polling_mode / _stop_polling_mode —
-           تعامل صحيح مع post_init/post_stop (callable أو list).
-    🟠 F4: timeout عند إلغاء المهام الخلفية (10s) لمنع تعليق الإغلاق.
-    🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now().
-    🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS.
-    🟡 F7: فحص وجود handle_edited في CommandHandlers._verify.
+    🔴 F3: _start_polling_mode / _stop_polling_mode — post_init/post_stop
+    🟠 F4: timeout عند إلغاء المهام الخلفية (10s)
+    🟠 F5: استبدال datetime.utcnow() بـ TimeUtils.utc_now()
+    🟡 F6: إضافة الأوامر الجديدة إلى ADMIN_COMMANDS
+    🟡 F7: فحص وجود handle_edited في CommandHandlers._verify
 
 🆕 v5.6.2 (POLLING-MODE CORRECTNESS + SHUTDOWN ORDER):
     🔴 F1-fix: تصحيح جوهري لـ Polling Mode
@@ -166,7 +177,7 @@ from handlers.handlers_message import (
 )
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v5.6.3: db_maintenance_commands
+# db_maintenance_commands
 # ═════════════════════════════════════════════════════════════════════
 register_maintenance_commands = None
 start_weekly_diagnostic_task = None
@@ -268,7 +279,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 _NOTIFY_SHUTDOWN_TIMEOUT = 5.0
-_BG_TASKS_SHUTDOWN_TIMEOUT = 10.0  # 🆕 v5.6.3
+_BG_TASKS_SHUTDOWN_TIMEOUT = 10.0
 
 _WATCHER_INTERVAL = 10.0
 _WATCHER_HEALTH_TIMEOUT = 5.0
@@ -439,7 +450,6 @@ else:
         _CH_DELETE_IMPORT_ERROR or "unknown",
     )
 
-# 🆕 v5.6.3
 if _MAINT_CMDS_AVAILABLE:
     logger.info(
         "✅ db_maintenance_commands متاح — "
@@ -459,7 +469,7 @@ else:
 
 ALLOWED_UPDATES = [
     "message",
-    "edited_message",  # 🆕 v5.6.3: ضروري لـ handle_edited
+    "edited_message",
     "callback_query",
     "chat_join_request",
     "pre_checkout_query",
@@ -510,7 +520,6 @@ ADMIN_COMMANDS = [
     ("restore", "🔄 عرض النسخ"),
     ("db_diag", "🔬 تشخيص قاعدة البيانات"),
     ("db_vacuum", "🧹 تنظيف قاعدة البيانات"),
-    # 🆕 v5.6.3
     ("db_diag_quick", "🔬 تقرير صحي مختصر"),
     ("db_maintenance", "🧹 صيانة قاعدة البيانات"),
     ("db_weekly", "📅 التقرير الأسبوعي"),
@@ -715,7 +724,6 @@ def _verify_command_handlers() -> bool:
 
     logger.info("✅ كل %d دالة CommandHandlers موجودة", len(required))
 
-    # 🆕 v5.6.3: فحص handle_edited (اختياري — يُنبّه فقط)
     if not hasattr(MessageHandlers, "handle_edited"):
         logger.warning(
             "⚠️ MessageHandlers.handle_edited مفقود — "
@@ -936,7 +944,6 @@ async def cleanup_removed_channels_periodically() -> None:
             deleted = 0
 
             if hasattr(DB, 'hard_delete_removed_channels_before'):
-                # 🆕 v5.6.3: TimeUtils.utc_now بدل datetime.utcnow
                 cutoff_dt = TimeUtils.utc_now() - timedelta(days=GRACE_DAYS)
                 deleted = await DB.hard_delete_removed_channels_before(
                     cutoff_dt
@@ -1322,7 +1329,13 @@ async def _dump_idle_tx_details() -> None:
 
 
 async def pool_health_monitor() -> None:
-    """يراقب Pool + الاتصالات كل 5 دقائق."""
+    """
+    يراقب Pool + الاتصالات كل 5 دقائق.
+
+    ✅ v5.6.4 FIX: جميع مسارات CancelledError تستخدم `raise`
+       بدل `return` — يُمرِّر الإلغاء بشكل صحيح إلى
+       `run_task_with_retry` (يمنع إعادة جدولة أثناء الإغلاق).
+    """
     _task_start_mono = time.monotonic()
     _idle_tx_streak = 0
     _last_details_dump_mono = 0.0
@@ -1331,7 +1344,8 @@ async def pool_health_monitor() -> None:
         await asyncio.sleep(120)
     except asyncio.CancelledError:
         logger.info("🛑 pool_health_monitor أُلغيت (قبل البدء)")
-        return
+        # ✅ v5.6.4: raise بدل return
+        raise
 
     while True:
         try:
@@ -1341,7 +1355,8 @@ async def pool_health_monitor() -> None:
                     await asyncio.sleep(1800)
                 except asyncio.CancelledError:
                     logger.info("🛑 pool_health_monitor أُلغيت")
-                    return
+                    # ✅ v5.6.4: raise بدل return
+                    raise
                 continue
 
             row = await DB.fetchone(
@@ -1494,7 +1509,8 @@ async def pool_health_monitor() -> None:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
             logger.info("🛑 pool_health_monitor أُلغيت")
-            return
+            # ✅ v5.6.4: raise بدل return
+            raise
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1767,12 +1783,12 @@ async def contest_cleanup(app: Application):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Post-init / Post-stop hook helpers (🆕 v5.6.3 — F3)
+# Post-init / Post-stop hook helpers
 # ═══════════════════════════════════════════════════════════════════
 
 async def _run_post_init_hooks(app: Application) -> None:
     """
-    ✅ F3: تنفيذ post_init hooks بشكل صحيح — يدعم:
+    تنفيذ post_init hooks بشكل صحيح — يدعم:
       - callable مفرد (PTB v20+)
       - list/tuple من callables (توافق أوسع)
     """
@@ -1796,7 +1812,7 @@ async def _run_post_init_hooks(app: Application) -> None:
 
 async def _run_post_stop_hooks(app: Application) -> None:
     """
-    ✅ F3: تنفيذ post_stop hooks بشكل صحيح — يدعم:
+    تنفيذ post_stop hooks بشكل صحيح — يدعم:
       - callable مفرد
       - list/tuple من callables
     """
@@ -1819,16 +1835,15 @@ async def _run_post_stop_hooks(app: Application) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Polling mode helpers (F1-fix + v5.6.3)
+# Polling mode helpers
 # ═══════════════════════════════════════════════════════════════════
 
 async def _start_polling_mode(app: Application) -> None:
     """
-    ✅ F1-fix: يُحاكي app.start() بدقة مع تمرير allowed_updates/
-    drop_pending_updates — بدون استدعاء app.start() (الذي كان
-    يفشل لأن Updater.start_polling() تُنادَى مرتين).
+    F1-fix: يُحاكي app.start() بدقة مع تمرير allowed_updates/
+    drop_pending_updates — بدون استدعاء app.start().
 
-    ✅ v5.6.3: يستخدم _run_post_init_hooks بدل iteration مباشر.
+    v5.6.3: يستخدم _run_post_init_hooks بدل iteration مباشر.
     """
     if app.updater is None:
         raise RuntimeError(
@@ -1850,13 +1865,12 @@ async def _start_polling_mode(app: Application) -> None:
         app._running = False
         raise
 
-    # ✅ F3: استخدام helper
     await _run_post_init_hooks(app)
 
 
 async def _stop_polling_mode(app: Application) -> None:
     """
-    ✅ F1-fix: يُحاكي app.stop() بدقة:
+    F1-fix: يُحاكي app.stop() بدقة:
       1. تنفيذ post_stop hooks (عبر helper)
       2. await app.updater.stop()
       3. app._running = False
@@ -1864,7 +1878,6 @@ async def _stop_polling_mode(app: Application) -> None:
     if not getattr(app, "_running", False):
         return
 
-    # ✅ F3
     await _run_post_stop_hooks(app)
 
     if app.updater is not None:
@@ -2110,7 +2123,6 @@ async def main():
     app.add_handler(CommandHandler("db_diag", CommandHandlers.db_diag))
     app.add_handler(CommandHandler("db_vacuum", CommandHandlers.db_vacuum))
 
-    # 🆕 v5.6.3: تسجيل أوامر الصيانة الجديدة
     if _MAINT_CMDS_AVAILABLE and callable(register_maintenance_commands):
         try:
             if register_maintenance_commands(app):
@@ -2190,7 +2202,6 @@ async def main():
         MessageHandlers.handle_private
     ))
 
-    # ═══ v5.6.3: تسجيل handle_group للرسائل العادية ═══
     _group_msg_filter = (
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL |
          filters.AUDIO | filters.VOICE | filters.ANIMATION |
@@ -2204,7 +2215,6 @@ async def main():
         MessageHandlers.handle_group
     ))
 
-    # ═══ 🆕 v5.6.3 F1: handle_edited للرسائل المُعدَّلة ═══
     if hasattr(MessageHandlers, "handle_edited"):
         try:
             app.add_handler(MessageHandler(
@@ -2321,7 +2331,6 @@ async def main():
             _MAINTENANCE_IMPORT_ERROR or "module missing",
         )
 
-    # 🆕 v5.6.3: بدء المهمة الأسبوعية من db_maintenance_commands
     if _MAINT_CMDS_AVAILABLE and callable(start_weekly_diagnostic_task):
         try:
             if start_weekly_diagnostic_task(app):
@@ -2509,7 +2518,7 @@ async def main():
             except asyncio.CancelledError:
                 raise
 
-        # 3) 🆕 v5.6.3 F4: background tasks مع timeout
+        # 3) background tasks مع timeout
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -2528,7 +2537,7 @@ async def main():
         except asyncio.CancelledError:
             raise
 
-        # 3.b) 🆕 v5.6.3: إيقاف weekly diagnostic task
+        # 3.b) إيقاف weekly diagnostic task
         if _MAINT_CMDS_AVAILABLE and callable(stop_weekly_diagnostic_task):
             try:
                 await stop_weekly_diagnostic_task(timeout=3.0)
