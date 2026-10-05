@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.17.1 (متوافق مع detectors v2.2.0 HARDENED+)
+handlers_message.py - v7.18.0
+(متوافق مع detectors v3.0.1 UNIFIED — 7 Layers)
 =============================================================================
-🆕 v7.17.1 — إصلاحات جوهرية على v7.17.0:
-    🔴 FIX-1: حساب PostBot pattern مرة واحدة (توفير ~50% CPU)
-    🔴 FIX-2: تصادم ctx.has_hint مع detectors — استخدام forward_hint محلي
-    🔴 FIX-3: handle_edited — إزالة تعيين effective_message (read-only)
-    🟠 FIX-4: ANTIEVASION_COMPACT_WORDS نُقل قبل أول استخدام
-    🟠 FIX-5: _apply_slow_mode — حماية bot_data.get
-    🟡 FIX-6: إشعار المالك عند فشل الحذف (كان يفشل بصمت)
-    🟡 FIX-7: دياجنوستيك POSTBOT-HARD-BLOCK دائم (بغض عن DEBUG_DIAG)
-    🟡 FIX-8: مسار فشل الحذف في _delete_and_warn يُشعر المالك
+🆕 v7.18.0 — تفعيل الطبقات السبع (Multi-Layer Integration):
+    🔥 MAJOR: استدعاء `analyze_message_full(message, bot)` بدل
+              `_compute_spam_score` فقط → تفعيل OCR + Audio +
+              URL Enrichment + Metadata + Obfuscation + Behavioral
+    🔥 FIX-1: الصور/الفويس/الروابط المختصرة تُفحَص الآن تلقائياً
+              (إن كانت طبقاتها مُثبَّتة)
+    🔥 FIX-2: Spam score = aggregate من كل الطبقات (بأوزان)
+    🟠 FIX-3: PostBot confidence ما زال من Layer 0 (Text) مباشرة
+    🟠 FIX-4: Fallback تلقائي لو analyze_message_full فشل
+    🟡 FIX-5: لوج موحّد يعرض نتائج كل طبقة
+    🟡 FIX-6: MULTILAYER_ENABLED=1 env flag (افتراضي مفعّل)
 
-🆕 v7.17.0 — تكامل مع محرك الكشف الجديد:
-    ✅ استيراد API v2.2.0 (context-first)
-    ✅ _handle_group_impl يستخدم _MessageContext مباشرة
-    ✅ استدعاءات _compute_spam_score / _is_postbot_pattern
-       / _postbot_pattern_confidence بالنمط الجديد
-    ✅ _env_flag / _as_bool محلياً (v2.2.0 لا يصدّرهما)
-    ✅ DEBUG_DIAG/DEBUG_SPAM (public، بدون underscore)
-    ✅ POSTBOT-AUTO-BLOCK بغض النظر عن delete_postbot_pattern
+🆕 v7.17.2:
+    🟢 FIX-3: استدعاء واحد لـ`_compute_spam_score` مع
+              `return_diagnostics=True`
+
+🆕 v7.17.1:
+    🔴 FIX-1: حساب PostBot pattern مرة واحدة
+    🔴 FIX-2: تصادم ctx.has_hint
+    🔴 FIX-3: handle_edited
+    🟠 FIX-4..8: إصلاحات متفرقة
 =============================================================================
 """
 
@@ -55,9 +59,10 @@ from cache import settings_cache, posts_cache
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 🆕 v7.17.0: استيراد محرك الكشف v2.2.0
+# استيراد محرك الكشف v2.2.0+ / v3.0.1
 # ═════════════════════════════════════════════════════════════════════
 
+# --- Layer 0 API (متوفرة في كل الإصدارات) ---
 try:
     from handlers.handlers_message_detectors import (
         DEBUG_DIAG, DEBUG_SPAM,
@@ -158,6 +163,107 @@ except ImportError:
         )
 
 
+# --- v3.0.x Multi-Layer API (اختياري) ---
+_HAS_MULTILAYER = False
+analyze_message_full = None
+SpamVerdict = None
+FINAL_THRESHOLD = 5
+LAYER_WEIGHTS = {}
+
+try:
+    from handlers.handlers_message_detectors import (
+        analyze_message_full as _amf,
+        SpamVerdict as _SV,
+        FINAL_THRESHOLD as _FT,
+        LAYER_WEIGHTS as _LW,
+        TEXT_LAYER_ENABLED as _TLE,
+        OCR_LAYER_ENABLED as _OLE,
+        AUDIO_LAYER_ENABLED as _ALE,
+        URL_LAYER_ENABLED as _ULE,
+        METADATA_LAYER_ENABLED as _MLE,
+        OBFUSCATION_LAYER_ENABLED as _OBLE,
+        BEHAVIORAL_LAYER_ENABLED as _BLE,
+    )
+    analyze_message_full = _amf
+    SpamVerdict = _SV
+    FINAL_THRESHOLD = _FT
+    LAYER_WEIGHTS = _LW
+    TEXT_LAYER_ENABLED = _TLE
+    OCR_LAYER_ENABLED = _OLE
+    AUDIO_LAYER_ENABLED = _ALE
+    URL_LAYER_ENABLED = _ULE
+    METADATA_LAYER_ENABLED = _MLE
+    OBFUSCATION_LAYER_ENABLED = _OBLE
+    BEHAVIORAL_LAYER_ENABLED = _BLE
+    _HAS_MULTILAYER = True
+except ImportError:
+    try:
+        from handlers_message_detectors import (
+            analyze_message_full as _amf,
+            SpamVerdict as _SV,
+            FINAL_THRESHOLD as _FT,
+            LAYER_WEIGHTS as _LW,
+            TEXT_LAYER_ENABLED as _TLE,
+            OCR_LAYER_ENABLED as _OLE,
+            AUDIO_LAYER_ENABLED as _ALE,
+            URL_LAYER_ENABLED as _ULE,
+            METADATA_LAYER_ENABLED as _MLE,
+            OBFUSCATION_LAYER_ENABLED as _OBLE,
+            BEHAVIORAL_LAYER_ENABLED as _BLE,
+        )
+        analyze_message_full = _amf
+        SpamVerdict = _SV
+        FINAL_THRESHOLD = _FT
+        LAYER_WEIGHTS = _LW
+        TEXT_LAYER_ENABLED = _TLE
+        OCR_LAYER_ENABLED = _OLE
+        AUDIO_LAYER_ENABLED = _ALE
+        URL_LAYER_ENABLED = _ULE
+        METADATA_LAYER_ENABLED = _MLE
+        OBFUSCATION_LAYER_ENABLED = _OBLE
+        BEHAVIORAL_LAYER_ENABLED = _BLE
+        _HAS_MULTILAYER = True
+    except ImportError:
+        try:
+            from .handlers_message_detectors import (
+                analyze_message_full as _amf,
+                SpamVerdict as _SV,
+                FINAL_THRESHOLD as _FT,
+                LAYER_WEIGHTS as _LW,
+                TEXT_LAYER_ENABLED as _TLE,
+                OCR_LAYER_ENABLED as _OLE,
+                AUDIO_LAYER_ENABLED as _ALE,
+                URL_LAYER_ENABLED as _ULE,
+                METADATA_LAYER_ENABLED as _MLE,
+                OBFUSCATION_LAYER_ENABLED as _OBLE,
+                BEHAVIORAL_LAYER_ENABLED as _BLE,
+            )
+            analyze_message_full = _amf
+            SpamVerdict = _SV
+            FINAL_THRESHOLD = _FT
+            LAYER_WEIGHTS = _LW
+            TEXT_LAYER_ENABLED = _TLE
+            OCR_LAYER_ENABLED = _OLE
+            AUDIO_LAYER_ENABLED = _ALE
+            URL_LAYER_ENABLED = _ULE
+            METADATA_LAYER_ENABLED = _MLE
+            OBFUSCATION_LAYER_ENABLED = _OBLE
+            BEHAVIORAL_LAYER_ENABLED = _BLE
+            _HAS_MULTILAYER = True
+        except ImportError:
+            # v2.x — لا يدعم الطبقات، نبقى على Layer 0 فقط
+            _HAS_MULTILAYER = False
+            analyze_message_full = None
+            SpamVerdict = None
+            TEXT_LAYER_ENABLED = False
+            OCR_LAYER_ENABLED = False
+            AUDIO_LAYER_ENABLED = False
+            URL_LAYER_ENABLED = False
+            METADATA_LAYER_ENABLED = False
+            OBFUSCATION_LAYER_ENABLED = False
+            BEHAVIORAL_LAYER_ENABLED = False
+
+
 try:
     from replies import analyze_sentiment  # noqa: F401
 except ImportError:
@@ -182,7 +288,7 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# v7.17.0: Local helpers (v2.2.0 لا يصدّر _env_flag / _as_bool)
+# Local helpers
 # ═══════════════════════════════════════════════════════════════════
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -220,11 +326,16 @@ def _as_bool(value, default=False) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Environment Flags (runtime-specific)
+# Environment Flags
 # ═══════════════════════════════════════════════════════════════════
 
 _ANTIFLOOD_ENABLED = _env_flag("ANTIFLOOD_ENABLED", True)
 _SLOW_MODE_AUTO = _env_flag("SLOW_MODE_AUTO", True)
+
+# 🆕 v7.18.0: تفعيل الطبقات السبع (افتراضي مفعّل)
+_MULTILAYER_ENABLED = (
+    _env_flag("MULTILAYER_ENABLED", True) and _HAS_MULTILAYER
+)
 
 _BAN_ADD_RATE_LIMIT = _env_flag("BAN_ADD_RATE_LIMIT", True)
 _BAN_ADD_RATE_MAX = 10
@@ -233,7 +344,7 @@ _BOT_DATA_SLOW_MODE_PRUNE_THRESHOLD = 10000
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Constants (runtime-specific)
+# Constants
 # ═══════════════════════════════════════════════════════════════════
 
 LOG_RATE_LIMIT_PER_MIN = 30
@@ -279,7 +390,6 @@ FEATURE_LOG_PENALTIES = _env_flag("LOG_PENALTIES", True)
 FEATURE_LOG_GIFTS = _env_flag("LOG_GIFTS", True)
 FEATURE_LOG_ADMIN_CHANGES = _env_flag("LOG_ADMIN_CHANGES", True)
 
-# Alias للتوافق
 _DEBUG_DIAG = DEBUG_DIAG
 _DEBUG_SPAM = DEBUG_SPAM
 
@@ -429,7 +539,7 @@ async def _lazy_init_columns():
         _columns_last_attempt_ts = now
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.17.1: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.18.0: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -2440,7 +2550,7 @@ class MessageHandlers:
         det = get_forward_detection_reason(message)
         ctx.is_forwarded = _as_bool(det.get('is_forwarded', False), False)
         ctx.is_protected = _as_bool(det.get('is_protected', False), False)
-        # v7.17.1 FIX-2: لا نكتب فوق ctx.has_hint (له دلالة أخرى في detectors)
+        # v7.17.1 FIX-2: لا نكتب فوق ctx.has_hint
         forward_hint = _as_bool(det.get('has_hint', False), False)
         ctx.is_auto_fwd = _as_bool(
             det.get('has_automatic_forward', False), False,
@@ -2455,18 +2565,54 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # v7.17.0: حساب spam score
+        # ════════════════════════════════════════════════════════════
+        # 🆕 v7.18.0: Multi-Layer Analysis (7 Layers)
+        # ════════════════════════════════════════════════════════════
         _spam_score = 0
         _spam_reasons: List[str] = []
+        _spam_layer_scores: Dict[str, float] = {}
+        _verdict = None
+        _analysis_mode = "text-only"
+
         if _spam_enabled:
-            try:
-                _spam_score, _spam_reasons = _compute_spam_score(ctx)
-            except Exception as e:
-                logger.debug("spam_score: %s", e)
+            if _MULTILAYER_ENABLED and analyze_message_full is not None:
+                try:
+                    _verdict = analyze_message_full(
+                        message, bot=context.bot,
+                    )
+                    if _verdict is not None:
+                        _spam_score = int(
+                            getattr(_verdict, "total_score", 0) or 0
+                        )
+                        _spam_layer_scores = dict(
+                            getattr(_verdict, "layer_scores", {}) or {}
+                        )
+                        try:
+                            for _layer, _reasons in (
+                                getattr(_verdict, "layer_reasons", {}) or {}
+                            ).items():
+                                for _r in (_reasons or []):
+                                    _spam_reasons.append(
+                                        f"{_layer}:{_r}"
+                                    )
+                        except Exception:
+                            pass
+                        _analysis_mode = "multilayer"
+                except Exception as e:
+                    logger.debug("multilayer error: %s", e)
+                    _verdict = None
+
+            # Fallback: Layer 0 فقط
+            if _verdict is None:
+                try:
+                    _spam_score, _spam_reasons = _compute_spam_score(ctx)
+                    _analysis_mode = "text-only"
+                except Exception as e:
+                    logger.debug("spam_score: %s", e)
 
         _is_spam = _spam_enabled and _spam_score >= SPAM_SCORE_THRESHOLD
 
-        # v7.17.1 FIX-1: حساب PostBot confidence مرة واحدة فقط
+        # v7.17.1 FIX-1: PostBot confidence من Layer 0 (دائماً)
         _postbot_hard_conf = 0
         try:
             _postbot_hard_conf = _postbot_pattern_confidence(
@@ -2482,7 +2628,7 @@ class MessageHandlers:
             _postbot_hard_conf >= POSTBOT_AUTO_BLOCK_CONFIDENCE
         )
 
-        # Legacy PostBot match — نعيد استخدام النتيجة المحسوبة
+        # Legacy PostBot match
         _postbot_match = False
         if _postbot_enabled:
             if _postbot_hard_block:
@@ -2497,17 +2643,29 @@ class MessageHandlers:
                 except Exception:
                     _postbot_match = False
 
-        # v7.17.1 FIX-7: إظهار POSTBOT-HARD-BLOCK دائماً
+        # v7.17.1 FIX-7: POSTBOT-HARD-BLOCK دائماً في اللوج
         if _postbot_hard_block:
             logger.warning(
                 "🤖 POSTBOT-HARD-BLOCK | chat=%s user=%s msg=%s "
                 "conf=%d/%d | buttons=%d strong=%d promo=%d cta=%d "
-                "spam_emoji=%d",
+                "spam_emoji=%d | mode=%s",
                 chat_id, user_id, message.message_id,
                 _postbot_hard_conf, POSTBOT_AUTO_BLOCK_CONFIDENCE,
                 ctx.button_count, ctx.strong_word_count,
                 ctx.promo_word_count, ctx.cta_count,
                 ctx.spam_emoji_count,
+                _analysis_mode,
+            )
+
+        # 🆕 v7.18.0: لوج موحّد للطبقات (يظهر فقط عند وجود نتيجة)
+        if _analysis_mode == "multilayer" and _spam_layer_scores:
+            logger.info(
+                "🛡️ SHIELD | chat=%s user=%s msg=%s | "
+                "total=%.1f | layers=%s",
+                chat_id, user_id, message.message_id,
+                float(_spam_score),
+                {k: round(v, 1)
+                 for k, v in _spam_layer_scores.items() if v > 0},
             )
 
         if _DEBUG_DIAG:
@@ -2527,7 +2685,7 @@ class MessageHandlers:
                 "txt=%s cap=%s poll=%d analysis=%d | "
                 "photo=%s video=%s btns=%d | "
                 "prot=%s auto_fwd=%s | df=%r/%s | "
-                "spam_en=%s score=%d is_spam=%s | "
+                "spam_en=%s score=%d is_spam=%s mode=%s | "
                 "postbot_en=%s match=%s hard_conf=%d hard_block=%s | "
                 "has_link=%s btn_links=%d ent_links=%d | "
                 "vcard=%d venue=%s poll_urls=%d hidden=%d bidi=%d | "
@@ -2544,7 +2702,7 @@ class MessageHandlers:
                 ctx.button_count,
                 ctx.is_protected, ctx.is_auto_fwd,
                 _df_raw, _df_bool,
-                _spam_enabled, _spam_score, _is_spam,
+                _spam_enabled, _spam_score, _is_spam, _analysis_mode,
                 _postbot_enabled, _postbot_match,
                 _postbot_hard_conf, _postbot_hard_block,
                 ctx.has_any_link,
@@ -2571,7 +2729,8 @@ class MessageHandlers:
             if ctx.entity_urls:
                 logger.info("   🎭 ENT | %s", ctx.entity_urls[:5])
             if _spam_score > 0:
-                logger.warning("   🎯 SPAM=%d | %s", _spam_score, _spam_reasons)
+                logger.warning("   🎯 SPAM=%d | %s",
+                               _spam_score, _spam_reasons[:10])
 
         # 0) Service
         if _as_bool(settings.get('delete_service'), False):
@@ -2610,7 +2769,7 @@ class MessageHandlers:
             )
             return
 
-        # 3) PostBot Pattern (legacy — when setting enabled)
+        # 3) PostBot Pattern (legacy)
         if _postbot_enabled and _postbot_match:
             await MessageHandlers._delete_and_warn(
                 update, context, chat_id, user_id,
@@ -2914,7 +3073,6 @@ class MessageHandlers:
 
         if not delete_ok:
             logger.error("⏭️ توقف — الحذف فشل (%s)", violation_type)
-            # v7.17.1 FIX-6: أبلغ المالك (كان يفشل بصمت)
             try:
                 should_notify = await _record_delete_failure(chat_id)
                 if should_notify:
@@ -3741,4 +3899,9 @@ __all__ = [
     "_DEFAULT_VIOLATION_MESSAGES",
     "_notify_delete_permission_failure",
     "analyze_sentiment",
+    # v7.18.0 multilayer exports
+    "_MULTILAYER_ENABLED",
+    "_HAS_MULTILAYER",
+    "analyze_message_full",
+    "SpamVerdict",
 ]
