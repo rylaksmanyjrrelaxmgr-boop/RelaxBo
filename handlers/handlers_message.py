@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handlers_message.py - v7.12.0 (CORRECTNESS + PERF + SHUTDOWN)
+handlers_message.py - v7.12.1 (CORRECTNESS + PERF + SHUTDOWN)
 =============================================================================
-🆕 v7.12.0 (CRITICAL + IMPROVEMENTS):
+🆕 v7.12.1 (REVIEW FIXES):
     🐛 Bug Fixes:
-        ✅ F1  _dispatch_log: إصلاح coroutine-reuse bug — الآن يستقبل factory
-              (retry كان يفشل فعلياً بسبب "cannot reuse already awaited coroutine")
-        ✅ F2  _MessageContext: الحقول المُهمَلة (is_forwarded..) صارت مستخدمة
-        ✅ F3  _get_message_button_data: توافق كامل مع الـsignature
+        ✅ R1  register_shutdown_handlers: يحفظ handler الأصلي (لا يمحوه)
+        ✅ R2  handle_private: inspect.signature بدل try/TypeError
+               (يمنع الاستدعاء المزدوج عند TypeError داخلي)
+        ✅ R3  _spawn_delete_after_delay: وحّد مسار delay<=0 داخل
+               _running_delete_tasks ليُنتظَر في shutdown_delete_tasks
+        ✅ R4  _get_banned_pattern: إصلاح re.sub لا-أثر
+               (استخدام .replace(" ", r"\s+") الصحيح)
+        ✅ R5  _notify_dev_log: rate-limit (30/دقيقة) + reset cache
+        ✅ R6  _delete_and_warn: نقل فحص delete_ok قبل إشعار المالك
+        ✅ R7  _spam_enabled: default=True بدل 1 (وضوح)
+        ✅ R8  _can_send_log: warning → debug (تقليل إغراق السجل)
+        ✅ R9  حذف imports غير مستخدمة (json, Path)
+        ✅ R10 _compute_spam_score: يقبل _analysis_text لتوفير pass
+        ✅ R11 _verify_bot_in_log_channel_error_text: توثيق lang كـ
+               reserved (متوافق مع الاستدعاءات الحالية)
 
     ⚡ Performance:
         ✅ P1  تمرير button context إلى _compute_spam_score
-              (تفادي استخراج مزدوج للأزرار)
-        ✅ P2  تجميع تحويلات _as_bool للأزرار/الإيموجي/الوسائط في pass واحد
-        ✅ P3  lazy log formatting (avoid f-string عند تعطيل DEBUG)
+        ✅ P2  تجميع تحويلات _as_bool في pass واحد
+        ✅ P3  lazy log formatting
         ✅ P4  LRU-based _compiled_banned_patterns (OrderedDict)
-        ✅ P5  _safe_delete_message: levels مبسّطة (info→debug للنجاح)
+        ✅ P5  _safe_delete_message: levels مبسّطة
 
     🛡️ Hardening:
         ✅ H1  register_shutdown_handlers(app) — تسجيل تلقائي
-        ✅ H2  رفض coroutine في _dispatch_log بدون factory (safety)
+        ✅ H2  رفض coroutine في _dispatch_log بدون factory
         ✅ H3  _spawn_delete_after_delay: check للـdelay السالب سلفاً
-        ✅ H4  _delete_and_warn: تقسيم إلى helpers (_handle_anon_warning, _handle_penalty)
-
-    🔧 Quality:
-        ✅ Q1  حذف imports غير مستخدمة (shutil, tempfile, PATHS, ...)
-        ✅ Q2  توثيق أوضح لـforward policy
-        ✅ Q3  حذف المتغيرات الميتة (msg_id في _handle_group_impl)
-
-    ✅ الحفاظ الكامل على وظائف v7.11.0
+        ✅ H4  _delete_and_warn: تقسيم إلى helpers
 =============================================================================
 """
 
@@ -38,10 +41,9 @@ import logging
 import time
 import os
 import re
-import json
+import inspect
 import ipaddress
 import unicodedata
-from pathlib import Path
 from html import escape
 from functools import partial
 from typing import Optional, Dict, Any, List, Tuple, Callable, Awaitable
@@ -465,7 +467,6 @@ def _get_message_analysis_text(message) -> str:
     return _normalize_text(" ".join(parts))
 
 
-# ✅ F1/P1: الآن تستقبل button context (اختياري) بدل استخراجها من الصفر
 def _compute_spam_score(
     message,
     *,
@@ -473,9 +474,12 @@ def _compute_spam_score(
     _button_urls: Optional[List[str]] = None,
     _button_texts: Optional[List[str]] = None,
     _normalized: Optional[str] = None,
+    _analysis_text: Optional[str] = None,
 ) -> Tuple[int, List[str]]:
     """
     Spam scoring engine.
+
+    ✅ R10: يقبل _analysis_text (نص+أزرار) لتوفير pass إضافي.
 
     إذا مُرِّرت بيانات الأزرار/النص مسبقاً، لن نعيد استخراجها.
     """
@@ -512,7 +516,10 @@ def _compute_spam_score(
     if not normalized and not button_urls and not button_texts:
         return 0, []
 
-    if button_texts:
+    # ═══ 3) analysis_text — استخدم الجاهز إن وُجد ═══
+    if _analysis_text is not None:
+        analysis_text = _analysis_text
+    elif button_texts:
         button_text_joined = _normalize_text(" ".join(button_texts))
         analysis_text = (
             f"{normalized} {button_text_joined}".strip()
@@ -850,7 +857,7 @@ async def _lazy_init_columns():
             return
 
         db_type = getattr(DB, "DB_TYPE", "sqlite")
-        logger.info("🔧 v7.12.0: Auto-migration (DB_TYPE=%s)", db_type)
+        logger.info("🔧 v7.12.1: Auto-migration (DB_TYPE=%s)", db_type)
 
         cols = [
             ("delete_protected_any", "INTEGER DEFAULT 0", "TINYINT(1) DEFAULT 0"),
@@ -975,6 +982,13 @@ def _invalidate_dev_log_cache():
 
 
 async def _notify_dev_log(context, text):
+    # ✅ R5: rate-limit للـdev log
+    try:
+        if not await _can_send_log("__dev_log__"):
+            return
+    except Exception:
+        pass
+
     try:
         log_ch = await _get_dev_log_channel_cached()
         if not log_ch:
@@ -1019,6 +1033,10 @@ _log_rate_tracker = defaultdict(
 )
 _log_rate_lock = asyncio.Lock()
 
+# ✅ R8: cooldown للتحذير نفسه لتفادي إغراق السجل
+_log_rate_warn_last: Dict[Any, float] = {}
+_LOG_RATE_WARN_COOLDOWN = 300.0
+
 
 async def _can_send_log(chat_id) -> bool:
     async with _log_rate_lock:
@@ -1029,7 +1047,13 @@ async def _can_send_log(chat_id) -> bool:
             len(tracker) >= LOG_RATE_LIMIT_PER_MIN
             and now - tracker[0] < LOG_RATE_WINDOW_SEC
         ):
-            logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
+            # ✅ R8: debug بدل warning + cooldown داخلي
+            last = _log_rate_warn_last.get(chat_id, 0.0)
+            if now - last >= _LOG_RATE_WARN_COOLDOWN:
+                _log_rate_warn_last[chat_id] = now
+                logger.warning("🚫 LOG-RATE-LIMIT | chat=%s", chat_id)
+            else:
+                logger.debug("🚫 LOG-RATE-LIMIT (silent) | chat=%s", chat_id)
             return False
 
         tracker.append(now)
@@ -1047,6 +1071,14 @@ async def _cleanup_log_rate_tracker():
         ]
         for cid in stale:
             _log_rate_tracker.pop(cid, None)
+
+        # ✅ R8: تنظيف cooldown map
+        stale_warn = [
+            cid for cid, ts in _log_rate_warn_last.items()
+            if now - ts > _LOG_RATE_WARN_COOLDOWN * 2
+        ]
+        for cid in stale_warn:
+            _log_rate_warn_last.pop(cid, None)
 
         return len(stale)
 
@@ -1068,19 +1100,11 @@ async def _dispatch_log(
     """
     ✅ F1: نستقبل factory (callable) بدل coroutine جاهز.
 
-    السبب:
-        coroutine في Python يمكن await مرة واحدة فقط.
-        المحاولة الثانية ترمي RuntimeError. لذلك كان الـretry
-        في v7.11.0 معطوباً فعلياً.
-
-    الاستخدام الصحيح:
-        await _dispatch_log(
-            partial(notify_group_log, context, chat_id, text),
-            label="delete-forwarded"
-        )
+    coroutine في Python يمكن await مرة واحدة فقط. لذلك كان الـretry
+    في v7.11.0 معطوباً فعلياً.
     """
     if not callable(factory):
-        # ✅ H2: رفض coroutine مباشر — يُنشئ صامتاً bug صعب التتبع
+        # ✅ H2: رفض coroutine مباشر
         logger.error(
             "❌ _dispatch_log: متوقع factory (callable) — "
             "وُجد %s",
@@ -1180,16 +1204,16 @@ async def _delete_after_delay(bot, chat_id, message_id, delay=10):
 
 
 def _spawn_delete_after_delay(bot, chat_id, message_id, delay=10):
-    # ✅ H3: لا نُشغّل مهمة لـdelay سالب
+    """
+    ✅ R3: وحّد المسارين (delay<=0 و delay>0) داخل _running_delete_tasks
+    حتى يُنتظَر التنظيف في shutdown_delete_tasks.
+    """
     try:
         d = float(delay)
     except (TypeError, ValueError):
         d = 0.0
-    if d <= 0:
-        asyncio.create_task(
-            _safe_delete_message(bot, chat_id, message_id)
-        )
-        return
+    if d < 0:
+        d = 0.0
 
     task = asyncio.create_task(
         _delete_after_delay(bot, chat_id, message_id, d)
@@ -1231,18 +1255,24 @@ async def shutdown_delete_tasks(timeout: float = 3.0):
     _running_delete_tasks.clear()
 
 
-# ✅ H1: تسجيل تلقائي
+# ✅ H1 + R1: تسجيل تلقائي يحفظ أي handler أصلي
 def register_shutdown_handlers(application):
     """
     يُسجّل shutdown handlers على تطبيق Telegram لتنظيف:
       - log dispatch tasks
       - delayed delete tasks
 
+    ✅ R1: يحفظ أي post_shutdown أصلي ويستدعيه بعد التنظيف.
+
     الاستخدام (من bot.py):
         from handlers_message import register_shutdown_handlers
         register_shutdown_handlers(application)
     """
     try:
+        original_post_shutdown = getattr(
+            application, 'post_shutdown', None
+        )
+
         async def _post_shutdown(app):
             try:
                 await shutdown_log_dispatcher(timeout=5.0)
@@ -1252,6 +1282,13 @@ def register_shutdown_handlers(application):
                 await shutdown_delete_tasks(timeout=3.0)
             except Exception as e:
                 logger.debug("shutdown del: %s", e)
+
+            # ✅ R1: استدعاء الأصلي إن وُجد
+            if callable(original_post_shutdown):
+                try:
+                    await original_post_shutdown(app)
+                except Exception as e:
+                    logger.debug("original post_shutdown: %s", e)
 
         application.post_shutdown = _post_shutdown
     except Exception as e:
@@ -1609,7 +1646,6 @@ def _is_delete_permission_error(exc) -> bool:
 async def _safe_delete_message(bot, chat_id, message_id) -> bool:
     try:
         await bot.delete_message(chat_id, message_id)
-        # ✅ P5: debug بدل info لتخفيف logs
         logger.debug("✅ DELETE OK | chat=%s msg=%s", chat_id, message_id)
         return True
 
@@ -2455,6 +2491,13 @@ async def _verify_bot_in_log_channel(context, channel_id):
 
 
 def _verify_bot_in_log_channel_error_text(reason, lang) -> str:
+    """
+    ✅ R11: lang محفوظ للتوافق مع الاستدعاءات الحالية.
+    الترجمة الكاملة عبر TranslationManager مُخطط لها v7.13.
+    """
+    # lang يُحفظ للتوافق المستقبلي (سيُستخدَم عند تفعيل الترجمة الكاملة)
+    _ = lang
+
     mapping = {
         "invalid_channel_id": "❌ معرّف القناة غير صالح.",
         "timeout": "⏱️ انتهت مهلة الاتصال.",
@@ -2506,8 +2549,12 @@ def _get_banned_pattern(banned_word: str) -> Optional[re.Pattern]:
         return cached
 
     try:
+        # ✅ R4: re.escape لا يهرّب المسافات (منذ Python 3.7).
+        # لتمكين مطابقة "كلمة1   كلمة2" بـ"كلمة1 كلمة2" نستبدل الفراغ
+        # الصريح بـ\s+ بدل re.sub الذي كان لا-أثر.
         escaped = re.escape(banned_word)
-        escaped = re.sub(r'\\\s+', r'\\s+', escaped)
+        if ' ' in escaped:
+            escaped = escaped.replace(' ', r'\s+')
         pattern = re.compile(
             rf'(?<!\w){escaped}(?!\w)',
             re.IGNORECASE | re.UNICODE
@@ -2646,8 +2693,9 @@ class MessageHandlers:
         _protected_any = _as_bool(
             settings.get('delete_protected_any'), False
         )
+        # ✅ R7: default=True بدل 1
         _spam_enabled = _as_bool(
-            settings.get('delete_spam_score', 1), True
+            settings.get('delete_spam_score', True), True
         )
         _postbot_enabled = _as_bool(
             settings.get('delete_postbot_pattern', 0), False
@@ -2680,7 +2728,7 @@ class MessageHandlers:
             and not is_protected_forward
         )
 
-        # ═══ Spam score — نمرّر البيانات لتفادي استخراج مزدوج ═══
+        # ═══ Spam score — ✅ R10: نمرّر _analysis_text الجاهز ═══
         _spam_score = 0
         _spam_reasons: List[str] = []
 
@@ -2692,6 +2740,7 @@ class MessageHandlers:
                     _button_urls=ctx.button_urls_raw,
                     _button_texts=ctx.button_texts,
                     _normalized=ctx.normalized_text,
+                    _analysis_text=ctx.analysis_text,
                 )
             except Exception as e:
                 logger.debug("spam_score: %s", e)
@@ -2946,7 +2995,6 @@ class MessageHandlers:
         )
         return await _trans(trans_key, lang, default)
 
-    # ═══ ✅ H4: helper للتحذير المجهول ═══
     @staticmethod
     async def _send_anonymous_warning(context, chat_id, violation_type, lang):
         try:
@@ -2971,7 +3019,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-    # ═══ ✅ H4: helper لتحذير مستخدم عادي ═══
     @staticmethod
     async def _send_user_warning(
         context, chat_id, user_name,
@@ -3006,7 +3053,6 @@ class MessageHandlers:
         except Exception:
             pass
 
-    # ═══ ✅ H4: helper لاستنباط العقوبة ═══
     @staticmethod
     async def _resolve_penalty(
         chat_id, violation_type, settings
@@ -3074,8 +3120,15 @@ class MessageHandlers:
             logger.error("delete exception: %s", e)
             delete_ok = False
 
+        # ✅ R6: إذا فشل الحذف، لا نُشعر المالك (تفادي إشعارات كاذبة)
+        if not delete_ok:
+            logger.error(
+                "⏭️ توقف — الحذف فشل (%s)", violation_type
+            )
+            return
+
         # ═══ سجل الحذف ═══
-        if delete_ok and FEATURE_LOG_DELETIONS:
+        if FEATURE_LOG_DELETIONS:
             try:
                 if await _can_send_log(chat_id):
                     if is_anonymous:
@@ -3144,12 +3197,6 @@ class MessageHandlers:
                     task.add_done_callback(_fwd_done)
             except Exception:
                 pass
-
-        if not delete_ok:
-            logger.error(
-                "⏭️ توقف — الحذف فشل (%s)", violation_type
-            )
-            return
 
         # ═══ تحذير المشرف المجهول ═══
         if is_anonymous:
@@ -3297,6 +3344,11 @@ class MessageHandlers:
 
     @staticmethod
     async def handle_private(update, context):
+        """
+        ✅ R2: inspect.signature بدل try/TypeError.
+        السبب: TypeError قد يأتي من داخل handler نفسه (int(None) مثلاً)
+        فيؤدي try/TypeError إلى استدعاء ثانٍ بمُعاملَين — تكرار جانبي.
+        """
         try:
             if not update.effective_user:
                 return
@@ -3305,13 +3357,31 @@ class MessageHandlers:
             state = StateManager.get(user_id)
             handler_name = MessageHandlers._PRIVATE_HANDLERS_MAP.get(state)
 
-            if handler_name:
-                handler = getattr(MessageHandlers, handler_name, None)
-                if handler:
-                    try:
-                        await handler(update, context, state)
-                    except TypeError:
-                        await handler(update, context)
+            if not handler_name:
+                return
+
+            handler = getattr(MessageHandlers, handler_name, None)
+            if handler is None:
+                return
+
+            # فحص عدد الوسائط مرة واحدة
+            try:
+                sig = inspect.signature(handler)
+                params = [
+                    p for p in sig.parameters.values()
+                    if p.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+                accepts_state = len(params) >= 3
+            except (TypeError, ValueError):
+                accepts_state = False
+
+            if accepts_state:
+                await handler(update, context, state)
+            else:
+                await handler(update, context)
         except Exception:
             logger.exception("handle_private error")
 
