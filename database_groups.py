@@ -1,8 +1,7 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-database_groups.py - دوال المجموعات (v7.4.10)
+database_groups.py - دوال المجموعات (v7.4.11)
 ================================================================================
 GroupsMixin:
   1.  كاش الكلمات المحظورة المحلي
@@ -18,13 +17,32 @@ GroupsMixin:
   11. إعدادات العقوبات (Penalty Settings)
   12. قناة السجل للمجموعة (Group Log Channel)
   13. المخالفات (Violations)
+  14. ✅ NEW: انتهاء العقوبات (Expire Penalties — fallback)
 
-🆕 v7.4.10 — FIX نهائي: add_banned_word (fallback 500 → 10000):
-  ✅ القيمة الافتراضية للحد الأقصى = 10000 (بدل 500)
-  ✅ يحل مشكلة "وصلنا للحد الأقصى (1897/500)"
-  ✅ لا يحتاج تعديل config.py (لكن يمكن ضبطه منه)
-  ✅ logging واضح عند الرفض (كما في v7.4.9)
+🆕 v7.4.11 — REVIEW-FIXES:
+  🟠 M1: increment_violation_count — قفل per-(user,chat) بدل self._lock
+         السبب: self._lock عالمي → يُخنق كل البوت عند مخالفات متزامنة
+         الحل: _get_penalty_lock(user_id, chat_id) مع fallback آمن
+  🟠 M2: update_penalty_settings — try/except + قائمة أعمدة فعلية
+         السبب: schema drift يُسبِّب crash بلا التقاط
+  🟠 M3: reset_auto_replies — إبطال settings_cache + internal_cache
+         السبب: إعدادات قديمة معروضة لثوانٍ بعد الحذف
+  🟠 M4: get_auto_reply — _spawn_bg_task بدل create_task اليدوي
+         السبب: task غير متتبَّع → تحذير عند shutdown
+  🟡 m1: get_violation_count — إضافة last_violation_time=NULL عند reset
+  🟡 m2: add_user_warning — ON CONFLICT ... user_warnings.warnings + 1
+  🟡 m3: _get_group_security_columns — قفل مخصص لمنع race
 
+🆕 v7.4.11 — NEW FALLBACKS (defensive):
+  🔴 _expire_penalties_pg / _expire_penalties_mysql /
+     _expire_penalties_sqlite + _expire_penalties_generic
+     السبب: expire_penalties() في database.py يستدعي هذه الدوال
+     بحسب DB_TYPE. إن لم يُعرّفها RefactorMixin → العقوبات
+     المؤقتة لا تنتهي أبداً (mute/ban مؤقت = دائم).
+     هذا تعريف احتياطي يُستخدم فقط إذا فُقد الأصل.
+     إذا كان RefactorMixin يُعرّفها، MRO يُفضّله تلقائياً.
+
+🆕 v7.4.10 — FIX نهائي: add_banned_word (fallback 500 → 10000)
 🆕 v7.4.9 — FIX: قراءة آمنة لـ MAX_GLOBAL_BANNED_WORDS
 🆕 v7.4.8 — PERFORMANCE-FIX (get_user_groups ~50ms)
 🆕 v7.4.7 — PERFORMANCE-FIX (get_user_groups من 1.59s → ~1s)
@@ -272,8 +290,13 @@ class GroupsMixin:
         return groups
 
     async def delete_group(self, chat_id: int) -> bool:
+        """
+        🟢 v7.4.11: تحذير صيانة — قائمة الجداول تحتاج تحديثاً يدوياً
+        عند إضافة جداول جديدة بـ `chat_id`.
+        """
         try:
             async with self.transaction() as conn:
+                # ⚠️ صيانة: كل جدول جديد بمفتاح chat_id يجب أن يُضاف هنا
                 tables = [
                     "user_groups_link", "group_admins",
                     "hidden_owner_groups", "hidden_admins",
@@ -611,59 +634,75 @@ class GroupsMixin:
 
     async def _get_group_security_columns(self) -> set:
         """
-        جلب أعمدة group_security الفعلية (مع كاش)
+        جلب أعمدة group_security الفعلية (مع كاش).
+
+        ✅ v7.4.11: قفل مخصص يمنع race عند أول استدعاء متزامن —
+        بدونه، N coroutines تُطلق N استعلامات information_schema
+        متوازية قبل أن يُملأ الكاش.
         """
+        # fast path (بلا قفل)
         if self._group_security_columns_cache is not None:
             return self._group_security_columns_cache
 
-        try:
-            async with self.connection() as conn:
-                if self.USE_POSTGRES:
-                    rows = await conn.fetch(
-                        "SELECT column_name "
-                        "FROM information_schema.columns "
-                        "WHERE table_name = 'group_security' "
-                        "ORDER BY ordinal_position"
-                    )
-                    cols = {row["column_name"] for row in rows}
-                elif self.USE_MYSQL:
-                    cursor = await conn.cursor()
-                    try:
-                        await cursor.execute(
-                            "SHOW COLUMNS FROM `group_security`"
-                        )
-                        rows = await cursor.fetchall()
-                        cols = {row[0] for row in rows}
-                    finally:
-                        try:
-                            await cursor.close()
-                        except Exception:
-                            pass
-                else:
-                    cursor = await conn.execute(
-                        "PRAGMA table_info(group_security)"
-                    )
-                    try:
-                        rows = await cursor.fetchall()
-                        cols = {row[1] for row in rows}
-                    finally:
-                        try:
-                            await cursor.close()
-                        except Exception:
-                            pass
+        # قفل مخصص (lazy init)
+        lock = getattr(self, "_gsc_columns_lock", None)
+        if lock is None:
+            self._gsc_columns_lock = asyncio.Lock()
+            lock = self._gsc_columns_lock
 
-            self._group_security_columns_cache = cols
-            logger.info(
-                f"📋 Loaded group_security columns: "
-                f"{len(cols)} columns"
-            )
-            return cols
-        except Exception as e:
-            logger.error(
-                f"❌ Failed to load group_security columns: {e}",
-                exc_info=True,
-            )
-            return set()
+        async with lock:
+            # double-check بعد اكتساب القفل
+            if self._group_security_columns_cache is not None:
+                return self._group_security_columns_cache
+
+            try:
+                async with self.connection() as conn:
+                    if self.USE_POSTGRES:
+                        rows = await conn.fetch(
+                            "SELECT column_name "
+                            "FROM information_schema.columns "
+                            "WHERE table_name = 'group_security' "
+                            "ORDER BY ordinal_position"
+                        )
+                        cols = {row["column_name"] for row in rows}
+                    elif self.USE_MYSQL:
+                        cursor = await conn.cursor()
+                        try:
+                            await cursor.execute(
+                                "SHOW COLUMNS FROM `group_security`"
+                            )
+                            rows = await cursor.fetchall()
+                            cols = {row[0] for row in rows}
+                        finally:
+                            try:
+                                await cursor.close()
+                            except Exception:
+                                pass
+                    else:
+                        cursor = await conn.execute(
+                            "PRAGMA table_info(group_security)"
+                        )
+                        try:
+                            rows = await cursor.fetchall()
+                            cols = {row[1] for row in rows}
+                        finally:
+                            try:
+                                await cursor.close()
+                            except Exception:
+                                pass
+
+                self._group_security_columns_cache = cols
+                logger.info(
+                    f"📋 Loaded group_security columns: "
+                    f"{len(cols)} columns"
+                )
+                return cols
+            except Exception as e:
+                logger.error(
+                    f"❌ Failed to load group_security columns: {e}",
+                    exc_info=True,
+                )
+                return set()
 
     async def get_group_security_columns(self) -> set:
         """دالة عامة لجلب أعمدة group_security"""
@@ -863,11 +902,19 @@ class GroupsMixin:
     async def add_user_warning(
         self, user_id: int, chat_id: int
     ) -> int:
+        """
+        🟡 v7.4.11: ON CONFLICT ... DO UPDATE بصيغة صريحة
+        (user_warnings.warnings + 1) — أوضح عبر DBs الثلاثة.
+
+        ملاحظة: `_convert_upsert` (MySQL) يُحوِّل الصيغة تلقائياً
+        إلى ON DUPLICATE KEY UPDATE, و`user_warnings.warnings`
+        سيُفسَّر كالعمود الحالي — صحيح على MySQL/PG/SQLite.
+        """
         await self.execute(
             """INSERT INTO user_warnings (user_id, chat_id, warnings)
                VALUES (?,?,1)
                ON CONFLICT(user_id, chat_id)
-               DO UPDATE SET warnings = warnings + 1""",
+               DO UPDATE SET warnings = user_warnings.warnings + 1""",
             (user_id, chat_id),
         )
         return await self.get_user_warnings(user_id, chat_id)
@@ -1088,6 +1135,10 @@ class GroupsMixin:
     async def get_auto_reply(
         self, keyword: str, chat_id: int
     ) -> Optional[Dict]:
+        """
+        🟠 v7.4.11: استخدام _spawn_bg_task بدل create_task اليدوي،
+        حتى يُتتبَّع الـtask ويُلغى بأمان عند close().
+        """
         keyword = keyword.lower().strip()
         if not keyword:
             return None
@@ -1102,15 +1153,27 @@ class GroupsMixin:
             (keyword, chat_id, chat_id),
         )
         if row:
-            def _log_task_exc(t: asyncio.Task):
-                if not t.cancelled() and t.exception():
-                    logger.debug(
-                        f"increment_usage_count: {t.exception()}"
-                    )
-            task = asyncio.create_task(
-                self._increment_usage_count(chat_id, keyword)
-            )
-            task.add_done_callback(_log_task_exc)
+            try:
+                coro = self._increment_usage_count(chat_id, keyword)
+                spawner = getattr(self, "_spawn_bg_task", None)
+                if callable(spawner):
+                    spawner(coro)
+                else:
+                    task = asyncio.create_task(coro)
+
+                    def _log_task_exc(t: asyncio.Task):
+                        if not t.cancelled() and t.exception():
+                            logger.debug(
+                                f"increment_usage_count: "
+                                f"{t.exception()}"
+                            )
+
+                    task.add_done_callback(_log_task_exc)
+            except Exception as e:
+                # لا نُفشل القراءة إن فشل تتبّع الـtask
+                logger.debug(
+                    f"increment_usage_count spawn: {e}"
+                )
             return row
         return None
 
@@ -1128,10 +1191,39 @@ class GroupsMixin:
         )
 
     async def reset_auto_replies(self, chat_id: int) -> bool:
-        return await self.execute(
-            "DELETE FROM auto_replies WHERE chat_id = ?",
-            (chat_id,),
-        ) > 0
+        """
+        🟠 v7.4.11: إبطال الكاش بعد الحذف — وإلا بقيت إعدادات
+        قديمة (enabled=1) معروضة لثوانٍ → تناقض مع الحالة الفعلية.
+        """
+        try:
+            rc = await self.execute(
+                "DELETE FROM auto_replies WHERE chat_id = ?",
+                (chat_id,),
+            ) > 0
+            if rc:
+                if self.CACHE_AVAILABLE:
+                    try:
+                        await self.settings_cache.invalidate_auto_reply(
+                            chat_id
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await self.internal_cache.invalidate(
+                        f"ars_{chat_id}"
+                    )
+                    await self.internal_cache.invalidate(
+                        f"auto_reply_settings_{chat_id}"
+                    )
+                except Exception:
+                    pass
+            return rc
+        except Exception as e:
+            logger.error(
+                f"❌ reset_auto_replies({chat_id}): {e}",
+                exc_info=True,
+            )
+            return False
 
     async def export_auto_replies_to_file(self) -> Optional[str]:
         try:
@@ -1465,32 +1557,70 @@ class GroupsMixin:
     async def update_penalty_settings(
         self, chat_id: int, **kwargs
     ) -> bool:
+        """
+        🟠 v7.4.11: إضافة try/except + فحص فعلي للأعمدة عبر
+        _get_group_security_columns() — بدل قائمة ثابتة قد لا تُطابق
+        الـschema الفعلي.
+        """
         if not kwargs:
             return False
-        await self.execute(
-            "INSERT OR IGNORE INTO group_security "
-            "(chat_id) VALUES (?)",
-            (chat_id,),
-        )
-        allowed_columns = {
-            "mute_default_duration", "ban_default_duration",
-            "warn_default_duration", "restrict_default_duration",
-            "enable_timed_penalties", "auto_remove_penalties",
-        }
-        for key in kwargs:
-            if key not in allowed_columns:
-                logger.error(f"❌ Invalid column: {key}")
+
+        try:
+            # فحص الأعمدة الفعلية (مع كاش)
+            actual_columns = await self._get_group_security_columns()
+            allowed_columns = {
+                "mute_default_duration", "ban_default_duration",
+                "warn_default_duration", "restrict_default_duration",
+                "enable_timed_penalties", "auto_remove_penalties",
+            }
+
+            valid_kwargs = {}
+            skipped = []
+            for key, value in kwargs.items():
+                if key not in allowed_columns:
+                    skipped.append((key, "not-allowed"))
+                    continue
+                if actual_columns and key not in actual_columns:
+                    skipped.append((key, "not-in-schema"))
+                    continue
+                valid_kwargs[key] = value
+
+            if skipped:
+                logger.warning(
+                    f"⚠️ update_penalty_settings({chat_id}): "
+                    f"skipped {len(skipped)}: {skipped}"
+                )
+
+            if not valid_kwargs:
+                logger.error(
+                    f"❌ update_penalty_settings({chat_id}): "
+                    f"لا عمود صالح للتحديث"
+                )
                 return False
-        updates = [f"{key} = ?" for key in kwargs]
-        values = list(kwargs.values()) + [chat_id]
-        query = (
-            f"UPDATE group_security SET {', '.join(updates)} "
-            f"WHERE chat_id = ?"
-        )
-        result = await self.execute(query, tuple(values)) > 0
-        if result and self.CACHE_AVAILABLE:
-            await self.settings_cache.invalidate_security(chat_id)
-        return result
+
+            # التأكد من وجود الصف
+            await self.execute(
+                "INSERT OR IGNORE INTO group_security "
+                "(chat_id) VALUES (?)",
+                (chat_id,),
+            )
+
+            updates = [f"{key} = ?" for key in valid_kwargs]
+            values = list(valid_kwargs.values()) + [chat_id]
+            query = (
+                f"UPDATE group_security SET {', '.join(updates)} "
+                f"WHERE chat_id = ?"
+            )
+            result = await self.execute(query, tuple(values)) > 0
+            if result and self.CACHE_AVAILABLE:
+                await self.settings_cache.invalidate_security(chat_id)
+            return result
+        except Exception as e:
+            logger.error(
+                f"❌ update_penalty_settings({chat_id}): {e}",
+                exc_info=True,
+            )
+            return False
 
     # =====================================================================
     # 12) قناة السجل للمجموعة (Group Log Channel)
@@ -1709,6 +1839,7 @@ class GroupsMixin:
     ) -> int:
         """
         ✅ v7.4.3: .get() بدل [] لتجنب KeyError
+        🟡 v7.4.11: إضافة last_violation_time=NULL عند الـreset
         """
         violation = await self.fetchone(
             "SELECT violation_count, last_violation_time "
@@ -1729,7 +1860,8 @@ class GroupsMixin:
                timedelta(hours=24):
                 await self.execute(
                     "UPDATE user_violations "
-                    "SET violation_count = 0 "
+                    "SET violation_count = 0, "
+                    "last_violation_time = NULL "
                     "WHERE user_id = ? AND chat_id = ?",
                     (user_id, chat_id),
                 )
@@ -1739,7 +1871,29 @@ class GroupsMixin:
     async def increment_violation_count(
         self, user_id: int, chat_id: int
     ) -> int:
-        async with self._lock:
+        """
+        🟠 v7.4.11: قفل per-(user, chat) بدل self._lock العالمي.
+
+        السبب: self._lock هو قفل على مستوى كامل الـDatabase.
+        كل مخالفة من أي مستخدم/مجموعة كانت تُنتظر بالتتابع →
+        عنق زجاجة حقيقي عند النشاط العالي.
+
+        الحل: _get_penalty_lock(user_id, chat_id) مع fallback
+        آمن إلى self._lock إن لم تكن الدالة متوفرة.
+        """
+        # قفل per-(user, chat) — fallback آمن
+        lock = None
+        try:
+            get_plock = getattr(self, "_get_penalty_lock", None)
+            if callable(get_plock):
+                lock = await get_plock(user_id, chat_id)
+        except Exception as e:
+            logger.debug(f"_get_penalty_lock fallback: {e}")
+
+        if lock is None:
+            lock = self._lock
+
+        async with lock:
             async with self.transaction() as conn:
                 last_time_str = await self._fetchval_with_conn(
                     conn,
@@ -1794,6 +1948,103 @@ class GroupsMixin:
             "WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id),
         ) > 0
+
+    # =====================================================================
+    # 14) ✅ v7.4.11 NEW: انتهاء العقوبات (Expire Penalties — fallback)
+    # =====================================================================
+    #
+    # 🔴 السبب: expire_penalties() في database.py يستدعي:
+    #     self._expire_penalties_pg(conn, BATCH)
+    #     self._expire_penalties_mysql(conn, BATCH)
+    #     self._expire_penalties_sqlite(conn, BATCH)
+    # بحسب DB_TYPE.
+    #
+    # إن لم تكن معرَّفة في RefactorMixin (أو كان التعريف فارغاً بسبب
+    # فشل استيراد)، فإن الاستدعاء يفشل بـ AttributeError → يُلتقط في
+    # except Exception → العقوبات المؤقتة (mute/ban) لا تنتهي أبداً.
+    #
+    # ⚠️ MRO: Database يرث RefactorMixin أولاً، ثم GroupsMixin.
+    # إذا عرَّف RefactorMixin هذه الدوال، فسيُستخدم تعريفه تلقائياً.
+    # هذا تعريف احتياطي يُستخدم فقط عند فقد الأصل.
+    # =====================================================================
+
+    async def _expire_penalties_generic(self, conn, batch: int):
+        """
+        منطق مشترك: يُجد expired penalties في دفعة، يؤرشفها،
+        ويُعلّمها كـ 'expired'.
+
+        يُرجع: (batch_expired, got_rows)
+        """
+        try:
+            now = self.TimeUtils.utc_now()
+
+            rows = await self._fetchall_with_conn(
+                conn,
+                "SELECT id FROM user_penalties "
+                "WHERE status = 'active' AND end_time IS NOT NULL "
+                "  AND end_time <= ? "
+                "ORDER BY end_time ASC LIMIT ?",
+                now, batch,
+            )
+            if not rows:
+                return 0, 0
+
+            ids = []
+            for r in rows:
+                pid = r.get("id") if isinstance(r, dict) else None
+                if pid is not None:
+                    ids.append(pid)
+            if not ids:
+                return 0, 0
+
+            # محاولة الأرشفة (best-effort — لا نُفشل إن فشلت)
+            try:
+                placeholders = ",".join(["?"] * len(ids))
+                await self._execute_with_conn(
+                    conn,
+                    f"INSERT INTO penalty_archive "
+                    f"(id, user_id, chat_id, penalty_type, duration, "
+                    f" start_time, end_time, reason, issued_by, "
+                    f" status, created_at, archived_at) "
+                    f"SELECT id, user_id, chat_id, penalty_type, duration, "
+                    f" start_time, end_time, reason, issued_by, "
+                    f" 'expired', created_at, ? "
+                    f"FROM user_penalties WHERE id IN ({placeholders})",
+                    now, *ids,
+                )
+            except Exception as arc_e:
+                logger.debug(
+                    f"penalty_archive insert (best-effort): {arc_e}"
+                )
+
+            # تعليم كـ expired
+            placeholders = ",".join(["?"] * len(ids))
+            await self._execute_with_conn(
+                conn,
+                f"UPDATE user_penalties SET status = 'expired' "
+                f"WHERE id IN ({placeholders})",
+                *ids,
+            )
+
+            return len(ids), len(ids)
+        except Exception as e:
+            logger.error(
+                f"❌ _expire_penalties_generic: {e}",
+                exc_info=True,
+            )
+            return 0, 0
+
+    async def _expire_penalties_pg(self, conn, batch: int):
+        """PG wrapper — see _expire_penalties_generic."""
+        return await self._expire_penalties_generic(conn, batch)
+
+    async def _expire_penalties_mysql(self, conn, batch: int):
+        """MySQL wrapper — see _expire_penalties_generic."""
+        return await self._expire_penalties_generic(conn, batch)
+
+    async def _expire_penalties_sqlite(self, conn, batch: int):
+        """SQLite wrapper — see _expire_penalties_generic."""
+        return await self._expire_penalties_generic(conn, batch)
 
 
 __all__ = ["GroupsMixin"]
