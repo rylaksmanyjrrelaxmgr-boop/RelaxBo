@@ -1,1333 +1,3477 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-handlers_message_detectors.py - كاشفات ومحلّلات الرسائل (v1.0.0)
-================================================================================
-استُخرجت من handlers_message.py v7.16.1 لتقليل حجمه.
+handlers_message_detectors.py
+===============================================================================
+🛡️ Relax Manager — Advanced Spam / Anti-Evasion Detection Engine
+Version: 2.2.0 HARDENED+
 
-المحتوى:
-    1. Environment flags (ANTIEVASION_*, SPAM, DEBUG)
-    2. _MessageContext         — كائن يجمع بيانات الرسالة
-    3. Constants               — كل الـ regex patterns والـ keyword sets
-    4. Normalizers             — تطبيع النص (homoglyph, combining, leet)
-    5. Extractors              — استخراج URLs/buttons/polls/vcards/venues
-    6. Link Detection          — كشف الروابط (URL, email, tg://, @channel)
-    7. Spam Scoring            — حساب spam score + PostBot detection
+محرك كشف مستقل عن handlers_message.py.
 
-⚠️ هذا الملف **لا يستورد** من handlers_message.py (تفادي circular imports).
-⚠️ كل الدوال نقية (pure functions) — لا تعتمد على DB/cache/context.
-================================================================================
+v2.2.0:
+    ✅ الحفاظ على API والدوال العامة الموجودة في v2.1.x
+    ✅ Unicode normalization + casefold
+    ✅ كشف Zero-width / Bidi / control characters
+    ✅ كشف Homoglyph / Leetspeak
+    ✅ إعادة بناء الروابط المفككة
+    ✅ كشف hxxp / spaced schemes / dot obfuscation
+    ✅ كشف Telegram links / usernames / invites
+    ✅ تحليل Entity URLs / Button URLs / WebApp / LoginURL
+    ✅ تحليل Poll / vCard / forwarded messages
+    ✅ Contextual spam scoring
+    ✅ Multi-signal scoring
+    ✅ URL-density analysis
+    ✅ CTA-density analysis
+    ✅ character / digit / symbol density
+    ✅ repeated-token detection
+    ✅ split-word evasion
+    ✅ suspicious-script detection
+    ✅ compact/fingerprint-style evasion detection
+    ✅ false-positive guards
+    ✅ fail-safe exception handling
+
+مهم:
+    هذا الملف لا يحذف ولا يحظر المستخدم.
+    هو محرك تحليل فقط.
+
+التوافق:
+    يحافظ على أسماء الدوال العامة الموجودة في v2.0/v2.1.
+===============================================================================
 """
 
+from __future__ import annotations
+
+import html
 import os
 import re
-import ipaddress
 import unicodedata
-from typing import Optional, Dict, Any, List, Tuple
-from urllib.parse import urlparse
+from collections import Counter
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Environment Flags
-# ═══════════════════════════════════════════════════════════════════
+# =============================================================================
+# ENVIRONMENT
+# =============================================================================
 
-def _env_flag(name: str, default: bool = True) -> bool:
-    val = os.getenv(name)
-    if val is None:
+def _env_bool(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
         return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
+
+    value = value.strip().lower()
+
+    if value in {
+        "1", "true", "yes", "y", "on",
+        "enable", "enabled",
+    }:
+        return True
+
+    if value in {
+        "0", "false", "no", "n", "off",
+        "disable", "disabled",
+    }:
+        return False
+
+    return default
 
 
-_DEBUG_DIAG = _env_flag("DEBUG_DIAG", False)
-_DEBUG_SPAM = _env_flag("DEBUG_SPAM", False)
+DEBUG_DIAG = _env_bool("DEBUG_DIAG", False)
+DEBUG_SPAM = _env_bool("DEBUG_SPAM", False)
 
-_ANTIEVASION_ENTITY_LINK = _env_flag("ANTIEVASION_ENTITY_LINK", True)
-_ANTIEVASION_BUTTON_LINK = _env_flag("ANTIEVASION_BUTTON_LINK", True)
-_ANTIEVASION_SCHEMELESS_URL = _env_flag("ANTIEVASION_SCHEMELESS_URL", True)
-_ANTIEVASION_HOMOGLYPH = _env_flag("ANTIEVASION_HOMOGLYPH", True)
-_ANTIEVASION_COMBINING = _env_flag("ANTIEVASION_COMBINING", True)
-_ANTIEVASION_COMPACT_WORDS = _env_flag("ANTIEVASION_COMPACT_WORDS", True)
-_ANTIEVASION_EMOJI_SEPARATOR = _env_flag("ANTIEVASION_EMOJI_SEPARATOR", True)
-_ANTIEVASION_BUTTON_WEBAPP = _env_flag("ANTIEVASION_BUTTON_WEBAPP", True)
-_ANTIEVASION_BUTTON_LOGINURL = _env_flag("ANTIEVASION_BUTTON_LOGINURL", True)
-_ANTIEVASION_LEETSPEAK = _env_flag("ANTIEVASION_LEETSPEAK", True)
-_ANTIEVASION_TG_SCHEME = _env_flag("ANTIEVASION_TG_SCHEME", True)
-_ANTIEVASION_AT_CHANNEL = _env_flag("ANTIEVASION_AT_CHANNEL", True)
-_ANTIEVASION_EMAIL = _env_flag("ANTIEVASION_EMAIL", True)
-_ANTIEVASION_PUNYCODE = _env_flag("ANTIEVASION_PUNYCODE", True)
-_ANTIEVASION_IPV4_SCHEMELESS = _env_flag("ANTIEVASION_IPV4_SCHEMELESS", True)
-_ANTIEVASION_MULTILINE_URL = _env_flag("ANTIEVASION_MULTILINE_URL", True)
-_ANTIEVASION_VENUE_VCARD = _env_flag("ANTIEVASION_VENUE_VCARD", True)
-_ANTIEVASION_POLL = _env_flag("ANTIEVASION_POLL", True)
-_ANTIEVASION_EMOJI_IN_DOMAIN = _env_flag("ANTIEVASION_EMOJI_IN_DOMAIN", True)
-_ANTIEVASION_UNICODE_DOTS = _env_flag("ANTIEVASION_UNICODE_DOTS", True)
-_ANTIEVASION_EXTENDED_COMBINING = _env_flag("ANTIEVASION_EXTENDED_COMBINING", True)
-_ANTIEVASION_EXTRA_SCRIPTS = _env_flag("ANTIEVASION_EXTRA_SCRIPTS", True)
-_ANTIEVASION_ALT_SCHEMES = _env_flag("ANTIEVASION_ALT_SCHEMES", True)
+ANTIEVASION_ENTITY_LINK = _env_bool(
+    "ANTIEVASION_ENTITY_LINK", True
+)
+ANTIEVASION_BUTTON_LINK = _env_bool(
+    "ANTIEVASION_BUTTON_LINK", True
+)
+ANTIEVASION_SCHEMELESS_URL = _env_bool(
+    "ANTIEVASION_SCHEMELESS_URL", True
+)
+ANTIEVASION_HOMOGLYPH = _env_bool(
+    "ANTIEVASION_HOMOGLYPH", True
+)
+ANTIEVASION_COMBINING = _env_bool(
+    "ANTIEVASION_COMBINING", True
+)
+ANTIEVASION_COMPACT_WORDS = _env_bool(
+    "ANTIEVASION_COMPACT_WORDS", True
+)
+ANTIEVASION_EMOJI_SEPARATOR = _env_bool(
+    "ANTIEVASION_EMOJI_SEPARATOR", True
+)
+ANTIEVASION_BUTTON_WEBAPP = _env_bool(
+    "ANTIEVASION_BUTTON_WEBAPP", True
+)
+ANTIEVASION_BUTTON_LOGINURL = _env_bool(
+    "ANTIEVASION_BUTTON_LOGINURL", True
+)
+ANTIEVASION_LEETSPEAK = _env_bool(
+    "ANTIEVASION_LEETSPEAK", True
+)
+ANTIEVASION_TG_SCHEME = _env_bool(
+    "ANTIEVASION_TG_SCHEME", True
+)
+ANTIEVASION_AT_CHANNEL = _env_bool(
+    "ANTIEVASION_AT_CHANNEL", True
+)
+ANTIEVASION_EMAIL = _env_bool(
+    "ANTIEVASION_EMAIL", True
+)
+ANTIEVASION_PUNYCODE = _env_bool(
+    "ANTIEVASION_PUNYCODE", True
+)
+ANTIEVASION_IPV4_SCHEMELESS = _env_bool(
+    "ANTIEVASION_IPV4_SCHEMELESS", True
+)
+ANTIEVASION_MULTILINE_URL = _env_bool(
+    "ANTIEVASION_MULTILINE_URL", True
+)
+ANTIEVASION_VENUE_VCARD = _env_bool(
+    "ANTIEVASION_VENUE_VCARD", True
+)
+ANTIEVASION_POLL = _env_bool(
+    "ANTIEVASION_POLL", True
+)
+ANTIEVASION_EMOJI_IN_DOMAIN = _env_bool(
+    "ANTIEVASION_EMOJI_IN_DOMAIN", True
+)
+ANTIEVASION_UNICODE_DOTS = _env_bool(
+    "ANTIEVASION_UNICODE_DOTS", True
+)
+ANTIEVASION_EXTENDED_COMBINING = _env_bool(
+    "ANTIEVASION_EXTENDED_COMBINING", True
+)
+ANTIEVASION_EXTRA_SCRIPTS = _env_bool(
+    "ANTIEVASION_EXTRA_SCRIPTS", True
+)
+ANTIEVASION_ALT_SCHEMES = _env_bool(
+    "ANTIEVASION_ALT_SCHEMES", True
+)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Public Constants (يستخدمها handlers_message.py)
-# ═══════════════════════════════════════════════════════════════════
+# =============================================================================
+# THRESHOLDS
+# =============================================================================
 
 SPAM_SCORE_THRESHOLD = 5
-
-# 🆕 حجب تلقائي لعينة PostBot عالية الثقة (0-4)
-#    ≥ POSTBOT_AUTO_BLOCK_CONFIDENCE → حجب فوري بغض النظر عن الإعداد
 POSTBOT_AUTO_BLOCK_CONFIDENCE = 3
+SPAM_HARD_THRESHOLD = 10
+SPAM_CRITICAL_THRESHOLD = 15
+MAX_SPAM_SCORE = 40
+
+# v2.2 additional safety limits
+MAX_ANALYSIS_TEXT_LENGTH = 12000
+MAX_REASON_COUNT = 80
 
 
-# ═══════════════════════════════════════════════════════════════════
-# _MessageContext
-# ═══════════════════════════════════════════════════════════════════
+# =============================================================================
+# HIDDEN / BIDI / UNICODE
+# =============================================================================
 
-class _MessageContext:
-    """يجمع كل بيانات الرسالة في كائن واحد."""
-    __slots__ = (
-        'text', 'caption', 'full_text', 'normalized_text',
-        'analysis_text',
-        'button_count', 'button_urls', 'button_texts', 'button_urls_raw',
-        'is_forwarded', 'is_protected', 'has_hint', 'is_auto_fwd',
-        'entity_urls', 'has_link_entity', 'button_link_urls',
-        'has_any_link', 'has_button_link',
-        'vcard_urls', 'venue_url', 'has_hidden_chars',
-        'poll_text', 'poll_options_count', 'poll_urls',
+_HIDDEN_CHARS = {
+    "\x00", "\x01", "\x02", "\x03",
+    "\x04", "\x05", "\x06", "\x07",
+    "\x08", "\x0b", "\x0c", "\x0e",
+    "\x0f", "\x10", "\x11", "\x12",
+    "\x13", "\x14", "\x15", "\x16",
+    "\x17", "\x18", "\x19", "\x1a",
+    "\x1b", "\x1c", "\x1d", "\x1e",
+    "\x1f", "\x7f",
+
+    "\u061c",
+    "\u115f",
+    "\u1160",
+    "\u17b4",
+    "\u17b5",
+    "\u180e",
+
+    "\u200b", "\u200c", "\u200d",
+    "\u200e", "\u200f",
+
+    "\u202a", "\u202b", "\u202c",
+    "\u202d", "\u202e",
+
+    "\u2060", "\u2061", "\u2062",
+    "\u2063", "\u2064", "\u2065",
+    "\u2066", "\u2067", "\u2068",
+    "\u2069",
+
+    "\u206a", "\u206b", "\u206c",
+    "\u206d", "\u206e", "\u206f",
+
+    "\ufeff",
+}
+
+_BIDI_CHARS = {
+    "\u061c",
+    "\u200e",
+    "\u200f",
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
+    "\u2066",
+    "\u2067",
+    "\u2068",
+    "\u2069",
+}
+
+_COMBINING_RANGES = (
+    (0x0300, 0x036F),
+    (0x1AB0, 0x1AFF),
+    (0x1DC0, 0x1DFF),
+    (0x20D0, 0x20FF),
+    (0xFE20, 0xFE2F),
+)
+
+
+# =============================================================================
+# HOMOGLYPHS
+# =============================================================================
+
+_HOMOGLYPH_MAP = {
+    "А": "A", "В": "B", "С": "C",
+    "Е": "E", "Н": "H", "І": "I",
+    "Ј": "J", "К": "K", "М": "M",
+    "О": "O", "Р": "P", "Ѕ": "S",
+    "Т": "T", "Х": "X", "Ү": "Y",
+
+    "а": "a", "е": "e", "о": "o",
+    "р": "p", "с": "c", "у": "y",
+    "х": "x", "і": "i", "ј": "j",
+    "к": "k", "м": "m", "т": "t",
+
+    "Α": "A", "Β": "B", "Ε": "E",
+    "Η": "H", "Ι": "I", "Κ": "K",
+    "Μ": "M", "Ν": "N", "Ο": "O",
+    "Ρ": "P", "Τ": "T", "Χ": "X",
+    "Υ": "Y", "Ζ": "Z",
+
+    "α": "a", "β": "b", "ε": "e",
+    "η": "h", "ι": "i", "κ": "k",
+    "μ": "m", "ν": "n", "ο": "o",
+    "ρ": "p", "τ": "t", "χ": "x",
+    "υ": "y", "ζ": "z",
+}
+
+
+# =============================================================================
+# LEETSPEAK
+# =============================================================================
+
+_LEET_MAP = str.maketrans({
+    "0": "o",
+    "1": "i",
+    "2": "z",
+    "3": "e",
+    "4": "a",
+    "5": "s",
+    "6": "g",
+    "7": "t",
+    "8": "b",
+    "9": "g",
+    "@": "a",
+    "$": "s",
+})
+
+
+# =============================================================================
+# REGEX
+# =============================================================================
+
+_URL_RE = re.compile(
+    r"(?i)\b(?:https?|ftp)://[^\s<>()\"']+"
+)
+
+_DOMAIN_RE = re.compile(
+    r"(?i)"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z]{2,63}"
+)
+
+_DOMAIN_HTTP_RE = re.compile(
+    r"(?i)\b(?:https?://)?"
+    r"(?:www\.)?"
+    r"(?:[a-z0-9-]+\.)+[a-z]{2,63}"
+    r"(?:/[^\s<>()]*)?"
+)
+
+_EMAIL_RE = re.compile(
+    r"(?i)\b"
+    r"[a-z0-9._%+\-]+"
+    r"@"
+    r"[a-z0-9.\-]+"
+    r"\.[a-z]{2,63}\b"
+)
+
+_IPV4_RE = re.compile(
+    r"\b"
+    r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}"
+    r"\b"
+)
+
+_PUNYCODE_RE = re.compile(
+    r"(?i)\bxn--[a-z0-9-]+"
+)
+
+_TG_SCHEME_RE = re.compile(
+    r"(?i)\b(?:tg|telegram):(?:/[^\s]+|[^\s]+)"
+)
+
+_TG_URL_RE = re.compile(
+    r"(?i)"
+    r"(?:https?://)?(?:www\.)?"
+    r"(?:t\.me|telegram\.me|telegram\.dog)"
+    r"(?:/[^\s<>()]+)?"
+)
+
+_TG_INVITE_RE = re.compile(
+    r"(?i)"
+    r"(?:t\.me/)?"
+    r"(?:joinchat/|\+)[A-Za-z0-9_-]{4,}"
+)
+
+_TG_USERNAME_RE = re.compile(
+    r"(?<![\w@])@(?:[A-Za-z0-9_]{5,32})(?!\w)"
+)
+
+_ALT_SCHEME_RE = re.compile(
+    r"(?i)\b"
+    r"(?:hxxp|hxxps|ttp|ttps|htp|httpx|httpsx)"
+    r"[:/\\]+"
+)
+
+_SPACED_SCHEME_RE = re.compile(
+    r"(?i)\bh\s*t\s*t\s*p\s*s?\s*[:./\\]"
+)
+
+_SPACED_TG_RE = re.compile(
+    r"(?i)"
+    r"\bt\s*[\.\[\(\{]?\s*m\s*"
+    r"[\.\]\)\}]?\s*e\b"
+)
+
+_DOT_DOMAIN_RE = re.compile(
+    r"(?i)"
+    r"\b[a-z0-9_-]{2,50}"
+    r"(?:\s*(?:dot|\[\.\]|\(\.\)|\{\.\})\s*)"
+    r"(?:com|net|org|io|me|co|cc|xyz|top|site|online|live|vip|pro|info)\b"
+)
+
+_SPACED_DOMAIN_RE = re.compile(
+    r"(?i)"
+    r"\b[a-z0-9_-]{2,50}"
+    r"(?:\s*[.\u2024\u2025\u2026\u3002\uFE52\uFF0E]\s*)"
+    r"[a-z]{2,63}\b"
+)
+
+_DOT_LIKE_RE = re.compile(
+    r"(?i)"
+    r"(?:\[\s*\.\s*\]"
+    r"|\(\s*\.\s*\)"
+    r"|\{\s*\.\s*\}"
+    r"|\[\s*dot\s*\]"
+    r"|\(\s*dot\s*\)"
+    r"|\{\s*dot\s*\})"
+)
+
+_NUMBER_PROMO_RE = re.compile(
+    r"(?i)\b"
+    r"(?:\d{2,7}\s*\+?\s*"
+    r"(?:clips?|videos?|pics?|photos?|files?|items?|مقطع|مقاطع|فيديوهات?))"
+    r"\b"
+)
+
+_PACK_RE = re.compile(
+    r"(?i)\b"
+    r"(?:mega|huge|massive|full|exclusive)?"
+    r"[\s_-]*pack(?:age|s)?\b"
+)
+
+_REPEATED_CHAR_RE = re.compile(
+    r"(.)\1{4,}",
+    re.UNICODE,
+)
+
+_REPEATED_WORD_RE = re.compile(
+    r"(?i)\b(\w{2,40})(?:\s+\1){2,}\b"
+)
+
+_SEPARATOR_RE = re.compile(
+    r"(?:"
+    r"[\W_]{4,}"
+    r"|(?:[a-z]\W){4,}[a-z]"
+    r")",
+    re.IGNORECASE,
+)
+
+# New v2.2 patterns
+_PHONE_RE = re.compile(
+    r"(?<!\d)"
+    r"(?:\+?\d[\d\s().-]{7,18}\d)"
+    r"(?!\d)"
+)
+
+_PERCENT_SYMBOL_RE = re.compile(
+    r"[^\w\s]{6,}",
+    re.UNICODE,
+)
+
+_MULTISPACE_SPLIT_RE = re.compile(
+    r"(?i)"
+    r"\b(?:[a-z]\s+){3,}[a-z]\b"
+)
+
+_EMOJI_SPLIT_RE = re.compile(
+    r"(?i)"
+    r"\b(?:[a-z]\s*[\U0001F000-\U0001FAFF]\s*){3,}[a-z]\b"
+)
+
+# Very long domain labels can be suspicious.
+_LONG_DOMAIN_LABEL_RE = re.compile(
+    r"(?i)"
+    r"\b[a-z0-9-]{35,}\.[a-z]{2,63}\b"
+)
+
+
+# =============================================================================
+# VOCABULARY
+# =============================================================================
+
+_STRONG_SPAM_WORDS = {
+    "uncensored", "xxx", "nsfw", "porn", "porno",
+    "nude", "nudes", "nudity", "leak", "leaked",
+    "leaks", "viral", "archive", "drop", "mega",
+    "megapack", "mega-pack", "packs", "pack",
+    "clips", "exclusive", "premium", "private",
+    "secret", "hidden", "uncut", "download",
+}
+
+_MEDIUM_SPAM_WORDS = {
+    "collection", "collections", "footage", "scene",
+    "scenes", "fresh", "wild", "best", "hot",
+    "sexy", "milf", "dilf", "teen", "teenager",
+    "taboo", "busty", "pierced", "petite",
+    "cartoon", "korean", "colombian", "stepmom",
+    "stepsis", "mfm", "bj", "mature",
+}
+
+_CTA_WORDS = {
+    "check", "tap", "click", "view", "open",
+    "join", "subscribe", "download", "watch",
+    "see", "visit", "enter", "access", "claim",
+    "get", "unlock", "follow", "now", "here",
+}
+
+_PROMO_WORDS = {
+    "mega", "pack", "collection", "archive",
+    "exclusive", "premium", "private", "content",
+    "clips", "drop", "leak", "viral", "fresh",
+    "new",
+}
+
+_ARABIC_SPAM_WORDS = {
+    "تسريب", "تسريبات", "مسرب", "مسربة",
+    "مسرّب", "مسرّبة", "محتوى", "حصري",
+    "حصريه", "حصرية", "خاص", "خاصه", "خاصة",
+    "ممنوع", "ممنوعة", "فيديوهات", "فيديو",
+    "صور", "مقاطع", "مقطع", "باك", "باكج",
+    "حزمة", "مجموعة", "ارشيف", "أرشيف",
+    "جديد", "جديده", "جديدة", "فيرال", "ترند",
+}
+
+_ARABIC_CTA_WORDS = {
+    "اضغط", "شاهد", "مشاهدة", "شوف", "ادخل",
+    "دخول", "افتح", "انضم", "اشترك", "تحميل",
+    "حمل", "حمّل", "الرابط", "هنا", "اضغطهنا",
+}
+
+_EXTRA_SCRIPT_SPAM_WORDS = {
+    "فروش", "دانلود", "رایگان", "خصوصی",
+    "محرمانه", "ویدیو", "ویدئو", "تصاویر",
+    "لینک", "کلیپ",
+}
+
+_GENERIC_WORDS = {
+    "new", "content", "best", "watch", "click",
+    "open", "view", "here", "fresh", "full",
+    "see", "join", "video", "photos", "photo",
+}
+
+_SPAM_EMOJIS = {
+    "🔥", "💥", "🚀", "👉", "👈", "👇",
+    "☝️", "💦", "💋", "🍑", "🍆", "😈",
+    "😏", "🔞", "⚡", "💎", "🎁", "🤑",
+    "💯",
+}
+
+
+# =============================================================================
+# CONTEXT PATTERNS
+# =============================================================================
+
+_PROMO_CONTEXT_PATTERNS = [
+    re.compile(
+        r"(?i)\b(?:mega|huge|massive|exclusive)"
+        r"\s*[- ]?\s*pack\b"
+    ),
+    re.compile(
+        r"(?i)\b\d{2,7}\s*\+\s*"
+        r"(?:clips?|videos?|pics?|photos?)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:viral|leak(?:ed)?|exclusive)\b"
+        r".{0,100}"
+        r"\b(?:content|clips?|pack|collection|archive)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:view|open|click|tap|watch|check)\b"
+        r".{0,70}"
+        r"\b(?:leak|content|pack|collection|archive)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:join|subscribe|download|unlock)\b"
+        r".{0,70}"
+        r"\b(?:private|exclusive|premium|content)\b"
+    ),
+    re.compile(
+        r"(?:اضغط|شاهد|ادخل|افتح|تحميل)"
+        r".{0,70}"
+        r"(?:محتوى|تسريب|حصري|مجموعة|فيديو|مقاطع)"
+    ),
+]
+
+
+_POSTBOT_REGEXES = [
+    re.compile(
+        r"(?i)"
+        r"(?:🔥|💥|🚀|👉|💦|🔞|⚡)"
+        r".{0,40}"
+        r"\b(?:view|open|click|tap|watch)\b"
+    ),
+    re.compile(
+        r"(?i)"
+        r"\b(?:mega|exclusive|viral|leak|premium)\b"
+        r".{0,70}"
+        r"(?:🔥|💥|👉|💦|🔞)"
+    ),
+    re.compile(
+        r"(?i)"
+        r"\b(?:mega\s*pack|pack)\b"
+        r".{0,70}"
+        r"\b\d{2,7}\+?\b"
+    ),
+]
+
+
+# =============================================================================
+# GENERIC HELPERS
+# =============================================================================
+
+def _unique_strings(
+    values: Iterable[Any],
+) -> List[str]:
+
+    seen = set()
+    result: List[str] = []
+
+    for value in values:
+        if value is None:
+            continue
+
+        value = str(value).strip()
+
+        if not value:
+            continue
+
+        key = value.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(value)
+
+    return result
+
+
+def _extract_words(
+    text: str,
+) -> List[str]:
+
+    if not text:
+        return []
+
+    return re.findall(
+        r"[^\W\d_][\w'-]{1,40}",
+        text,
+        flags=re.UNICODE,
     )
 
-    def __init__(self):
+
+def _count_word_matches(
+    text: str,
+    vocabulary: Iterable[str],
+) -> int:
+
+    if not text:
+        return 0
+
+    normalized = _normalize_text(text)
+
+    if not normalized:
+        return 0
+
+    words = set(
+        _extract_words(normalized)
+    )
+
+    count = 0
+
+    for word in vocabulary:
+        w = str(word).casefold()
+
+        if w in words:
+            count += 1
+            continue
+
+        if re.search(
+            rf"(?<!\w){re.escape(w)}(?!\w)",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            count += 1
+
+    return count
+
+
+def _count_emojis(text: str) -> int:
+
+    if not text:
+        return 0
+
+    return sum(
+        1
+        for ch in text
+        if (
+            0x1F000 <= ord(ch) <= 0x1FAFF
+            or 0x2600 <= ord(ch) <= 0x27BF
+        )
+    )
+
+
+def _count_spam_emojis(text: str) -> int:
+
+    if not text:
+        return 0
+
+    return sum(
+        text.count(emoji)
+        for emoji in _SPAM_EMOJIS
+    )
+
+
+def _count_unique_matches(
+    text: str,
+    patterns: Iterable[re.Pattern],
+) -> int:
+
+    if not text:
+        return 0
+
+    count = 0
+
+    for pattern in patterns:
+        try:
+            if pattern.search(text):
+                count += 1
+        except Exception:
+            continue
+
+    return count
+
+
+# =============================================================================
+# SCRIPT DETECTION
+# =============================================================================
+
+def _script_counts(text: str) -> Counter:
+
+    counts: Counter = Counter()
+
+    for ch in text or "":
+        if not ch.isalpha():
+            continue
+
+        name = unicodedata.name(ch, "")
+
+        if "LATIN" in name:
+            counts["latin"] += 1
+        elif "ARABIC" in name:
+            counts["arabic"] += 1
+        elif "CYRILLIC" in name:
+            counts["cyrillic"] += 1
+        elif "GREEK" in name:
+            counts["greek"] += 1
+        elif "HEBREW" in name:
+            counts["hebrew"] += 1
+        elif "DEVANAGARI" in name:
+            counts["devanagari"] += 1
+        elif "HIRAGANA" in name or "KATAKANA" in name:
+            counts["japanese"] += 1
+        elif "HANGUL" in name:
+            counts["korean"] += 1
+        elif "CJK" in name or "IDEOGRAPH" in name:
+            counts["cjk"] += 1
+        else:
+            counts["other"] += 1
+
+    return counts
+
+
+def _has_mixed_suspicious_scripts(text: str) -> bool:
+
+    counts = _script_counts(text)
+
+    latin = counts["latin"]
+    cyr = counts["cyrillic"]
+    greek = counts["greek"]
+
+    return latin >= 3 and (cyr >= 1 or greek >= 1)
+
+
+# =============================================================================
+# NORMALIZATION
+# =============================================================================
+
+def _strip_combining_marks(text: str) -> str:
+
+    if not text:
+        return ""
+
+    result: List[str] = []
+
+    for ch in unicodedata.normalize("NFD", text):
+        code = ord(ch)
+
+        in_range = any(
+            start <= code <= end
+            for start, end in _COMBINING_RANGES
+        )
+
+        if in_range:
+            continue
+
+        if unicodedata.category(ch) == "Mn":
+            continue
+
+        result.append(ch)
+
+    return "".join(result)
+
+
+def _remove_hidden_chars(text: str) -> str:
+
+    if not text:
+        return ""
+
+    return "".join(
+        ch
+        for ch in text
+        if ch not in _HIDDEN_CHARS
+    )
+
+
+def _deleet(text: str) -> str:
+
+    if not text:
+        return ""
+
+    def repl(match: re.Match) -> str:
+        token = match.group(0)
+
+        # لا نلمس token رقمي بالكامل.
+        if not re.search(r"[A-Za-z]", token):
+            return token
+
+        if not re.search(r"\d|[@$]", token):
+            return token
+
+        # يجب أن يحتوي token على حروف كافية
+        # حتى لا نعتبر أرقامًا عادية تحايلاً.
+        letters = len(
+            re.findall(r"[A-Za-z]", token)
+        )
+
+        if letters < 2:
+            return token
+
+        return token.translate(_LEET_MAP)
+
+    return re.sub(
+        r"[A-Za-z0-9@$]{3,}",
+        repl,
+        text,
+    )
+
+
+def _apply_homoglyphs_safe(text: str) -> str:
+
+    if not text or not ANTIEVASION_HOMOGLYPH:
+        return text or ""
+
+    return "".join(
+        _HOMOGLYPH_MAP.get(ch, ch)
+        for ch in text
+    )
+
+
+def _normalize_unicode_dots(text: str) -> str:
+
+    if not text or not ANTIEVASION_UNICODE_DOTS:
+        return text or ""
+
+    replacements = {
+        "\u2024": ".",
+        "\u2025": ".",
+        "\u2026": ".",
+        "\u3002": ".",
+        "\uFE52": ".",
+        "\uFF0E": ".",
+        "\uFF61": ".",
+    }
+
+    return "".join(
+        replacements.get(ch, ch)
+        for ch in text
+    )
+
+
+def _normalize_text(text: str) -> str:
+
+    if not text:
+        return ""
+
+    value = html.unescape(str(text))
+
+    # NFKC handles compatibility forms.
+    value = unicodedata.normalize(
+        "NFKC",
+        value,
+    )
+
+    # casefold أقوى من lower في المقارنات النصية.
+    value = value.casefold()
+
+    if (
+        ANTIEVASION_COMBINING
+        or ANTIEVASION_EXTENDED_COMBINING
+    ):
+        value = _strip_combining_marks(value)
+
+    value = _remove_hidden_chars(value)
+    value = _normalize_unicode_dots(value)
+
+    if ANTIEVASION_HOMOGLYPH:
+        value = _apply_homoglyphs_safe(value)
+
+    if ANTIEVASION_LEETSPEAK:
+        value = _deleet(value)
+
+    # إعادة تطبيق التطبيع بعد التحويلات.
+    value = unicodedata.normalize(
+        "NFKC",
+        value,
+    )
+
+    for code in range(0x2000, 0x200B):
+        value = value.replace(chr(code), " ")
+
+    value = value.replace("\u00a0", " ")
+
+    value = re.sub(
+        r"[ \t\r\f\v]+",
+        " ",
+        value,
+    )
+
+    return value.strip()
+
+
+def _strip_emoji_for_domain(text: str) -> str:
+
+    if not text:
+        return ""
+
+    if not ANTIEVASION_EMOJI_IN_DOMAIN:
+        return text
+
+    return re.sub(
+        r"[\U0001F000-\U0001FAFF]",
+        "",
+        text,
+    )
+
+
+def _has_hidden_chars(text: str) -> bool:
+
+    return bool(
+        text
+        and any(
+            ch in _HIDDEN_CHARS
+            for ch in text
+        )
+    )
+
+
+def _hidden_char_count(text: str) -> int:
+
+    if not text:
+        return 0
+
+    return sum(
+        ch in _HIDDEN_CHARS
+        for ch in text
+    )
+
+
+def _bidi_count(text: str) -> int:
+
+    if not text:
+        return 0
+
+    return sum(
+        ch in _BIDI_CHARS
+        for ch in text
+    )
+
+
+def _merge_split_urls(text: str) -> str:
+
+    if not text:
+        return ""
+
+    value = str(text)
+
+    value = re.sub(
+        r"(?i)"
+        r"h\s*t\s*t\s*p\s*s?"
+        r"\s*:\s*/\s*/",
+        "https://",
+        value,
+    )
+
+    value = re.sub(
+        r"(?i)"
+        r"\bh\s*t\s*t\s*p\s*s?"
+        r"\s*[:/\\]+",
+        "https://",
+        value,
+    )
+
+    value = re.sub(
+        r"(?i)"
+        r"\bt\s*[\.\[\(\{]?\s*m\s*"
+        r"[\.\]\)\}]\s*e",
+        "t.me",
+        value,
+    )
+
+    value = _DOT_LIKE_RE.sub(".", value)
+
+    value = re.sub(
+        r"(?i)\bdot\b",
+        ".",
+        value,
+    )
+
+    value = re.sub(
+        r"\s*\.\s*",
+        ".",
+        value,
+    )
+
+    value = re.sub(
+        r"\s*/\s*",
+        "/",
+        value,
+    )
+
+    return value
+
+
+# =============================================================================
+# URL EXTRACTION
+# =============================================================================
+
+def _extract_possible_urls(
+    text: str,
+) -> List[str]:
+
+    if not text:
+        return []
+
+    raw = str(text)
+
+    normalized = _normalize_unicode_dots(raw)
+    normalized = _merge_split_urls(normalized)
+
+    candidates: List[str] = []
+
+    candidates.extend(
+        _URL_RE.findall(normalized)
+    )
+
+    if ANTIEVASION_SCHEMELESS_URL:
+        candidates.extend(
+            _DOMAIN_HTTP_RE.findall(normalized)
+        )
+
+    if ANTIEVASION_EMAIL:
+        candidates.extend(
+            _EMAIL_RE.findall(normalized)
+        )
+
+    if ANTIEVASION_IPV4_SCHEMELESS:
+        candidates.extend(
+            _IPV4_RE.findall(normalized)
+        )
+
+    if ANTIEVASION_PUNYCODE:
+        candidates.extend(
+            _PUNYCODE_RE.findall(normalized)
+        )
+
+    if ANTIEVASION_TG_SCHEME:
+        candidates.extend(
+            _TG_SCHEME_RE.findall(normalized)
+        )
+        candidates.extend(
+            _TG_URL_RE.findall(normalized)
+        )
+        candidates.extend(
+            _TG_INVITE_RE.findall(normalized)
+        )
+
+    return _unique_strings(candidates)
+
+
+# =============================================================================
+# ENHANCED LINK DETECTION
+# =============================================================================
+
+def _has_domain_pattern(text: str) -> bool:
+
+    if not text:
+        return False
+
+    value = _merge_split_urls(
+        _strip_emoji_for_domain(
+            _normalize_text(text)
+        )
+    )
+
+    return bool(
+        _DOMAIN_RE.search(value)
+        or _SPACED_DOMAIN_RE.search(value)
+        or _DOT_DOMAIN_RE.search(value)
+        or (
+            ANTIEVASION_PUNYCODE
+            and _PUNYCODE_RE.search(value)
+        )
+        or (
+            ANTIEVASION_IPV4_SCHEMELESS
+            and _IPV4_RE.search(value)
+        )
+    )
+
+
+def _contains_link_enhanced(
+    text: str,
+    *,
+    include_usernames: bool = True,
+) -> bool:
+
+    if not text:
+        return False
+
+    raw = str(text)
+    normalized = _normalize_text(raw)
+    merged = _merge_split_urls(normalized)
+
+    if _URL_RE.search(raw):
+        return True
+
+    if _DOMAIN_HTTP_RE.search(raw):
+        return True
+
+    if _DOMAIN_RE.search(merged):
+        return True
+
+    if _SPACED_DOMAIN_RE.search(normalized):
+        return True
+
+    if _DOT_DOMAIN_RE.search(normalized):
+        return True
+
+    if (
+        ANTIEVASION_TG_SCHEME
+        and (
+            _TG_SCHEME_RE.search(merged)
+            or _TG_URL_RE.search(merged)
+            or _TG_INVITE_RE.search(merged)
+            or _SPACED_TG_RE.search(normalized)
+        )
+    ):
+        return True
+
+    if ANTIEVASION_ALT_SCHEMES:
+        if _ALT_SCHEME_RE.search(raw):
+            return True
+
+        if _SPACED_SCHEME_RE.search(raw):
+            return True
+
+    if (
+        ANTIEVASION_EMAIL
+        and _EMAIL_RE.search(normalized)
+    ):
+        return True
+
+    if (
+        ANTIEVASION_PUNYCODE
+        and _PUNYCODE_RE.search(normalized)
+    ):
+        return True
+
+    if (
+        ANTIEVASION_IPV4_SCHEMELESS
+        and _IPV4_RE.search(normalized)
+    ):
+        return True
+
+    if (
+        include_usernames
+        and ANTIEVASION_AT_CHANNEL
+        and _TG_USERNAME_RE.search(normalized)
+    ):
+        return True
+
+    return False
+
+
+def _contains_email(text: str) -> bool:
+
+    if not text or not ANTIEVASION_EMAIL:
+        return False
+
+    return bool(
+        _EMAIL_RE.search(
+            _normalize_text(text)
+        )
+    )
+
+
+def _contains_at_channel(text: str) -> bool:
+
+    if not text or not ANTIEVASION_AT_CHANNEL:
+        return False
+
+    return bool(
+        _TG_USERNAME_RE.search(
+            _normalize_text(text)
+        )
+    )
+
+
+def _contains_tg_scheme(text: str) -> bool:
+
+    if not text or not ANTIEVASION_TG_SCHEME:
+        return False
+
+    normalized = _merge_split_urls(
+        _normalize_text(text)
+    )
+
+    return bool(
+        _TG_SCHEME_RE.search(normalized)
+        or _TG_URL_RE.search(normalized)
+        or _TG_INVITE_RE.search(normalized)
+        or _SPACED_TG_RE.search(normalized)
+    )
+
+
+# =============================================================================
+# ENTITY / BUTTON EXTRACTION
+# =============================================================================
+
+def _extract_entity_urls(
+    message: Any,
+    _depth: int = 0,
+) -> List[str]:
+
+    if message is None or _depth > 4:
+        return []
+
+    urls: List[str] = []
+
+    try:
+        text = getattr(message, "text", None) or ""
+        entities = getattr(message, "entities", None) or []
+
+        for entity in entities:
+            try:
+                entity_type = str(
+                    getattr(entity, "type", "") or ""
+                ).lower()
+
+                if entity_type == "text_link":
+                    url = getattr(entity, "url", None)
+                    if url:
+                        urls.append(str(url))
+
+                elif entity_type == "url":
+                    offset = int(
+                        getattr(entity, "offset", 0) or 0
+                    )
+                    length = int(
+                        getattr(entity, "length", 0) or 0
+                    )
+
+                    if text and length > 0:
+                        part = text[
+                            offset:offset + length
+                        ]
+                        if part:
+                            urls.append(str(part))
+
+            except Exception:
+                continue
+
+        caption = getattr(
+            message,
+            "caption",
+            None,
+        ) or ""
+
+        caption_entities = getattr(
+            message,
+            "caption_entities",
+            None,
+        ) or []
+
+        for entity in caption_entities:
+            try:
+                entity_type = str(
+                    getattr(entity, "type", "") or ""
+                ).lower()
+
+                if entity_type == "text_link":
+                    url = getattr(entity, "url", None)
+                    if url:
+                        urls.append(str(url))
+
+                elif entity_type == "url":
+                    offset = int(
+                        getattr(entity, "offset", 0) or 0
+                    )
+                    length = int(
+                        getattr(entity, "length", 0) or 0
+                    )
+
+                    if caption and length > 0:
+                        part = caption[
+                            offset:offset + length
+                        ]
+                        if part:
+                            urls.append(str(part))
+
+            except Exception:
+                continue
+
+        reply = getattr(
+            message,
+            "reply_to_message",
+            None,
+        )
+
+        if reply is not None:
+            urls.extend(
+                _extract_entity_urls(
+                    reply,
+                    _depth + 1,
+                )
+            )
+
+    except Exception:
+        pass
+
+    return _unique_strings(urls)
+
+
+def _has_link_entity(message: Any) -> bool:
+    return bool(_extract_entity_urls(message))
+
+
+def _extract_url_from_button(
+    button: Any,
+) -> Optional[str]:
+
+    if button is None:
+        return None
+
+    try:
+        url = getattr(button, "url", None)
+        if url:
+            return str(url)
+
+        web_app = getattr(button, "web_app", None)
+
+        if web_app is not None:
+            web_url = getattr(web_app, "url", None)
+            if web_url:
+                return str(web_url)
+            return "web_app://button"
+
+        login_url = getattr(button, "login_url", None)
+
+        if login_url is not None:
+            login_web_url = getattr(
+                login_url,
+                "url",
+                None,
+            )
+
+            if login_web_url:
+                return str(login_web_url)
+
+            return "login_url://button"
+
+    except Exception:
+        pass
+
+    return None
+
+
+def _button_is_external(button: Any) -> bool:
+
+    if button is None:
+        return False
+
+    try:
+        return bool(
+            getattr(button, "url", None)
+            or getattr(button, "web_app", None) is not None
+            or getattr(button, "login_url", None) is not None
+        )
+    except Exception:
+        return False
+
+
+def _extract_button_context(
+    message: Any,
+) -> Tuple[int, List[str], List[str], List[str]]:
+
+    button_count = 0
+    button_urls: List[str] = []
+    button_texts: List[str] = []
+    button_urls_raw: List[str] = []
+
+    try:
+        markup = getattr(
+            message,
+            "reply_markup",
+            None,
+        )
+
+        if markup is None:
+            return 0, [], [], []
+
+        rows = getattr(
+            markup,
+            "inline_keyboard",
+            None,
+        )
+
+        if rows is None:
+            return 0, [], [], []
+
+        for row in rows or []:
+            for button in row or []:
+                button_count += 1
+
+                text = getattr(
+                    button,
+                    "text",
+                    None,
+                )
+
+                if text:
+                    button_texts.append(str(text))
+
+                url = _extract_url_from_button(button)
+
+                if url:
+                    button_urls_raw.append(str(url))
+
+                    if not str(url).endswith("://button"):
+                        button_urls.append(str(url))
+
+    except Exception:
+        pass
+
+    return (
+        button_count,
+        _unique_strings(button_urls),
+        button_texts,
+        _unique_strings(button_urls_raw),
+    )
+
+
+def _extract_vcard_urls(message: Any) -> List[str]:
+
+    if message is None:
+        return []
+
+    urls: List[str] = []
+
+    try:
+        contact = getattr(message, "contact", None)
+
+        if contact is not None:
+            website = getattr(
+                contact,
+                "website",
+                None,
+            )
+
+            if website:
+                urls.append(str(website))
+
+    except Exception:
+        pass
+
+    return _unique_strings(urls)
+
+
+def _extract_venue_url(message: Any) -> Optional[str]:
+    # Telegram Venue لا يحتوي عادةً على web URL.
+    # الدالة محفوظة للتوافق.
+    return None
+
+
+def _extract_poll_text(
+    message: Any,
+) -> Tuple[str, int, List[str]]:
+
+    if message is None:
+        return "", 0, []
+
+    try:
+        poll = getattr(message, "poll", None)
+
+        if poll is None:
+            return "", 0, []
+
+        question = str(
+            getattr(poll, "question", None) or ""
+        )
+
+        options = getattr(
+            poll,
+            "options",
+            None,
+        ) or []
+
+        option_texts: List[str] = []
+
+        for option in options:
+            option_text = getattr(
+                option,
+                "text",
+                None,
+            )
+
+            if option_text:
+                option_texts.append(str(option_text))
+
+        full = " ".join(
+            [question] + option_texts
+        ).strip()
+
+        return (
+            full,
+            len(option_texts),
+            _extract_possible_urls(full),
+        )
+
+    except Exception:
+        return "", 0, []
+
+
+# =============================================================================
+# MESSAGE HELPERS
+# =============================================================================
+
+def _get_message_button_data(
+    message: Any,
+) -> Tuple[int, List[str], List[str], List[str]]:
+    return _extract_button_context(message)
+
+
+def _get_message_button_texts(message: Any) -> List[str]:
+
+    try:
+        return _extract_button_context(message)[2]
+    except Exception:
+        return []
+
+
+def _get_message_analysis_text(message: Any) -> str:
+
+    if message is None:
+        return ""
+
+    parts: List[str] = []
+
+    try:
+        text = getattr(message, "text", None)
+        if text:
+            parts.append(str(text))
+
+        caption = getattr(message, "caption", None)
+        if caption:
+            parts.append(str(caption))
+
+        parts.extend(
+            _get_message_button_texts(message)
+        )
+
+        poll_text, _, _ = _extract_poll_text(message)
+
+        if poll_text:
+            parts.append(poll_text)
+
+    except Exception:
+        pass
+
+    result = "\n".join(
+        x for x in parts if x
+    ).strip()
+
+    return result[:MAX_ANALYSIS_TEXT_LENGTH]
+
+
+# =============================================================================
+# CONTEXT OBJECT
+# =============================================================================
+
+class _MessageContext:
+
+    __slots__ = (
+        "text", "caption", "full_text",
+        "normalized_text", "analysis_text",
+        "button_count", "button_urls",
+        "button_texts", "button_urls_raw",
+        "is_forwarded", "is_protected",
+        "has_hint", "is_auto_fwd",
+        "entity_urls", "has_link_entity",
+        "button_link_urls", "has_any_link",
+        "has_button_link", "vcard_urls",
+        "venue_url", "has_hidden_chars",
+        "poll_text", "poll_options_count",
+        "poll_urls", "hidden_char_count",
+        "bidi_count", "script_counts",
+        "mixed_scripts", "normalized_compact",
+        "normalized_url_text", "emoji_count",
+        "spam_emoji_count", "url_count",
+        "domain_count", "telegram_link_count",
+        "cta_count", "strong_word_count",
+        "medium_word_count", "promo_word_count",
+        "arabic_spam_count", "generic_word_count",
+        "suspicious_separator_count",
+        "repeated_char_count", "repeated_word_count",
+    )
+
+    def __init__(
+        self,
+        message: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+
         self.text = ""
         self.caption = ""
         self.full_text = ""
         self.normalized_text = ""
         self.analysis_text = ""
+
         self.button_count = 0
-        self.button_urls: List[str] = []
-        self.button_urls_raw: List[str] = []
-        self.button_texts: List[str] = []
+        self.button_urls = []
+        self.button_texts = []
+        self.button_urls_raw = []
+
         self.is_forwarded = False
         self.is_protected = False
         self.has_hint = False
         self.is_auto_fwd = False
-        self.entity_urls: List[str] = []
+
+        self.entity_urls = []
         self.has_link_entity = False
-        self.button_link_urls: List[str] = []
+        self.button_link_urls = []
         self.has_any_link = False
         self.has_button_link = False
-        self.vcard_urls: List[str] = []
-        self.venue_url: str = ""
+
+        self.vcard_urls = []
+        self.venue_url = None
+
         self.has_hidden_chars = False
-        self.poll_text: str = ""
-        self.poll_options_count: int = 0
-        self.poll_urls: List[str] = []
 
+        self.poll_text = ""
+        self.poll_options_count = 0
+        self.poll_urls = []
 
-# ═══════════════════════════════════════════════════════════════════
-# Regex Constants
-# ═══════════════════════════════════════════════════════════════════
+        self.hidden_char_count = 0
+        self.bidi_count = 0
+        self.script_counts = Counter()
+        self.mixed_scripts = False
+        self.normalized_compact = ""
+        self.normalized_url_text = ""
 
-_EMOJI_SEP_RE = re.compile(
-    r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF'
-    r'\U0001F000-\U0001F2FF\U000024C2-\U0001F251'
-    r'\U0001F900-\U0001F9FF\U0001FA70-\U0001FAFF'
-    r'\U00002190-\U000021FF\U00002B00-\U00002BFF'
-    r'\U0000FE00-\U0000FE0F\U0001F1E6-\U0001F1FF]',
-    re.UNICODE,
-)
+        self.emoji_count = 0
+        self.spam_emoji_count = 0
 
-_HIDDEN_CHARS = (
-    '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
-    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-    '\u2060', '\u2061', '\u2062', '\u2063', '\u2064',
-    '\u2066', '\u2067', '\u2068', '\u2069',
-    '\u206a', '\u206b', '\u206c', '\u206d', '\u206e', '\u206f',
-    '\u180e', '\u3164', '\u2800', '\u115f', '\u1160',
-    '\u00ad', '\u034f', '\u17b4', '\u17b5', '\ufeff',
-)
+        self.url_count = 0
+        self.domain_count = 0
+        self.telegram_link_count = 0
 
-_HIDDEN_TRANSLATE_TABLE = {ord(c): None for c in _HIDDEN_CHARS}
+        self.cta_count = 0
+        self.strong_word_count = 0
+        self.medium_word_count = 0
+        self.promo_word_count = 0
+        self.arabic_spam_count = 0
+        self.generic_word_count = 0
 
-_UNICODE_DOT_TABLE = str.maketrans({
-    '\u3002': '.', '\uff61': '.', '\uff0e': '.',
-    '\ufe52': '.', '\u2024': '.',
-})
+        self.suspicious_separator_count = 0
+        self.repeated_char_count = 0
+        self.repeated_word_count = 0
 
-_WS_RE = re.compile(
-    r'[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'
-)
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
 
-_HOMOGLYPH_MAP = str.maketrans({
-    '\u0430': 'a', '\u0431': 'b', '\u0432': 'b', '\u0433': 'r',
-    '\u0434': 'd', '\u0435': 'e', '\u0436': 'x', '\u0437': '3',
-    '\u0438': 'u', '\u0439': 'u', '\u043a': 'k', '\u043b': 'n',
-    '\u043c': 'm', '\u043d': 'h', '\u043e': 'o', '\u043f': 'n',
-    '\u0440': 'p', '\u0441': 'c', '\u0442': 't', '\u0443': 'y',
-    '\u0444': 'f', '\u0445': 'x', '\u0446': 'u', '\u0447': 'y',
-    '\u0448': 'w', '\u0449': 'w', '\u044a': 'b', '\u044b': 'b',
-    '\u044c': 'b', '\u044d': 'e', '\u044e': 'o', '\u044f': 'r',
-    '\u0456': 'i', '\u0455': 's', '\u0458': 'j', '\u0457': 'i',
-    '\u0451': 'e',
-    '\u0410': 'A', '\u0411': 'B', '\u0412': 'B', '\u0413': 'R',
-    '\u0414': 'D', '\u0415': 'E', '\u0416': 'X', '\u0417': '3',
-    '\u0418': 'U', '\u0419': 'U', '\u041a': 'K', '\u041b': 'N',
-    '\u041c': 'M', '\u041d': 'H', '\u041e': 'O', '\u041f': 'N',
-    '\u0420': 'P', '\u0421': 'C', '\u0422': 'T', '\u0423': 'Y',
-    '\u0424': 'F', '\u0425': 'X', '\u0426': 'U', '\u0427': 'Y',
-    '\u0428': 'W', '\u0429': 'W', '\u042a': 'B', '\u042b': 'B',
-    '\u042c': 'B', '\u042d': 'E', '\u042e': 'O', '\u042f': 'R',
-    '\u0406': 'I', '\u0407': 'I', '\u0405': 'S', '\u0408': 'J',
-    '\u0401': 'E',
-    '\u03b1': 'a', '\u03b2': 'b', '\u03b3': 'y', '\u03b4': 'd',
-    '\u03b5': 'e', '\u03b6': 'z', '\u03b7': 'n', '\u03b8': 'o',
-    '\u03b9': 'i', '\u03ba': 'k', '\u03bb': 'l', '\u03bc': 'u',
-    '\u03bd': 'v', '\u03be': 'e', '\u03bf': 'o', '\u03c0': 'n',
-    '\u03c1': 'p', '\u03c2': 's', '\u03c3': 'o', '\u03c4': 't',
-    '\u03c5': 'u', '\u03c6': 'f', '\u03c7': 'x', '\u03c8': 'y',
-    '\u03c9': 'w',
-    '\u0391': 'A', '\u0392': 'B', '\u0393': 'Y', '\u0394': 'A',
-    '\u0395': 'E', '\u0396': 'Z', '\u0397': 'H', '\u0398': 'O',
-    '\u0399': 'I', '\u039a': 'K', '\u039b': 'L', '\u039c': 'M',
-    '\u039d': 'N', '\u039e': 'E', '\u039f': 'O', '\u03a0': 'N',
-    '\u03a1': 'P', '\u03a3': 'S', '\u03a4': 'T', '\u03a5': 'Y',
-    '\u03a6': 'F', '\u03a7': 'X', '\u03a8': 'Y', '\u03a9': 'W',
-})
+        if message is not None:
+            self._populate(message)
 
-_LEET_TRANSLATE = str.maketrans({
-    '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's',
-    '7': 't', '8': 'b', '9': 'g',
-})
+    def _populate(self, message: Any) -> None:
 
-_LEET_CANDIDATE_RE = re.compile(
-    r'\b(?=[a-z0-9]*[a-z])(?=[a-z0-9]*[0-9])[a-z0-9]{3,}\b',
-    re.IGNORECASE,
-)
-
-_COMBINING_MARKS_RANGE = frozenset(
-    list(range(0x0300, 0x0370))
-    + list(range(0x1AB0, 0x1B00))
-    + list(range(0x1DC0, 0x1E00))
-    + list(range(0x20D0, 0x2100))
-    + list(range(0xFE20, 0xFE30))
-)
-
-_LATIN_RANGE = frozenset(
-    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-)
-
-_TRUE_STRINGS = frozenset({
-    "1", "true", "yes", "on", "enabled", "enable", "y",
-    "نعم", "مفعل", "مفعّل",
-})
-
-_FALSE_STRINGS = frozenset({
-    "0", "false", "no", "off", "disabled", "disable", "n",
-    "لا", "غير مفعل", "غير مفعّل",
-})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Link Regex Constants
-# ═══════════════════════════════════════════════════════════════════
-
-_URL_RE = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
-
-_ALT_SCHEME_RE = re.compile(
-    r'\b(?:hxxps?|ftps?|magnet|mailto|tel|sms|file):[^\s<>"]+',
-    re.IGNORECASE,
-)
-
-_DOMAIN_HTTP_RE = re.compile(
-    r'(?:https?://|hxxps?://|ftps?://|www\.|t\.me/|telegram\.me/)\S+',
-    re.IGNORECASE,
-)
-
-_TG_SCHEME_RE = re.compile(r'\btg://\S+', re.IGNORECASE)
-
-_AT_CHANNEL_RE = re.compile(
-    r'(?<![\w@/])@([A-Za-z][A-Za-z0-9_]{4,31})(?![\w@])',
-)
-
-_EMAIL_RE = re.compile(
-    r'(?<![\w.\-])[\w.\-+]{1,64}@'
-    r'(?:[a-z0-9\-]{1,63}\.)+[a-z]{2,24}(?![\w\-])',
-    re.IGNORECASE,
-)
-
-_PUNYCODE_RE = re.compile(
-    r'(?<![\w\-])xn--[a-z0-9\-]{2,}(?:\.[a-z0-9\-]+)*',
-    re.IGNORECASE,
-)
-
-_IPV4_SCHEMELESS_RE = re.compile(
-    r'(?<![\w.\-])(?:\d{1,3}\.){3}\d{1,3}'
-    r'(?::\d{1,5})?(?:/[^\s<>"\']*)?(?![\w.\-])',
-)
-
-_TLD_PATTERN = (
-    r'com|net|org|edu|gov|mil|int|info|biz|name|mobi|asia|xxx|tel|'
-    r'travel|jobs|cat|coop|aero|pro|museum|'
-    r'io|ai|co|me|tv|cc|app|dev|xyz|top|site|website|space|store|club|'
-    r'live|life|world|online|shop|blog|wiki|win|cloud|host|tech|fun|'
-    r'link|click|work|today|news|media|agency|company|solutions|'
-    r'fyi|zip|mov|re|yt|be|nu|im|st|am|is|it|'
-    r'ly|at|gg|gy|sh|to|so|pw|su|gd|vc|ws|tk|ml|ga|cf|gq|'
-    r'ru|uk|de|fr|es|nl|pl|tr|jp|cn|in|br|mx|ar|ir|sa|ae|eg|ma|dz|'
-    r'pk|bd|id|th|vn|ph|my|sg|hk|kr|tw|'
-    r'us|ca|au|nz|za|ng|ke|gh|tz|ug|zw|zm|'
-    r'ch|se|no|dk|fi|ie|pt|gr|cz|sk|hu|ro|bg|hr|si|rs|ua|by|'
-    r'lt|lv|ee|md|al|mk|ba|il|jo|lb|sy|iq|kw|qa|bh|om|ye|sd|tn'
-)
-
-_COMMON_FILE_EXTS = frozenset({
-    'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-    'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz',
-    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'ico',
-    'mp3', 'mp4', 'wav', 'ogg', 'flac', 'avi', 'mkv', 'mov', 'webm',
-    'py', 'js', 'ts', 'java', 'cpp', 'c', 'h', 'rb', 'go', 'rs', 'php',
-    'html', 'css', 'scss', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini',
-    'md', 'rst', 'csv', 'tsv', 'log', 'bat', 'ps1',
-    'exe', 'dll', 'so', 'dylib', 'apk', 'ipa', 'deb', 'rpm',
-})
-
-_SCHEMELESS_DOMAIN_RE = re.compile(
-    r'(?<![\w@/])'
-    r'(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?'
-    r'\.(?:' + _TLD_PATTERN + r')'
-    r'(?::\d{1,5})?'
-    r'(?:/[^\s<>"\']+|(?=\s|$|[,،.!?;:\)\]])))',
-    re.IGNORECASE,
-)
-
-_SPLIT_URL_RE = re.compile(
-    r'((?:https?://|hxxps?://|www\.)?'
-    r'[a-z0-9][a-z0-9\-\.]*?)'
-    r'\s*\n\s*'
-    r'(\.[a-z0-9\-][a-z0-9\-\.]*(?:/[^\s<>"\']*)?)',
-    re.IGNORECASE,
-)
-
-_ENTITY_LINK_TYPES = frozenset({'url', 'text_link'})
-_ENTITY_URL_TYPES = frozenset({'url', 'text_link'})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Spam Constants
-# ═══════════════════════════════════════════════════════════════════
-
-_SPAM_STRONG_KEYWORDS = frozenset({
-    'uncensored', 'xxx', 'nsfw', 'porn', 'nude', 'nudes',
-    'leak', 'leaked', 'viral', 'archive', 'drop', 'mega',
-})
-
-_SPAM_MEDIUM_KEYWORDS = frozenset({
-    'collection', 'clips', 'clip', 'footage', 'scenes', 'pack',
-    'fresh', 'wild', 'best', 'hot', 'sexy', 'milf', 'dilf',
-    'teen', 'teenager', 'taboo', 'busty', 'pierced', 'petite',
-})
-
-_SPAM_CONTEXT_KEYWORDS = frozenset({
-    'check', 'tap', 'click', 'view', 'open',
-    'cartoon', 'korean', 'colombian', 'step', 'mom',
-    'euro', 'bj', 'mfm',
-})
-
-_CTA_KEYWORDS = frozenset({
-    'check', 'tap', 'click', 'view', 'open',
-    'join', 'subscribe', 'download', 'watch',
-})
-
-_SPAM_EMOJIS = (
-    '⭐', '💀', '🔥', '✨', '🍑', '🔞', '🚨', '💎',
-    '🎁', '🎉', '🌟', '💥', '⚡', '🌸', '🌺', '💋',
-    '👑', '🥇', '🏆', '🎯', '💯', '🆕', '🆗',
-    '🔴', '🟢', '🔵', '🟡', '🟣', '🟠',
-)
-
-_WORD_SEP_CLASS = r'[\s\-_.|/*+=~^´`°•●○◦▪▫■□♦♢※]'
-_WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*", re.IGNORECASE)
-_CAPS_WORD_RE = re.compile(r'\b[A-Z]{4,}\b')
-
-_SPAM_CONTEXT_PATTERNS = (
-    (re.compile(
-        r'\buncensored\s+(?:best\s+)?(?:collection|archive|pack|clips?)\b',
-        re.IGNORECASE,
-    ), 4, "uncensored+collection"),
-    (re.compile(
-        r'\b(?:xxx|nsfw|porn)\s+(?:collection|archive|pack|clips?)\b',
-        re.IGNORECASE,
-    ), 4, "adult+collection"),
-    (re.compile(
-        r'\b(?:leak|leaked)\s+(?:pack|archive|collection|clips?)\b',
-        re.IGNORECASE,
-    ), 4, "leak+pack"),
-    (re.compile(
-        r'\b(?:click|tap|check|view|open)\s+(?:here|now|below)\b',
-        re.IGNORECASE,
-    ), 2, "cta_phrase"),
-    (re.compile(
-        r'\b(?:best|fresh|hot|wild|viral)\s+'
-        r'(?:collection|clips?|pack|archive)\b',
-        re.IGNORECASE,
-    ), 3, "promo_collection"),
-    (re.compile(
-        r'\b(?:mega|huge|massive)\s+(?:pack|archive|collection|drop)\b',
-        re.IGNORECASE,
-    ), 3, "mega_promo"),
-    (re.compile(
-        r'\b(?:viral|leak|leaked)\b.{0,35}\b(?:view|open|click|tap|check)\b',
-        re.IGNORECASE,
-    ), 3, "viral/leak+cta"),
-)
-
-_POSTBOT_EMOJI = (
-    r'[⭐💀🔥✨🍑🔞🚨💎🎁🎉🌟💥⚡🌸🌺💋👑🥇🏆🎯💯🆕🆗'
-    r'🔴🟢🔵🟡🟣🟠💦👉]'
-)
-
-_POSTBOT_PATTERN = re.compile(
-    _POSTBOT_EMOJI + r'.{0,15}'
-    + r'\b[A-Z]{4,}(?:\s+[A-Z]{4,}){1,}' + r'.{0,20}'
-    + r'(?:' + _POSTBOT_EMOJI + r'|\d{2,})',
-    re.UNICODE,
-)
-
-_POSTBOT_PATTERN_LOOSE = re.compile(
-    _POSTBOT_EMOJI + r'.{0,10}'
-    + r'\b[A-Z]{4,}(?:\s+[A-Z]{4,}){1,}',
-    re.UNICODE,
-)
-
-_POSTBOT_BUTTON_PATTERN = re.compile(
-    r'\b(?:view|open|watch|click|tap|viral|leak|'
-    r'content|download|join|subscribe)\b',
-    re.IGNORECASE,
-)
-
-_POSTBOT_HARD_KEYWORDS = re.compile(
-    r'\b(?:viral|leak|mega|pack|clips?|uncensored|nsfw)\b',
-    re.IGNORECASE,
-)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════
-
-def _as_bool(value, default=False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in _TRUE_STRINGS:
-            return True
-        if v in _FALSE_STRINGS:
-            return False
-    return default
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Normalizers
-# ═══════════════════════════════════════════════════════════════════
-
-def _strip_combining_marks(text: str) -> str:
-    if not text:
-        return text
-    try:
-        return ''.join(c for c in text if ord(c) not in _COMBINING_MARKS_RANGE)
-    except Exception:
-        return text
-
-
-def _deleet(text: str) -> str:
-    if not text:
-        return text
-    try:
-        def _replace(m):
-            return m.group(0).lower().translate(_LEET_TRANSLATE)
-        return _LEET_CANDIDATE_RE.sub(_replace, text)
-    except Exception:
-        return text
-
-
-def _apply_homoglyphs_safe(text: str) -> str:
-    if not text or not _ANTIEVASION_HOMOGLYPH:
-        return text
-    try:
-        has_latin = any(c in _LATIN_RANGE for c in text)
-        has_cyr = any('\u0400' <= c <= '\u04FF' for c in text)
-        has_grk = any('\u0370' <= c <= '\u03FF' for c in text)
-        if has_latin and (has_cyr or has_grk):
-            return text.translate(_HOMOGLYPH_MAP)
-        return text
-    except Exception:
-        return text
-
-
-def _normalize_text(text: str) -> str:
-    if not text:
-        return ""
-    try:
-        text = unicodedata.normalize('NFKC', text)
-    except Exception:
-        pass
-    if _ANTIEVASION_UNICODE_DOTS:
         try:
-            text = text.translate(_UNICODE_DOT_TABLE)
-        except Exception:
-            pass
-    text = text.translate(_HIDDEN_TRANSLATE_TABLE)
-    try:
-        text = _apply_homoglyphs_safe(text)
-    except Exception:
-        pass
-    if _ANTIEVASION_COMBINING:
-        try:
-            text = _strip_combining_marks(text)
-        except Exception:
-            pass
-    if _ANTIEVASION_LEETSPEAK:
-        try:
-            text = _deleet(text)
-        except Exception:
-            pass
-    return _WS_RE.sub(' ', text).strip()
+            self.text = str(
+                getattr(message, "text", None) or ""
+            )
 
+            self.caption = str(
+                getattr(message, "caption", None) or ""
+            )
 
-def _strip_emoji_for_domain(text: str) -> str:
-    if not text or not _ANTIEVASION_EMOJI_IN_DOMAIN:
-        return text
-    try:
-        return _EMOJI_SEP_RE.sub('', text)
-    except Exception:
-        return text
+            self.full_text = "\n".join(
+                x
+                for x in (
+                    self.text,
+                    self.caption,
+                )
+                if x
+            ).strip()
 
+            self.analysis_text = (
+                _get_message_analysis_text(message)
+            )
 
-def _has_hidden_chars(text: str) -> bool:
-    if not text:
-        return False
-    try:
-        return any(c in text for c in _HIDDEN_CHARS)
-    except Exception:
-        return False
+            self.normalized_text = _normalize_text(
+                self.analysis_text
+            )
 
+            self.normalized_compact = re.sub(
+                r"[\W_]+",
+                "",
+                self.normalized_text,
+                flags=re.UNICODE,
+            )
 
-def _merge_split_urls(text: str) -> str:
-    if not text or not _ANTIEVASION_MULTILINE_URL:
-        return text
-    if '\n' not in text:
-        return text
-    try:
-        for _ in range(3):
-            new_text = _SPLIT_URL_RE.sub(r'\1\2', text)
-            if new_text == text:
-                break
-            text = new_text
-    except Exception:
-        pass
-    return text
+            self.normalized_url_text = (
+                _merge_split_urls(
+                    self.normalized_text
+                )
+            )
 
+            (
+                self.button_count,
+                self.button_urls,
+                self.button_texts,
+                self.button_urls_raw,
+            ) = _extract_button_context(message)
 
-# ═══════════════════════════════════════════════════════════════════
-# Extractors
-# ═══════════════════════════════════════════════════════════════════
+            self.button_link_urls = list(
+                self.button_urls
+            )
 
-def _extract_entity_urls(message, depth: int = 0) -> List[str]:
-    urls: List[str] = []
-    if message is None or depth > 4:
-        return urls
-    try:
-        for attr in ('entities', 'caption_entities'):
-            ents = getattr(message, attr, None) or []
-            for e in ents:
+            self.entity_urls = _extract_entity_urls(message)
+            self.has_link_entity = bool(self.entity_urls)
+
+            self.vcard_urls = _extract_vcard_urls(message)
+            self.venue_url = _extract_venue_url(message)
+
+            (
+                self.poll_text,
+                self.poll_options_count,
+                self.poll_urls,
+            ) = _extract_poll_text(message)
+
+            self.has_hidden_chars = _has_hidden_chars(
+                self.analysis_text
+            )
+
+            self.hidden_char_count = _hidden_char_count(
+                self.analysis_text
+            )
+
+            self.bidi_count = _bidi_count(
+                self.analysis_text
+            )
+
+            self.script_counts = _script_counts(
+                self.analysis_text
+            )
+
+            self.mixed_scripts = (
+                _has_mixed_suspicious_scripts(
+                    self.analysis_text
+                )
+            )
+
+            self.emoji_count = _count_emojis(
+                self.analysis_text
+            )
+
+            self.spam_emoji_count = _count_spam_emojis(
+                self.analysis_text
+            )
+
+            self.url_count = _count_text_urls(
+                self.analysis_text
+            )
+
+            self.domain_count = len(
+                _DOMAIN_RE.findall(
+                    self.normalized_url_text
+                )
+            )
+
+            self.telegram_link_count = len(
+                _TG_URL_RE.findall(
+                    self.normalized_url_text
+                )
+            )
+
+            self.cta_count = _count_word_matches(
+                self.normalized_text,
+                _CTA_WORDS,
+            )
+
+            self.strong_word_count = _count_word_matches(
+                self.normalized_text,
+                _STRONG_SPAM_WORDS,
+            )
+
+            self.medium_word_count = _count_word_matches(
+                self.normalized_text,
+                _MEDIUM_SPAM_WORDS,
+            )
+
+            self.promo_word_count = _count_word_matches(
+                self.normalized_text,
+                _PROMO_WORDS,
+            )
+
+            self.arabic_spam_count = _count_word_matches(
+                self.normalized_text,
+                (
+                    _ARABIC_SPAM_WORDS
+                    | _ARABIC_CTA_WORDS
+                    | _EXTRA_SCRIPT_SPAM_WORDS
+                ),
+            )
+
+            self.generic_word_count = _count_word_matches(
+                self.normalized_text,
+                _GENERIC_WORDS,
+            )
+
+            self.suspicious_separator_count = len(
+                _SEPARATOR_RE.findall(
+                    self.analysis_text
+                )
+            )
+
+            self.repeated_char_count = len(
+                _REPEATED_CHAR_RE.findall(
+                    self.analysis_text
+                )
+            )
+
+            self.repeated_word_count = len(
+                _REPEATED_WORD_RE.findall(
+                    self.normalized_text
+                )
+            )
+
+            self.has_button_link = bool(
+                self.button_link_urls
+                or any(
+                    "://button" in str(x)
+                    for x in self.button_urls_raw
+                )
+            )
+
+            self.has_any_link = bool(
+                self.has_link_entity
+                or self.has_button_link
+                or self.entity_urls
+                or self.button_urls
+                or self.vcard_urls
+                or self.poll_urls
+                or self.url_count
+                or _contains_link_enhanced(
+                    self.analysis_text,
+                    include_usernames=False,
+                )
+            )
+
+            self.is_forwarded = bool(
+                getattr(message, "forward_origin", None)
+                or getattr(message, "forward_from", None)
+                or getattr(message, "forward_from_chat", None)
+                or getattr(message, "is_automatic_forward", False)
+            )
+
+            self.is_auto_fwd = bool(
+                getattr(
+                    message,
+                    "is_automatic_forward",
+                    False,
+                )
+            )
+
+            self.is_protected = bool(
+                getattr(
+                    message,
+                    "has_protected_content",
+                    False,
+                )
+            )
+
+            self.has_hint = bool(
+                self.button_count
+                or self.has_any_link
+                or self.has_link_entity
+            )
+
+        except Exception as exc:
+            if DEBUG_DIAG:
                 try:
-                    if getattr(e, 'type', None) not in _ENTITY_LINK_TYPES:
-                        continue
-                    u = getattr(e, 'url', None)
-                    if isinstance(u, str) and u:
-                        urls.append(u)
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    if depth < 4:
-        try:
-            rtm = getattr(message, 'reply_to_message', None)
-            if rtm is not None:
-                urls.extend(_extract_entity_urls(rtm, depth + 1))
-        except Exception:
-            pass
-    return urls
-
-
-def _has_link_entity(message) -> bool:
-    if not _ANTIEVASION_ENTITY_LINK or message is None:
-        return False
-    try:
-        for attr in ('entities', 'caption_entities'):
-            for e in (getattr(message, attr, None) or []):
-                try:
-                    if getattr(e, 'type', None) in _ENTITY_URL_TYPES:
-                        return True
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return False
-
-
-def _extract_url_from_button(button) -> List[str]:
-    urls: List[str] = []
-    if button is None:
-        return urls
-    try:
-        u = getattr(button, 'url', None)
-        if isinstance(u, str) and u:
-            urls.append(u)
-    except Exception:
-        pass
-    if _ANTIEVASION_BUTTON_WEBAPP:
-        try:
-            wa = getattr(button, 'web_app', None)
-            if wa is not None:
-                wau = getattr(wa, 'url', None)
-                if isinstance(wau, str) and wau:
-                    urls.append(wau)
-        except Exception:
-            pass
-    if _ANTIEVASION_BUTTON_LOGINURL:
-        try:
-            lu = getattr(button, 'login_url', None)
-            if lu is not None:
-                luu = getattr(lu, 'url', None)
-                if isinstance(luu, str) and luu:
-                    urls.append(luu)
-        except Exception:
-            pass
-    return urls
-
-
-def _extract_button_context(message) -> Tuple[int, List[str], List[str]]:
-    if message is None:
-        return 0, [], []
-    count = 0
-    urls: List[str] = []
-    texts: List[str] = []
-    try:
-        markup = getattr(message, 'reply_markup', None)
-        if not markup:
-            return 0, [], []
-        keyboard = getattr(markup, 'inline_keyboard', None)
-        if not keyboard:
-            return 0, [], []
-        for row in keyboard:
-            if not row:
-                continue
-            for button in row:
-                if button is None:
-                    continue
-                count += 1
-                try:
-                    b_text = getattr(button, 'text', None)
-                    if isinstance(b_text, str):
-                        b_text = b_text.strip()
-                        if b_text:
-                            texts.append(b_text)
+                    print(
+                        "[DETECTOR] context error:",
+                        repr(exc),
+                    )
                 except Exception:
                     pass
-                try:
-                    urls.extend(_extract_url_from_button(button))
-                except Exception:
-                    pass
+
+
+# =============================================================================
+# BUTTON HELPERS
+# =============================================================================
+
+def _has_button_link(message_or_context: Any) -> bool:
+
+    if isinstance(message_or_context, _MessageContext):
+        return bool(
+            message_or_context.has_button_link
+            or message_or_context.button_link_urls
+        )
+
+    try:
+        return bool(
+            _extract_button_context(
+                message_or_context
+            )[1]
+        )
     except Exception:
-        pass
-    return count, urls, texts
+        return False
 
 
-def _extract_vcard_urls(message) -> List[str]:
-    if not _ANTIEVASION_VENUE_VCARD:
+def _extract_button_link_urls(
+    message_or_context: Any,
+) -> List[str]:
+
+    if isinstance(message_or_context, _MessageContext):
+        return list(
+            message_or_context.button_link_urls
+        )
+
+    try:
+        return list(
+            _extract_button_context(
+                message_or_context
+            )[1]
+        )
+    except Exception:
         return []
-    urls: List[str] = []
-    try:
-        contact = getattr(message, 'contact', None)
-        if contact is None:
-            return urls
-        vcard = getattr(contact, 'vcard', None)
-        if not vcard or not isinstance(vcard, str):
-            return urls
-        for m in re.finditer(
-            r'(?im)^URL(?:;[^:\r\n]*)?[:;]\s*([^\r\n]+)$', vcard,
-        ):
-            u = m.group(1).strip()
-            if u:
-                urls.append(u)
-    except Exception:
-        pass
-    return urls
 
 
-def _extract_venue_url(message) -> str:
-    if not _ANTIEVASION_VENUE_VCARD:
-        return ""
-    try:
-        venue = getattr(message, 'venue', None)
-        if venue is None:
-            return ""
-        u = getattr(venue, 'url', None)
-        if isinstance(u, str) and u:
-            return u
-        for field in ('title', 'address'):
-            v = getattr(venue, field, None)
-            if isinstance(v, str) and v:
-                if _DOMAIN_HTTP_RE.search(v):
-                    return v
-                if _has_domain_pattern(v):
-                    return v
-    except Exception:
-        pass
-    return ""
-
-
-def _extract_poll_text(message) -> Tuple[str, int, List[str]]:
-    if not _ANTIEVASION_POLL:
-        return "", 0, []
-    try:
-        poll = getattr(message, 'poll', None)
-        if poll is None:
-            return "", 0, []
-        parts: List[str] = []
-        urls: List[str] = []
-        q = getattr(poll, 'question', None)
-        if q:
-            parts.append(str(q))
-            if _DOMAIN_HTTP_RE.search(str(q)):
-                urls.append(str(q))
-        opts = getattr(poll, 'options', None) or []
-        for o in opts:
-            t = getattr(o, 'text', None)
-            if t:
-                parts.append(str(t))
-                if _DOMAIN_HTTP_RE.search(str(t)):
-                    urls.append(str(t))
-        expl = getattr(poll, 'explanation', None)
-        if expl:
-            parts.append(str(expl))
-            if _DOMAIN_HTTP_RE.search(str(expl)):
-                urls.append(str(expl))
-        return " ".join(parts), len(opts), urls
-    except Exception:
-        return "", 0, []
-
+# =============================================================================
+# SPAM WORD EXTRACTION
+# =============================================================================
 
 def _extract_spam_words(text: str) -> List[str]:
+
     if not text:
         return []
-    try:
-        regular = [m.group(0).lower() for m in _WORD_RE.finditer(text)]
-        if not _ANTIEVASION_EMOJI_SEPARATOR:
-            return list(set(regular))
-        no_emoji = _EMOJI_SEP_RE.sub('', text)
-        fully_compact = re.sub(r'[^a-zA-Z0-9]', '', no_emoji).lower()
-        compact_words = re.findall(r'[a-z]{3,}', fully_compact)
-        spaced_compact = re.sub(_WORD_SEP_CLASS, ' ', no_emoji)
-        spaced_compact = re.sub(r'[^a-zA-Z0-9 ]', ' ', spaced_compact)
-        spaced_words = [
-            w.lower() for w in spaced_compact.split() if len(w) >= 3
-        ]
-        return list(set(regular + compact_words + spaced_words))
-    except Exception:
-        return []
+
+    normalized = _normalize_text(text)
+    found: List[str] = []
+
+    vocabularies = (
+        _STRONG_SPAM_WORDS,
+        _MEDIUM_SPAM_WORDS,
+        _CTA_WORDS,
+        _PROMO_WORDS,
+        _ARABIC_SPAM_WORDS,
+        _ARABIC_CTA_WORDS,
+        _EXTRA_SCRIPT_SPAM_WORDS,
+    )
+
+    for vocabulary in vocabularies:
+        for word in vocabulary:
+            if re.search(
+                rf"(?<![\w-])"
+                rf"{re.escape(str(word).casefold())}"
+                rf"(?![\w-])",
+                normalized,
+                flags=re.IGNORECASE,
+            ):
+                found.append(str(word))
+
+    compact = re.sub(
+        r"[\W_]+",
+        "",
+        normalized,
+        flags=re.UNICODE,
+    )
+
+    compact_candidates = {
+        "megapack",
+        "megapacks",
+        "viralcontent",
+        "openhere",
+        "viewleak",
+        "checkthis",
+        "clickhere",
+        "watchnow",
+        "exclusivecontent",
+    }
+
+    for word in compact_candidates:
+        if word in compact:
+            found.append(word)
+
+    return _unique_strings(found)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Link Detection
-# ═══════════════════════════════════════════════════════════════════
+# =============================================================================
+# EVASION
+# =============================================================================
 
-def _has_domain_pattern(text: str) -> bool:
-    if not text:
-        return False
-    try:
-        cleaned = _strip_emoji_for_domain(text)
-        cleaned = cleaned.translate(_HIDDEN_TRANSLATE_TABLE)
-        for m in _SCHEMELESS_DOMAIN_RE.finditer(cleaned):
-            full = m.group(0).lower()
-            if '/' not in full and ':' not in full:
-                ext = full.rsplit('.', 1)[-1].split('?')[0]
-                if ext in _COMMON_FILE_EXTS:
-                    continue
-            return True
-    except Exception:
-        pass
-    return False
+def _compact_evasion_variants(text: str) -> List[str]:
 
-
-def _contains_link_enhanced(text: str) -> bool:
-    if not text:
-        return False
-    try:
-        if _DOMAIN_HTTP_RE.search(text):
-            return True
-        if _ANTIEVASION_ALT_SCHEMES:
-            if _ALT_SCHEME_RE.search(text):
-                return True
-        if _ANTIEVASION_SCHEMELESS_URL:
-            if _has_domain_pattern(text):
-                return True
-        if _ANTIEVASION_TG_SCHEME:
-            if _TG_SCHEME_RE.search(text):
-                return True
-        if _ANTIEVASION_PUNYCODE:
-            if _PUNYCODE_RE.search(text):
-                return True
-        if _ANTIEVASION_IPV4_SCHEMELESS:
-            for m in _IPV4_SCHEMELESS_RE.finditer(text):
-                try:
-                    ip_str = m.group(0).split('/')[0].split(':')[0]
-                    ipaddress.ip_address(ip_str)
-                    return True
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return False
-
-
-def _contains_email(text: str) -> bool:
-    if not text or not _ANTIEVASION_EMAIL:
-        return False
-    try:
-        return bool(_EMAIL_RE.search(text))
-    except Exception:
-        return False
-
-
-def _contains_at_channel(text: str) -> bool:
-    if not text or not _ANTIEVASION_AT_CHANNEL:
-        return False
-    try:
-        return bool(_AT_CHANNEL_RE.search(text))
-    except Exception:
-        return False
-
-
-def _contains_tg_scheme(text: str) -> bool:
-    if not text or not _ANTIEVASION_TG_SCHEME:
-        return False
-    try:
-        return bool(_TG_SCHEME_RE.search(text))
-    except Exception:
-        return False
-
-
-def _has_button_link(ctx: "_MessageContext") -> bool:
-    if not _ANTIEVASION_BUTTON_LINK:
-        return False
-    try:
-        for url in ctx.button_urls_raw:
-            if not isinstance(url, str) or not url:
-                continue
-            if _DOMAIN_HTTP_RE.search(url):
-                return True
-            if _ANTIEVASION_SCHEMELESS_URL and _has_domain_pattern(url):
-                return True
-            if _ANTIEVASION_TG_SCHEME and _TG_SCHEME_RE.search(url):
-                return True
-            if _ANTIEVASION_ALT_SCHEMES and _ALT_SCHEME_RE.search(url):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _extract_button_link_urls(ctx: "_MessageContext") -> List[str]:
-    if not _ANTIEVASION_BUTTON_LINK:
-        return []
-    result: List[str] = []
-    try:
-        for url in ctx.button_urls_raw:
-            if not isinstance(url, str) or not url:
-                continue
-            if _DOMAIN_HTTP_RE.search(url):
-                result.append(url)
-            elif _ANTIEVASION_SCHEMELESS_URL and _has_domain_pattern(url):
-                result.append(url)
-            elif _ANTIEVASION_TG_SCHEME and _TG_SCHEME_RE.search(url):
-                result.append(url)
-            elif _ANTIEVASION_ALT_SCHEMES and _ALT_SCHEME_RE.search(url):
-                result.append(url)
-    except Exception:
-        pass
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Analysis Text Builders
-# ═══════════════════════════════════════════════════════════════════
-
-def _get_message_button_data(message):
-    count, urls, _ = _extract_button_context(message)
-    return count, urls
-
-
-def _get_message_button_texts(message):
-    _, _, texts = _extract_button_context(message)
-    return texts
-
-
-def _get_message_analysis_text(message) -> str:
-    if message is None:
-        return ""
-    parts: List[str] = []
-    for attr in ('text', 'caption'):
-        try:
-            v = getattr(message, attr, None)
-            if v:
-                parts.append(str(v))
-        except Exception:
-            pass
-    try:
-        _, _, bts = _extract_button_context(message)
-        if bts:
-            parts.extend(bts)
-    except Exception:
-        pass
-    try:
-        for u in _extract_entity_urls(message):
-            parts.append(str(u))
-    except Exception:
-        pass
-    try:
-        for u in _extract_vcard_urls(message):
-            parts.append(str(u))
-    except Exception:
-        pass
-    try:
-        vu = _extract_venue_url(message)
-        if vu:
-            parts.append(vu)
-    except Exception:
-        pass
-    try:
-        pt, _, _ = _extract_poll_text(message)
-        if pt:
-            parts.append(pt)
-    except Exception:
-        pass
-    return _normalize_text(" ".join(parts))
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Spam Scoring
-# ═══════════════════════════════════════════════════════════════════
-
-def _count_unique_matches(words, keywords):
-    try:
-        return sorted(set(words).intersection(keywords))
-    except Exception:
-        return []
-
-
-def _count_text_urls(text: str) -> List[str]:
     if not text:
         return []
-    try:
-        return _URL_RE.findall(text)
-    except Exception:
-        return []
+
+    normalized = _normalize_text(text)
+
+    variants = [normalized]
+
+    compact = re.sub(
+        r"[^\w]+",
+        "",
+        normalized,
+        flags=re.UNICODE,
+    )
+
+    if compact != normalized:
+        variants.append(compact)
+
+    no_emoji = re.sub(
+        r"[\U0001F000-\U0001FAFF]",
+        "",
+        normalized,
+    )
+
+    no_emoji = re.sub(r"\s+", "", no_emoji)
+
+    if no_emoji != normalized:
+        variants.append(no_emoji)
+
+    return _unique_strings(variants)
 
 
-def _compute_spam_score(
-    message,
-    *,
-    _button_count: Optional[int] = None,
-    _button_urls: Optional[List[str]] = None,
-    _button_texts: Optional[List[str]] = None,
-    _normalized: Optional[str] = None,
-    _analysis_text: Optional[str] = None,
-    _entity_urls: Optional[List[str]] = None,
-) -> Tuple[int, List[str]]:
-    if message is None:
-        return 0, []
+def _detect_split_spam_words(text: str) -> List[str]:
+
     if (
-        _button_count is not None
-        and _button_urls is not None
-        and _button_texts is not None
+        not text
+        or not ANTIEVASION_COMPACT_WORDS
     ):
-        button_count = _button_count
-        button_urls = _button_urls
-        button_texts = _button_texts
-    else:
-        button_count, button_urls, button_texts = _extract_button_context(message)
-    if _normalized is not None:
-        normalized = _normalized
-    else:
-        try:
-            body_text = (
-                getattr(message, 'text', None)
-                or getattr(message, 'caption', None)
-                or ""
-            )
-        except Exception:
-            body_text = ""
-        normalized = _normalize_text(body_text) if body_text else ""
-    if _analysis_text is not None:
-        analysis_text = _analysis_text
-    elif button_texts:
-        button_text_joined = _normalize_text(" ".join(button_texts))
-        analysis_text = (
-            f"{normalized} {button_text_joined}".strip()
-            if normalized else button_text_joined
+        return []
+
+    variants = _compact_evasion_variants(text)
+
+    targets = (
+        set(_STRONG_SPAM_WORDS)
+        | set(_PROMO_WORDS)
+        | {
+            "viralcontent",
+            "megapack",
+            "openhere",
+            "viewleak",
+            "watchnow",
+            "clickhere",
+            "exclusivecontent",
+        }
+    )
+
+    compact_targets = {
+        re.sub(
+            r"[\W_]+",
+            "",
+            str(x).casefold(),
         )
-    else:
-        analysis_text = normalized
-    if not analysis_text and not button_urls:
+        for x in targets
+    }
+
+    found: List[str] = []
+
+    for variant in variants:
+        compact_variant = re.sub(
+            r"[\W_]+",
+            "",
+            variant.casefold(),
+            flags=re.UNICODE,
+        )
+
+        for target in compact_targets:
+            if len(target) < 4:
+                continue
+
+            if target in compact_variant:
+                found.append(target)
+
+    return _unique_strings(found)
+
+
+def _detect_url_obfuscation(
+    text: str,
+) -> Tuple[bool, List[str]]:
+
+    if not text:
+        return False, []
+
+    raw = str(text)
+    normalized = _normalize_text(raw)
+
+    reasons: List[str] = []
+
+    if _SPACED_SCHEME_RE.search(raw):
+        reasons.append("spaced_url_scheme")
+
+    if _ALT_SCHEME_RE.search(raw):
+        reasons.append("alternate_url_scheme")
+
+    if _SPACED_TG_RE.search(normalized):
+        reasons.append("obfuscated_telegram_domain")
+
+    if _DOT_DOMAIN_RE.search(normalized):
+        reasons.append("dot_domain")
+
+    if _SPACED_DOMAIN_RE.search(normalized):
+        reasons.append("spaced_domain")
+
+    if _DOT_LIKE_RE.search(raw):
+        reasons.append("bracketed_dot")
+
+    if (
+        ANTIEVASION_PUNYCODE
+        and _PUNYCODE_RE.search(normalized)
+    ):
+        reasons.append("punycode")
+
+    if (
+        ANTIEVASION_IPV4_SCHEMELESS
+        and _IPV4_RE.search(normalized)
+    ):
+        reasons.append("ipv4")
+
+    if (
+        ANTIEVASION_EMAIL
+        and _EMAIL_RE.search(normalized)
+    ):
+        reasons.append("email")
+
+    if _MULTISPACE_SPLIT_RE.search(normalized):
+        reasons.append("split_scheme_or_domain")
+
+    return bool(reasons), _unique_strings(reasons)
+
+
+def _detect_unicode_evasion(
+    text: str,
+) -> Tuple[int, List[str]]:
+
+    if not text:
         return 0, []
-    if _entity_urls is None:
-        _entity_urls = _extract_entity_urls(message)
+
     score = 0
     reasons: List[str] = []
-    text_lower = analysis_text.lower()
 
-    # PostBot boost BEFORE other scoring
-    try:
-        _pb_conf = _postbot_pattern_confidence(
-            analysis_text,
-            button_count=button_count,
-            has_urls=bool(button_urls) or bool(_entity_urls),
+    hidden = _hidden_char_count(text)
+    bidi = _bidi_count(text)
+
+    if hidden:
+        score += min(4, 1 + hidden // 2)
+        reasons.append(f"hidden_chars:{hidden}")
+
+    if bidi:
+        score += min(4, 1 + bidi // 2)
+        reasons.append(f"bidi_chars:{bidi}")
+
+    if _has_mixed_suspicious_scripts(text):
+        score += 2
+        reasons.append("mixed_scripts")
+
+    if ANTIEVASION_COMBINING:
+        combining = sum(
+            1
+            for ch in text
+            if unicodedata.category(ch) == "Mn"
         )
-        if _pb_conf >= 2:
-            _pb_boost = _pb_conf * 2
-            score += _pb_boost
-            reasons.append(f"postbot_conf={_pb_conf}(+{_pb_boost})")
-    except Exception:
-        pass
 
-    try:
-        if button_count >= 6:
-            score += 3
-            reasons.append(f"buttons={button_count}")
-        elif button_count >= 5:
-            score += 2
-            reasons.append(f"buttons={button_count}")
-        elif button_count >= 3:
-            score += 1
-            reasons.append(f"buttons={button_count}")
-        has_photo = bool(getattr(message, 'photo', None))
-        has_video = bool(getattr(message, 'video', None))
-        if (has_photo or has_video) and button_count >= 1:
-            score += 1
-            reasons.append("media+buttons")
-        emoji_count = 0
-        for emoji in _SPAM_EMOJIS:
-            emoji_count += analysis_text.count(emoji)
-        if emoji_count >= 8:
-            score += 3
-            reasons.append(f"emoji={emoji_count}")
-        elif emoji_count >= 6:
-            score += 2
-            reasons.append(f"emoji={emoji_count}")
-        elif emoji_count >= 3:
-            score += 1
-            reasons.append(f"emoji={emoji_count}")
-        words = _extract_spam_words(analysis_text)
-        strong_matches = _count_unique_matches(words, _SPAM_STRONG_KEYWORDS)
-        medium_matches = _count_unique_matches(words, _SPAM_MEDIUM_KEYWORDS)
-        context_matches = _count_unique_matches(words, _SPAM_CONTEXT_KEYWORDS)
-        cta_matches = _count_unique_matches(words, _CTA_KEYWORDS)
-        context_only_matches = [
-            w for w in context_matches
-            if w not in strong_matches and w not in medium_matches
-        ]
-        if strong_matches:
-            score += min(5, len(strong_matches) * 2)
-            reasons.append("strong=" + ",".join(strong_matches[:8]))
-        if medium_matches:
-            score += min(4, len(medium_matches))
-            reasons.append("medium=" + ",".join(medium_matches[:8]))
-        if context_only_matches and (strong_matches or medium_matches):
-            score += min(2, len(context_only_matches))
-            reasons.append("context=" + ",".join(context_only_matches[:8]))
-        cta_only_matches = [
-            w for w in cta_matches
-            if w not in strong_matches and w not in medium_matches
-        ]
-        if cta_only_matches and (strong_matches or medium_matches):
-            score += 1
-            reasons.append("cta=" + ",".join(cta_only_matches[:6]))
-        matched_patterns: List[str] = []
-        for pattern, weight, label in _SPAM_CONTEXT_PATTERNS:
-            if pattern.search(text_lower):
-                score += weight
-                matched_patterns.append(label)
-        if matched_patterns:
-            reasons.append("patterns=" + ",".join(matched_patterns))
-        button_cta_matches: List[str] = []
-        for bt in button_texts:
-            if _POSTBOT_BUTTON_PATTERN.search(bt):
-                button_cta_matches.append(_normalize_text(bt))
-        if button_cta_matches and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += min(3, len(button_cta_matches))
-            reasons.append("button_cta=" + ",".join(button_cta_matches[:4]))
-        tme_button_count = 0
-        external_button_count = 0
-        for url in button_urls:
-            try:
-                parsed = urlparse(url)
-                host = (parsed.hostname or "").lower()
-                if host == "t.me" or host.endswith(".t.me"):
-                    tme_button_count += 1
-                elif host:
-                    external_button_count += 1
-            except Exception:
-                continue
-        if tme_button_count >= 4:
-            score += 4
-            reasons.append(f"tme_buttons={tme_button_count}")
-        elif tme_button_count >= 3:
-            score += 3
-            reasons.append(f"tme_buttons={tme_button_count}")
-        elif tme_button_count >= 2:
-            score += 2
-            reasons.append(f"tme_buttons={tme_button_count}")
-        elif tme_button_count >= 1 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 1
-            reasons.append(f"tme_buttons={tme_button_count}")
-        if external_button_count >= 3:
-            score += 2
-            reasons.append(f"external_buttons={external_button_count}")
-        elif external_button_count >= 1 and (
-            strong_matches or medium_matches or matched_patterns
-            or button_cta_matches
-        ):
-            score += 1
-            reasons.append(f"external_buttons={external_button_count}")
-        if _entity_urls:
-            entity_count = len(_entity_urls)
-            if entity_count >= 3:
-                score += 3
-                reasons.append(f"entity_urls={entity_count}")
-            elif entity_count >= 2:
-                score += 2
-                reasons.append(f"entity_urls={entity_count}")
-            elif entity_count >= 1:
-                score += 1
-                reasons.append(f"entity_urls={entity_count}")
-        text_urls = _count_text_urls(normalized)
-        schemeless_hit = False
-        if _ANTIEVASION_SCHEMELESS_URL and not text_urls:
-            try:
-                if _has_domain_pattern(normalized):
-                    schemeless_hit = True
-            except Exception:
-                pass
-        effective_text_url_count = len(text_urls) + (1 if schemeless_hit else 0)
-        if effective_text_url_count >= 3:
-            score += 3
-            reasons.append(f"text_urls={effective_text_url_count}")
-        elif effective_text_url_count >= 2:
-            score += 2
-            reasons.append(f"text_urls={effective_text_url_count}")
-        elif effective_text_url_count == 1 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 1
-            reasons.append("text_urls=1")
-        elif schemeless_hit:
-            reasons.append("text_urls=scheme-less")
-        body_len = len(normalized)
-        if body_len < 60 and button_count >= 5 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 2
-            reasons.append("short_promo+many_buttons")
-        elif body_len < 50 and button_count >= 3 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 2
-            reasons.append("short_promo+buttons")
-        elif body_len < 30 and button_count >= 2 and (
-            strong_matches or matched_patterns
-        ):
-            score += 1
-            reasons.append("short_text+buttons")
-        caps_n = len(_CAPS_WORD_RE.findall(analysis_text))
-        if caps_n >= 8 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 3
-            reasons.append(f"CAPS={caps_n}")
-        elif caps_n >= 6 and (
-            strong_matches or medium_matches or matched_patterns
-        ):
-            score += 2
-            reasons.append(f"CAPS={caps_n}")
-        elif caps_n >= 4 and (strong_matches or matched_patterns):
-            score += 1
-            reasons.append(f"CAPS={caps_n}")
-        promo_count = (
-            len(strong_matches) + len(medium_matches) + len(cta_only_matches)
-        )
-        if promo_count >= 8:
-            score += 3
-            reasons.append(f"promo_density={promo_count}")
-        elif promo_count >= 6:
-            score += 2
-            reasons.append(f"promo_density={promo_count}")
-        elif promo_count >= 4:
-            score += 1
-            reasons.append(f"promo_density={promo_count}")
-        if len(strong_matches) >= 2 and (
-            button_count >= 2 or cta_only_matches or button_cta_matches
-        ):
-            score += 3
-            reasons.append("strong+cta/buttons")
-        if 'leak' in strong_matches and (
-            'viral' in strong_matches or 'mega' in strong_matches
-        ):
-            score += 2
-            reasons.append("leak+viral/mega")
-        if 'viral' in strong_matches and button_cta_matches:
-            score += 2
-            reasons.append("viral+button_cta")
-        if _entity_urls and (strong_matches or matched_patterns):
-            score += 2
-            reasons.append("entity_url+keywords")
-        if (
-            not strong_matches
-            and not medium_matches
-            and not matched_patterns
-            and not text_urls
-            and not schemeless_hit
-            and tme_button_count == 0
-            and external_button_count == 0
-            and not button_cta_matches
-            and not _entity_urls
-        ):
-            score = 0
-            reasons = []
-        score = min(max(score, 0), 30)
-    except Exception:
-        return 0, []
-    return score, reasons
+        if combining >= 3:
+            score += min(
+                3,
+                1 + combining // 5,
+            )
+            reasons.append(
+                f"combining_marks:{combining}"
+            )
+
+    return min(score, 8), reasons
 
 
-# ═══════════════════════════════════════════════════════════════════
-# PostBot Detection
-# ═══════════════════════════════════════════════════════════════════
-
-def _is_postbot_pattern(
-    text: str, *, button_count: int = 0, has_urls: bool = False
-) -> bool:
-    if not text or len(text) < 10:
-        return False
-    hard_match = bool(_POSTBOT_HARD_KEYWORDS.search(text))
-    if not hard_match and not has_urls and button_count < 2:
-        return False
-    try:
-        if _POSTBOT_PATTERN.search(text):
-            if hard_match or has_urls or button_count >= 2:
-                return True
-        if (
-            hard_match
-            and (has_urls or button_count >= 2)
-            and _POSTBOT_PATTERN_LOOSE.search(text)
-        ):
-            return True
-        if (
-            len(text) < 200
-            and hard_match
-            and (has_urls or button_count >= 2)
-            and _POSTBOT_BUTTON_PATTERN.search(text)
-        ):
-            return True
-    except Exception:
-        pass
-    return False
-
+# =============================================================================
+# POSTBOT
+# =============================================================================
 
 def _postbot_pattern_confidence(
-    text: str, *, button_count: int = 0, has_urls: bool = False
+    text: str,
+    *,
+    button_count: int = 0,
+    button_urls: Optional[Sequence[str]] = None,
 ) -> int:
-    """
-    قياس شدة مطابقة PostBot (0-4).
 
-    0 = لا تطابق
-    1 = ضعيف (تجاهل)
-    2 = متوسط (boost في spam_score)
-    3 = قوي (auto-block حتى لو الإعداد معطّل)
-    4 = قوي جداً (auto-block مضمون)
-    """
-    if not text or len(text) < 10:
+    if not text:
         return 0
+
+    normalized = _normalize_text(text)
+    merged = _merge_split_urls(normalized)
 
     confidence = 0
 
-    # +1 لو طابق النمط الأساسي
-    try:
-        if _POSTBOT_PATTERN.search(text):
-            confidence += 1
-    except Exception:
-        pass
+    strong = _count_word_matches(
+        normalized,
+        _STRONG_SPAM_WORDS,
+    )
 
-    # +1 لو طابق النمط المرن
-    try:
-        if _POSTBOT_PATTERN_LOOSE.search(text):
-            confidence += 1
-    except Exception:
-        pass
+    promo = _count_word_matches(
+        normalized,
+        _PROMO_WORDS,
+    )
 
-    # +1 لو كلمات hard موجودة
-    try:
-        hard_matches = _POSTBOT_HARD_KEYWORDS.findall(text)
-        if len(hard_matches) >= 2:
-            confidence += 1
-        elif len(hard_matches) >= 1 and button_count >= 2:
-            confidence += 1
-    except Exception:
-        pass
+    cta = _count_word_matches(
+        normalized,
+        _CTA_WORDS,
+    )
 
-    # +1 لو CAPS words كثيرة
-    try:
-        caps_matches = _CAPS_WORD_RE.findall(text)
-        if len(caps_matches) >= 3:
-            confidence += 1
-        elif len(caps_matches) >= 2 and button_count >= 2:
-            confidence += 1
-    except Exception:
-        pass
+    spam_emojis = _count_spam_emojis(text)
 
-    # +1 لو أزرار كثيرة
+    context_hits = _count_unique_matches(
+        merged,
+        _PROMO_CONTEXT_PATTERNS,
+    )
+
+    if strong >= 2:
+        confidence += 2
+    elif strong == 1:
+        confidence += 1
+
+    if promo >= 2:
+        confidence += 1
+
+    if cta >= 1:
+        confidence += 1
+
+    if button_count >= 2:
+        confidence += 1
+
     if button_count >= 3:
         confidence += 1
-    elif button_count >= 2 and has_urls:
+
+    if button_urls and len(button_urls) >= 2:
         confidence += 1
 
-    return min(confidence, 4)
+    if spam_emojis >= 2:
+        confidence += 1
+
+    if _NUMBER_PROMO_RE.search(merged):
+        confidence += 2
+
+    if _PACK_RE.search(merged):
+        confidence += 1
+
+    if context_hits:
+        confidence += 1
+
+    if (
+        promo >= 2
+        and cta >= 1
+        and button_count >= 2
+    ):
+        confidence += 2
+
+    return min(confidence, 10)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Public API
-# ═══════════════════════════════════════════════════════════════════
+def _is_postbot_pattern(
+    text: str,
+    *,
+    button_count: int = 0,
+    button_urls: Optional[Sequence[str]] = None,
+) -> bool:
+
+    if not text:
+        return False
+
+    normalized = _normalize_text(text)
+    merged = _merge_split_urls(normalized)
+
+    confidence = _postbot_pattern_confidence(
+        normalized,
+        button_count=button_count,
+        button_urls=button_urls,
+    )
+
+    if confidence >= POSTBOT_AUTO_BLOCK_CONFIDENCE:
+        return True
+
+    return any(
+        pattern.search(merged)
+        for pattern in _POSTBOT_REGEXES
+    )
+
+
+# =============================================================================
+# URL COUNT
+# =============================================================================
+
+def _count_text_urls(text: str) -> int:
+
+    if not text:
+        return 0
+
+    normalized = _merge_split_urls(
+        _normalize_text(text)
+    )
+
+    urls = _extract_possible_urls(normalized)
+
+    if not urls and _has_domain_pattern(normalized):
+        return 1
+
+    return len(urls)
+
+
+# =============================================================================
+# MEDIA
+# =============================================================================
+
+def _message_has_media(
+    context_or_message: Any,
+) -> bool:
+
+    if context_or_message is None:
+        return False
+
+    if isinstance(
+        context_or_message,
+        _MessageContext,
+    ):
+        return bool(
+            context_or_message.caption
+        )
+
+    attrs = (
+        "photo",
+        "video",
+        "animation",
+        "document",
+        "audio",
+        "voice",
+        "video_note",
+        "sticker",
+        "contact",
+        "location",
+        "venue",
+    )
+
+    for attr in attrs:
+        try:
+            if getattr(
+                context_or_message,
+                attr,
+                None,
+            ):
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+# =============================================================================
+# v2.2 ADDITIONAL SIGNALS
+# =============================================================================
+
+def _text_density_signals(
+    text: str,
+) -> Tuple[int, List[str]]:
+
+    if not text:
+        return 0, []
+
+    length = len(text)
+
+    if length < 8:
+        return 0, []
+
+    score = 0
+    reasons: List[str] = []
+
+    digits = sum(ch.isdigit() for ch in text)
+    letters = sum(ch.isalpha() for ch in text)
+    symbols = sum(
+        not ch.isalnum() and not ch.isspace()
+        for ch in text
+    )
+
+    digit_ratio = digits / max(length, 1)
+    symbol_ratio = symbols / max(length, 1)
+
+    if length >= 40 and digit_ratio >= 0.45:
+        score += 2
+        reasons.append("high_digit_density")
+
+    elif length >= 25 and digit_ratio >= 0.65:
+        score += 2
+        reasons.append("very_high_digit_density")
+
+    if length >= 40 and symbol_ratio >= 0.45:
+        score += 2
+        reasons.append("high_symbol_density")
+
+    if len(text.split()) <= 3 and (
+        digits >= 8 or symbols >= 8
+    ):
+        score += 1
+        reasons.append("short_symbol_numeric_payload")
+
+    if letters >= 8:
+        upper = sum(ch.isupper() for ch in text)
+        if upper / max(letters, 1) >= 0.85:
+            score += 1
+            reasons.append("excessive_caps")
+
+    return min(score, 4), reasons
+
+
+def _detect_phone_or_contact_evasion(
+    text: str,
+) -> Tuple[int, List[str]]:
+
+    if not text:
+        return 0, []
+
+    reasons: List[str] = []
+    score = 0
+
+    normalized = _normalize_text(text)
+
+    if _PHONE_RE.search(normalized):
+        score += 1
+        reasons.append("phone_like_sequence")
+
+    # Deliberately only scores strongly when combined with promotion.
+    if (
+        _PHONE_RE.search(normalized)
+        and (
+            _count_word_matches(
+                normalized,
+                _CTA_WORDS,
+            )
+            or _contains_link_enhanced(
+                normalized,
+                include_usernames=False,
+            )
+        )
+    ):
+        score += 2
+        reasons.append("contact_with_promotion")
+
+    return min(score, 3), reasons
+
+
+def _detect_structural_evasion(
+    text: str,
+) -> Tuple[int, List[str]]:
+
+    if not text:
+        return 0, []
+
+    score = 0
+    reasons: List[str] = []
+
+    if _MULTISPACE_SPLIT_RE.search(text):
+        score += 1
+        reasons.append("character_split")
+
+    if (
+        ANTIEVASION_EMOJI_SEPARATOR
+        and _EMOJI_SPLIT_RE.search(text)
+    ):
+        score += 2
+        reasons.append("emoji_character_split")
+
+    if _LONG_DOMAIN_LABEL_RE.search(
+        _merge_split_urls(text)
+    ):
+        score += 2
+        reasons.append("long_domain_label")
+
+    return min(score, 4), reasons
+
+
+# =============================================================================
+# SCORING ENGINE
+# =============================================================================
+
+def _compute_spam_score(
+    context_or_message: Any,
+    *,
+    return_diagnostics: bool = False,
+) -> Any:
+
+    try:
+        if isinstance(
+            context_or_message,
+            _MessageContext,
+        ):
+            ctx = context_or_message
+        else:
+            ctx = _MessageContext(
+                context_or_message
+            )
+
+        text = ctx.analysis_text or ""
+        normalized = ctx.normalized_text or ""
+
+        if not text:
+            result = {
+                "score": 0,
+                "reasons": [],
+                "confidence": "none",
+                "hard": False,
+                "critical": False,
+                "postbot_confidence": 0,
+            }
+
+            return result if return_diagnostics else (0, [])
+
+        score = 0
+        reasons: List[str] = []
+
+        # ------------------------------------------------------------------
+        # ENTITY LINKS
+        # ------------------------------------------------------------------
+
+        if (
+            ANTIEVASION_ENTITY_LINK
+            and ctx.has_link_entity
+        ):
+            score += 3
+            reasons.append("link_entity")
+
+        # ------------------------------------------------------------------
+        # BUTTON LINKS
+        # ------------------------------------------------------------------
+
+        external_buttons = len(
+            ctx.button_link_urls
+        )
+
+        if (
+            ANTIEVASION_BUTTON_LINK
+            and external_buttons
+        ):
+            if external_buttons >= 3:
+                score += 5
+                reasons.append(
+                    f"external_buttons:{external_buttons}"
+                )
+            elif external_buttons == 2:
+                score += 4
+                reasons.append("external_buttons:2")
+            else:
+                score += 2
+                reasons.append("external_button")
+
+        if (
+            ANTIEVASION_BUTTON_WEBAPP
+            and any(
+                "web_app://button" in str(x)
+                for x in ctx.button_urls_raw
+            )
+        ):
+            score += 3
+            reasons.append("webapp_button")
+
+        if (
+            ANTIEVASION_BUTTON_LOGINURL
+            and any(
+                "login_url://button" in str(x)
+                for x in ctx.button_urls_raw
+            )
+        ):
+            score += 3
+            reasons.append("loginurl_button")
+
+        # ------------------------------------------------------------------
+        # LINKS
+        # ------------------------------------------------------------------
+
+        link_detected = _contains_link_enhanced(
+            text,
+            include_usernames=False,
+        )
+
+        if link_detected:
+            score += 3
+            reasons.append("link_detected")
+
+        url_obfuscated, url_reasons = (
+            _detect_url_obfuscation(text)
+        )
+
+        if url_obfuscated:
+            score += min(
+                5,
+                2 + len(url_reasons),
+            )
+            reasons.extend(
+                "url_evasion:" + x
+                for x in url_reasons
+            )
+
+        text_url_count = _count_text_urls(text)
+
+        if text_url_count >= 3:
+            score += 4
+            reasons.append(
+                f"text_urls:{text_url_count}"
+            )
+        elif text_url_count == 2:
+            score += 3
+            reasons.append("text_urls:2")
+        elif text_url_count == 1:
+            score += 1
+            reasons.append("text_url")
+
+        if _contains_tg_scheme(text):
+            score += 3
+            reasons.append("telegram_link")
+
+        if _contains_email(text):
+            score += 2
+            reasons.append("email_link")
+
+        if _contains_at_channel(text):
+            # Username alone is weak evidence.
+            score += 1
+            reasons.append("telegram_username")
+
+        if (
+            ANTIEVASION_PUNYCODE
+            and _PUNYCODE_RE.search(normalized)
+        ):
+            score += 3
+            reasons.append("punycode_domain")
+
+        if (
+            ANTIEVASION_IPV4_SCHEMELESS
+            and _IPV4_RE.search(normalized)
+        ):
+            score += 3
+            reasons.append("ipv4_link")
+
+        # ------------------------------------------------------------------
+        # BUTTON STRUCTURE
+        # ------------------------------------------------------------------
+
+        if ctx.button_count >= 4:
+            score += 3
+            reasons.append(
+                f"many_buttons:{ctx.button_count}"
+            )
+        elif ctx.button_count == 3:
+            score += 2
+            reasons.append("three_buttons")
+        elif ctx.button_count == 2:
+            score += 1
+            reasons.append("two_buttons")
+
+        button_text = " ".join(ctx.button_texts)
+
+        button_cta_count = _count_word_matches(
+            button_text,
+            _CTA_WORDS,
+        )
+
+        if button_cta_count >= 3:
+            score += 3
+            reasons.append(
+                f"button_cta:{button_cta_count}"
+            )
+        elif button_cta_count >= 2:
+            score += 2
+            reasons.append("button_cta:2")
+        elif button_cta_count == 1:
+            score += 1
+            reasons.append("button_cta")
+
+        # ------------------------------------------------------------------
+        # VOCABULARY
+        # ------------------------------------------------------------------
+
+        strong = ctx.strong_word_count
+        medium = ctx.medium_word_count
+        promo = ctx.promo_word_count
+        arabic = ctx.arabic_spam_count
+        cta = ctx.cta_count
+
+        if strong >= 4:
+            score += 6
+            reasons.append(
+                f"strong_spam_words:{strong}"
+            )
+        elif strong == 3:
+            score += 5
+            reasons.append("strong_spam_words:3")
+        elif strong == 2:
+            score += 3
+            reasons.append("strong_spam_words:2")
+        elif strong == 1:
+            score += 1
+            reasons.append("strong_spam_word")
+
+        if medium >= 4:
+            score += 4
+            reasons.append(
+                f"medium_spam_words:{medium}"
+            )
+        elif medium >= 2:
+            score += 2
+            reasons.append(
+                f"medium_spam_words:{medium}"
+            )
+
+        if promo >= 4:
+            score += 4
+            reasons.append(
+                f"promo_words:{promo}"
+            )
+        elif promo >= 2:
+            score += 2
+            reasons.append(
+                f"promo_words:{promo}"
+            )
+
+        if arabic >= 4:
+            score += 4
+            reasons.append(
+                f"arabic_spam_words:{arabic}"
+            )
+        elif arabic >= 2:
+            score += 2
+            reasons.append(
+                f"arabic_spam_words:{arabic}"
+            )
+
+        if cta >= 4:
+            score += 4
+            reasons.append(
+                f"cta_words:{cta}"
+            )
+        elif cta >= 2:
+            score += 2
+            reasons.append(
+                f"cta_words:{cta}"
+            )
+
+        # ------------------------------------------------------------------
+        # PACK / NUMBER
+        # ------------------------------------------------------------------
+
+        has_number_pack = bool(
+            _NUMBER_PROMO_RE.search(normalized)
+        )
+
+        has_pack = bool(
+            _PACK_RE.search(normalized)
+        )
+
+        if has_number_pack:
+            score += 4
+            reasons.append("large_pack_number")
+
+        if has_pack:
+            score += 2
+            reasons.append("pack_pattern")
+
+        # ------------------------------------------------------------------
+        # CONTEXT
+        # ------------------------------------------------------------------
+
+        context_hits = _count_unique_matches(
+            normalized,
+            _PROMO_CONTEXT_PATTERNS,
+        )
+
+        if context_hits >= 3:
+            score += 6
+            reasons.append(
+                f"promo_context:{context_hits}"
+            )
+        elif context_hits == 2:
+            score += 4
+            reasons.append("promo_context:2")
+        elif context_hits == 1:
+            score += 2
+            reasons.append("promo_context")
+
+        # ------------------------------------------------------------------
+        # POSTBOT
+        # ------------------------------------------------------------------
+
+        postbot_confidence = (
+            _postbot_pattern_confidence(
+                normalized,
+                button_count=ctx.button_count,
+                button_urls=ctx.button_urls,
+            )
+        )
+
+        if postbot_confidence >= 6:
+            score += 6
+            reasons.append(
+                f"postbot:very_high:{postbot_confidence}"
+            )
+        elif postbot_confidence >= 4:
+            score += 4
+            reasons.append(
+                f"postbot:high:{postbot_confidence}"
+            )
+        elif postbot_confidence >= 2:
+            score += 2
+            reasons.append(
+                f"postbot:{postbot_confidence}"
+            )
+
+        # ------------------------------------------------------------------
+        # EMOJI
+        # ------------------------------------------------------------------
+
+        spam_emojis = ctx.spam_emoji_count
+
+        if spam_emojis >= 6:
+            score += 3
+            reasons.append(
+                f"spam_emojis:{spam_emojis}"
+            )
+        elif spam_emojis >= 3:
+            score += 2
+            reasons.append(
+                f"spam_emojis:{spam_emojis}"
+            )
+
+        # ------------------------------------------------------------------
+        # SPLIT WORDS
+        # ------------------------------------------------------------------
+
+        split_words = _detect_split_spam_words(text)
+
+        if split_words:
+            score += min(
+                5,
+                2 + len(split_words),
+            )
+            reasons.append(
+                "split_spam_words:"
+                + ",".join(split_words[:5])
+            )
+
+        # ------------------------------------------------------------------
+        # UNICODE
+        # ------------------------------------------------------------------
+
+        unicode_score, unicode_reasons = (
+            _detect_unicode_evasion(text)
+        )
+
+        if unicode_score:
+            score += unicode_score
+            reasons.extend(
+                "unicode_evasion:" + x
+                for x in unicode_reasons
+            )
+
+        if ctx.mixed_scripts:
+            score += 2
+            reasons.append(
+                "suspicious_mixed_scripts"
+            )
+
+        # ------------------------------------------------------------------
+        # STRUCTURAL EVASION
+        # ------------------------------------------------------------------
+
+        structural_score, structural_reasons = (
+            _detect_structural_evasion(text)
+        )
+
+        if structural_score:
+            score += structural_score
+            reasons.extend(
+                "structural_evasion:" + x
+                for x in structural_reasons
+            )
+
+        # ------------------------------------------------------------------
+        # DENSITY
+        # ------------------------------------------------------------------
+
+        density_score, density_reasons = (
+            _text_density_signals(text)
+        )
+
+        if density_score:
+            score += density_score
+            reasons.extend(
+                "density:" + x
+                for x in density_reasons
+            )
+
+        # ------------------------------------------------------------------
+        # CONTACT / PHONE
+        # ------------------------------------------------------------------
+
+        contact_score, contact_reasons = (
+            _detect_phone_or_contact_evasion(text)
+        )
+
+        if contact_score:
+            score += contact_score
+            reasons.extend(
+                "contact:" + x
+                for x in contact_reasons
+            )
+
+        # ------------------------------------------------------------------
+        # SEPARATORS / REPETITION
+        # ------------------------------------------------------------------
+
+        if ctx.suspicious_separator_count >= 2:
+            score += 2
+            reasons.append("separator_evasion")
+
+        if ctx.repeated_char_count:
+            score += 1
+            reasons.append("repeated_characters")
+
+        if ctx.repeated_word_count:
+            score += 2
+            reasons.append("repeated_words")
+
+        # ------------------------------------------------------------------
+        # MEDIA + PROMOTION
+        # ------------------------------------------------------------------
+
+        has_media = _message_has_media(
+            context_or_message
+        )
+
+        if (
+            has_media
+            and (
+                ctx.button_count >= 2
+                or cta >= 2
+            )
+        ):
+            score += 3
+            reasons.append("media_plus_promotion")
+
+        # ------------------------------------------------------------------
+        # POLL / VCARD
+        # ------------------------------------------------------------------
+
+        if (
+            ANTIEVASION_POLL
+            and ctx.poll_urls
+        ):
+            score += 3
+            reasons.append("poll_with_url")
+
+        if ANTIEVASION_VENUE_VCARD:
+            if ctx.vcard_urls:
+                score += 2
+                reasons.append("vcard_url")
+
+            if ctx.venue_url:
+                score += 2
+                reasons.append("venue_url")
+
+        # ------------------------------------------------------------------
+        # FORWARDED
+        # ------------------------------------------------------------------
+
+        if (
+            ctx.is_forwarded
+            and score >= 5
+        ):
+            score += 2
+            reasons.append("forwarded_spam_context")
+
+        # ------------------------------------------------------------------
+        # HIGH CONFIDENCE MARKETING
+        # ------------------------------------------------------------------
+
+        if (
+            (
+                promo >= 2
+                or strong >= 2
+            )
+            and cta >= 1
+            and (
+                ctx.button_link_urls
+                or text_url_count
+            )
+        ):
+            score += 5
+            reasons.append(
+                "high_confidence_marketing_spam"
+            )
+
+        # ------------------------------------------------------------------
+        # PACK + NUMBER + EXTERNAL
+        # ------------------------------------------------------------------
+
+        if (
+            has_pack
+            and has_number_pack
+            and (
+                ctx.button_link_urls
+                or _contains_link_enhanced(
+                    text,
+                    include_usernames=False,
+                )
+            )
+        ):
+            score += 7
+            reasons.append(
+                "pack_number_external_cta"
+            )
+
+        # ------------------------------------------------------------------
+        # CATEGORY STACK
+        # ------------------------------------------------------------------
+
+        category_hits = _count_word_matches(
+            normalized,
+            {
+                "mfm",
+                "dilf",
+                "busty",
+                "milf",
+                "bj",
+                "xxx",
+                "nsfw",
+                "porn",
+                "nude",
+                "leak",
+                "clips",
+            },
+        )
+
+        if (
+            category_hits >= 4
+            and (
+                ctx.button_link_urls
+                or cta >= 1
+                or text_url_count
+            )
+        ):
+            score += 6
+            reasons.append(
+                "multiple_spam_categories"
+            )
+
+        # ------------------------------------------------------------------
+        # OBFUSCATION + PROMOTION
+        # ------------------------------------------------------------------
+
+        if (
+            url_obfuscated
+            and (
+                strong >= 1
+                or promo >= 1
+                or cta >= 1
+            )
+        ):
+            score += 4
+            reasons.append(
+                "obfuscated_promotion"
+            )
+
+        # ------------------------------------------------------------------
+        # HIDDEN + LINK/SPAM
+        # ------------------------------------------------------------------
+
+        if (
+            ctx.has_hidden_chars
+            and (
+                link_detected
+                or strong >= 1
+                or promo >= 1
+            )
+        ):
+            score += 3
+            reasons.append(
+                "hidden_evasion_with_spam"
+            )
+
+        # ------------------------------------------------------------------
+        # USERNAME + PROMOTION
+        # ------------------------------------------------------------------
+
+        if (
+            _contains_at_channel(text)
+            and (
+                cta >= 1
+                or promo >= 1
+                or strong >= 1
+            )
+        ):
+            score += 2
+            reasons.append(
+                "telegram_username_with_promotion"
+            )
+
+        # ------------------------------------------------------------------
+        # FINAL
+        # ------------------------------------------------------------------
+
+        score = max(
+            0,
+            min(
+                MAX_SPAM_SCORE,
+                int(score),
+            ),
+        )
+
+        reasons = _unique_strings(
+            reasons
+        )[:MAX_REASON_COUNT]
+
+        if score >= SPAM_CRITICAL_THRESHOLD:
+            confidence = "critical"
+        elif score >= SPAM_HARD_THRESHOLD:
+            confidence = "very_high"
+        elif score >= SPAM_SCORE_THRESHOLD:
+            confidence = "high"
+        elif score >= 3:
+            confidence = "medium"
+        elif score >= 1:
+            confidence = "low"
+        else:
+            confidence = "none"
+
+        if DEBUG_SPAM:
+            try:
+                print(
+                    "[SPAM]"
+                    f" score={score}"
+                    f" confidence={confidence}"
+                    f" reasons={reasons}"
+                )
+            except Exception:
+                pass
+
+        result = {
+            "score": score,
+            "reasons": reasons,
+            "confidence": confidence,
+            "hard": score >= SPAM_HARD_THRESHOLD,
+            "critical": score >= SPAM_CRITICAL_THRESHOLD,
+            "postbot_confidence": postbot_confidence,
+        }
+
+        if return_diagnostics:
+            return result
+
+        return score, reasons
+
+    except Exception as exc:
+
+        if DEBUG_DIAG:
+            try:
+                print(
+                    "[DETECTOR] scoring error:",
+                    repr(exc),
+                )
+            except Exception:
+                pass
+
+        if return_diagnostics:
+            return {
+                "score": 0,
+                "reasons": ["detector_error"],
+                "confidence": "none",
+                "hard": False,
+                "critical": False,
+                "postbot_confidence": 0,
+            }
+
+        return 0, []
+
+
+# =============================================================================
+# FALSE POSITIVE GUARDS
+# =============================================================================
+
+def _looks_like_normal_conversation(
+    text: str,
+) -> bool:
+
+    if not text:
+        return True
+
+    normalized = _normalize_text(text)
+    words = _extract_words(normalized)
+
+    if not words:
+        return True
+
+    generic_hits = sum(
+        word in _GENERIC_WORDS
+        for word in words
+    )
+
+    strong_hits = _count_word_matches(
+        normalized,
+        _STRONG_SPAM_WORDS,
+    )
+
+    promo_hits = _count_word_matches(
+        normalized,
+        _PROMO_WORDS,
+    )
+
+    link = _contains_link_enhanced(
+        normalized,
+        include_usernames=False,
+    )
+
+    # الكلمات العامة وحدها لا تكفي.
+    if (
+        generic_hits >= 1
+        and strong_hits == 0
+        and promo_hits <= 1
+        and not link
+        and len(words) <= 12
+    ):
+        return True
+
+    # رسالة طويلة طبيعية بلا روابط ولا مؤشرات قوية.
+    if (
+        len(words) >= 8
+        and strong_hits == 0
+        and promo_hits <= 1
+        and not link
+    ):
+        return True
+
+    return False
+
+
+def should_ignore_as_low_signal(
+    message: Any,
+) -> bool:
+
+    try:
+        ctx = _MessageContext(message)
+
+        if not ctx.analysis_text:
+            return True
+
+        if _looks_like_normal_conversation(
+            ctx.analysis_text
+        ):
+            score, _ = _compute_spam_score(ctx)
+
+            return score < SPAM_SCORE_THRESHOLD
+
+    except Exception:
+        return False
+
+    return False
+
+
+# =============================================================================
+# HIGH LEVEL API
+# =============================================================================
+
+def analyze_message(message: Any) -> dict:
+
+    ctx = _MessageContext(message)
+
+    result = _compute_spam_score(
+        ctx,
+        return_diagnostics=True,
+    )
+
+    result.update({
+        "has_link": ctx.has_any_link,
+        "has_button_link": ctx.has_button_link,
+        "button_count": ctx.button_count,
+        "button_urls": list(ctx.button_urls),
+        "entity_urls": list(ctx.entity_urls),
+        "is_forwarded": ctx.is_forwarded,
+        "is_auto_forwarded": ctx.is_auto_fwd,
+        "hidden_char_count": ctx.hidden_char_count,
+        "bidi_count": ctx.bidi_count,
+        "mixed_scripts": ctx.mixed_scripts,
+        "script_counts": dict(ctx.script_counts),
+        "url_count": ctx.url_count,
+        "telegram_link_count": ctx.telegram_link_count,
+        "spam_emoji_count": ctx.spam_emoji_count,
+        "strong_word_count": ctx.strong_word_count,
+        "medium_word_count": ctx.medium_word_count,
+        "promo_word_count": ctx.promo_word_count,
+        "arabic_spam_count": ctx.arabic_spam_count,
+        "cta_count": ctx.cta_count,
+    })
+
+    return result
+
+
+def is_spam(message: Any) -> bool:
+
+    score, _ = _compute_spam_score(message)
+
+    return score >= SPAM_SCORE_THRESHOLD
+
+
+def is_high_confidence_spam(message: Any) -> bool:
+
+    score, _ = _compute_spam_score(message)
+
+    return score >= SPAM_HARD_THRESHOLD
+
+
+def is_critical_spam(message: Any) -> bool:
+
+    score, _ = _compute_spam_score(message)
+
+    return score >= SPAM_CRITICAL_THRESHOLD
+
+
+# =============================================================================
+# DIAGNOSTICS
+# =============================================================================
+
+def get_spam_diagnostics(message: Any) -> dict:
+
+    try:
+        ctx = _MessageContext(message)
+
+        score_info = _compute_spam_score(
+            ctx,
+            return_diagnostics=True,
+        )
+
+        split_words = _detect_split_spam_words(
+            ctx.analysis_text
+        )
+
+        url_obfuscated, url_reasons = (
+            _detect_url_obfuscation(
+                ctx.analysis_text
+            )
+        )
+
+        unicode_score, unicode_reasons = (
+            _detect_unicode_evasion(
+                ctx.analysis_text
+            )
+        )
+
+        density_score, density_reasons = (
+            _text_density_signals(
+                ctx.analysis_text
+            )
+        )
+
+        structural_score, structural_reasons = (
+            _detect_structural_evasion(
+                ctx.analysis_text
+            )
+        )
+
+        return {
+            **score_info,
+
+            "text": ctx.full_text,
+            "normalized_text": ctx.normalized_text,
+
+            "buttons": {
+                "count": ctx.button_count,
+                "urls": list(ctx.button_urls),
+                "texts": list(ctx.button_texts),
+                "has_external": ctx.has_button_link,
+            },
+
+            "links": {
+                "entity": list(ctx.entity_urls),
+                "button": list(ctx.button_link_urls),
+                "detected": ctx.has_any_link,
+                "count": ctx.url_count,
+            },
+
+            "evasion": {
+                "hidden_chars": ctx.hidden_char_count,
+                "bidi_chars": ctx.bidi_count,
+                "mixed_scripts": ctx.mixed_scripts,
+                "unicode_score": unicode_score,
+                "unicode_reasons": unicode_reasons,
+                "url_obfuscation": url_obfuscated,
+                "url_reasons": url_reasons,
+                "split_spam_words": split_words,
+                "structural_score": structural_score,
+                "structural_reasons": structural_reasons,
+            },
+
+            "density": {
+                "score": density_score,
+                "reasons": density_reasons,
+            },
+
+            "vocabulary": {
+                "strong": ctx.strong_word_count,
+                "medium": ctx.medium_word_count,
+                "promo": ctx.promo_word_count,
+                "arabic": ctx.arabic_spam_count,
+                "cta": ctx.cta_count,
+            },
+
+            "postbot": {
+                "is_pattern": _is_postbot_pattern(
+                    ctx.analysis_text,
+                    button_count=ctx.button_count,
+                    button_urls=ctx.button_urls,
+                ),
+                "confidence": score_info[
+                    "postbot_confidence"
+                ],
+            },
+        }
+
+    except Exception as exc:
+        return {
+            "score": 0,
+            "reasons": ["diagnostic_error"],
+            "confidence": "none",
+            "hard": False,
+            "critical": False,
+            "error": repr(exc),
+        }
+
+
+# =============================================================================
+# COMPATIBILITY EXPORTS
+# =============================================================================
 
 __all__ = [
-    # Constants
+    "DEBUG_DIAG",
+    "DEBUG_SPAM",
+
+    "ANTIEVASION_ENTITY_LINK",
+    "ANTIEVASION_BUTTON_LINK",
+    "ANTIEVASION_SCHEMELESS_URL",
+    "ANTIEVASION_HOMOGLYPH",
+    "ANTIEVASION_COMBINING",
+    "ANTIEVASION_COMPACT_WORDS",
+    "ANTIEVASION_EMOJI_SEPARATOR",
+    "ANTIEVASION_BUTTON_WEBAPP",
+    "ANTIEVASION_BUTTON_LOGINURL",
+    "ANTIEVASION_LEETSPEAK",
+    "ANTIEVASION_TG_SCHEME",
+    "ANTIEVASION_AT_CHANNEL",
+    "ANTIEVASION_EMAIL",
+    "ANTIEVASION_PUNYCODE",
+    "ANTIEVASION_IPV4_SCHEMELESS",
+    "ANTIEVASION_MULTILINE_URL",
+    "ANTIEVASION_VENUE_VCARD",
+    "ANTIEVASION_POLL",
+    "ANTIEVASION_EMOJI_IN_DOMAIN",
+    "ANTIEVASION_UNICODE_DOTS",
+    "ANTIEVASION_EXTENDED_COMBINING",
+    "ANTIEVASION_EXTRA_SCRIPTS",
+    "ANTIEVASION_ALT_SCHEMES",
+
     "SPAM_SCORE_THRESHOLD",
     "POSTBOT_AUTO_BLOCK_CONFIDENCE",
-    # Context
+    "SPAM_HARD_THRESHOLD",
+    "SPAM_CRITICAL_THRESHOLD",
+
     "_MessageContext",
-    # Env flags (للاستخدام الاختياري)
-    "_DEBUG_DIAG",
-    "_DEBUG_SPAM",
-    # Helpers
-    "_env_flag",
-    "_as_bool",
-    # Normalizers
+
     "_strip_combining_marks",
     "_deleet",
     "_apply_homoglyphs_safe",
@@ -1335,16 +3479,20 @@ __all__ = [
     "_strip_emoji_for_domain",
     "_has_hidden_chars",
     "_merge_split_urls",
-    # Extractors
+
     "_extract_entity_urls",
     "_has_link_entity",
     "_extract_url_from_button",
+    "_button_is_external",
     "_extract_button_context",
     "_extract_vcard_urls",
     "_extract_venue_url",
     "_extract_poll_text",
-    "_extract_spam_words",
-    # Link detection
+
+    "_get_message_button_data",
+    "_get_message_button_texts",
+    "_get_message_analysis_text",
+
     "_has_domain_pattern",
     "_contains_link_enhanced",
     "_contains_email",
@@ -1352,39 +3500,19 @@ __all__ = [
     "_contains_tg_scheme",
     "_has_button_link",
     "_extract_button_link_urls",
-    # Analysis text
-    "_get_message_button_data",
-    "_get_message_button_texts",
-    "_get_message_analysis_text",
-    # Spam scoring
+
+    "_extract_spam_words",
     "_count_unique_matches",
     "_count_text_urls",
     "_compute_spam_score",
-    # PostBot
+
     "_is_postbot_pattern",
     "_postbot_pattern_confidence",
-    # Constants for reuse
-    "_HOMOGLYPH_MAP",
-    "_HIDDEN_CHARS",
-    "_HIDDEN_TRANSLATE_TABLE",
-    "_UNICODE_DOT_TABLE",
-    "_LEET_TRANSLATE",
-    "_TG_SCHEME_RE",
-    "_AT_CHANNEL_RE",
-    "_EMAIL_RE",
-    "_PUNYCODE_RE",
-    "_IPV4_SCHEMELESS_RE",
-    "_ALT_SCHEME_RE",
-    "_POSTBOT_PATTERN",
-    "_POSTBOT_PATTERN_LOOSE",
-    "_POSTBOT_HARD_KEYWORDS",
-    "_EMOJI_SEP_RE",
-    "_TLD_PATTERN",
-    "_COMMON_FILE_EXTS",
-    "_SPAM_EMOJIS",
-    "_SPAM_STRONG_KEYWORDS",
-    "_SPAM_MEDIUM_KEYWORDS",
-    "_SPAM_CONTEXT_KEYWORDS",
-    "_CTA_KEYWORDS",
-    "_SPAM_CONTEXT_PATTERNS",
+
+    "analyze_message",
+    "get_spam_diagnostics",
+    "is_spam",
+    "is_high_confidence_spam",
+    "is_critical_spam",
+    "should_ignore_as_low_signal",
 ]
